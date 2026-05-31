@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+build/
+dist/
+
+# Virtualenvs (in case any get created in-repo; the lerobot conda env lives in ~/miniconda3)
+.venv/
+venv/
+env/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Claude Code local settings (per-user)
+.claude/
+
+# Local install/run artifacts
+*.bak
+*.log
+scripts/.cache/
+
+# Large data shouldn't live in the repo (ReplicaCAD lives in ~/.maniskill/data/)
+data/

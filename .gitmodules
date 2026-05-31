@@ -1,0 +1,3 @@
+[submodule "third_party/XLeRobot"]
+	path = third_party/XLeRobot
+	url = https://github.com/Vector-Wangel/XLeRobot.git
