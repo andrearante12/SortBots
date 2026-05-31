@@ -1,5 +1,18 @@
 # Task: Add Isaac Sim as a second simulator alongside ManiSkill
 
+## Status
+
+- 2026-05-31: Phase 1 **complete** on Andre's machine (Ubuntu 24.04, RTX 4070
+  Laptop 8 GB, driver 580.159.03). `verify_isaac_sim.py` steps an empty
+  headless world 100 times and exits 0.
+- ManiSkill stays put (VLA / arm manipulation). Isaac Sim is the mobile /
+  multi-robot / ROS 2 / VSLAM track.
+- Isaac Sim **5.1** chosen over 6.0 — 6.0's 16 GB VRAM minimum is a hard gate;
+  5.1 supports Ubuntu 24.04 with an 8 GB floor.
+- Install method: pip workflow (`pip install isaacsim[all]==5.1.0` from
+  `https://pypi.nvidia.com`) into `~/isaacsim/venv/`. Not the standalone zip.
+- Next: Phase 2 (URDF → USD pipeline) is unblocked.
+
 ## Project context
 
 This is the SortBots capstone — a 5–6 person team building 2 autonomous warehouse robots on top of the XLeRobot platform (https://xlerobot.readthedocs.io/). The current simulator stack is ManiSkill (SAPIEN-based), which ships with XLeRobot and is great for arm manipulation / VLA work but does not support multi-robot mobile navigation, ROS 2, or VSLAM.

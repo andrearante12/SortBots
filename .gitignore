@@ -28,3 +28,8 @@ scripts/.cache/
 
 # Large data shouldn't live in the repo (ReplicaCAD lives in ~/.maniskill/data/)
 data/
+
+# Isaac Sim install lives at ~/isaacsim/ (out of repo). Defensive ignores in
+# case anyone deviates from that layout.
+.venv-isaac/
+isaacsim/

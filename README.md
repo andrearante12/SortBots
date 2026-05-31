@@ -17,10 +17,16 @@ halt the task, and the coordination layer requires no central server.
 ## Current Goals
 
 ### Simulation infrastructure
-- **Adding Isaac Sim** for the multi-robot / SLAM / coordination half of the
-  project
-- Basic warehouse scene setup.
-- ROS 2 bridge between Isaac Sim and the rest of the stack 
+
+Two parallel sim tracks:
+
+- **ManiSkill 3** (`conda activate lerobot`) — VLA / arm manipulation, ships
+  with XLeRobot. See [`docs/setup.md`](docs/setup.md).
+- **Isaac Sim 5.1** (`source scripts/activate_isaac.sh`) — mobile / multi-robot
+  / ROS 2 bridge / VSLAM. See [`docs/isaac_sim_setup.md`](docs/isaac_sim_setup.md).
+
+Next up: basic warehouse scene, 2-robot ROS 2 spawn, and the ROS 2 bridge
+between Isaac Sim and the rest of the stack.
 
 ### CAD & mechanical design
 - Custom robot chassis design in CAD (replacing the XLeRobot IKEA-cart base).
@@ -41,8 +47,9 @@ halt the task, and the coordination layer requires no central server.
 
 ## Docs
 
-- [`docs/setup.md`](docs/setup.md) — first-time install (apt, Miniconda, conda env, ReplicaCAD, overlay)
-- [`docs/running.md`](docs/running.md) — activating the env, the verify script, the demo catalog
+- [`docs/setup.md`](docs/setup.md) — ManiSkill first-time install (apt, Miniconda, conda env, ReplicaCAD, overlay)
+- [`docs/running.md`](docs/running.md) — activating the ManiSkill env, the verify script, the demo catalog
+- [`docs/isaac_sim_setup.md`](docs/isaac_sim_setup.md) — Isaac Sim 5.1 install, activation, and headless verify
 ## License
 
 Project code: see `LICENSE` (to be added). XLeRobot submodule: Apache 2.0 (see `third_party/XLeRobot/LICENSE`).
