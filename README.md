@@ -14,18 +14,11 @@ re-allocate tasks when one is blocked or delayed. Time-to-completion
 scales with fleet size, failure of any single robot does not
 halt the task, and the coordination layer requires no central server.
 
-## Current Goals
+## Current Goals 
 
 ### Simulation infrastructure
 
-Two parallel sim tracks:
-
-- **ManiSkill 3** (`conda activate lerobot`) — VLA / arm manipulation, ships
-  with XLeRobot. See [`docs/setup.md`](docs/setup.md).
-- **Isaac Sim 5.1** (`source scripts/activate_isaac.sh`) — mobile / multi-robot
-  / ROS 2 bridge / VSLAM. See [`docs/isaac_sim_setup.md`](docs/isaac_sim_setup.md).
-
-Next up: basic warehouse scene, 2-robot ROS 2 spawn, and the ROS 2 bridge
+Basic warehouse scene, 2-robot ROS 2 spawn, and the ROS 2 bridge
 between Isaac Sim and the rest of the stack.
 
 ### CAD & mechanical design
@@ -33,15 +26,14 @@ between Isaac Sim and the rest of the stack.
 - End-effector design exploration 
 
 ### Perception & mapping (sim-first)
-- Validate VSLAM library choice (cuVSLAM vs. ORB-SLAM3 vs. RTAB-Map) against
-  Isaac Sim ground-truth pose. Pick one before fall.
-- Stand up nvblox in sim for 3D mapping, verify the output format integrates
+- Validate VSLAM library choice (cuVSLAM vs. ORB-SLAM3 vs. RTAB-Map)
+- Nvblox in sim for 3D mapping, verify the output format integrates
   with Nav2.
-- Prototype collaborative SLAM in sim — start with centralized map fusion at a
-  base station (simpler baseline); distributed peer-to-peer fusion is stretch.
+- Prototype collaborative SLAM in sim: map fusion, peer to peer communication, decentralized coordination
 
-### Navigation (sim-first)
+### Navigation 
 - Nav2 stack configured against a known map in the warehouse scene.
+- Explore VLA as an alternative manipulation method
  
 
 
