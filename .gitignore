@@ -33,3 +33,9 @@ data/
 # case anyone deviates from that layout.
 .venv-isaac/
 isaacsim/
+
+# Phase 2: generated USDs from scripts/import_urdf.py
+assets/generated/
+
+# Phase 1+: result files from verify / import / drive tests
+/tmp/isaac_*
