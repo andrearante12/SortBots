@@ -10,9 +10,18 @@ Exit code 0 on success. The 100-step loop is wrapped in a 120 s timeout so
 from __future__ import annotations
 
 import os
-import signal
 import sys
 import time
+
+from _isaac_utils import (
+    cancel_timeout,
+    emit_factory,
+    gpu_name,
+    guard_against_ros2,
+    install_timeout,
+)
+
+guard_against_ros2()
 
 # SimulationApp MUST be constructed before any other omni / isaacsim imports.
 from isaacsim import SimulationApp  # noqa: E402
@@ -24,58 +33,25 @@ CONFIG = {
 
 simulation_app = SimulationApp(CONFIG)
 
-
-def _timeout_handler(signum, frame):  # noqa: ARG001
-    print("ERROR: verify timed out after 120 s.", file=sys.stderr)
-    print("       Likely Kit did not pick up the dGPU. Check vulkaninfo and", file=sys.stderr)
-    print("       __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia.", file=sys.stderr)
-    try:
-        simulation_app.close()
-    finally:
-        sys.exit(2)
-
-
-signal.signal(signal.SIGALRM, _timeout_handler)
-signal.alarm(120)
-
-
-def _gpu_name() -> str:
-    # `carb.settings` exposes the renderer's chosen GPU.
-    try:
-        import carb.settings
-
-        s = carb.settings.get_settings()
-        name = s.get("/renderer/activeDevice/name") or s.get("/renderer/activeDeviceName")
-        if name:
-            return str(name)
-    except Exception:
-        pass
-    return "unknown"
-
+install_timeout(
+    seconds=120,
+    hint=(
+        "Likely Kit did not pick up the dGPU. Check vulkaninfo and\n"
+        "__NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia."
+    ),
+    close_app=simulation_app.close,
+)
 
 RESULT_FILE = os.environ.get("ISAAC_VERIFY_RESULT", "/tmp/isaac_verify_result.txt")
-
-
-def _emit(line: str) -> None:
-    """Write a line both to stdout and to RESULT_FILE.
-
-    Kit captures stdout during its startup and may swallow late writes, so we
-    also persist the same lines to a file the caller can read after exit.
-    """
-    print(line, flush=True)
-    with open(RESULT_FILE, "a") as f:
-        f.write(line + "\n")
+_emit = emit_factory(RESULT_FILE)
 
 
 def main() -> int:
     import isaacsim
     from isaacsim.core.api import World
 
-    # Truncate the result file at the start of each run.
-    open(RESULT_FILE, "w").close()
-
     version = getattr(isaacsim, "__version__", "unknown")
-    _emit(f"isaacsim {version} | GPU: {_gpu_name()}")
+    _emit(f"isaacsim {version} | GPU: {gpu_name()}")
 
     world = World()
     world.reset()
@@ -101,7 +77,7 @@ except Exception as e:
     print(f"ERROR: {type(e).__name__}: {e}", file=sys.stderr)
     rc = 1
 finally:
-    signal.alarm(0)
+    cancel_timeout()
     simulation_app.close()
 
 sys.exit(rc)

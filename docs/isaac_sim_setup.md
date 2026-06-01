@@ -6,9 +6,10 @@ Python 3.11 venv — entirely separate from the `lerobot` conda env that drives
 ManiSkill.
 
 This is Phase 1 of the broader Isaac Sim plan in
-[`../tasks/issacsim_setup.md`](../tasks/issacsim_setup.md). Phases 2-4 (URDF
-import, warehouse + 2-robot ROS 2 spawn, cuVSLAM hook-up) are deferred until
-this verifies on the target machine.
+[`../tasks/issacsim_setup.md`](../tasks/issacsim_setup.md). Phase 2 (URDF →
+USD import pipeline + regression test) is documented separately in
+[`isaac_sim_phase2.md`](isaac_sim_phase2.md). Phases 3-4 (warehouse + 2-robot
+ROS 2 spawn, cuVSLAM hook-up) are still deferred.
 
 ## Why Isaac Sim alongside ManiSkill
 
