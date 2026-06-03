@@ -221,6 +221,34 @@ def Usd_iter(prim):
         yield from Usd_iter(child)
 
 
+def fix_zero_masses(stage, robot_prim_path: str, min_mass: float = 0.5) -> int:
+    """Apply `min_mass` to any link with zero or missing mass.
+
+    URDFs with massless intermediate links (e.g. XLeRobot's holonomic-base
+    serial chain: root → root_arm_1_link_1 → root_arm_1_link_2) cause PhysX
+    instability, especially when multiple copies of the same articulation
+    are spawned in one world — the inverse-mass matrix becomes
+    ill-conditioned and joints saturate at their limits within a few steps.
+    A tiny fix-up mass keeps the dynamics well-conditioned without
+    meaningfully altering the kinematics (XLeRobot's `base_link` is 70 kg
+    so 0.5 kg on auxiliary links is negligible).
+    """
+    from pxr import UsdPhysics
+
+    root = stage.GetPrimAtPath(robot_prim_path)
+    n = 0
+    for prim in Usd_iter(root):
+        if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            continue
+        mass_attr = prim.GetAttribute("physics:mass")
+        current = mass_attr.Get() if mass_attr and mass_attr.IsValid() else None
+        if current is None or current < min_mass:
+            mass_api = UsdPhysics.MassAPI.Apply(prim)
+            mass_api.CreateMassAttr().Set(min_mass)
+            n += 1
+    return n
+
+
 # ------------------------------------------------------------ physics overrides
 
 def load_overrides(path: str | None) -> dict[str, Any]:
@@ -380,6 +408,9 @@ def main() -> int:
         stage, robot_prim_path, args.wheel_link, args.wheel_radius, args.wheel_length
     )
     emit(f"  wheel-swap: replaced {n_wheels} mesh collider(s)")
+
+    n_mass = fix_zero_masses(stage, robot_prim_path)
+    emit(f"  mass-fix: bumped {n_mass} link(s) to min mass")
 
     n_overrides = apply_physics_overrides(stage, robot_prim_path, overrides)
     emit(f"  overrides: applied {n_overrides} entr{'y' if n_overrides == 1 else 'ies'}")
