@@ -37,5 +37,9 @@ isaacsim/
 # Phase 2: generated USDs from scripts/import_urdf.py
 assets/generated/
 
+# Phase 3: generated warehouse USDs from scripts/build_warehouse.py
+scenes/*.usd
+scenes/*.usda
+
 # Phase 1+: result files from verify / import / drive tests
 /tmp/isaac_*

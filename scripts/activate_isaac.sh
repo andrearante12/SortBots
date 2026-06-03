@@ -17,9 +17,13 @@ if [[ "${CONDA_DEFAULT_ENV:-}" == "lerobot" ]]; then
     return 1
 fi
 
-# Refuse to activate inside a ROS 2-sourced shell.
-if [[ -n "${AMENT_PREFIX_PATH:-}" || -n "${ROS_DISTRO:-}" ]]; then
-    echo "ERROR: ROS 2 is sourced in this shell; open a fresh terminal." >&2
+# Refuse to activate inside a ROS 2-sourced shell. We check AMENT_PREFIX_PATH
+# (the canonical "ROS 2 is sourced" signal) but NOT ROS_DISTRO — Isaac Sim's
+# bundled ROS 2 bridge requires ROS_DISTRO to be set to the bundled distro
+# (we set it below to "jazzy"), so its presence isn't a conflict by itself.
+if [[ -n "${AMENT_PREFIX_PATH:-}" ]]; then
+    echo "ERROR: ROS 2 is sourced in this shell (AMENT_PREFIX_PATH set);" >&2
+    echo "       open a fresh terminal and do not source /opt/ros/*/setup.bash." >&2
     return 1
 fi
 
@@ -39,6 +43,19 @@ export KIT_RENDERER=rtx
 # non-interactive shells (CI, headless verify, etc).
 export OMNI_KIT_ACCEPT_EULA=YES
 export PRIVACY_CONSENT=Y
+
+# Phase 3+: Isaac Sim's bundled ROS 2 bridge (isaacsim.ros2.bridge v4.12.4)
+# fails to load with "ROS2 Bridge startup failed" unless ROS_DISTRO,
+# RMW_IMPLEMENTATION, and LD_LIBRARY_PATH point at the bundled distro libs.
+# These libs live under .../isaacsim.ros2.bridge/jazzy/lib on Ubuntu 24.04.
+# We default to FastDDS (the bridge's recommended RMW for the bundled stack).
+_ISAAC_ROS2_LIB="$ISAACSIM_HOME/venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.ros2.bridge/jazzy/lib"
+if [[ -d "$_ISAAC_ROS2_LIB" ]]; then
+    export ROS_DISTRO=jazzy
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:$_ISAAC_ROS2_LIB"
+fi
+unset _ISAAC_ROS2_LIB
 
 # shellcheck disable=SC1091
 source "$ISAACSIM_HOME/venv/bin/activate"

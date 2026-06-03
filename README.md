@@ -55,34 +55,12 @@ More detail: [`docs/running.md`](docs/running.md).
 
 ```bash
 source scripts/activate_isaac.sh
-
-# Phase 1 — headless verify (empty stage, 100 steps)
-python scripts/verify_isaac_sim.py
-
-# Phase 2 — URDF → USD pipeline (writes to assets/generated/, gitignored)
-python scripts/import_urdf.py \
-    --urdf ~/isaacsim/venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.asset.importer.urdf/data/urdf/robots/carter/urdf/carter.urdf \
-    --out  assets/generated/carter.usd \
-    --physics-overrides configs/physics_overrides/carter.json
-
-python scripts/import_urdf.py \
-    --urdf third_party/XLeRobot/simulation/Maniskill/assets/xlerobot/xlerobot.urdf \
-    --out  assets/generated/xlerobot.usd \
-    --physics-overrides configs/physics_overrides/xlerobot.json \
-    --fix-base
-
-# Phase 2 — regression test (one-time `pip install pytest` into the Isaac venv)
-python -m pytest tests/isaac/ -v
-
-# Phase 2 — watch the sim with a visible viewport (needs a display)
-python scripts/view_sim.py inspect assets/generated/carter.usd
-python scripts/view_sim.py drive carter            # diff-drive forever
-python scripts/view_sim.py drive xlerobot          # prismatic forever
+python scripts/spawn_warehouse.py --no-headless --forever
 ```
 
-Everything except `view_sim.py` is headless (`SimulationApp({"headless": True})`) — that's why `verify`, `import_urdf`, and `pytest` never open a window. Use `view_sim.py` when you want to see the robot. Result files for the headless scripts land under `/tmp/isaac_*` because Kit captures stdout during shutdown. `SORTBOTS_FORCE_REIMPORT=1` forces fresh USDs instead of reusing the cached ones.
+Opens Kit, references the warehouse, spawns 2 XLeRobots, and drives them forward while publishing `/robot_<n>/{odom, camera/rgb, camera/depth, tf}` per robot over the bundled ROS 2 bridge. The first time it runs, the script auto-builds the warehouse USD and re-imports the XLeRobot URDF (~30 s extra).
 
-More detail: [`docs/isaac_sim_setup.md`](docs/isaac_sim_setup.md) (install + Phase 1), [`docs/isaac_sim_phase2.md`](docs/isaac_sim_phase2.md) (Phase 2 pipeline + drive test).
+Install + Phase-by-phase commands (URDF→USD pipeline, headless regression tests, ROS 2 topic inspection) live in the docs: [`docs/isaac_sim_setup.md`](docs/isaac_sim_setup.md), [`docs/isaac_sim_phase2.md`](docs/isaac_sim_phase2.md), [`docs/isaac_sim_phase3.md`](docs/isaac_sim_phase3.md).
 
 ## Docs
 
@@ -90,6 +68,7 @@ More detail: [`docs/isaac_sim_setup.md`](docs/isaac_sim_setup.md) (install + Pha
 - [`docs/running.md`](docs/running.md) — activating the ManiSkill env, the verify script, the demo catalog
 - [`docs/isaac_sim_setup.md`](docs/isaac_sim_setup.md) — Isaac Sim 5.1 install, activation, and headless verify
 - [`docs/isaac_sim_phase2.md`](docs/isaac_sim_phase2.md) — URDF → USD import pipeline, physics-override JSON schema, regression test
+- [`docs/isaac_sim_phase3.md`](docs/isaac_sim_phase3.md) — warehouse scene, 2-robot spawn, ROS 2 bridge publishing odom/RGB-D/TF
 
 ## License
 

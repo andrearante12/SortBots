@@ -7,9 +7,10 @@ ManiSkill.
 
 This is Phase 1 of the broader Isaac Sim plan in
 [`../tasks/issacsim_setup.md`](../tasks/issacsim_setup.md). Phase 2 (URDF →
-USD import pipeline + regression test) is documented separately in
-[`isaac_sim_phase2.md`](isaac_sim_phase2.md). Phases 3-4 (warehouse + 2-robot
-ROS 2 spawn, cuVSLAM hook-up) are still deferred.
+USD import pipeline + regression test) is documented in
+[`isaac_sim_phase2.md`](isaac_sim_phase2.md). Phase 3 (warehouse + 2-robot
+ROS 2 spawn) is documented in [`isaac_sim_phase3.md`](isaac_sim_phase3.md).
+Phase 4 (cuVSLAM hook-up) is still deferred.
 
 ## Why Isaac Sim alongside ManiSkill
 

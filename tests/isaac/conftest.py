@@ -83,6 +83,19 @@ def sim_app(carter_usd_path, xlerobot_usd_path):
     from isaacsim import SimulationApp
 
     app = SimulationApp({"headless": True, "renderer": "RayTracedLighting"})
+
+    # Phase 3+: the ROS 2 bridge isn't auto-loaded on the pip-install. Enable
+    # it once at session start and tick the app so its OmniGraph node types
+    # (ROS2PublishOdometry, ROS2CameraHelper, ROS2PublishTransformTree)
+    # finish registering before any test references them. Phase 1+2 tests
+    # don't use the bridge, so this is a no-op for them.
+    import omni.kit.app
+
+    ext_manager = omni.kit.app.get_app().get_extension_manager()
+    ext_manager.set_extension_enabled_immediate("isaacsim.ros2.bridge", True)
+    for _ in range(10):
+        app.update()
+
     try:
         yield app
     finally:
