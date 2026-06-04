@@ -14,7 +14,7 @@ re-allocate tasks when one is blocked or delayed. Time-to-completion
 scales with fleet size, failure of any single robot does not
 halt the task, and the coordination layer requires no central server.
 
-## Current Goals 
+## Software Team Objectives
 
 ### Simulation infrastructure
 
@@ -58,9 +58,7 @@ source scripts/activate_isaac.sh
 python scripts/spawn_warehouse.py --no-headless --forever
 ```
 
-Opens Kit, references the warehouse, spawns 2 XLeRobots, and drives them forward while publishing `/robot_<n>/{odom, camera/rgb, camera/depth, tf}` per robot over the bundled ROS 2 bridge. The first time it runs, the script auto-builds the warehouse USD and re-imports the XLeRobot URDF (~30 s extra).
-
-Install + Phase-by-phase commands (URDF→USD pipeline, headless regression tests, ROS 2 topic inspection) live in the docs: [`docs/isaac_sim_setup.md`](docs/isaac_sim_setup.md), [`docs/isaac_sim_phase2.md`](docs/isaac_sim_phase2.md), [`docs/isaac_sim_phase3.md`](docs/isaac_sim_phase3.md).
+Opens Kit, references the warehouse, spawns 2 XLeRobots, and publishes per-robot D435 RGB-D + camera_info + MPU 6050 IMU + odom + TF + a `cmd_vel` subscriber (`/robot_<n>/{camera/rgb, camera/depth, camera/camera_info, imu, odom, tf}` + `/robot_<n>/cmd_vel`). The robots stand still until something publishes Twist on `/robot_<n>/cmd_vel`. The first time it runs, the script auto-builds the warehouse USD and re-imports the XLeRobot URDF (~30 s extra).
 
 ## Docs
 
@@ -69,6 +67,7 @@ Install + Phase-by-phase commands (URDF→USD pipeline, headless regression test
 - [`docs/isaac_sim_setup.md`](docs/isaac_sim_setup.md) — Isaac Sim 5.1 install, activation, and headless verify
 - [`docs/isaac_sim_phase2.md`](docs/isaac_sim_phase2.md) — URDF → USD import pipeline, physics-override JSON schema, regression test
 - [`docs/isaac_sim_phase3.md`](docs/isaac_sim_phase3.md) — warehouse scene, 2-robot spawn, ROS 2 bridge publishing odom/RGB-D/TF
+- [`docs/isaac_sim_phase4.md`](docs/isaac_sim_phase4.md) — D435 + MPU 6050 sim sensors, cmd_vel subscriber, per-robot RTAB-Map
 
 ## License
 

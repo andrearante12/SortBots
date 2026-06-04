@@ -1,0 +1,17 @@
+{
+  "model": "Intel RealSense D435 (depth-aligned color)",
+  "width": 848,
+  "height": 480,
+  "fps": 30,
+  "fx": 605.0,
+  "fy": 605.0,
+  "cx": 424.0,
+  "cy": 240.0,
+  "focal_length_mm": 1.93,
+  "horizontal_aperture_mm": 2.7288,
+  "vertical_aperture_mm": 1.5444,
+  "clipping_range_m": [0.105, 10.0],
+  "distortion_model": "plumb_bob",
+  "distortion_coeffs": [0.0, 0.0, 0.0, 0.0, 0.0],
+  "notes": "Intrinsics tuned so the bridge's ROS2CameraInfoHelper publishes K ~ [605, 0, 424, 0, 605, 240, 0, 0, 1] at 848x480 (D435 datasheet HFOV 87 deg, VFOV 58 deg). Distortion is all-zero because rs2::align rectifies the aligned color stream. Phase 5 may sweep to match a per-unit EEPROM calibration."
+}
