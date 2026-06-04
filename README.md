@@ -14,14 +14,18 @@ re-allocate tasks when one is blocked or delayed. Applications to autonomous del
 
 ## Already Completed
 
+<img width="1666" height="843" alt="Screenshot from 2026-06-03 23-28-06" src="https://github.com/user-attachments/assets/400507ae-119a-41f7-996c-ea5fedfafd36" />
+
+
 We currently have a working simulation of our intended robot imported into an realistic test enviornment. As we design our custom additions to the robot we can update the URDF/sim enviornment accordingly. The intention is to use this repo to experiment with the software without needing to wait for the physical build of the robot.
+
 
 ### Simulation infrastructure
 - **Isaac Sim** Isaac Sim 5.1 supporting SLAM pipelines and integrating with Nvidia packages such as Nvblox
 - **ManiSkill (arm-manipulation sim):** XLeRobot's original sim env with extensive support for training manipulation tasks
 
 ### Perception & mapping
-- **Per-robot ROS 2 sensor suite** 
+- **Intended sensor suite** 
   - Intel RealSense D435 RGB-Depth Camera
   - MPU 6050 IMU
   - Optical Tracking Odometry Sensor - PAA5160E1
