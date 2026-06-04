@@ -43,3 +43,6 @@ scenes/*.usda
 
 # Phase 1+: result files from verify / import / drive tests
 /tmp/isaac_*
+
+# Reference papers — kept local, not redistributed
+literature_review/

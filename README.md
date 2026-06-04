@@ -1,7 +1,7 @@
 # SortBots
 
 Fully autonomous mobile robots performing collaborative
-indoor package logistics, built on
+indoor logistics, built on
 [XLeRobot](https://github.com/Vector-Wangel/XLeRobot).
 
 Unlike commercial AMR
@@ -10,36 +10,45 @@ SortBots targets the opposite operating point: rapid deployment
 in unmapped environments, with collaboration as the primary
 mechanism for both efficiency and resilience. Robots divide work via decentralized task allocation,
 coordinate passage through shared spaces, and dynamically
-re-allocate tasks when one is blocked or delayed. Time-to-completion
-scales with fleet size, failure of any single robot does not
-halt the task, and the coordination layer requires no central server.
+re-allocate tasks when one is blocked or delayed. Applications to autonomous delivery logistics in dynamic enviornemnts, such as warehouses, shelf restocking, or serving foods in restaurants.
 
-## Software Team Objectives
+## Already Completed
+
+We currently have a working simulation of our intended robot imported into an realistic test enviornment. As we design our custom additions to the robot we can update the URDF/sim enviornment accordingly. The intention is to use this repo to experiment with the software without needing to wait for the physical build of the robot.
 
 ### Simulation infrastructure
+- **Isaac Sim** Isaac Sim 5.1 supporting SLAM pipelines and integrating with Nvidia packages such as Nvblox
+- **ManiSkill (arm-manipulation sim):** XLeRobot's original sim env with extensive support for training manipulation tasks
 
-Basic warehouse scene, 2-robot ROS 2 spawn, and the ROS 2 bridge
-between Isaac Sim and the rest of the stack.
+### Perception & mapping
+- **Per-robot ROS 2 sensor suite** 
+  - Intel RealSense D435 RGB-Depth Camera
+  - MPU 6050 IMU
+  - Optical Tracking Odometry Sensor - PAA5160E1
 
-### CAD & mechanical design
-- Custom robot chassis design in CAD (replacing the XLeRobot IKEA-cart base).
-- End-effector design exploration 
+- **RGB-D SLAM working end-to-end:** 
+  - RTAB-Map is the current SLAM algorithm of choice
 
-### Perception & mapping (sim-first)
-- Validate VSLAM library choice (cuVSLAM vs. ORB-SLAM3 vs. RTAB-Map)
-- Nvblox in sim for 3D mapping, verify the output format integrates
-  with Nav2.
-- Prototype collaborative SLAM in sim: map fusion, peer to peer communication, decentralized coordination
 
-### Navigation 
-- Nav2 stack configured against a known map in the warehouse scene.
-- Explore VLA as an alternative manipulation method
- 
+## Docs
+
+- [`docs/setup.md`](docs/setup.md) — full setup: Isaac Sim + ROS 2 + RTAB-Map (optional ManiSkill at the end)
+- [`docs/running.md`](docs/running.md) — optional ManiSkill arm-manipulation demos
 
 
 ## Run commands
 
 Open a fresh shell at the repo root. Never activate both simulators in the same shell, and never source ROS 2 in either.
+
+
+### Isaac Sim (mobile / multi-robot / ROS 2 / VSLAM track)
+
+```bash
+./scripts/run_demo.sh          # launch the whole demo
+./scripts/run_demo.sh stop     # shut it all down
+```
+
+`run_demo.sh` brings up the entire pipeline in one command. Drive the robot around and the map fills in live. Re-running it resets the environment. The first run auto-builds the robot USD and streams the NVIDIA warehouse (a few minutes; cached after).
 
 ### ManiSkill (arm manipulation track)
 
@@ -51,24 +60,10 @@ python scripts/run_xle_demo.py     # XLeRobot demo
 
 More detail: [`docs/running.md`](docs/running.md).
 
-### Isaac Sim (mobile / multi-robot / ROS 2 / VSLAM track)
 
-```bash
-source scripts/activate_isaac.sh
-python scripts/spawn_warehouse.py --no-headless --forever
-```
-
-Opens Kit, references the warehouse, spawns 2 XLeRobots, and publishes per-robot D435 RGB-D + camera_info + MPU 6050 IMU + odom + TF + a `cmd_vel` subscriber (`/robot_<n>/{camera/rgb, camera/depth, camera/camera_info, imu, odom, tf}` + `/robot_<n>/cmd_vel`). The robots stand still until something publishes Twist on `/robot_<n>/cmd_vel`. The first time it runs, the script auto-builds the warehouse USD and re-imports the XLeRobot URDF (~30 s extra).
-
-## Docs
-
-- [`docs/setup.md`](docs/setup.md) — ManiSkill first-time install (apt, Miniconda, conda env, ReplicaCAD, overlay)
-- [`docs/running.md`](docs/running.md) — activating the ManiSkill env, the verify script, the demo catalog
-- [`docs/isaac_sim_setup.md`](docs/isaac_sim_setup.md) — Isaac Sim 5.1 install, activation, and headless verify
-- [`docs/isaac_sim_phase2.md`](docs/isaac_sim_phase2.md) — URDF → USD import pipeline, physics-override JSON schema, regression test
-- [`docs/isaac_sim_phase3.md`](docs/isaac_sim_phase3.md) — warehouse scene, 2-robot spawn, ROS 2 bridge publishing odom/RGB-D/TF
-- [`docs/isaac_sim_phase4.md`](docs/isaac_sim_phase4.md) — D435 + MPU 6050 sim sensors, cmd_vel subscriber, per-robot RTAB-Map
 
 ## License
 
-Project code: see `LICENSE` (to be added). XLeRobot submodule: Apache 2.0 (see `third_party/XLeRobot/LICENSE`).
+Project code: see `LICENSE` (to be added). 
+
+XLeRobot submodule: Apache 2.0 (see `third_party/XLeRobot/LICENSE`).

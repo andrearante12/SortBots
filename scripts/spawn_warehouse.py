@@ -50,6 +50,25 @@ REPO_ROOT = SCRIPTS_DIR.parent
 
 XLEROBOT_USD = REPO_ROOT / "assets" / "generated" / "xlerobot.usd"
 WAREHOUSE_USD = REPO_ROOT / "scenes" / "warehouse_v0.usd"
+
+# NVIDIA's fully-assetted warehouse, streamed from the Isaac asset server
+# (resolved via get_assets_root_path() after SimulationApp boots). The
+# `full_warehouse` variant is stocked shelves + props; `warehouse` is the
+# bare shell fallback if the full variant can't be reached.
+NVIDIA_WAREHOUSE_REL = "Isaac/Environments/Simple_Warehouse/full_warehouse.usd"
+NVIDIA_WAREHOUSE_FALLBACK_REL = "Isaac/Environments/Simple_Warehouse/warehouse.usd"
+
+# Spawn points inside NVIDIA's warehouse: just in front of the shelving, a
+# good middle ground between NVIDIA's open Carter spawn (-6, -1) and deep
+# in-aisle. The racks run along +y with x-centers ~5 m apart and span
+# y~8.8..24.8; (-4.5, 4.5) is open floor a few metres ahead of the first rack
+# row, so the robot sees the stocked shelves without being boxed in. z matches
+# the primitive scene's ride height.
+NVIDIA_SPAWN_POSITIONS: dict[str, tuple[float, float, float]] = {
+    "robot_0": (-4.5, 4.5, 0.05),
+    "robot_1": (-4.5, 6.5, 0.05),
+}
+
 D435_CONFIG = REPO_ROOT / "configs" / "sensors" / "d435.json"
 MPU6050_CONFIG = REPO_ROOT / "configs" / "sensors" / "mpu6050.json"
 RESULT_FILE = os.environ.get(
@@ -74,6 +93,32 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--headless", dest="headless", action="store_true")
     p.add_argument("--no-headless", dest="headless", action="store_false")
     p.set_defaults(headless=True)
+    p.add_argument(
+        "--scene",
+        choices=("nvidia", "primitive"),
+        default="nvidia",
+        help=(
+            "Which warehouse to load. `nvidia` (default) streams NVIDIA's "
+            "fully-assetted Simple_Warehouse from the Isaac asset server; "
+            "`primitive` uses the hand-built scenes/warehouse_v0.usd."
+        ),
+    )
+    p.add_argument(
+        "--warehouse-url",
+        default=None,
+        help=(
+            "Override the warehouse USD path/URL outright (skips asset-server "
+            "resolution). Useful for an offline Nucleus mirror."
+        ),
+    )
+    p.add_argument(
+        "--robots",
+        type=int,
+        default=2,
+        choices=(1, 2),
+        help="How many XLeRobots to spawn (default 2). Use 1 to save VRAM "
+        "for the single-robot teleop + RTAB-Map demo.",
+    )
     g = p.add_mutually_exclusive_group()
     g.add_argument(
         "--duration",
@@ -122,8 +167,12 @@ for _ in range(10):
 emit = emit_factory(RESULT_FILE)
 
 if not args.forever:
+    # The NVIDIA warehouse streams ~hundreds of MB from the asset server on
+    # the first run (cached locally afterward), so give it a much higher
+    # floor than the primitive scene's local load.
+    _timeout_floor = 600 if args.scene == "nvidia" else 240
     install_timeout(
-        seconds=max(int(args.duration * 6), 240),
+        seconds=max(int(args.duration * 6), _timeout_floor),
         hint=(
             "Spawn loop took too long. Common causes: Kit fell back to llvmpipe,\n"
             "asset reference failed to resolve, or one of the ROS 2 publisher\n"
@@ -196,6 +245,40 @@ def _ensure_warehouse_usd() -> Path:
             f"stdout:\n{r.stdout}\nstderr:\n{r.stderr}"
         )
     return WAREHOUSE_USD
+
+
+def _resolve_nvidia_warehouse() -> str:
+    """Resolve NVIDIA's Simple_Warehouse USD URL on the Isaac asset server.
+
+    Must be called AFTER `SimulationApp` constructs (needs the Kit runtime).
+    Prefers the stocked `full_warehouse`; falls back to the bare `warehouse`
+    shell if the full variant can't be reached. Raises with an actionable
+    message when the asset root itself is unreachable (no network / no local
+    Nucleus) so the failure isn't a silent llvmpipe-style hang.
+    """
+    import omni.client
+    from isaacsim.storage.native import get_assets_root_path
+
+    root = get_assets_root_path()
+    if not root:
+        raise RuntimeError(
+            "Isaac asset root is unreachable — get_assets_root_path() returned "
+            "None. The NVIDIA warehouse streams from NVIDIA's S3/Nucleus server, "
+            "so this machine needs network access (or a local Omniverse Nucleus "
+            "mount). Re-run with `--scene primitive` to use the local "
+            "scenes/warehouse_v0.usd instead."
+        )
+    for rel in (NVIDIA_WAREHOUSE_REL, NVIDIA_WAREHOUSE_FALLBACK_REL):
+        url = f"{root}/{rel}"
+        res, _ = omni.client.stat(url)
+        if str(res) == "Result.OK":
+            emit(f"  resolved NVIDIA warehouse: {url}")
+            return url
+        emit(f"  NVIDIA warehouse not reachable ({res}): {url}")
+    raise RuntimeError(
+        f"No Simple_Warehouse variant reachable under {root}. "
+        "Re-run with `--scene primitive`."
+    )
 
 
 def _spawn_robot(world, name: str, position, xlerobot_usd: Path, d435: dict, mpu: dict):
@@ -272,6 +355,30 @@ def _spawn_robot(world, name: str, position, xlerobot_usd: Path, d435: dict, mpu
     return robot, cam, cam_path, imu_path
 
 
+def _base_to_prim_transform(stage, base_prim_path: str, child_prim_path: str):
+    """Fixed transform of `child` expressed in `base`'s frame.
+
+    Returns ((tx, ty, tz), (qx, qy, qz, qw)) — translation + IJKR quaternion,
+    the form ROS2PublishRawTransformTree wants. Used to publish
+    base_link -> camera_optical so the prefixed frame the camera images are
+    stamped with actually exists in the TF tree.
+    """
+    from pxr import Gf, UsdGeom
+
+    xc = UsdGeom.XformCache()
+    base_w = xc.GetLocalToWorldTransform(stage.GetPrimAtPath(base_prim_path))
+    child_w = xc.GetLocalToWorldTransform(stage.GetPrimAtPath(child_prim_path))
+    # USD is row-vector (p_world = p_local * L2W), so child-in-base = child_w * base_w^-1.
+    rel = child_w * base_w.GetInverse()
+    t = rel.ExtractTranslation()
+    q = rel.ExtractRotationQuat()
+    img = q.GetImaginary()
+    return (
+        (float(t[0]), float(t[1]), float(t[2])),
+        (float(img[0]), float(img[1]), float(img[2]), float(q.GetReal())),
+    )
+
+
 def _orient_camera_to_ros(cam) -> None:
     """Apply a 180° local rotation about X so the camera's USD axes align
     with ROS optical-frame convention (Z forward, X right, Y down).
@@ -341,11 +448,8 @@ def main() -> int:
     sys.path.insert(0, str(SCRIPTS_DIR))
     from _ros2_graphs import build_robot_graphs
 
-    # Local import so the build_warehouse module's stdlib-only top-level still
-    # works for documentation introspection.
-    from build_warehouse import SPAWN_POSITIONS  # noqa: E402
-
     emit(f"spawn_warehouse | GPU: {gpu_name()}")
+    emit(f"  scene={args.scene}  robots={args.robots}")
     emit(f"  headless={args.headless}  drive={args.drive}")
     emit(f"  duration={'forever' if args.forever else args.duration}")
 
@@ -354,18 +458,36 @@ def main() -> int:
     emit(f"  mpu6050: {mpu['publish_rate_hz']}Hz publish, mount={mpu['mount_offset_m']}")
 
     xlerobot_usd = _ensure_xlerobot_usd()
-    warehouse_usd = _ensure_warehouse_usd()
     emit(f"  xlerobot_usd={xlerobot_usd}")
-    emit(f"  warehouse_usd={warehouse_usd}")
+
+    # Pick the warehouse + matching spawn-point table for the chosen scene.
+    if args.warehouse_url:
+        warehouse_ref = args.warehouse_url
+        spawn_positions = NVIDIA_SPAWN_POSITIONS
+        emit(f"  warehouse_ref={warehouse_ref} (override)")
+    elif args.scene == "nvidia":
+        warehouse_ref = _resolve_nvidia_warehouse()
+        spawn_positions = NVIDIA_SPAWN_POSITIONS
+    else:
+        # Local import so build_warehouse's stdlib-only top-level still works
+        # for documentation introspection; only needed for the primitive scene.
+        from build_warehouse import SPAWN_POSITIONS
+
+        warehouse_ref = str(_ensure_warehouse_usd())
+        spawn_positions = SPAWN_POSITIONS
+        emit(f"  warehouse_ref={warehouse_ref}")
+
+    # Spawn only the first `--robots` entries (single-robot teleop saves VRAM).
+    spawn_positions = dict(list(spawn_positions.items())[: args.robots])
 
     World.clear_instance()
     omni.usd.get_context().new_stage()
     world = World(stage_units_in_meters=1.0)
 
-    add_reference_to_stage(usd_path=str(warehouse_usd), prim_path="/World/Warehouse")
+    add_reference_to_stage(usd_path=warehouse_ref, prim_path="/World/Warehouse")
 
     robots: dict[str, tuple] = {}
-    for name, pos in SPAWN_POSITIONS.items():
+    for name, pos in spawn_positions.items():
         robot, cam, cam_path, imu_path = _spawn_robot(
             world, name, pos, xlerobot_usd, d435, mpu
         )
@@ -380,8 +502,21 @@ def main() -> int:
         cam.initialize()
         _orient_camera_to_ros(cam)
 
+    # IMU mount is authored relative to base_link from the MPU config, so the
+    # base_link -> imu_link transform is exactly (offset, rotation). wxyz -> ijkr.
+    imu_wxyz = [float(v) for v in mpu["mount_rotation_wxyz"]]
+    base_to_imu = (
+        tuple(float(v) for v in mpu["mount_offset_m"]),
+        (imu_wxyz[1], imu_wxyz[2], imu_wxyz[3], imu_wxyz[0]),
+    )
+
     # Build per-robot graphs.
+    stage = omni.usd.get_context().get_stage()
     for name, (_, _, cam_path, imu_path) in robots.items():
+        base_to_camera = _base_to_prim_transform(
+            stage, f"/World/{name}/base_link", cam_path
+        )
+        emit(f"  {name} base->cam t={base_to_camera[0]} q={base_to_camera[1]}")
         build_robot_graphs(
             robot_prim_path=f"/World/{name}",
             chassis_subpath="base_link",
@@ -389,6 +524,8 @@ def main() -> int:
             namespace=name,
             imu_prim_path=imu_path,
             rgb_resolution=(d435["width"], d435["height"]),
+            base_to_camera=base_to_camera,
+            base_to_imu=base_to_imu,
         )
         emit(f"  graphs built for {name}")
 
@@ -442,12 +579,13 @@ def main() -> int:
         step += 1
         if step % 60 == 0:
             elapsed = step * dt
-            r0_q = robots["robot_0"][0].get_joint_positions()
-            r1_q = robots["robot_1"][0].get_joint_positions()
+            pose = " ".join(
+                f"{n} x={robots[n][0].get_joint_positions()[0]:+.3f} "
+                f"yaw={robots[n][0].get_joint_positions()[2]:+.3f}"
+                for n in robots
+            )
             emit(
-                f"  t={elapsed:5.1f}s  "
-                f"r0 x={r0_q[0]:+.3f} yaw={r0_q[2]:+.3f}  "
-                f"r1 x={r1_q[0]:+.3f} yaw={r1_q[2]:+.3f}"
+                f"  t={elapsed:5.1f}s  {pose}"
             )
 
     emit(f"spawn_warehouse: ran {step} steps ({step * dt:.1f} sim seconds)")

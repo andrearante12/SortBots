@@ -16,7 +16,7 @@ This is the first phase that actually exercises the "ROS 2 sim-to-real"
 justification for adopting Isaac Sim. Phase 4 (cuVSLAM) consumes these
 topics.
 
-This page assumes [`isaac_sim_setup.md`](isaac_sim_setup.md) and
+This page assumes [`setup.md`](setup.md) and
 [`isaac_sim_phase2.md`](isaac_sim_phase2.md) are done.
 
 ## What the pieces do
