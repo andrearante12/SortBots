@@ -6,7 +6,7 @@ forward >1 m in 5 s of headless physics. `pytest -x tests/isaac/` exercises
 the pipeline on two placeholder URDFs — NVIDIA Carter (ships with Isaac Sim)
 and the team's XLeRobot URDF (`third_party/XLeRobot/...`).
 
-This page assumes Phase 1 ([`isaac_sim_setup.md`](isaac_sim_setup.md)) is
+This page assumes Phase 1 ([`setup.md`](setup.md)) is
 done.
 
 ## What the pipeline does

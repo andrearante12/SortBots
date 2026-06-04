@@ -7,7 +7,7 @@ The first SLAM consumer wired up is **RTAB-Map**, running natively on
 ROS 2 Jazzy (no Docker, no Isaac ROS yet). Phase 5+ swaps in cuVSLAM
 and the Jetson-parity Docker path.
 
-This page assumes [`isaac_sim_setup.md`](isaac_sim_setup.md),
+This page assumes [`setup.md`](setup.md),
 [`isaac_sim_phase2.md`](isaac_sim_phase2.md), and
 [`isaac_sim_phase3.md`](isaac_sim_phase3.md) are done.
 
@@ -37,19 +37,44 @@ like `imu_filter_madgwick`). The Phase 4 default leaves
 gravity prior. Phase 5+ sim-to-real work should flip it off and run a
 matching filter node in software.
 
-## Running the full Phase 4 demo
+## The warehouse scene
 
-You'll need three terminals.
+`spawn_warehouse.py` loads one of two environments via `--scene`:
 
-**Terminal 1 — Isaac Sim with both robots and the new graphs:**
+| `--scene` | What loads | Source |
+|---|---|---|
+| `nvidia` (default) | NVIDIA's fully-assetted **Simple_Warehouse** (`full_warehouse.usd` — stocked shelves, pallets, barrels, props) | Streamed from the Isaac asset server via `get_assets_root_path()`; cached locally after first run |
+| `primitive` | The hand-built `scenes/warehouse_v0.usd` (textured boxes/cylinders) | Local, offline; what the pytest suite uses |
+
+The NVIDIA warehouse is the default because it gives RTAB-Map far more
+ORB texture/geometry to track than the primitive boxes. It needs network
+(or a local Omniverse Nucleus mount) on the first run; if the asset root
+is unreachable the script raises a clear error pointing you at
+`--scene primitive`. Robots spawn in the open front aisle — `robot_0`
+sits exactly where NVIDIA places Nova Carter in
+`carter_warehouse_navigation.usd` (`-6, -1`), a verified-drivable spot.
+
+The pytest suite (below) deliberately stays on the **primitive** scene so
+CI is offline and deterministic; only the interactive demo uses NVIDIA's.
+
+## Running the full Phase 4 demo (single-robot teleop + live SLAM)
+
+You'll need three terminals. For the teleop-one-robot demo, spawn a
+single XLeRobot (`--robots 1`) to keep VRAM free for rviz + RTAB-Map on
+the 8 GB RTX 4070.
+
+**Terminal 1 — Isaac Sim in NVIDIA's warehouse with one robot:**
 
 ```bash
 source scripts/activate_isaac.sh
-python scripts/spawn_warehouse.py --no-headless --forever
+python scripts/spawn_warehouse.py --no-headless --forever --robots 1
 ```
 
-The default `--drive cmd_vel` mode waits for external Twist messages;
-the robots stand still until terminal 3 sends commands.
+`--scene nvidia` is the default. The first launch streams the warehouse
+(~hundreds of MB) and can take a few minutes; later launches hit the
+local cache. The default `--drive cmd_vel` mode waits for external Twist
+messages; the robot stands still until terminal 3 sends commands. Pass
+`--scene primitive` to fall back to the local box warehouse offline.
 
 **Terminal 2 — RTAB-Map on robot_0:**
 
@@ -62,17 +87,23 @@ ros2 launch ./launch/sortbots_rtabmap_robot.launch.py robot_id:=robot_0
 rviz opens with RTAB-Map's panels. It will wait for the first IMU
 message, then start consuming RGB-D + odom + TF.
 
-**Terminal 3 — drive robot_0 around:**
+**Terminal 3 — drive robot_0 around (WASD):**
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-ros2 run teleop_twist_keyboard teleop_twist_keyboard \
-    --ros-args -r /cmd_vel:=/robot_0/cmd_vel
+python3 scripts/wasd_teleop.py --robot-id robot_0
 ```
 
-Use the on-screen keys to drive; rviz should show the dense map
-filling in as the robot explores. For a scripted demo without the
-keyboard:
+`scripts/wasd_teleop.py` is a friendlier replacement for
+`teleop_twist_keyboard` (whose defaults are the awkward i/j/l/, cluster).
+Keys: **w/s** forward/back, **a/d** turn, **q/e** strafe (the XLeRobot base
+is holonomic), **space** stop, **z/x** slower/faster, **k** quit. It
+streams the Twist continuously and zeroes on stop, so the OmniGraph
+SubscribeTwist never holds a stale non-zero command. It auto-re-execs
+under `/usr/bin/python3` (ROS 2's interpreter) if you launch it from a
+conda/pyenv shell. rviz fills in the dense map as you explore.
+
+For a scripted demo without the keyboard:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -103,7 +134,34 @@ Compared to Phase 3:
 - **`launch/sortbots_rtabmap_robot.launch.py`** — thin wrapper around
   `rtabmap_launch/rtabmap.launch.py` with `/robot_<n>/*` remaps,
   `wait_imu_to_init: true`, `visual_odometry: false` (use sim's
-  noiseless odom as the motion prior).
+  noiseless odom as the motion prior), and `use_sim_time: true`
+  (REQUIRED — see below).
+
+### TF + sim-time plumbing (required for RTAB-Map to build a map)
+
+Getting RTAB-Map to actually map against the sim needs three things that
+bit hard the first time the pipeline was run end-to-end:
+
+1. **`use_sim_time:=true`.** The Isaac ROS 2 bridge stamps every message
+   with *simulation* time (seconds since sim start), not wall clock. With
+   `use_sim_time=false`, RTAB-Map treats all data as ~decades old and
+   every TF lookup fails — the map stays empty. The launch file defaults
+   it to `true` and the global `/clock` publisher (from `spawn_warehouse`)
+   feeds it.
+2. **A complete, prefixed TF chain.** `ROS2PublishTransformTree` can only
+   emit raw USD prim names (no namespace prefix), and it never publishes
+   an `odom→base_link` link at all. So `_ros2_graphs.py` adds
+   `ROS2PublishRawTransformTree` publishers for the frames RTAB-Map needs,
+   with the prefixed names the data streams already use:
+   `robot_<n>/odom → robot_<n>/base_link` (dynamic, from the odom node),
+   `robot_<n>/base_link → robot_<n>/camera_optical` (camera extrinsic,
+   computed from USD), and `robot_<n>/base_link → robot_<n>/imu_link`
+   (from the MPU mount config).
+3. **TF on the *global* `/tf`, not `/robot_<n>/tf`.** ROS 2 `tf2`
+   TransformListeners subscribe to the absolute `/tf` regardless of node
+   namespace, so a namespaced tf topic has zero consumers. The raw TF
+   publishers above use `nodeNamespace=""` → global `/tf`; the frame_ids
+   stay prefixed (`robot_<n>/...`) so it remains multi-robot-safe.
 
 ## Tests
 
@@ -129,6 +187,15 @@ python -m pytest tests/isaac/test_camera_info.py \
 
 ## Troubleshooting
 
+- **`Isaac asset root is unreachable — get_assets_root_path() returned
+  None`** — the NVIDIA warehouse streams from NVIDIA's S3/Nucleus server,
+  so the machine needs network access on the first run. Re-run with
+  `--scene primitive` to use the local box warehouse offline, or point
+  `--warehouse-url` at a local Nucleus mirror.
+- **First NVIDIA-scene launch hangs for minutes / watchdog fires** — it's
+  streaming `full_warehouse.usd` and its dependencies. The watchdog floor
+  is raised to 600 s for `--scene nvidia` to allow this; the download is
+  cached under `~/.cache/ov/` so subsequent launches are fast.
 - **`OmniGraphError: Could not create node using unrecognized type
   'isaacsim.ros2.bridge.ROS2CameraInfoHelper'`** — same fix as Phase 3:
   the bridge extension needs `app.update()` ticks after enable. The

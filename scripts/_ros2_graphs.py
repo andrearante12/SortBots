@@ -44,6 +44,8 @@ def build_robot_graphs(
     imu_prim_path: Optional[str] = None,
     imu_topic: str = "imu",
     rgb_resolution: Tuple[int, int] = (640, 480),
+    base_to_camera: Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]] = None,
+    base_to_imu: Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]] = None,
 ) -> None:
     """Author Odometry + Camera + TF + CmdVel (+ optional IMU) graphs.
 
@@ -65,6 +67,13 @@ def build_robot_graphs(
         behavior for callers that don't have an IMU yet.
     rgb_resolution : (width, height)
         Render-product resolution shared by RGB / depth / camera_info.
+    base_to_camera, base_to_imu : ((tx,ty,tz), (qx,qy,qz,qw)) or None
+        Fixed transforms from ``<ns>/base_link`` to the camera optical frame
+        / IMU frame, broadcast on ``<ns>/tf`` so an external SLAM consumer can
+        connect the RGB-D + IMU streams to the odom→base_link chain. When
+        ``None`` the corresponding extrinsic is not published (Phase 3
+        behavior). Rotation is the (x,y,z,w) quaternion the bridge's raw TF
+        node expects (IJKR).
     """
     import omni.graph.core as og
     import usdrt.Sdf
@@ -129,6 +138,22 @@ def build_robot_graphs(
             frame_id=imu_frame_id,
         )
 
+    # Fixed base_link -> {camera_optical, imu_link} extrinsics on <ns>/tf, so
+    # the prefixed frames the data streams are stamped with actually exist in
+    # the TF tree and connect to odom->base_link.
+    extrinsics = []
+    if base_to_camera is not None:
+        extrinsics.append((chassis_frame_id, camera_frame_id, base_to_camera))
+    if base_to_imu is not None:
+        extrinsics.append((chassis_frame_id, imu_frame_id, base_to_imu))
+    if extrinsics:
+        _build_extrinsics_tf_graph(
+            og=og,
+            graph_path=f"{robot_prim_path}/ExtrinsicsTfGraph",
+            namespace=namespace,
+            transforms=extrinsics,
+        )
+
 
 def _build_odometry_graph(
     *,
@@ -141,7 +166,16 @@ def _build_odometry_graph(
     odom_frame_id: str,
     chassis_frame_id: str,
 ) -> None:
-    """Mirrors test_ros2_odometry.py:107-145 with namespacing added."""
+    """Mirrors test_ros2_odometry.py:107-145 with namespacing added.
+
+    Also broadcasts the ``odom_frame_id -> chassis_frame_id`` transform on
+    ``<namespace>/tf`` via ROS2PublishRawTransformTree, fed by the same
+    ComputeOdometry node. ROS2PublishTransformTree can only emit raw USD
+    prim names (no prefix), so it can't produce the prefixed
+    ``<ns>/base_link`` frame an external SLAM consumer (RTAB-Map) expects —
+    this raw publisher closes that gap. Republished every playback tick
+    (not `staticPublisher`) so it never ages out of the tf2 buffer.
+    """
     keys = og.Controller.Keys
     og.Controller.edit(
         {"graph_path": graph_path, "evaluator_name": "execution"},
@@ -151,6 +185,7 @@ def _build_odometry_graph(
                 ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
                 ("ComputeOdometry", "isaacsim.core.nodes.IsaacComputeOdometry"),
                 ("PublishOdometry", "isaacsim.ros2.bridge.ROS2PublishOdometry"),
+                ("PublishOdomTf", "isaacsim.ros2.bridge.ROS2PublishRawTransformTree"),
             ],
             keys.SET_VALUES: [
                 ("ComputeOdometry.inputs:chassisPrim", [usdrt.Sdf.Path(chassis_prim_path)]),
@@ -159,15 +194,28 @@ def _build_odometry_graph(
                 ("PublishOdometry.inputs:odomFrameId", odom_frame_id),
                 ("PublishOdometry.inputs:chassisFrameId", chassis_frame_id),
                 ("PublishOdometry.inputs:publishRawVelocities", False),
+                # Global /tf (NOT /<ns>/tf): ROS 2 tf2 TransformListeners
+                # subscribe to the absolute /tf regardless of their own
+                # namespace, so a namespaced tf topic has zero consumers. Our
+                # frame_ids are already prefixed with <ns>/, so a shared global
+                # /tf stays multi-robot-safe.
+                ("PublishOdomTf.inputs:topicName", "tf"),
+                ("PublishOdomTf.inputs:nodeNamespace", ""),
+                ("PublishOdomTf.inputs:parentFrameId", odom_frame_id),
+                ("PublishOdomTf.inputs:childFrameId", chassis_frame_id),
             ],
             keys.CONNECT: [
                 ("OnPlaybackTick.outputs:tick", "ComputeOdometry.inputs:execIn"),
                 ("ComputeOdometry.outputs:execOut", "PublishOdometry.inputs:execIn"),
+                ("ComputeOdometry.outputs:execOut", "PublishOdomTf.inputs:execIn"),
                 ("ComputeOdometry.outputs:position", "PublishOdometry.inputs:position"),
                 ("ComputeOdometry.outputs:orientation", "PublishOdometry.inputs:orientation"),
                 ("ComputeOdometry.outputs:linearVelocity", "PublishOdometry.inputs:linearVelocity"),
                 ("ComputeOdometry.outputs:angularVelocity", "PublishOdometry.inputs:angularVelocity"),
+                ("ComputeOdometry.outputs:position", "PublishOdomTf.inputs:translation"),
+                ("ComputeOdometry.outputs:orientation", "PublishOdomTf.inputs:rotation"),
                 ("ReadSimTime.outputs:simulationTime", "PublishOdometry.inputs:timeStamp"),
+                ("ReadSimTime.outputs:simulationTime", "PublishOdomTf.inputs:timeStamp"),
             ],
         },
     )
@@ -260,6 +308,55 @@ def _build_tf_graph(
                 ("OnPlaybackTick.outputs:tick", "PublishTf.inputs:execIn"),
                 ("ReadSimTime.outputs:simulationTime", "PublishTf.inputs:timeStamp"),
             ],
+        },
+    )
+
+
+def _build_extrinsics_tf_graph(
+    *,
+    og,
+    graph_path: str,
+    namespace: str,
+    transforms,
+) -> None:
+    """Broadcast fixed parent->child transforms on ``<namespace>/tf``.
+
+    `transforms` is a list of ``(parent_frame_id, child_frame_id,
+    ((tx,ty,tz), (qx,qy,qz,qw)))``. One ROS2PublishRawTransformTree per
+    transform, all driven by a shared OnPlaybackTick + ReadSimTime so they
+    re-broadcast every tick (kept dynamic rather than `staticPublisher` so
+    they carry a fresh sim timestamp and never age out of the tf2 buffer
+    while `use_sim_time` is on).
+    """
+    keys = og.Controller.Keys
+    create = [
+        ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+        ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+    ]
+    set_values = []
+    connect = []
+    for i, (parent_fid, child_fid, (translation, rotation)) in enumerate(transforms):
+        node = f"Tf{i}"
+        create.append((node, "isaacsim.ros2.bridge.ROS2PublishRawTransformTree"))
+        set_values += [
+            # Global /tf — see the PublishOdomTf comment in the odometry graph.
+            (f"{node}.inputs:topicName", "tf"),
+            (f"{node}.inputs:nodeNamespace", ""),
+            (f"{node}.inputs:parentFrameId", parent_fid),
+            (f"{node}.inputs:childFrameId", child_fid),
+            (f"{node}.inputs:translation", [float(v) for v in translation]),
+            (f"{node}.inputs:rotation", [float(v) for v in rotation]),
+        ]
+        connect += [
+            ("OnPlaybackTick.outputs:tick", f"{node}.inputs:execIn"),
+            ("ReadSimTime.outputs:simulationTime", f"{node}.inputs:timeStamp"),
+        ]
+    og.Controller.edit(
+        {"graph_path": graph_path, "evaluator_name": "execution"},
+        {
+            keys.CREATE_NODES: create,
+            keys.SET_VALUES: set_values,
+            keys.CONNECT: connect,
         },
     )
 

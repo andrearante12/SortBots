@@ -23,12 +23,24 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     robot_id = LaunchConfiguration("robot_id")
+    use_sim_time = LaunchConfiguration("use_sim_time")
 
     return LaunchDescription([
         DeclareLaunchArgument(
             "robot_id",
             default_value="robot_0",
             description="Which spawned robot to feed RTAB-Map (robot_0 or robot_1).",
+        ),
+        DeclareLaunchArgument(
+            "use_sim_time",
+            default_value="true",
+            description=(
+                "Use /clock sim time. MUST be true against spawn_warehouse.py: "
+                "the Isaac ROS 2 bridge stamps every message with simulation "
+                "time (seconds since sim start), not wall clock, so with "
+                "use_sim_time=false RTAB-Map treats all data as ~decades old "
+                "and every TF lookup fails — the map stays empty."
+            ),
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -57,6 +69,7 @@ def generate_launch_description():
                 "approx_sync":        "true",
                 "rviz":               "true",
                 "namespace":          robot_id,
+                "use_sim_time":       use_sim_time,
             }.items(),
         ),
     ])
