@@ -50,9 +50,21 @@ REPO_ROOT = SCRIPTS_DIR.parent
 
 XLEROBOT_USD = REPO_ROOT / "assets" / "generated" / "xlerobot.usd"
 WAREHOUSE_USD = REPO_ROOT / "scenes" / "warehouse_v0.usd"
+D435_CONFIG = REPO_ROOT / "configs" / "sensors" / "d435.json"
+MPU6050_CONFIG = REPO_ROOT / "configs" / "sensors" / "mpu6050.json"
 RESULT_FILE = os.environ.get(
     "ISAAC_SPAWN_WAREHOUSE_RESULT", "/tmp/isaac_spawn_warehouse_result.txt"
 )
+
+
+def _load_sensor_configs():
+    import json
+
+    with open(D435_CONFIG) as f:
+        d435 = json.load(f)
+    with open(MPU6050_CONFIG) as f:
+        mpu = json.load(f)
+    return d435, mpu
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,9 +88,13 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--drive",
-        choices=("circle", "straight", "still"),
-        default="circle",
-        help="Per-robot motion model (circle = opposing yaw to keep robots in-bounds)",
+        choices=("cmd_vel", "circle", "straight", "still"),
+        default="cmd_vel",
+        help=(
+            "Per-robot motion model. `cmd_vel` (default) waits for external "
+            "ROS 2 Twist messages on /robot_<n>/cmd_vel. The other modes are "
+            "for ROS-2-free smoke tests."
+        ),
     )
     return p.parse_args()
 
@@ -182,8 +198,9 @@ def _ensure_warehouse_usd() -> Path:
     return WAREHOUSE_USD
 
 
-def _spawn_robot(world, name: str, position, xlerobot_usd: Path):
+def _spawn_robot(world, name: str, position, xlerobot_usd: Path, d435: dict, mpu: dict):
     import numpy as np
+    import omni.kit.commands
     import omni.usd
     from isaacsim.core.api.robots import Robot
     from isaacsim.core.utils.stage import add_reference_to_stage
@@ -207,13 +224,52 @@ def _spawn_robot(world, name: str, position, xlerobot_usd: Path):
     robot = Robot(prim_path=prim_path, name=name)
     world.scene.add(robot)
 
+    # Camera at the URDF's head optical frame, D435-spec resolution.
     cam_path = f"{prim_path}/head_camera_rgb_optical_frame/cam"
     cam = Camera(
         prim_path=cam_path,
-        resolution=(640, 480),
-        frequency=30,
+        resolution=(d435["width"], d435["height"]),
+        frequency=d435["fps"],
     )
-    return robot, cam, cam_path
+
+    # D435 intrinsics on the underlying USD Camera prim — the bridge's
+    # ROS2CameraInfoHelper derives K/P/R/D from these attributes.
+    cam_prim = stage.GetPrimAtPath(cam_path)
+    ucam = UsdGeom.Camera(cam_prim)
+    ucam.CreateFocalLengthAttr(float(d435["focal_length_mm"]))
+    ucam.CreateHorizontalApertureAttr(float(d435["horizontal_aperture_mm"]))
+    ucam.CreateVerticalApertureAttr(float(d435["vertical_aperture_mm"]))
+    ucam.CreateClippingRangeAttr(
+        Gf.Vec2f(*[float(v) for v in d435["clipping_range_m"]])
+    )
+
+    # MPU 6050 IMU under base_link. `IsaacSensorCreateImuSensor` authors the
+    # IsaacImuSensor schema + sets the sensor period from `sensor_period`
+    # (seconds). Translation is the mount offset; rotation is identity by
+    # default (overridden via mpu["mount_rotation_wxyz"] if non-identity).
+    parent_path = f"{prim_path}/base_link"
+    imu_path = f"{parent_path}/imu_sensor"
+    sensor_period = 1.0 / float(mpu["internal_rate_hz"])
+    ok, _ = omni.kit.commands.execute(
+        "IsaacSensorCreateImuSensor",
+        path="/imu_sensor",
+        parent=parent_path,
+        sensor_period=sensor_period,
+        translation=Gf.Vec3d(*[float(v) for v in mpu["mount_offset_m"]]),
+        orientation=Gf.Quatd(
+            float(mpu["mount_rotation_wxyz"][0]),
+            float(mpu["mount_rotation_wxyz"][1]),
+            float(mpu["mount_rotation_wxyz"][2]),
+            float(mpu["mount_rotation_wxyz"][3]),
+        ),
+        linear_acceleration_filter_size=int(mpu["linear_acceleration_filter_size"]),
+        angular_velocity_filter_size=int(mpu["angular_velocity_filter_size"]),
+        orientation_filter_size=int(mpu["orientation_filter_size"]),
+    )
+    if not ok:
+        raise RuntimeError(f"IsaacSensorCreateImuSensor failed for {imu_path}")
+
+    return robot, cam, cam_path, imu_path
 
 
 def _orient_camera_to_ros(cam) -> None:
@@ -239,16 +295,39 @@ def _drive_velocities(name: str, mode: str, n_dof: int):
         idx 1: root_y_axis_joint     (prismatic, m/s)
         idx 2: root_z_rotation_joint (continuous, rad/s)
         idx 3..16: arm + head joints (locked by xlerobot.json overrides)
+
+    `cmd_vel` mode returns zeros — the step loop overrides these from the
+    OG SubscribeTwist outputs.
     """
     import numpy as np
 
     v = np.zeros(n_dof)
-    if mode == "still":
+    if mode in ("still", "cmd_vel"):
         return v
     v[0] = 0.15  # forward
     if mode == "circle":
         v[2] = 0.10 if name == "robot_0" else -0.10
     return v
+
+
+def _read_cmd_vel(robot_name: str):
+    """Read the most recent Twist from `/World/<robot>/CmdVelGraph`.
+
+    Returns (linear: np.ndarray[3], angular: np.ndarray[3]). Defaults to
+    zeros before the first message lands.
+    """
+    import numpy as np
+    import omni.graph.core as og
+
+    base = f"/World/{robot_name}/CmdVelGraph/SubscribeTwist.outputs"
+    try:
+        lin = og.Controller.attribute(f"{base}:linearVelocity").get()
+        ang = og.Controller.attribute(f"{base}:angularVelocity").get()
+    except Exception:
+        return np.zeros(3), np.zeros(3)
+    return np.array([float(lin[0]), float(lin[1]), float(lin[2])]), np.array(
+        [float(ang[0]), float(ang[1]), float(ang[2])]
+    )
 
 
 def main() -> int:
@@ -270,6 +349,10 @@ def main() -> int:
     emit(f"  headless={args.headless}  drive={args.drive}")
     emit(f"  duration={'forever' if args.forever else args.duration}")
 
+    d435, mpu = _load_sensor_configs()
+    emit(f"  d435: {d435['width']}x{d435['height']}@{d435['fps']}Hz")
+    emit(f"  mpu6050: {mpu['publish_rate_hz']}Hz publish, mount={mpu['mount_offset_m']}")
+
     xlerobot_usd = _ensure_xlerobot_usd()
     warehouse_usd = _ensure_warehouse_usd()
     emit(f"  xlerobot_usd={xlerobot_usd}")
@@ -283,27 +366,51 @@ def main() -> int:
 
     robots: dict[str, tuple] = {}
     for name, pos in SPAWN_POSITIONS.items():
-        robot, cam, cam_path = _spawn_robot(world, name, pos, xlerobot_usd)
-        robots[name] = (robot, cam, cam_path)
-        emit(f"  spawned {name} at {pos}, cam_path={cam_path}")
+        robot, cam, cam_path, imu_path = _spawn_robot(
+            world, name, pos, xlerobot_usd, d435, mpu
+        )
+        robots[name] = (robot, cam, cam_path, imu_path)
+        emit(f"  spawned {name} at {pos}, cam={cam_path}, imu={imu_path}")
 
     world.reset()
 
     # Camera.initialize() must come after world.reset() so the underlying
     # render product is bindable.
-    for name, (_, cam, _) in robots.items():
+    for name, (_, cam, _, _) in robots.items():
         cam.initialize()
         _orient_camera_to_ros(cam)
 
     # Build per-robot graphs.
-    for name, (_, _, cam_path) in robots.items():
+    for name, (_, _, cam_path, imu_path) in robots.items():
         build_robot_graphs(
             robot_prim_path=f"/World/{name}",
             chassis_subpath="base_link",
             camera_prim_path=cam_path,
             namespace=name,
+            imu_prim_path=imu_path,
+            rgb_resolution=(d435["width"], d435["height"]),
         )
         emit(f"  graphs built for {name}")
+
+    # Global /clock publisher so external ROS 2 nodes can `use_sim_time:=true`.
+    # Bridges sim time → /clock at every playback tick.
+    import omni.graph.core as og  # noqa: E402
+
+    og.Controller.edit(
+        {"graph_path": "/World/ClockGraph", "evaluator_name": "execution"},
+        {
+            og.Controller.Keys.CREATE_NODES: [
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+                ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+                ("PublishClock", "isaacsim.ros2.bridge.ROS2PublishClock"),
+            ],
+            og.Controller.Keys.CONNECT: [
+                ("OnPlaybackTick.outputs:tick", "PublishClock.inputs:execIn"),
+                ("ReadSimTime.outputs:simulationTime", "PublishClock.inputs:timeStamp"),
+            ],
+        },
+    )
+    emit("  /clock publisher built")
 
     # Let the bridge finish registering OG node types — first edit can race.
     for _ in range(3):
@@ -314,7 +421,7 @@ def main() -> int:
     emit("  timeline.play()")
 
     # Cache DOF counts post-reset.
-    dof_counts = {name: len(robot.dof_names) for name, (robot, _, _) in robots.items()}
+    dof_counts = {name: len(robot.dof_names) for name, (robot, _, _, _) in robots.items()}
     emit(f"  dof_counts={dof_counts}")
 
     dt = 1.0 / 60.0
@@ -323,16 +430,18 @@ def main() -> int:
     while simulation_app.is_running():
         if n_steps is not None and step >= n_steps:
             break
-        for name, (robot, _, _) in robots.items():
+        for name, (robot, _, _, _) in robots.items():
             v = _drive_velocities(name, args.drive, dof_counts[name])
+            if args.drive == "cmd_vel":
+                lin, ang = _read_cmd_vel(name)
+                v[0] = lin[0]   # forward (m/s) — root_x_axis_joint
+                v[1] = lin[1]   # strafe  (m/s) — root_y_axis_joint
+                v[2] = ang[2]   # yaw    (rad/s) — root_z_rotation_joint
             robot.apply_action(ArticulationAction(joint_velocities=v))
         world.step(render=True)
         step += 1
         if step % 60 == 0:
             elapsed = step * dt
-            # base_link's world pose (not the prim's) — XLeRobot's holonomic
-            # base translates base_link via the prismatic joints while the
-            # prim's root link stays welded to its USD position by --fix-base.
             r0_q = robots["robot_0"][0].get_joint_positions()
             r1_q = robots["robot_1"][0].get_joint_positions()
             emit(
