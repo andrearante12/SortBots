@@ -628,23 +628,116 @@ function updateSlamBadge() {
 }
 setInterval(updateSlamBadge, 250);
 
-const tfClient = new ROSLIB.TFClient({
-  ros,
-  fixedFrame: "map",
-  angularThres: 0.01,
-  transThres: 0.01,
-  rate: 20.0,
-});
-tfClient.subscribe(`${ROBOT_ID}/base_link`, (tf) => {
-  const x = tf.translation.x;
-  const y = tf.translation.y;
-  // yaw from quaternion (planar base, roll/pitch ~0)
-  const { z: qz, w: qw } = tf.rotation;
-  const yaw = Math.atan2(2 * qw * qz, 1 - 2 * qz * qz);
+// -- robot pose from /tf ---------------------------------------------------
+// This used to be a ROSLIB.TFClient. That does NOT work here and never did:
+// the vendored roslib implements TFClient by calling a `/republish_tfs`
+// service of type `tf2_web_republisher/RepublishTFs`, and that package is not
+// installed, is not provided by rosbridge (see rosbridge_library/capabilities/
+// — there is no TF capability), and isn't packaged for Jazzy at all. The
+// service call simply never resolved, so `lastPose` stayed null forever and
+// the robot marker, the odom trail and the 3D panel's marker were all dead.
+//
+// Instead: subscribe to /tf and /tf_static directly and compose the chain
+//   map -> robot_0/odom      (published by RTAB-Map)
+//   robot_0/odom -> robot_0/base_link  (published by the sim)
+// ourselves. Frame ids are normalised because ROS 1 bags and some publishers
+// keep a leading "/" while ROS 2 does not.
+
+const TF_TARGET_FRAME = `${ROBOT_ID}/base_link`;
+const TF_FIXED_FRAME = "map";
+
+// child frame -> { parent, t: {x,y,z}, q: {x,y,z,w} }
+const tfTree = new Map();
+
+const normFrame = (f) => (f || "").replace(/^\//, "");
+
+function quatMul(a, b) {
+  return {
+    x: a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+    y: a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+    z: a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+    w: a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+  };
+}
+
+// Rotate vector v by quaternion q (v' = q * v * q^-1, expanded).
+function quatRotate(q, v) {
+  const { x, y, z, w } = q;
+  const tx = 2 * (y * v.z - z * v.y);
+  const ty = 2 * (z * v.x - x * v.z);
+  const tz = 2 * (x * v.y - y * v.x);
+  return {
+    x: v.x + w * tx + (y * tz - z * ty),
+    y: v.y + w * ty + (z * tx - x * tz),
+    z: v.z + w * tz + (x * ty - y * tx),
+  };
+}
+
+// Compose parent<-child onto an accumulated child->target transform.
+function tfCompose(parent, child) {
+  const r = quatRotate(parent.q, child.t);
+  return {
+    t: { x: parent.t.x + r.x, y: parent.t.y + r.y, z: parent.t.z + r.z },
+    q: quatMul(parent.q, child.q),
+  };
+}
+
+// Walk `frame` up to TF_FIXED_FRAME, composing as we go. Returns null while
+// any link in the chain is still missing (e.g. before RTAB-Map publishes
+// map->odom), which is why the caller treats null as "no pose yet".
+function lookupPose(frame) {
+  let acc = { t: { x: 0, y: 0, z: 0 }, q: { x: 0, y: 0, z: 0, w: 1 } };
+  let cur = normFrame(frame);
+  // Bounded so a malformed tree (a cycle, or a frame reparented mid-run)
+  // can't spin forever inside a /tf callback.
+  for (let hops = 0; hops < 16; hops++) {
+    if (cur === TF_FIXED_FRAME) return acc;
+    const link = tfTree.get(cur);
+    if (!link) return null;
+    acc = tfCompose({ t: link.t, q: link.q }, acc);
+    cur = link.parent;
+  }
+  return null;
+}
+
+function onTfMessage(msg) {
+  for (const tr of msg.transforms || []) {
+    tfTree.set(normFrame(tr.child_frame_id), {
+      parent: normFrame(tr.header.frame_id),
+      t: tr.transform.translation,
+      q: tr.transform.rotation,
+    });
+  }
+  const pose = lookupPose(TF_TARGET_FRAME);
+  if (!pose) return;
+  const { x, y } = pose.t;
+  const yaw = yawFromQuat(pose.q.z, pose.q.w);
   lastPose = { x, y, yaw };
-  trail.push([x, y]);
-  if (trail.length > MAX_TRAIL_POINTS) trail.shift();
-});
+  // Only extend the trail on real movement — /tf arrives at ~60 Hz and a
+  // stationary robot would otherwise burn through MAX_TRAIL_POINTS standing
+  // still, silently truncating the history that's actually interesting.
+  const last = trail[trail.length - 1];
+  if (!last || Math.hypot(x - last[0], y - last[1]) > 0.02) {
+    trail.push([x, y]);
+    if (trail.length > MAX_TRAIL_POINTS) trail.shift();
+  }
+}
+
+new ROSLIB.Topic({
+  ros,
+  name: "/tf",
+  messageType: "tf2_msgs/TFMessage",
+  reconnect_on_close: true,
+  // The sim publishes odom at ~60 Hz; the dashboard needs nowhere near that.
+  throttle_rate: 50,
+}).subscribe(onTfMessage);
+
+new ROSLIB.Topic({
+  ros,
+  name: "/tf_static",
+  messageType: "tf2_msgs/TFMessage",
+  reconnect_on_close: true,
+}).subscribe(onTfMessage);
 
 function drawFrame() {
   requestAnimationFrame(drawFrame);

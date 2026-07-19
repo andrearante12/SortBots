@@ -280,3 +280,72 @@ tailscale status                          # phone + workstation both online?
 ufw status                                # inactive, or tailscale0 allowed?
 curl -s -o /dev/null -w '%{http_code}\n' http://<tailnet-ip>:8081/   # expect 200
 ```
+
+## Testing the dashboard without the sim (recorded data)
+
+Checking a dashboard change shouldn't need Isaac Sim, a GPU and a display. So
+record real ROS data **once**, and replay it from then on:
+
+```
+scripts/record_dashboard_bag.sh          # ← the ONLY step that needs the sim
+python3 scripts/bag_to_fixture.py <bag>  # offline
+node webui/tests/dashboard_test.mjs      # offline, no ROS at all, seconds
+scripts/replay_dashboard_bag.sh <bag>    # offline, real rosbridge + browser
+```
+
+### 1. Record (needs the demo running)
+
+With `scripts/run_demo.sh` up and ROS 2 sourced:
+
+```bash
+scripts/record_dashboard_bag.sh --duration 60
+```
+
+**Drive the robot while it records, and dispatch a task.** A bag of a
+stationary robot has no trail, no planned path, no task states and probably no
+loop closure, so the fixture can't exercise those panels. The script warns
+about any dashboard topic that isn't currently being published before it starts
+— read that list, it's the difference between a useful bag and a useless one.
+
+Bags land in `data/bags/` (gitignored, they're hundreds of MB).
+
+### 2. Build the fixture
+
+```bash
+python3 scripts/bag_to_fixture.py data/bags/dashboard_<timestamp>/
+```
+
+This trims the bag to a small committable snapshot in `webui/testdata/`:
+`fixture.json` plus a handful of JPEG camera frames. It prints a per-topic
+kept/dropped table and fails if the result exceeds 5 MB.
+
+Messages are serialised with rosbridge's *own* converter
+(`rosbridge_library.internal.message_conversion.extract_values`), so the fixture
+is byte-shaped exactly like what the browser receives live — including
+base64 for `uint8[]` fields but plain arrays for `OccupancyGrid.data`.
+
+### 3. Run the headless test
+
+```bash
+node webui/tests/dashboard_test.mjs                  # add --screenshot DIR for PNGs
+```
+
+No ROS, no sim, no display, no npm install. It serves the real page, swaps in a
+stubbed `roslib` and fake `web_video_server`, replays the fixture, and asserts
+across five viewports: layout fits without scrolling, PiP swap, map mode, the
+grid renders undistorted, click-to-nav round-trips to the right world
+coordinate, the trail and robot marker draw, keyboard driving and its form
+guard, and the polling gate. Exit code is non-zero on any failure.
+
+### 4. Replay through the real stack (optional)
+
+To eyeball it in a real browser, with real rosbridge and real MJPEG:
+
+```bash
+scripts/replay_dashboard_bag.sh data/bags/dashboard_<timestamp>/
+# then open http://localhost:8081/
+```
+
+This is also how to double-check fixture fidelity: what the browser gets here
+went through the live rosbridge serializer, which is the same `extract_values`
+the fixture was built with.
