@@ -175,9 +175,28 @@ appear.
 ### What the dashboard shows
 
 Open the printed URL (`http://localhost:8081/` locally, or the tailnet URL).
-On top of the head/chase camera streams and the drive/aim pads:
+The page is sized to fit one viewport — nothing scrolls except the task queue.
 
-- **Map, trail & nav panel** — the RTAB-Map occupancy grid, the robot's cyan
+**The stage** (the big box on the left) shows one view at a time, with a second
+one as a picture-in-picture inset:
+
+- **Chase cam** (default) large, **head cam** as the inset. **Click the inset to
+  swap** which feed is large.
+- **Map mode** — the `camera` / `map` buttons in the header swap the map into
+  the stage in place of the cameras; the chase cam stays as the inset so you
+  don't lose sight of the robot while picking a goal. Switching back restores
+  whichever camera you last had large.
+- **Drive pad** (bottom-left) and **head-aim pad** (bottom-right) float over the
+  stage as translucent overlays — they fade up on hover, or on tap on a phone.
+  The aim pad is hidden in map mode, where head pan/tilt means nothing.
+
+A feed that's off the stage stops being fetched, so map mode isn't paying for
+the head camera in the background.
+
+**The right column** is always visible: the **3D reconstruction** viewer on top,
+**dispatch + task queue** below.
+
+- **Map view** — the RTAB-Map occupancy grid, the robot's cyan
   odom trail, plus live Nav2 overlays:
   - **Planned path** (orange) — Nav2's current global plan, for both
     click-to-nav and dispatched pickup→dropoff tasks.
@@ -190,14 +209,23 @@ On top of the head/chase camera streams and the drive/aim pads:
   total loop closures from `/robot_0/info`; goes red/"stale" if RTAB-Map stops
   publishing.
 
+### Driving
+
+W/A/S/D to move, Q/E to rotate, Space to stop — the keys work anywhere on the
+page, no need to click the pad first (typing in the dispatch selects doesn't
+drive the robot, and switching tabs mid-drive stops it). The pad buttons also
+work by holding the mouse down, or by touch on a phone. This publishes straight
+to `cmd_vel`, so don't drive while a task is active — Nav2 will fight you.
+
 ### Click-to-navigate
 
-Drag on the map (rviz "2D Nav Goal" style): **press** sets the goal position,
-**drag** sets the heading (a plain click uses heading 0). This sends a
+Switch the stage to **map**, then drag on it (rviz "2D Nav Goal" style):
+**press** sets the goal position, **drag** sets the heading (a plain click uses
+heading 0). The goal that was sent is echoed bottom-right. This sends a
 `NavigateToPose` goal straight to Nav2. **Caveat:** a manual map goal preempts
 whatever `task_manager` is currently navigating — it's a manual override, same
-spirit as the "don't drive while a task is active" note on the drive pad. Use
-the **Dispatch task** form for the queued pickup→dropoff workflow instead.
+spirit as the drive-pad note above. Use the **Dispatch task** form for the
+queued pickup→dropoff workflow instead.
 
 ## Remote access from a phone / remote Claude session (Tailscale)
 

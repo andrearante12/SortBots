@@ -50,9 +50,21 @@ ros.on("error", (e) => {
 const CAMERA_POLL_MS = 400;
 const CAMERA_ERROR_BACKOFF_MS = 1500;
 
+// A feed that isn't on the stage (neither .stage-main nor .stage-pip) isn't
+// worth fetching — in map mode that drops the head cam's polling entirely.
+// The timer keeps ticking while hidden rather than being cleared, so the feed
+// resumes on its own when the stage swaps, with no restart wiring.
+function isFeedVisible(img) {
+  return img.classList.contains("stage-main") || img.classList.contains("stage-pip");
+}
+
 function wireCameraStream(elId, topic) {
   const img = document.getElementById(elId);
   function tick() {
+    if (!isFeedVisible(img)) {
+      setTimeout(tick, CAMERA_POLL_MS);
+      return;
+    }
     const probe = new Image();
     // Swap the visible src only once the new frame is fully loaded, so the
     // panel never flashes blank between polls.
@@ -69,6 +81,78 @@ function wireCameraStream(elId, topic) {
 
 wireCameraStream("camera-stream", "camera/rgb");
 wireCameraStream("chase-stream", "camera/chase/rgb");
+
+// -- stage mode -----------------------------------------------------------
+// The stage box shows exactly one main view, plus at most one picture-in-
+// picture inset:
+//
+//   "chase" -> chase cam large, head cam as PiP   (default)
+//   "head"  -> head cam large,  chase cam as PiP  (clicking the PiP swaps)
+//   "map"   -> map large,       chase cam as PiP
+//
+// Clicking the PiP swaps the two cameras; the header's camera/map buttons
+// switch between the map and whichever camera mode was last active.
+
+const STAGE_LABELS = {
+  chase: "3rd person (chase cam)",
+  head: "Head camera",
+  map: "Map, trail & nav",
+};
+
+const chaseEl = document.getElementById("chase-stream");
+const headEl = document.getElementById("camera-stream");
+const mapViewEl = document.getElementById("map-view");
+const stageLabel = document.getElementById("stage-label");
+const pipHint = document.getElementById("pip-hint");
+const aimOverlay = document.getElementById("aim-overlay");
+
+let stageMode = "chase";
+let lastCameraMode = "chase"; // restored when switching back from the map
+
+// Set by initRecon() below so a stage swap can re-fit the three.js canvas.
+let onStageResize = () => {};
+
+function setStageMode(mode) {
+  stageMode = mode;
+  if (mode !== "map") lastCameraMode = mode;
+
+  const main = { chase: chaseEl, head: headEl, map: mapViewEl }[mode];
+  // In map mode the chase cam keeps a corner so you never lose sight of the
+  // robot while picking a goal.
+  const pip = mode === "chase" ? headEl : chaseEl;
+
+  for (const el of [chaseEl, headEl, mapViewEl]) {
+    el.classList.toggle("stage-main", el === main);
+    el.classList.toggle("stage-pip", el === pip);
+  }
+
+  stageLabel.textContent = STAGE_LABELS[mode];
+  pipHint.style.display = pip ? "" : "none";
+  // Head pan/tilt has no meaning while looking at the map.
+  aimOverlay.style.display = mode === "map" ? "none" : "";
+
+  for (const btn of document.querySelectorAll("#stage-mode button")) {
+    btn.classList.toggle("active", (btn.dataset.stage === "map") === (mode === "map"));
+  }
+  onStageResize();
+}
+
+// Clicking either camera while it's the inset promotes it to main.
+for (const el of [chaseEl, headEl]) {
+  el.addEventListener("click", () => {
+    if (el.classList.contains("stage-pip")) {
+      setStageMode(el === chaseEl ? "chase" : "head");
+    }
+  });
+}
+
+for (const btn of document.querySelectorAll("#stage-mode button")) {
+  btn.addEventListener("click", () => {
+    setStageMode(btn.dataset.stage === "map" ? "map" : lastCameraMode);
+  });
+}
+
+setStageMode("chase");
 
 // -- camera aim (head pan/tilt) -------------------------------------------
 // Unlike cmd_vel, head_cmd is a POSITION target (see spawn_warehouse.py's
@@ -236,6 +320,21 @@ function stopCmd(cmd) {
   }
 }
 
+// The overlays sit at low opacity until pointed at. Hover covers mouse users;
+// touch has no hover, so a tap marks the overlay active (and it fades back a
+// few seconds after the last touch).
+for (const overlay of document.querySelectorAll(".pad-overlay")) {
+  let fadeTimer = null;
+  overlay.addEventListener("touchstart", () => {
+    overlay.classList.add("pad-active");
+    if (fadeTimer) clearTimeout(fadeTimer);
+  }, { passive: true });
+  overlay.addEventListener("touchend", () => {
+    if (fadeTimer) clearTimeout(fadeTimer);
+    fadeTimer = setTimeout(() => overlay.classList.remove("pad-active"), 3000);
+  }, { passive: true });
+}
+
 const drivePad = document.getElementById("drive-pad");
 for (const btn of drivePad.querySelectorAll("button[data-cmd]")) {
   const cmd = btn.dataset.cmd;
@@ -246,24 +345,46 @@ for (const btn of drivePad.querySelectorAll("button[data-cmd]")) {
   btn.addEventListener("touchend", (e) => { e.preventDefault(); stopCmd(cmd); });
 }
 
-// Keyboard only captured while the pad itself is focused (click it first) —
-// scoped listeners, not window-level, so typing in the dispatch form or
-// anywhere else on the page can never accidentally drive the robot.
-drivePad.addEventListener("keydown", (ev) => {
+// Keyboard is captured at the window, not on the focused pad: the pad is now a
+// translucent overlay on the video, and "click the pad before WASD works" was
+// the single most confusing thing about the old layout. The form guard below
+// is what the old focus-scoping bought us — without it, typing in the dispatch
+// selects would drive the robot.
+function isTypingTarget(el) {
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || el.isContentEditable;
+}
+
+window.addEventListener("keydown", (ev) => {
   if (ev.repeat) return; // browser key-repeat is handled by our own interval
-  if (ev.code === "Space") { startCmd("stop"); return; }
+  if (isTypingTarget(ev.target)) return;
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return; // don't eat browser shortcuts
+  if (ev.code === "Space") { ev.preventDefault(); startCmd("stop"); return; }
   const cmd = KEY_TO_CMD[ev.key.toLowerCase()];
   if (cmd) { ev.preventDefault(); startCmd(cmd); }
 });
-drivePad.addEventListener("keyup", (ev) => {
+window.addEventListener("keyup", (ev) => {
+  if (isTypingTarget(ev.target)) return;
   const cmd = KEY_TO_CMD[ev.key.toLowerCase()];
   if (cmd) stopCmd(cmd);
 });
-// Losing focus mid-drive (e.g. alt-tab) must not leave the robot creeping.
-drivePad.addEventListener("blur", () => {
+
+// Losing focus mid-drive (alt-tab, switching apps) must not leave the robot
+// creeping — the keyup would never arrive. Same safety net as the old pad
+// blur handler, moved to the window since that's where keys are read now.
+function releaseAllDriveKeys() {
+  if (!heldCmds.size) return;
+  for (const cmd of heldCmds) {
+    document.querySelector(`#drive-pad [data-cmd="${cmd}"]`)?.classList.remove("held");
+  }
   heldCmds.clear();
   publishDriveTwist();
   if (driveTimer) { clearInterval(driveTimer); driveTimer = null; }
+}
+window.addEventListener("blur", releaseAllDriveKeys);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) releaseAllDriveKeys();
 });
 
 // -- dispatch form (populated from configs/waypoints.yaml via serve.py) --
@@ -374,6 +495,11 @@ new ROSLIB.Topic({
   const h = msg.info.height;
   canvas.width = w;
   canvas.height = h;
+  // Display the canvas at the grid's own aspect ratio (CSS caps it to the
+  // stage box). This keeps the map undistorted AND keeps the element's
+  // bounding rect equal to the drawn image, which eventToCanvasPixel() below
+  // depends on to invert clicks back into world coordinates.
+  canvas.style.aspectRatio = `${w} / ${h}`;
   const imgData = ctx.createImageData(w, h);
   const data = msg.data;
   for (let row = 0; row < h; row++) {
@@ -522,6 +648,9 @@ tfClient.subscribe(`${ROBOT_ID}/base_link`, (tf) => {
 
 function drawFrame() {
   requestAnimationFrame(drawFrame);
+  // Nothing to draw to while the map is off-stage. The subscriptions stay
+  // live, so the map/trail/plan are current the instant it's swapped back in.
+  if (stageMode !== "map") return;
   if (!mapImageData) return;
   ctx.putImageData(mapImageData, 0, 0); // raw pixels; ignores alpha (base layer)
   if (!mapInfo) return;
@@ -733,7 +862,15 @@ const MAX_RENDER_POINTS = 400000;    // decimate above this to keep the browser 
     camera.updateProjectionMatrix();
   }
   sizeToContainer();
-  window.addEventListener("resize", sizeToContainer);
+  // ResizeObserver rather than a window "resize" listener: the panel also
+  // changes size without the window doing so (stage swaps, column reflow),
+  // and this is robust to the container being zero-sized at init.
+  if (typeof ResizeObserver !== "undefined") {
+    new ResizeObserver(sizeToContainer).observe(container);
+  } else {
+    window.addEventListener("resize", sizeToContainer);
+  }
+  onStageResize = sizeToContainer; // let setStageMode() re-fit after a swap
 
   // Frame the camera on the cloud's bounding box (called on first cloud and
   // by the "reset view" button).
