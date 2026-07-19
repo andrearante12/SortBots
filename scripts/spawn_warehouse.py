@@ -10,9 +10,21 @@ Both robots curve gently in the warehouse, each one publishing:
     /<robot>/odom              nav_msgs/Odometry
     /<robot>/camera/rgb        sensor_msgs/Image
     /<robot>/camera/depth      sensor_msgs/Image (32FC1, meters)
+    /<robot>/camera/chase/rgb   sensor_msgs/Image (3rd-person chase cam; robot_0 only)
+    /<robot>/camera/chase/depth sensor_msgs/Image (32FC1, meters; robot_0 only)
     /<robot>/tf                tf2_msgs/TFMessage  (full articulation tree)
 
-with `<robot>` ∈ {robot_0, robot_1}. From a separate shell with ROS 2 Jazzy
+and subscribing:
+
+    /<robot>/cmd_vel           geometry_msgs/Twist  (--drive cmd_vel; holonomic x/y/yaw)
+    /<robot>/pick_cmd          std_msgs/String      ("attach"/"detach"; robot_0 only,
+                                                      see nodes/task_manager.py)
+    /<robot>/head_cmd          sensor_msgs/JointState (head_pan_joint/head_tilt_joint
+                                                      position targets, radians; robot_0 only)
+
+pick_cmd/head_cmd are plain rclpy subscribers, not OmniGraph — see
+`_start_extra_ros_subscribers`. `<robot>` ∈ {robot_0, robot_1}. From a
+separate shell with ROS 2 Jazzy
 in scope (or the bundled-lib env-var recipe in docs/isaac_sim_phase3.md),
 `ros2 topic list` and `ros2 topic echo /robot_0/odom` confirm liveness.
 
@@ -71,9 +83,48 @@ NVIDIA_SPAWN_POSITIONS: dict[str, tuple[float, float, float]] = {
 
 D435_CONFIG = REPO_ROOT / "configs" / "sensors" / "d435.json"
 MPU6050_CONFIG = REPO_ROOT / "configs" / "sensors" / "mpu6050.json"
+WAYPOINTS_CONFIG = REPO_ROOT / "configs" / "waypoints.yaml"
 RESULT_FILE = os.environ.get(
     "ISAAC_SPAWN_WAREHOUSE_RESULT", "/tmp/isaac_spawn_warehouse_result.txt"
 )
+
+# Milestone 1 mock pick: the URDF link name of the first arm's gripper tip
+# (see third_party/XLeRobot/simulation/Maniskill/assets/xlerobot/xlerobot.urdf,
+# `Fixed_Jaw_tip`). Isaac's URDF importer parents links as flat children of
+# the articulation root (matches head_camera/imu path conventions above), so
+# this is `/World/<robot>/Fixed_Jaw_tip`. Single-robot (robot_0) scope only.
+GRIPPER_LINK = "Fixed_Jaw_tip"
+
+# Mock-pick "package" surface height above the floor (m) — a placeholder
+# guess pending the real shelf/bin CAD height, same honesty caveat as the
+# station poses in configs/waypoints.yaml.
+PACKAGE_HEIGHT_M = 0.85
+PACKAGE_SIZE_M = 0.08
+
+# First arm's 6 non-fixed joints. `nodes/scripted_pick.py` commands these
+# by name. DOF INDICES ARE NOT HARDCODED — Isaac's actual articulation DOF
+# order does NOT follow xlerobot.urdf's declaration order (verified live:
+# it interleaves arm1/arm2 by joint type — Rotation, Rotation_2, head_pan,
+# Pitch, Pitch_2, head_tilt, Elbow, ... — not arm1-then-arm2-then-head as
+# the raw URDF text would suggest). A prior version of this file hardcoded
+# `ARM_JOINT_INDICES = [3,4,5,6,7,8]` and `HEAD_JOINT_INDICES = [15,16]`
+# from the URDF's file order; [15,16] turned out to be Jaw/Jaw_2 (the
+# GRIPPER), not the head, which is why head_cmd silently did nothing —
+# no error, it was just moving the wrong joints. See `_dof_indices` below;
+# indices are looked up from `robot.dof_names` at runtime instead.
+ARM_JOINT_NAMES = ["Rotation", "Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll", "Jaw"]
+HEAD_JOINT_NAMES = ["head_pan_joint", "head_tilt_joint"]
+HEAD_JOINT_LIMITS = {"head_pan_joint": (-1.57, 1.57), "head_tilt_joint": (-0.76, 1.45)}
+
+
+def _dof_indices(dof_names: list[str], joint_names: list[str]) -> list[int]:
+    """Map joint names to their actual DOF index in this articulation.
+
+    Isaac's URDF import order is importer-specific, not the URDF file's
+    declaration order — don't hardcode indices, look them up. See the
+    ARM_JOINT_NAMES comment above for how this bit us once already.
+    """
+    return [dof_names.index(n) for n in joint_names]
 
 
 def _load_sensor_configs():
@@ -84,6 +135,23 @@ def _load_sensor_configs():
     with open(MPU6050_CONFIG) as f:
         mpu = json.load(f)
     return d435, mpu
+
+
+def _load_first_pickup_station():
+    """(x, y) of the first `kind: pickup` station in waypoints.yaml.
+
+    Used only to place the Milestone-1 mock package prop at sim start;
+    `nodes/task_manager.py` is the source of truth for which station a
+    given task actually targets.
+    """
+    import yaml
+
+    with open(WAYPOINTS_CONFIG) as f:
+        stations = yaml.safe_load(f)["stations"]
+    for spec in stations.values():
+        if spec["kind"] == "pickup":
+            return float(spec["pose"]["x"]), float(spec["pose"]["y"])
+    raise ValueError(f"no pickup station found in {WAYPOINTS_CONFIG}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -380,18 +448,91 @@ def _base_to_prim_transform(stage, base_prim_path: str, child_prim_path: str):
 
 
 def _orient_camera_to_ros(cam) -> None:
-    """Apply a 180° local rotation about X so the camera's USD axes align
-    with ROS optical-frame convention (Z forward, X right, Y down).
+    """Apply a local rotation so the camera's USD axes align with ROS
+    optical-frame convention (Z forward, X right, Y down).
 
-    USD Camera defaults to looking toward -Z with +Y up. Rotating 180°
-    about X flips both Y and Z without disturbing X, giving us Z forward
-    and Y down at the optical frame.
+    USD Camera defaults to looking toward -Z with +Y up. A pure 180° flip
+    about X gives Z-forward/Y-down IF the parent frame's own axes are
+    already exactly ROS-optical (which `head_camera_rgb_optical_frame`
+    should be — the URDF's `head_camera_rgb_optical_joint` already applies
+    the standard camera_link->optical_frame rpy).
+
+    `camera_axes` MUST be "usd" here. `Camera.set_local_pose`'s default
+    (`camera_axes="world"`, i.e. omitting the kwarg entirely) silently
+    runs the supplied quaternion through a hidden `W_U_TRANSFORM`
+    conversion before applying it — found by reading
+    isaacsim.sensors.camera.camera.py's source after two live tests with
+    that default produced wrong results in different ways (one rolled
+    ~90°, one pointed straight up), neither matching what the raw
+    quaternion math below predicts. `camera_axes="usd"` is the only mode
+    that applies the quaternion as a plain local-to-parent rotation with
+    no hidden conversion, matching this function's derivation.
     """
     import numpy as np
 
-    # (w, x, y, z) — Isaac Sim quaternion convention.
+    # (w, x, y, z). 180° about X: right(+X) unchanged, up(+Y)->down,
+    # forward(-Z)->+Z — converts USD's (-Z fwd, +Y up) default to ROS
+    # optical (+Z fwd, +Y down) when the parent is already ROS-optical.
     q_x180 = np.array([0.0, 1.0, 0.0, 0.0])
-    cam.set_local_pose(orientation=q_x180)
+    cam.set_local_pose(orientation=q_x180, camera_axes="usd")
+
+
+CHASE_CAM_OFFSET_M = (-2.2, 0.0, 1.5)  # behind + above, in base_link's local frame
+# Orientation quaternion (w,x,y,z), camera_axes="usd" (see _orient_camera_to_ros
+# for why "usd" and not the misleading default). base_link's axes (X
+# forward matching root_x_axis_joint's forward-drive convention, Y left
+# per REP-103, Z up) verified live across three iterations: level (robot
+# only a sliver at the bottom edge) -> 25° tilt at 1.3m/1.1m (whole cart
+# visible but the head/camera-mast cropped off the top) -> this one,
+# pulled back further (2.2m) and higher (1.5m) with a gentler 16° tilt so
+# the taller head mast fits in frame too. Verified by explicit
+# rotation-matrix construction + reconstruction + orthonormality check
+# (not hand-waved) each time; only the distance/tilt magnitude needed
+# empirical tuning against a live snapshot, not the axis mapping itself.
+CHASE_CAM_ORIENTATION = (0.5647, 0.4255, -0.4255, -0.5647)
+
+
+def _spawn_chase_camera(robot_prim_path: str, d435: dict):
+    """3rd-person 'chase cam' rigidly mounted behind+above base_link.
+
+    Unlike the head camera (a pre-existing URDF-authored prim,
+    `head_camera_rgb_optical_frame`, whose parent orientation already does
+    most of the work), this is a brand new child prim under `base_link`
+    with no inherited pose — both translation AND orientation must be set
+    explicitly, or it defaults to sitting at base_link's own origin
+    looking along base_link's local -Z.
+    """
+    from isaacsim.sensors.camera import Camera
+    from pxr import Gf, UsdGeom
+    import omni.usd
+
+    cam_path = f"{robot_prim_path}/base_link/chase_cam"
+    cam = Camera(
+        prim_path=cam_path,
+        resolution=(d435["width"], d435["height"]),
+        frequency=d435["fps"],
+    )
+
+    stage = omni.usd.get_context().get_stage()
+    cam_prim = stage.GetPrimAtPath(cam_path)
+    ucam = UsdGeom.Camera(cam_prim)
+    ucam.CreateFocalLengthAttr(float(d435["focal_length_mm"]))
+    ucam.CreateHorizontalApertureAttr(float(d435["horizontal_aperture_mm"]))
+    ucam.CreateVerticalApertureAttr(float(d435["vertical_aperture_mm"]))
+    ucam.CreateClippingRangeAttr(
+        Gf.Vec2f(*[float(v) for v in d435["clipping_range_m"]])
+    )
+    return cam, cam_path
+
+
+def _orient_chase_camera(cam) -> None:
+    import numpy as np
+
+    cam.set_local_pose(
+        translation=np.array(CHASE_CAM_OFFSET_M),
+        orientation=np.array(CHASE_CAM_ORIENTATION),
+        camera_axes="usd",
+    )
 
 
 def _drive_velocities(name: str, mode: str, n_dof: int):
@@ -437,6 +578,137 @@ def _read_cmd_vel(robot_name: str):
     )
 
 
+def _start_extra_ros_subscribers(robot_name: str):
+    """Plain rclpy subscribers for topics with no working OmniGraph node,
+    or where a rock-solid tested path was worth more than another
+    speculative OmniGraph attribute name (see below).
+
+    `/<robot_name>/pick_cmd` (std_msgs/String) is NOT an OmniGraph node:
+    verified live against Isaac Sim 5.1 (isaacsim.ros2.bridge 4.12.4) that
+    `ROS2SubscribeString` doesn't exist in this build (unlike
+    `ROS2SubscribeTwist`/`ROS2SubscribeJointState`, both confirmed present
+    in the bridge extension's own test suite).
+
+    `/<robot_name>/head_cmd` (sensor_msgs/JointState: head_pan_joint,
+    head_tilt_joint) COULD go through the same ArmCmdGraph/ROS2SubscribeJointState
+    mechanism as arm_joint_cmd, but that graph's exact output attribute
+    names (`outputs:jointNames`/`outputs:positionCommand`) are still
+    unverified against a live session (only confirmed the *node type*
+    exists, not `_read_arm_cmd`'s attribute names) — added here instead to
+    reuse the pick_cmd path already proven end-to-end live.
+
+    Isaac's Python process already has `rclpy` loaded for the bridge
+    extension's own internal use, so plain subscribers work without a
+    separate ROS 2 install inside the Isaac venv — just poll them each
+    tick the same way the OmniGraph-attribute reads elsewhere in this file
+    are polled.
+
+    Returns (node, pick_state, head_state):
+      - pick_state["data"]: last pick_cmd string, "" before the first one.
+      - head_state["pan"]/["tilt"]: last head_cmd values, 0.0 before the
+        first one (matches the physics_overrides default of held-at-0).
+    Call `rclpy.spin_once(node, timeout_sec=0.001)` once per sim tick — NOT
+    `timeout_sec=0.0`; that's a known rclpy/rmw flakiness trap where a
+    literal zero can skip actually polling the middleware depending on the
+    executor, so pending messages don't reliably get processed. Verified
+    live: `head_cmd` worked once right after this mechanism was first
+    written, then silently stopped moving the head on a later restart with
+    no code change in between — exactly the signature of relying on a
+    zero timeout's undefined-ish polling behavior rather than a real bug
+    in the callback logic itself.
+    """
+    import rclpy
+    from rclpy.node import Node
+    from sensor_msgs.msg import JointState
+    from std_msgs.msg import String
+
+    try:
+        rclpy.init()
+    except RuntimeError:
+        pass  # already initialized (e.g. by Isaac's own bridge internals)
+
+    node = Node(f"{robot_name}_extra_ros_bridge")
+    pick_state = {"data": ""}
+    head_state = {"pan": 0.0, "tilt": 0.0}
+
+    node.create_subscription(
+        String, f"/{robot_name}/pick_cmd", lambda msg: pick_state.__setitem__("data", msg.data), 10
+    )
+
+    def _on_head_cmd(msg):
+        by_name = dict(zip(msg.name, msg.position))
+        if "head_pan_joint" in by_name:
+            head_state["pan"] = float(by_name["head_pan_joint"])
+        if "head_tilt_joint" in by_name:
+            head_state["tilt"] = float(by_name["head_tilt_joint"])
+
+    node.create_subscription(JointState, f"/{robot_name}/head_cmd", _on_head_cmd, 10)
+
+    return node, pick_state, head_state
+
+
+def _read_arm_cmd(robot_name: str):
+    """Read the last JointState from `/World/<robot>/ArmCmdGraph`.
+
+    Returns an np.ndarray of length `len(ARM_JOINT_NAMES)`, ordered to
+    match `ARM_JOINT_NAMES`, or None before the first message lands / if
+    the received `jointNames` don't match what we expect / on bridge error.
+    """
+    import numpy as np
+    import omni.graph.core as og
+
+    base = f"/World/{robot_name}/ArmCmdGraph/SubscribeJointState.outputs"
+    try:
+        names = list(og.Controller.attribute(f"{base}:jointNames").get())
+        positions = list(og.Controller.attribute(f"{base}:positionCommand").get())
+    except Exception:
+        return None
+    if not names or len(names) != len(positions):
+        return None
+    by_name = dict(zip(names, positions))
+    if not all(n in by_name for n in ARM_JOINT_NAMES):
+        return None
+    return np.array([float(by_name[n]) for n in ARM_JOINT_NAMES])
+
+
+def _spawn_package(stage, prim_path: str, x: float, y: float):
+    """A free Cube the mock pick teleports onto the gripper.
+
+    No rigid-body physics — Milestone 1 only needs the box to visibly ride
+    the gripper and stay put once released. Real grasp physics arrives in
+    Phase 4's scripted IK pick (weld-assist on contact).
+    """
+    from pxr import Gf, UsdGeom
+
+    cube = UsdGeom.Cube.Define(stage, prim_path)
+    cube.CreateSizeAttr(PACKAGE_SIZE_M)
+    xformable = UsdGeom.Xformable(cube)
+    xformable.ClearXformOpOrder()
+    xformable.AddTranslateOp().Set(Gf.Vec3d(x, y, PACKAGE_HEIGHT_M))
+
+
+def _sync_package_to_gripper(stage, robot_name: str, package_prim_path: str) -> bool:
+    """Teleport the package prim onto the gripper tip's current world pose.
+
+    Returns False (no-op) if the gripper link isn't found — e.g. `GRIPPER_LINK`
+    doesn't match the actual imported prim name, which nobody has confirmed
+    against a live session yet (see the `Fixed_Jaw_tip` comment above).
+    """
+    from pxr import Usd, UsdGeom
+
+    gripper_prim = stage.GetPrimAtPath(f"/World/{robot_name}/{GRIPPER_LINK}")
+    if not gripper_prim.IsValid():
+        return False
+    world_xform = UsdGeom.Xformable(gripper_prim).ComputeLocalToWorldTransform(
+        Usd.TimeCode.Default()
+    )
+    package_prim = stage.GetPrimAtPath(package_prim_path)
+    xformable = UsdGeom.Xformable(package_prim)
+    xformable.ClearXformOpOrder()
+    xformable.AddTransformOp().Set(world_xform)
+    return True
+
+
 def main() -> int:
     import numpy as np
     import omni.timeline
@@ -446,7 +718,7 @@ def main() -> int:
     from isaacsim.core.utils.types import ArticulationAction
 
     sys.path.insert(0, str(SCRIPTS_DIR))
-    from _ros2_graphs import build_robot_graphs
+    from _ros2_graphs import build_chase_camera_graph, build_robot_graphs
 
     emit(f"spawn_warehouse | GPU: {gpu_name()}")
     emit(f"  scene={args.scene}  robots={args.robots}")
@@ -494,6 +766,15 @@ def main() -> int:
         robots[name] = (robot, cam, cam_path, imu_path)
         emit(f"  spawned {name} at {pos}, cam={cam_path}, imu={imu_path}")
 
+    # 3rd-person chase camera (robot_0 only, single-robot scope elsewhere in
+    # this file). Spawned alongside the head camera but kept out of the
+    # `robots` dict tuple — that shape is unpacked at several call sites
+    # already and a 5th element would need touching all of them.
+    chase_cam, chase_cam_path = None, None
+    if "robot_0" in robots:
+        chase_cam, chase_cam_path = _spawn_chase_camera("/World/robot_0", d435)
+        emit(f"  chase_cam spawned at {chase_cam_path}")
+
     world.reset()
 
     # Camera.initialize() must come after world.reset() so the underlying
@@ -501,6 +782,9 @@ def main() -> int:
     for name, (_, cam, _, _) in robots.items():
         cam.initialize()
         _orient_camera_to_ros(cam)
+    if chase_cam is not None:
+        chase_cam.initialize()
+        _orient_chase_camera(chase_cam)
 
     # IMU mount is authored relative to base_link from the MPU config, so the
     # base_link -> imu_link transform is exactly (offset, rotation). wxyz -> ijkr.
@@ -513,10 +797,19 @@ def main() -> int:
     # Build per-robot graphs.
     stage = omni.usd.get_context().get_stage()
     for name, (_, _, cam_path, imu_path) in robots.items():
+        # TF for the frame the images are stamped with must be the ROS-optical
+        # parent prim (head_camera_rgb_optical_frame), NOT the cam prim inside
+        # it: _orient_camera_to_ros gives the cam prim an extra 180°-about-X so
+        # its USD axes (-Z fwd, +Y up) render correctly, but depth consumers
+        # (RTAB-Map) reproject assuming ROS optical axes (+Z fwd, +Y down).
+        # Publishing the cam prim's pose here baked that 180° flip into TF and
+        # mirrored the whole SLAM cloud about the camera's horizontal plane —
+        # floor became a ceiling slab at z≈2.4, walls hung downward.
+        optical_path = cam_path.rsplit("/", 1)[0]
         base_to_camera = _base_to_prim_transform(
-            stage, f"/World/{name}/base_link", cam_path
+            stage, f"/World/{name}/base_link", optical_path
         )
-        emit(f"  {name} base->cam t={base_to_camera[0]} q={base_to_camera[1]}")
+        emit(f"  {name} base->optical t={base_to_camera[0]} q={base_to_camera[1]}")
         build_robot_graphs(
             robot_prim_path=f"/World/{name}",
             chassis_subpath="base_link",
@@ -528,6 +821,35 @@ def main() -> int:
             base_to_imu=base_to_imu,
         )
         emit(f"  graphs built for {name}")
+
+    if chase_cam_path is not None:
+        build_chase_camera_graph(
+            graph_path="/World/robot_0/ChaseCameraGraph",
+            camera_prim_path=chase_cam_path,
+            namespace="robot_0",
+            rgb_topic="camera/chase/rgb",
+            depth_topic="camera/chase/depth",
+            camera_info_topic="camera/chase/camera_info",
+            width=d435["width"],
+            height=d435["height"],
+            frame_id="robot_0/chase_camera_optical",
+        )
+        emit("  chase_cam graph built (/robot_0/camera/chase/*)")
+
+    # Milestone 1 mock pick (robot_0 only): a package prop `nodes/task_manager.py`
+    # attaches/detaches via a plain rclpy pick_cmd subscriber (see
+    # _start_extra_ros_subscribers). Spawned at the first pickup station in
+    # configs/waypoints.yaml so it starts out looking shelved. Same node also
+    # carries head_cmd (head pan/tilt).
+    package_prim_path = None
+    extra_ros_node, pick_cmd_state, head_cmd_state = None, None, None
+    if "robot_0" in robots:
+        pkg_x, pkg_y = _load_first_pickup_station()
+        package_prim_path = "/World/package_0"
+        _spawn_package(stage, package_prim_path, pkg_x, pkg_y)
+        emit(f"  package_0 spawned at ({pkg_x}, {pkg_y}, {PACKAGE_HEIGHT_M})")
+        extra_ros_node, pick_cmd_state, head_cmd_state = _start_extra_ros_subscribers("robot_0")
+        emit("  pick_cmd/head_cmd rclpy subscriber started")
 
     # Global /clock publisher so external ROS 2 nodes can `use_sim_time:=true`.
     # Bridges sim time → /clock at every playback tick.
@@ -560,6 +882,14 @@ def main() -> int:
     # Cache DOF counts post-reset.
     dof_counts = {name: len(robot.dof_names) for name, (robot, _, _, _) in robots.items()}
     emit(f"  dof_counts={dof_counts}")
+    arm_joint_indices = None
+    head_joint_indices = None
+    if "robot_0" in robots:
+        dof_names = robots["robot_0"][0].dof_names
+        emit(f"  robot_0 dof_names={dof_names}")
+        arm_joint_indices = _dof_indices(dof_names, ARM_JOINT_NAMES)
+        head_joint_indices = _dof_indices(dof_names, HEAD_JOINT_NAMES)
+        emit(f"  arm_joint_indices={arm_joint_indices} head_joint_indices={head_joint_indices}")
 
     dt = 1.0 / 60.0
     n_steps = None if args.forever else int(args.duration / dt)
@@ -567,14 +897,73 @@ def main() -> int:
     while simulation_app.is_running():
         if n_steps is not None and step >= n_steps:
             break
+        if extra_ros_node is not None:
+            import rclpy
+
+            # Spin BEFORE applying head_cmd this tick, not after — the
+            # previous ordering (spin at the bottom of the loop) meant
+            # every apply used the PREVIOUS tick's state, a permanent
+            # one-tick lag. Also: timeout_sec=0.0 is a known rclpy/rmw
+            # flakiness trap — a literal zero can skip actually polling
+            # the middleware depending on the executor, so pending
+            # messages don't reliably get processed. A tiny positive
+            # timeout reliably triggers the check; see
+            # reference_isaac_sim_quirks.md-style caveats elsewhere in
+            # this file for the same "verify against a live session"
+            # lesson.
+            rclpy.spin_once(extra_ros_node, timeout_sec=0.001)
         for name, (robot, _, _, _) in robots.items():
             v = _drive_velocities(name, args.drive, dof_counts[name])
             if args.drive == "cmd_vel":
                 lin, ang = _read_cmd_vel(name)
-                v[0] = lin[0]   # forward (m/s) — root_x_axis_joint
-                v[1] = lin[1]   # strafe  (m/s) — root_y_axis_joint
-                v[2] = ang[2]   # yaw    (rad/s) — root_z_rotation_joint
+                # cmd_vel is BODY-frame (ROS convention), but root_x/root_y are
+                # WORLD-frame prismatic joints: they sit BEFORE root_z_rotation in
+                # the kinematic chain (root -> x -> y -> yaw -> base_link), so a raw
+                # lin[0] drives along world +x regardless of heading — "forward"
+                # ignores which way the robot faces. Rotate the body command into
+                # the world frame by the current yaw (== root_z_rotation position,
+                # DOF idx 2, the only rotation in the base chain) before applying.
+                # Fixes manual teleop AND Nav2, which also emits body-frame cmd_vel.
+                yaw = float(robot.get_joint_positions()[2])
+                cos_y, sin_y = np.cos(yaw), np.sin(yaw)
+                v[0] = cos_y * lin[0] - sin_y * lin[1]  # world vx -> root_x_axis_joint
+                v[1] = sin_y * lin[0] + cos_y * lin[1]  # world vy -> root_y_axis_joint
+                v[2] = ang[2]                           # yaw rate -> root_z_rotation_joint
             robot.apply_action(ArticulationAction(joint_velocities=v))
+            # Arm/head joints are position-driven (physics_overrides/xlerobot.json),
+            # so velocity commands above are no-ops for them; a second,
+            # joint_indices-scoped action carries scripted_pick.py's targets.
+            # joint_indices are looked up from the live dof_names, not
+            # hardcoded — see _dof_indices' docstring for why.
+            if name == "robot_0":
+                arm_positions = _read_arm_cmd(name)
+                if arm_positions is not None:
+                    robot.apply_action(
+                        ArticulationAction(
+                            joint_positions=arm_positions,
+                            joint_indices=np.array(arm_joint_indices),
+                        )
+                    )
+                if extra_ros_node is not None:
+                    pan_lo, pan_hi = HEAD_JOINT_LIMITS["head_pan_joint"]
+                    tilt_lo, tilt_hi = HEAD_JOINT_LIMITS["head_tilt_joint"]
+                    head_positions = np.array([
+                        float(np.clip(head_cmd_state["pan"], pan_lo, pan_hi)),
+                        float(np.clip(head_cmd_state["tilt"], tilt_lo, tilt_hi)),
+                    ])
+                    robot.apply_action(
+                        ArticulationAction(
+                            joint_positions=head_positions,
+                            joint_indices=np.array(head_joint_indices),
+                        )
+                    )
+        if package_prim_path is not None:
+            # Level-triggered: state["data"] holds the last message, so
+            # re-checking "attach" every tick is idempotent, not a repeated
+            # trigger. "detach" (or no message yet) just stops the follow —
+            # the package stays wherever it last was.
+            if pick_cmd_state["data"] == "attach":
+                _sync_package_to_gripper(stage, "robot_0", package_prim_path)
         world.step(render=True)
         step += 1
         if step % 60 == 0:
@@ -584,9 +973,18 @@ def main() -> int:
                 f"yaw={robots[n][0].get_joint_positions()[2]:+.3f}"
                 for n in robots
             )
-            emit(
-                f"  t={elapsed:5.1f}s  {pose}"
-            )
+            debug_line = f"  t={elapsed:5.1f}s  {pose}"
+            if head_cmd_state is not None:
+                qpos = robots["robot_0"][0].get_joint_positions()
+                pan_i, tilt_i = head_joint_indices
+                debug_line += (
+                    f"  head_cmd_state={head_cmd_state}"
+                    f" actual[pan,tilt]=({qpos[pan_i]:+.3f},{qpos[tilt_i]:+.3f})"
+                )
+            emit(debug_line)
+
+    if extra_ros_node is not None:
+        extra_ros_node.destroy_node()  # not rclpy.shutdown() — Isaac's own bridge may share the context
 
     emit(f"spawn_warehouse: ran {step} steps ({step * dt:.1f} sim seconds)")
     emit("spawn_warehouse: OK")

@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>SortBots Dashboard</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0;
+    font-family: system-ui, sans-serif;
+    background: #14161a;
+    color: #e6e6e6;
+    display: grid;
+    grid-template-columns: 1.6fr 1fr;
+    gap: 12px;
+    padding: 12px;
+    min-height: 100vh;
+    box-sizing: border-box;
+  }
+  header { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; }
+  h1 { font-size: 1.1rem; margin: 0; }
+  #conn-dot { width: 10px; height: 10px; border-radius: 50%; background: #a33; }
+  #conn-dot.connected { background: #3a3; }
+  .panel {
+    background: #1c1f24;
+    border: 1px solid #2a2e35;
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .panel h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa; margin: 0 0 8px; }
+  #left-col { display: flex; flex-direction: column; gap: 12px; }
+  #right-col { display: flex; flex-direction: column; gap: 12px; }
+  #map-panel { height: 420px; }
+  #map-canvas { width: 100%; flex: 1 1 auto; min-height: 0; background: #000; border-radius: 4px; image-rendering: pixelated; cursor: crosshair; }
+  /* No forced panel height here (unlike the map) — the image renders at
+     its natural 848x480 aspect for whatever width the column gives it,
+     instead of being cropped down to fit a squeezed flex row. The page
+     scrolls if that runs past the viewport — that's the point. */
+  #camera-panel img, #chase-panel img { width: 100%; display: block; border-radius: 4px; background: #000; }
+  #aim-panel { flex: none; }
+  #aim-pad {
+    display: grid;
+    grid-template-columns: repeat(3, 40px);
+    grid-template-rows: repeat(3, 40px);
+    gap: 6px;
+  }
+  #aim-pad button {
+    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 6px; font-size: 1rem; cursor: pointer; user-select: none;
+  }
+  #aim-pad button:active, #aim-pad button.held { background: #2d5; color: #111; }
+  #aim-pad .empty { visibility: hidden; }
+  #aim-center { grid-column: 2; grid-row: 2; color: #f77 !important; }
+  #aim-status { font-size: 0.8rem; font-family: monospace; margin-top: 6px; color: #7bf; }
+  #drive-panel { flex: none; }
+  #drive-pad {
+    display: grid;
+    grid-template-columns: repeat(3, 48px);
+    grid-template-rows: repeat(3, 48px);
+    gap: 6px;
+    outline: none;
+    border-radius: 6px;
+    padding: 6px;
+  }
+  #drive-pad:focus { box-shadow: 0 0 0 2px #2d5; }
+  #drive-pad button {
+    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 6px; font-size: 1.1rem; cursor: pointer; user-select: none;
+  }
+  #drive-pad button:active, #drive-pad button.held { background: #2d5; color: #111; }
+  #drive-pad .empty { visibility: hidden; }
+  #drive-stop { grid-column: 2; grid-row: 2; color: #f77 !important; }
+  #drive-hint { font-size: 0.78rem; color: #9aa; margin-top: 6px; line-height: 1.4; }
+  #drive-status { font-size: 0.8rem; font-family: monospace; margin-top: 4px; color: #7bf; }
+  #dispatch-panel { flex: none; }
+  #dispatch-panel form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  #dispatch-panel select, #dispatch-panel button {
+    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 6px 8px; font-size: 0.9rem;
+  }
+  #dispatch-panel button { background: #2d5; color: #111; border: none; font-weight: 600; cursor: pointer; }
+  #dispatch-panel button:hover { background: #3e6; }
+  #queue-panel { flex: 1; min-height: 0; }
+  #queue-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+  #queue-list li {
+    display: flex; justify-content: space-between; padding: 6px 8px; margin-bottom: 4px;
+    background: #14161a; border-radius: 4px; font-size: 0.85rem; font-family: monospace;
+  }
+  .state-badge { padding: 1px 6px; border-radius: 3px; font-size: 0.75rem; }
+  .state-IDLE, .state-DONE { background: #234; color: #7bf; }
+  .state-NAV_TO_PICKUP, .state-NAV_TO_DROPOFF { background: #430; color: #fb7; }
+  .state-PICKING, .state-PLACING { background: #043; color: #7fb; }
+  .state-FAILED { background: #400; color: #f77; }
+  /* SLAM status badge in the header. Mirrors the .state-badge look; colour
+     swaps to green briefly when a loop closure lands (see app.js). */
+  #slam-badge {
+    padding: 1px 8px; border-radius: 3px; font-size: 0.75rem; font-family: monospace;
+    background: #234; color: #7bf; margin-left: auto;
+  }
+  #slam-badge.loop-closed { background: #043; color: #2d5; }
+  #slam-badge.stale { background: #400; color: #f77; }
+  #map-controls { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; }
+  #map-controls h2 { margin: 0; flex: none; }
+  #map-controls label { font-size: 0.78rem; color: #9aa; display: flex; align-items: center; gap: 4px; cursor: pointer; margin-left: auto; }
+  #map-hint { font-size: 0.72rem; color: #9aa; margin-top: 6px; line-height: 1.4; }
+  #goal-status { font-size: 0.8rem; font-family: monospace; margin-top: 2px; color: #fb7; }
+  /* 3D reconstruction panel — RTAB-Map's assembled point cloud (cloud_map)
+     rendered with three.js. The renderer injects its own <canvas> into
+     #recon-canvas, which flexes to fill the panel below the controls row. */
+  #recon-panel { height: 480px; }
+  #recon-controls { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; }
+  #recon-controls h2 { margin: 0; flex: none; }
+  #recon-info { font-size: 0.78rem; font-family: monospace; color: #7bf; }
+  #recon-controls button {
+    margin-left: auto; background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 4px 8px; font-size: 0.78rem; cursor: pointer;
+  }
+  #recon-controls button:hover { background: #222831; }
+  #recon-canvas { flex: 1 1 auto; min-height: 0; position: relative; background: #000; border-radius: 4px; overflow: hidden; }
+  #recon-canvas canvas { display: block; width: 100% !important; height: 100% !important; }
+  #recon-hint { font-size: 0.72rem; color: #9aa; margin-top: 6px; line-height: 1.4; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>SortBots — robot_0</h1>
+    <span id="conn-dot"></span>
+    <span id="conn-label">connecting…</span>
+    <span id="slam-badge" title="RTAB-Map SLAM status (from /robot_0/info)">SLAM: waiting…</span>
+  </header>
+
+  <div id="left-col">
+    <div class="panel" id="chase-panel">
+      <h2>3rd person (chase cam)</h2>
+      <img id="chase-stream" alt="chase camera stream (waiting for web_video_server)" />
+    </div>
+    <div class="panel" id="map-panel">
+      <div id="map-controls">
+        <h2>Map, trail &amp; nav</h2>
+        <label><input type="checkbox" id="costmap-toggle" checked /> costmap</label>
+      </div>
+      <canvas id="map-canvas"></canvas>
+      <div id="map-hint">
+        Drag on the map to set a Nav2 goal (press = position, drag = heading).
+        Overrides any active task — same as manual drive, Nav2 takes the newest goal.
+      </div>
+      <div id="goal-status"></div>
+    </div>
+    <div class="panel" id="recon-panel">
+      <div id="recon-controls">
+        <h2>3D reconstruction</h2>
+        <span id="recon-info">waiting for cloud…</span>
+        <button type="button" id="recon-reset" title="Recenter the camera on the cloud">reset view</button>
+      </div>
+      <div id="recon-canvas"></div>
+      <div id="recon-hint">
+        RTAB-Map's assembled cloud (<code>cloud_map</code>). Drag to orbit,
+        scroll to zoom, right-drag to pan. Grows as the robot explores.
+      </div>
+    </div>
+    <div class="panel" id="camera-panel">
+      <h2>Head camera</h2>
+      <img id="camera-stream" alt="camera stream (waiting for web_video_server)" />
+    </div>
+  </div>
+
+  <div id="right-col">
+    <div class="panel" id="aim-panel">
+      <h2>Camera aim (head pan/tilt)</h2>
+      <div id="aim-pad">
+        <span class="empty"></span>
+        <button type="button" data-aim="tilt-up" title="Tilt up">&#9650;</button>
+        <span class="empty"></span>
+        <button type="button" data-aim="pan-left" title="Pan left">&#9664;</button>
+        <button type="button" id="aim-center" data-aim="center" title="Center">&#8853;</button>
+        <button type="button" data-aim="pan-right" title="Pan right">&#9654;</button>
+        <span class="empty"></span>
+        <button type="button" data-aim="tilt-down" title="Tilt down">&#9660;</button>
+        <span class="empty"></span>
+      </div>
+      <div id="aim-status">pan=0.00 tilt=0.00</div>
+    </div>
+    <div class="panel" id="drive-panel">
+      <h2>Manual drive</h2>
+      <div id="drive-pad" tabindex="0">
+        <span class="empty"></span>
+        <button type="button" data-cmd="fwd" title="Forward (W)">&#9650;</button>
+        <span class="empty"></span>
+        <button type="button" data-cmd="left" title="Strafe left (A)">&#9664;</button>
+        <button type="button" id="drive-stop" data-cmd="stop" title="Stop (Space)">&#9632;</button>
+        <button type="button" data-cmd="right" title="Strafe right (D)">&#9654;</button>
+        <button type="button" data-cmd="rot-left" title="Rotate left (Q)">&#8634;</button>
+        <button type="button" data-cmd="back" title="Backward (S)">&#9660;</button>
+        <button type="button" data-cmd="rot-right" title="Rotate right (E)">&#8635;</button>
+      </div>
+      <div id="drive-hint">
+        Click the pad to focus it, then W/A/S/D to move, Q/E to rotate, Space
+        to stop. Buttons also work by holding the mouse down. Publishes
+        directly to <code>cmd_vel</code> — don't drive while a task is
+        active, Nav2 will fight you for it.
+      </div>
+      <div id="drive-status">stopped</div>
+    </div>
+    <div class="panel" id="dispatch-panel">
+      <h2>Dispatch task</h2>
+      <form id="dispatch-form">
+        <select id="pickup-select"></select>
+        <span>&rarr;</span>
+        <select id="dropoff-select"></select>
+        <button type="submit">Dispatch</button>
+      </form>
+    </div>
+    <div class="panel" id="queue-panel">
+      <h2>Task queue</h2>
+      <ul id="queue-list"></ul>
+    </div>
+  </div>
+
+<!-- Vendored (webui/vendor/roslib.min.js) rather than a CDN so the dashboard is
+     fully self-contained over the tailnet — no public-internet dependency to
+     load the page. Refresh with:
+       curl -sSL -o webui/vendor/roslib.min.js \
+         https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js -->
+<script src="vendor/roslib.min.js"></script>
+<!-- three.js (UMD global THREE) + OrbitControls for the 3D reconstruction panel.
+     Vendored like roslib so the dashboard stays self-contained over the tailnet.
+     Refresh (must match versions) with:
+       curl -sSL -o webui/vendor/three.min.js \
+         https://cdn.jsdelivr.net/npm/three@0.137.5/build/three.min.js
+       curl -sSL -o webui/vendor/OrbitControls.js \
+         https://cdn.jsdelivr.net/npm/three@0.137.5/examples/js/controls/OrbitControls.js -->
+<script src="vendor/three.min.js"></script>
+<script src="vendor/OrbitControls.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

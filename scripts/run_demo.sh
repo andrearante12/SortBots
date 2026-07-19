@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # SortBots warehouse SLAM demo launcher — brings up the whole pipeline with
 # one command:
-#   1. Isaac Sim  — NVIDIA warehouse + XLeRobot + ROS 2 publishers
-#   2. RTAB-Map + rviz — live SLAM map
-#   3. a WASD teleop terminal window
+#   1. Isaac Sim — NVIDIA warehouse + XLeRobot + ROS 2 publishers (own venv)
+#   2. ROS 2 side, one launch (launch/sortbots_bringup.launch.py):
+#        RTAB-Map SLAM + Nav2 + the web dashboard (rosbridge + web_video_server
+#        + serve.py) + nodes/task_manager.py
+#   3. (optional) a WASD teleop terminal window — off by default now that the
+#        dashboard has its own drive pad; enable with --teleop.
+#
+# Drive and dispatch from the dashboard (URL printed on startup); rviz is off
+# by default since the dashboard replaces it.
 #
 # Each piece needs a different environment (Isaac venv vs system ROS 2), so
 # this script sources the right one for each component itself. Run it from a
@@ -11,7 +17,7 @@
 #
 # Usage:
 #   scripts/run_demo.sh [--robot-id robot_0] [--robots 1] [--scene nvidia]
-#                       [--headless] [--no-teleop]
+#                       [--headless] [--teleop]
 #   scripts/run_demo.sh stop      # tear the whole pipeline down
 #
 # Re-running it auto-stops any existing pipeline first, so it doubles as a
@@ -23,14 +29,22 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROS_SETUP="/opt/ros/jazzy/setup.bash"
 SIM_LOG="/tmp/sortbots_demo_sim.log"
 SIM_RESULT="/tmp/isaac_spawn_warehouse_result.txt"
-RTAB_LOG="/tmp/sortbots_demo_rtabmap.log"
+BRINGUP_LOG="/tmp/sortbots_demo_bringup.log"
+DASHBOARD_PORT=8081
 
 stop_pipeline() {
   echo "[run_demo] stopping any running pipeline..."
+  # SIGINT the top-level launch first so it can shut its children (Nav2
+  # lifecycle nodes, rtabmap, rosbridge) down cleanly, then hard-kill leftovers.
+  pkill -INT -f "sortbots_bringup.launch.py" 2>/dev/null || true
   pkill -INT -f "sortbots_rtabmap_robot.launch.py" 2>/dev/null || true
   sleep 2
   for p in rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz2 \
-           wasd_teleop "spawn_warehouse.py"; do
+           controller_server planner_server smoother_server behavior_server \
+           bt_navigator waypoint_follower velocity_smoother lifecycle_manager \
+           component_container rosbridge_websocket web_video_server \
+           "webui/serve.py" webui_url.py task_manager.py rtabmap_cloud_pump.py \
+           web_video_watchdog.sh wasd_teleop "spawn_warehouse.py"; do
     pkill -9 -f "$p" 2>/dev/null || true
   done
   sleep 1
@@ -43,15 +57,17 @@ if [[ "${1:-}" == "stop" ]]; then
 fi
 
 # ---- args ----
-ROBOT_ID=robot_0; ROBOTS=1; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=1
+# Teleop defaults OFF — the dashboard drive pad replaces the WASD window.
+ROBOT_ID=robot_0; ROBOTS=1; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
     --robots)   ROBOTS="$2";   shift 2;;
     --scene)    SCENE="$2";    shift 2;;
     --headless) HEADLESS="--headless"; shift;;
-    --no-teleop) TELEOP=0; shift;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0;;
+    --teleop)    TELEOP=1; shift;;
+    --no-teleop) TELEOP=0; shift;;  # accepted for back-compat (already the default)
+    -h|--help) sed -n '2,25p' "$0"; exit 0;;
     *) echo "[run_demo] unknown arg: $1"; exit 2;;
   esac
 done
@@ -90,15 +106,26 @@ else
   echo "[run_demo] Isaac Sim is up and publishing."
 fi
 
-# ---- 2. RTAB-Map + rviz ----
-echo "[run_demo] launching RTAB-Map + rviz..."
+# ---- 2. ROS 2 side: SLAM + Nav2 + dashboard + task manager (one launch) ----
+echo "[run_demo] launching RTAB-Map + Nav2 + web dashboard + task manager..."
+# Prepend the system path so rosbridge_websocket's `#!/usr/bin/env python3`
+# shebang resolves to /usr/bin/python3 even if this script was started from a
+# conda-active shell (conda's python breaks rclpy's compiled extension — see
+# launch/sortbots_webui.launch.py's docstring).
 setsid bash -c "source '$ROS_SETUP'; \
+  export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
   export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
-  exec ros2 launch '$REPO_ROOT/launch/sortbots_rtabmap_robot.launch.py' \
-       robot_id:=$ROBOT_ID use_sim_time:=true" \
-  >"$RTAB_LOG" 2>&1 &
+  exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
+       robot_id:=$ROBOT_ID use_sim_time:=true rviz:=false \
+       dashboard_port:=$DASHBOARD_PORT" \
+  >"$BRINGUP_LOG" 2>&1 &
 sleep 12
-echo "[run_demo] RTAB-Map + rviz up."
+echo "[run_demo] ROS 2 stack up (see $BRINGUP_LOG)."
+
+# Echo the dashboard URL to this console too (the launch prints it into the
+# bringup log; webui_url.py needs no ROS, just tailscale).
+python3 "$REPO_ROOT/scripts/webui_url.py" --port "$DASHBOARD_PORT" 2>/dev/null || \
+  echo "[run_demo] dashboard: http://localhost:$DASHBOARD_PORT/"
 
 # ---- 3. WASD teleop (its own terminal window) ----
 TELEOP_CMD="source '$ROS_SETUP'; \
@@ -121,11 +148,13 @@ cat <<EOF
 ============================================================
   SortBots warehouse SLAM demo is UP
     * Isaac Sim window  : NVIDIA warehouse + $ROBOT_ID
-    * rviz / rtabmap_viz: live SLAM map (drive around to build it)
-    * WASD teleop       : w/s fwd-back  a/d turn  q/e strafe
-                          space stop  z/x slower/faster  k quit
+    * Web dashboard     : http://localhost:$DASHBOARD_PORT/  (or the tailnet URL above)
+        - live SLAM map + trail, Nav2 path/costmap overlays, SLAM status
+        - drag on the map to send a Nav2 goal; drive pad; pickup->dropoff dispatch
+    * Nav2 + RTAB-Map   : running headless (rviz off; the dashboard replaces it)
+$( [[ $TELEOP -eq 1 ]] && echo "    * WASD teleop       : w/s fwd-back  a/d turn  q/e strafe  space stop  k quit" )
   Logs : $SIM_LOG
-         $RTAB_LOG
+         $BRINGUP_LOG
   Stop : scripts/run_demo.sh stop
 ============================================================
 EOF

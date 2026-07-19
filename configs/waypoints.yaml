@@ -1,0 +1,36 @@
+# Named stations for task dispatch (pickup shelves / dropoff zones), in the
+# `map` frame Nav2 navigates against.
+#
+# PLACEHOLDER POSES: derived from spawn_warehouse.py's NVIDIA_SPAWN_POSITIONS
+# comment ("racks run along +y with x-centers ~5 m apart and span
+# y~8.8..24.8"; robot_0 spawns at (-4.5, 4.5), "a few metres ahead of the
+# first rack row"). Nobody has driven the warehouse with Nav2 live yet to
+# confirm these against the actual NVIDIA asset geometry.
+#
+# To fix: bring up Phase 1 (RTAB-Map + this Nav2 stack), teleop/waypoint the
+# robot to each real station, and record `ros2 topic echo /robot_0/odom
+# --once` (position is in the `map` frame once RTAB-Map has localized).
+# Each station also needs a `dock_offset` — how far off the shelf the robot
+# should stop so the arm's reach envelope covers the pick point; 0.5 m is a
+# placeholder pending the URDF's actual arm reach.
+
+stations:
+  shelf_a:
+    kind: pickup
+    pose: { x: -4.5, y: 8.3, yaw: 1.5708 } # facing +y into the rack row
+    dock_offset_m: 0.5
+
+  shelf_b:
+    kind: pickup
+    pose: { x: 0.5, y: 8.3, yaw: 1.5708 }
+    dock_offset_m: 0.5
+
+  zone_a:
+    kind: dropoff
+    pose: { x: -4.5, y: 2.0, yaw: -1.5708 } # facing back toward open floor
+    dock_offset_m: 0.5
+
+  zone_b:
+    kind: dropoff
+    pose: { x: 0.5, y: 2.0, yaw: -1.5708 }
+    dock_offset_m: 0.5

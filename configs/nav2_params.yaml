@@ -1,0 +1,252 @@
+# Nav2 params for the SortBots warehouse demo, robot_0 only.
+#
+# Single-robot MVP: frame ids below are hardcoded to `robot_0/base_link` and
+# `robot_0/odom` to match `launch/sortbots_rtabmap_robot.launch.py`'s TF
+# tree. Multi-robot Nav2 (per-robot params via RewrittenYaml, or separate TF
+# trees) is deferred to the Phase 5+ multi-agent track — out of scope here.
+#
+# No map_server / amcl: RTAB-Map (already running, see
+# sortbots_rtabmap_robot.launch.py) owns SLAM, publishes `map` (namespaced to
+# /robot_0/map by the launch file's `namespace` arg) and the map -> odom TF.
+# Nav2 only needs the planning/control/behavior stack.
+#
+# The XLeRobot base is holonomic (root_x/root_y/root_z joints, cmd_vel
+# consumes linear.x AND linear.y — see spawn_warehouse.py:_drive_velocities),
+# so the controller must support strafing. DWB gets holonomic Y-motion from
+# non-zero min_vel_y/max_vel_y/vy_samples below (no separate "holonomic"
+# flag — that's not a real DWB parameter, an earlier draft of this file
+# wrongly included one); a purely differential-drive controller (RPP,
+# regular MPPI defaults) would throw away half the robot's mobility.
+#
+# Top-level keys are `/**/<node_name>:`, not bare `<node_name>:`. Verified
+# live (ros-jazzy-navigation2 1.3.12): rcl_yaml_param_parser's bare-name
+# matching does NOT apply under a namespaced node (ours run under
+# `PushRosNamespace(robot_id)` in sortbots_nav2.launch.py, so the node's
+# real name is `/robot_0/controller_server` etc). With a bare key every
+# parameter here silently fails to apply — including `FollowPath.critics`,
+# which fails LOUD ("No critics defined for FollowPath", DWB has no
+# default critics) while everything else fails silently. The standard
+# `/**/` node-name wildcard (matches the name in any namespace) fixes it
+# without hardcoding `robot_0` into every key, so multi-robot params files
+# stay copy-pasteable.
+
+/**/controller_server:
+  ros__parameters:
+    use_sim_time: true
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.001
+    min_theta_velocity_threshold: 0.001
+    progress_checker_plugins: ["progress_checker"]
+    goal_checker_plugins: ["goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.5
+      movement_time_allowance: 10.0
+
+    goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.15
+      yaw_goal_tolerance: 0.15
+      stateful: true
+
+    FollowPath:
+      plugin: "dwb_core::DWBLocalPlanner"
+      debug_trajectory_details: true
+      # Holonomic: allow y-velocity sampling so the planner can strafe
+      # around obstacles instead of always turning first.
+      min_vel_x: -0.3
+      min_vel_y: -0.3
+      max_vel_x: 0.5
+      max_vel_y: 0.5
+      max_vel_theta: 1.0
+      min_speed_xy: 0.0
+      max_speed_xy: 0.5
+      min_speed_theta: 0.0
+      acc_lim_x: 1.0
+      acc_lim_y: 1.0
+      acc_lim_theta: 2.0
+      decel_lim_x: -1.0
+      decel_lim_y: -1.0
+      decel_lim_theta: -2.0
+      vx_samples: 15
+      vy_samples: 10
+      vtheta_samples: 20
+      sim_time: 1.5
+      linear_granularity: 0.05
+      angular_granularity: 0.025
+      transform_tolerance: 0.3
+      trans_stopped_velocity: 0.1
+      short_circuit_trajectory_evaluation: true
+      stateful: true
+      # Block-list style, not a flow-sequence: ROS 2's rcl_yaml_param_parser
+      # (not plain pyyaml) failed to load a multi-line bracketed list with a
+      # trailing comma here — controller_server errored "No critics defined
+      # for FollowPath" even though the file parses fine under Python's
+      # yaml.safe_load. Verified live against ros-jazzy-navigation2 1.3.12.
+      critics:
+        - "RotateToGoal"
+        - "Oscillation"
+        - "BaseObstacle"
+        - "GoalAlign"
+        - "PathAlign"
+        - "PathDist"
+        - "GoalDist"
+      BaseObstacle.scale: 0.02
+      PathAlign.scale: 32.0
+      PathAlign.forward_point_distance: 0.1
+      GoalAlign.scale: 24.0
+      GoalAlign.forward_point_distance: 0.1
+      PathDist.scale: 32.0
+      GoalDist.scale: 24.0
+      RotateToGoal.scale: 32.0
+      RotateToGoal.slowing_factor: 5.0
+      RotateToGoal.lookahead_time: -1.0
+
+/**/local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: true
+      global_frame: robot_0/odom
+      robot_base_frame: robot_0/base_link
+      transform_tolerance: 0.3
+      update_frequency: 10.0
+      publish_frequency: 5.0
+      rolling_window: true
+      width: 6
+      height: 6
+      resolution: 0.05
+      footprint: "[[0.25, 0.2], [0.25, -0.2], [-0.25, -0.2], [-0.25, 0.2]]"
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: depth_scan
+        depth_scan:
+          topic: /robot_0/camera/depth/points
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          # Isaac only publishes a raw depth Image; the nav2 launch file
+          # runs a depth_image_proc::PointCloudXyzNode to produce this
+          # PointCloud2 topic for obstacle marking.
+          max_obstacle_height: 1.5
+          min_obstacle_height: 0.05
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.4
+      always_send_full_costmap: true
+
+/**/global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: true
+      global_frame: map
+      robot_base_frame: robot_0/base_link
+      transform_tolerance: 0.3
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      resolution: 0.05
+      footprint: "[[0.25, 0.2], [0.25, -0.2], [-0.25, -0.2], [-0.25, 0.2]]"
+      track_unknown_space: true
+      plugins: ["static_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+        # Namespaced by the launch file's `namespace` arg to /robot_0/map,
+        # published by RTAB-Map (see sortbots_rtabmap_robot.launch.py).
+        map_topic: map
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.4
+      always_send_full_costmap: true
+
+/**/planner_server:
+  ros__parameters:
+    use_sim_time: true
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner::NavfnPlanner"
+      tolerance: 0.3
+      use_astar: true
+      allow_unknown: true
+
+/**/smoother_server:
+  ros__parameters:
+    use_sim_time: true
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 1.0e-10
+      max_its: 1000
+      do_refinement: true
+
+/**/behavior_server:
+  ros__parameters:
+    use_sim_time: true
+    local_costmap_topic: local_costmap/costmap_raw
+    global_costmap_topic: global_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_footprint_topic: global_costmap/published_footprint
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait", "assisted_teleop"]
+    spin:
+      plugin: "nav2_behaviors::Spin"
+    backup:
+      plugin: "nav2_behaviors::BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors::DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors::Wait"
+    assisted_teleop:
+      plugin: "nav2_behaviors::AssistedTeleop"
+    global_frame: map
+    robot_base_frame: robot_0/base_link
+    transform_tolerance: 0.3
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 3.2
+
+/**/bt_navigator:
+  ros__parameters:
+    use_sim_time: true
+    global_frame: map
+    robot_base_frame: robot_0/base_link
+    odom_topic: odom
+    transform_tolerance: 0.3
+    # Unset: bt_navigator falls back to its built-in default trees.
+
+/**/waypoint_follower:
+  ros__parameters:
+    use_sim_time: true
+    loop_rate: 20
+    stop_on_failure: false
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: true
+      waypoint_pause_duration: 0
+
+/**/velocity_smoother:
+  ros__parameters:
+    use_sim_time: true
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: "OPEN_LOOP"
+    max_velocity: [0.5, 0.5, 1.0]
+    min_velocity: [-0.3, -0.3, -1.0]
+    max_accel: [1.0, 1.0, 2.0]
+    max_decel: [-1.0, -1.0, -2.0]
+    odom_topic: odom
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
+
+/**/collision_monitor:
+  ros__parameters:
+    use_sim_time: true
+    enabled: false

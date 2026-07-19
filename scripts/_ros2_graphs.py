@@ -12,8 +12,22 @@
 - `<robot_prim>/CmdVelGraph`   — `ROS2SubscribeTwist` on
   `<namespace>/cmd_vel`; `spawn_warehouse.py` reads the output
   attributes each tick (no script-node inside the graph).
+- `<robot_prim>/ArmCmdGraph`   — `ROS2SubscribeJointState` on
+  `<namespace>/arm_joint_cmd`; `spawn_warehouse.py` polls
+  `jointNames`/`positionCommand` each tick and applies them to the arm's
+  DOF indices via `ArticulationAction(joint_indices=...)`.
 - `<robot_prim>/ImuGraph`      — `IsaacReadIMU` on a sensor prim under
   `base_link` → `ROS2PublishImu` to `<namespace>/imu`.
+
+`pick_cmd` (the mock-pick "attach"/"detach" trigger) is NOT an OmniGraph
+node — confirmed live against Isaac Sim 5.1
+(isaacsim.ros2.bridge 4.12.4): there is no `ROS2SubscribeString` node type
+in this build (`ROS2SubscribeTwist`/`ROS2SubscribeJointState`/etc. all
+exist, confirmed in the bridge extension's own test suite; String does
+not). `spawn_warehouse.py` instead runs a plain `rclpy` subscriber in its
+own process (`_start_pick_cmd_subscriber`) — Isaac's Python environment
+already has `rclpy` loaded for the bridge extension's own internal use, so
+this doesn't need a separate ROS 2 install inside the Isaac venv.
 
 Module-level imports are stdlib-only. All `isaacsim` / `omni` / `pxr`
 imports are lazy and happen inside `build_robot_graphs` so this file is
@@ -30,6 +44,42 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 
+def build_chase_camera_graph(
+    *,
+    graph_path: str,
+    camera_prim_path: str,
+    namespace: str,
+    rgb_topic: str,
+    depth_topic: str,
+    camera_info_topic: str,
+    width: int,
+    height: int,
+    frame_id: str,
+) -> None:
+    """One extra `CameraGraph` for a camera that isn't part of a robot's
+    core sensor suite (see `_spawn_chase_camera` in spawn_warehouse.py).
+    Thin wrapper around `_build_camera_graph` — same node graph shape as
+    the per-robot cameras `build_robot_graphs` builds, just callable on
+    its own instead of bundled with odometry/TF/cmd_vel/etc.
+    """
+    import omni.graph.core as og
+    import usdrt.Sdf
+
+    _build_camera_graph(
+        og=og,
+        usdrt=usdrt,
+        graph_path=graph_path,
+        camera_prim_path=camera_prim_path,
+        namespace=namespace,
+        rgb_topic=rgb_topic,
+        depth_topic=depth_topic,
+        camera_info_topic=camera_info_topic,
+        width=width,
+        height=height,
+        frame_id=frame_id,
+    )
+
+
 def build_robot_graphs(
     robot_prim_path: str,
     chassis_subpath: str,
@@ -41,6 +91,7 @@ def build_robot_graphs(
     camera_info_topic: str = "camera/camera_info",
     tf_topic: str = "tf",
     cmd_vel_topic: str = "cmd_vel",
+    arm_cmd_topic: str = "arm_joint_cmd",
     imu_prim_path: Optional[str] = None,
     imu_topic: str = "imu",
     rgb_resolution: Tuple[int, int] = (640, 480),
@@ -125,6 +176,13 @@ def build_robot_graphs(
         graph_path=f"{robot_prim_path}/CmdVelGraph",
         namespace=namespace,
         topic=cmd_vel_topic,
+    )
+
+    _build_arm_cmd_graph(
+        og=og,
+        graph_path=f"{robot_prim_path}/ArmCmdGraph",
+        namespace=namespace,
+        topic=arm_cmd_topic,
     )
 
     if imu_prim_path is not None:
@@ -389,6 +447,42 @@ def _build_cmd_vel_graph(
             ],
             keys.CONNECT: [
                 ("OnPlaybackTick.outputs:tick", "SubscribeTwist.inputs:execIn"),
+            ],
+        },
+    )
+
+
+def _build_arm_cmd_graph(
+    *,
+    og,
+    graph_path: str,
+    namespace: str,
+    topic: str,
+) -> None:
+    """Subscribe to `<namespace>/arm_joint_cmd`; polled by the spawn loop.
+
+    Mirrors `_build_cmd_vel_graph`/`_build_pick_cmd_graph`:
+    `spawn_warehouse.py` calls
+    `og.Controller.attribute(f"{graph_path}/SubscribeJointState.outputs:jointNames").get()`
+    and `...outputs:positionCommand`.get() each tick, matches names against
+    `ARM_JOINT_NAMES`, and applies the positions via
+    `ArticulationAction(joint_indices=ARM_JOINT_INDICES)`. `nodes/scripted_pick.py`
+    is the only publisher (sensor_msgs/JointState, position-only).
+    """
+    keys = og.Controller.Keys
+    og.Controller.edit(
+        {"graph_path": graph_path, "evaluator_name": "execution"},
+        {
+            keys.CREATE_NODES: [
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+                ("SubscribeJointState", "isaacsim.ros2.bridge.ROS2SubscribeJointState"),
+            ],
+            keys.SET_VALUES: [
+                ("SubscribeJointState.inputs:topicName", topic),
+                ("SubscribeJointState.inputs:nodeNamespace", namespace),
+            ],
+            keys.CONNECT: [
+                ("OnPlaybackTick.outputs:tick", "SubscribeJointState.inputs:execIn"),
             ],
         },
     )

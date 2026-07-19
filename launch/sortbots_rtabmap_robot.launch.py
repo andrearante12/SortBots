@@ -14,16 +14,21 @@ The launch file lives loose under `launch/`; it's not built into a ROS 2
 package because the only thing it adds over the upstream launch is the
 SortBots topic remaps + an opinionated argument set.
 """
+import os
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def generate_launch_description():
     robot_id = LaunchConfiguration("robot_id")
     use_sim_time = LaunchConfiguration("use_sim_time")
+    rviz = LaunchConfiguration("rviz")
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -40,6 +45,15 @@ def generate_launch_description():
                 "time (seconds since sim start), not wall clock, so with "
                 "use_sim_time=false RTAB-Map treats all data as ~decades old "
                 "and every TF lookup fails — the map stays empty."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "rviz",
+            default_value="true",
+            description=(
+                "Open RTAB-Map's rviz view. Default true for standalone use; "
+                "the unified bringup (sortbots_bringup.launch.py) sets this "
+                "false because the web dashboard replaces rviz for the demo."
             ),
         ),
         IncludeLaunchDescription(
@@ -67,9 +81,20 @@ def generate_launch_description():
                 "visual_odometry":    "false",
                 "subscribe_rgbd":     "false",
                 "approx_sync":        "true",
-                "rviz":               "true",
+                "rviz":               rviz,
                 "namespace":          robot_id,
                 "use_sim_time":       use_sim_time,
             }.items(),
+        ),
+
+        # Keeps cloud_map/cloud_ground/cloud_obstacles/octomap_* flowing — see
+        # nodes/rtabmap_cloud_pump.py's docstring for why this is needed.
+        ExecuteProcess(
+            cmd=[
+                "python3",
+                os.path.join(REPO_ROOT, "nodes", "rtabmap_cloud_pump.py"),
+                "--robot-id", robot_id,
+            ],
+            output="screen",
         ),
     ])
