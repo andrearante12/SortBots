@@ -17,11 +17,20 @@
 #
 # Usage:
 #   scripts/run_demo.sh [--robot-id robot_0] [--robots 1] [--scene nvidia]
-#                       [--headless] [--teleop]
+#                       [--headless] [--teleop] [--localize] [--map PATH]
 #   scripts/run_demo.sh stop      # tear the whole pipeline down
 #
 # Re-running it auto-stops any existing pipeline first, so it doubles as a
 # "reset the environment" button.
+#
+# Map lifecycle — build a map once, then navigate on it afterwards:
+#
+#   scripts/run_demo.sh --teleop     # drive around; map builds from scratch
+#   scripts/run_demo.sh stop         # map persists in ~/.ros/sortbots_<id>.db
+#   scripts/run_demo.sh --localize   # reopen that map, localize, send nav goals
+#
+# Without --localize every run starts from an empty database, so a mapping run
+# always means what it says. --localize never deletes.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -59,6 +68,7 @@ fi
 # ---- args ----
 # Teleop defaults OFF — the dashboard drive pad replaces the WASD window.
 ROBOT_ID=robot_0; ROBOTS=1; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=0
+LOCALIZE=false; MAP_DB=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
@@ -67,10 +77,24 @@ while [[ $# -gt 0 ]]; do
     --headless) HEADLESS="--headless"; shift;;
     --teleop)    TELEOP=1; shift;;
     --no-teleop) TELEOP=0; shift;;  # accepted for back-compat (already the default)
-    -h|--help) sed -n '2,25p' "$0"; exit 0;;
+    --localize) LOCALIZE=true; shift;;
+    --map)      MAP_DB="$2";  shift 2;;
+    -h|--help) sed -n '2,33p' "$0"; exit 0;;
     *) echo "[run_demo] unknown arg: $1"; exit 2;;
   esac
 done
+
+# Default matches launch/sortbots_rtabmap_robot.launch.py's database_path.
+[[ -z "$MAP_DB" ]] && MAP_DB="$HOME/.ros/sortbots_${ROBOT_ID}.db"
+
+# Localizing against a map that was never built is a confusing failure mode —
+# RTAB-Map comes up, publishes nothing, and every nav goal is rejected for want
+# of a map. Catch it here instead.
+if [[ "$LOCALIZE" == "true" && ! -f "$MAP_DB" ]]; then
+  echo "ERROR: --localize needs an existing map, but $MAP_DB does not exist."
+  echo "       Build one first:  scripts/run_demo.sh --teleop"
+  exit 1
+fi
 
 # Must be a clean shell — Isaac's activate refuses if ROS 2 is sourced.
 if [[ -n "${AMENT_PREFIX_PATH:-}" ]]; then
@@ -107,6 +131,11 @@ else
 fi
 
 # ---- 2. ROS 2 side: SLAM + Nav2 + dashboard + task manager (one launch) ----
+if [[ "$LOCALIZE" == "true" ]]; then
+  echo "[run_demo] LOCALIZATION mode — reusing the map at $MAP_DB (not modified)."
+else
+  echo "[run_demo] MAPPING mode — building a fresh map into $MAP_DB."
+fi
 echo "[run_demo] launching RTAB-Map + Nav2 + web dashboard + task manager..."
 # Prepend the system path so rosbridge_websocket's `#!/usr/bin/env python3`
 # shebang resolves to /usr/bin/python3 even if this script was started from a
@@ -117,7 +146,8 @@ setsid bash -c "source '$ROS_SETUP'; \
   export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
        robot_id:=$ROBOT_ID use_sim_time:=true rviz:=false \
-       dashboard_port:=$DASHBOARD_PORT" \
+       dashboard_port:=$DASHBOARD_PORT \
+       localization:=$LOCALIZE database_path:='$MAP_DB'" \
   >"$BRINGUP_LOG" 2>&1 &
 sleep 12
 echo "[run_demo] ROS 2 stack up (see $BRINGUP_LOG)."
@@ -152,6 +182,7 @@ cat <<EOF
         - live SLAM map + trail, Nav2 path/costmap overlays, SLAM status
         - drag on the map to send a Nav2 goal; drive pad; pickup->dropoff dispatch
     * Nav2 + RTAB-Map   : running headless (rviz off; the dashboard replaces it)
+    * Map               : $MAP_DB $( [[ "$LOCALIZE" == "true" ]] && echo "(localization — read-only)" || echo "(mapping — rebuilt this run)" )
 $( [[ $TELEOP -eq 1 ]] && echo "    * WASD teleop       : w/s fwd-back  a/d turn  q/e strafe  space stop  k quit" )
   Logs : $SIM_LOG
          $BRINGUP_LOG

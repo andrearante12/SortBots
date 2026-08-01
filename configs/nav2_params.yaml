@@ -156,9 +156,19 @@
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: true
-        # Namespaced by the launch file's `namespace` arg to /robot_0/map,
-        # published by RTAB-Map (see sortbots_rtabmap_robot.launch.py).
-        map_topic: map
+        # MUST be absolute. A relative `map` here does NOT resolve to
+        # /robot_0/map: this costmap node lives in the `global_costmap`
+        # SUB-namespace, so a relative name resolves to
+        # /robot_0/global_costmap/map — a topic nothing publishes. The static
+        # layer then silently never receives a map ("Can't update static
+        # costmap layer, no map received"), the global costmap stays at its
+        # default 5x5 m of all-unknown, and because planner_server sets
+        # allow_unknown: true the planner still "succeeds" on short goals by
+        # planning blind through unknown space. That failure is nearly
+        # invisible from the dashboard, which is how it survived this long.
+        # Like the depth_scan topic above, this is absolute and so must be
+        # rewritten per robot when robot_1 arrives.
+        map_topic: /robot_0/map
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0

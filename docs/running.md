@@ -227,6 +227,49 @@ whatever `task_manager` is currently navigating — it's a manual override, same
 spirit as the drive-pad note above. Use the **Dispatch task** form for the
 queued pickup→dropoff workflow instead.
 
+## Map lifecycle: build a map once, navigate on it later
+
+By default every run builds a **fresh** map — RTAB-Map starts from an empty
+database, so a mapping run always means what it says. The map persists after
+shutdown, and `--localize` reopens it read-only instead of rebuilding:
+
+```bash
+scripts/run_demo.sh --teleop      # drive around; map builds from scratch
+scripts/run_demo.sh stop          # map persists on disk
+scripts/run_demo.sh --localize    # reopen it, localize, send nav goals
+```
+
+The database lives at `~/.ros/sortbots_<robot_id>.db` — **per robot**, so two
+robots can't clobber each other's map. Override with `--map PATH` to keep
+several warehouses around. `--localize` refuses up front if the file doesn't
+exist, rather than coming up and silently rejecting every goal.
+
+In localization mode RTAB-Map sets `Mem/IncrementalMemory=false`, so the map is
+never modified — verified by checksum across a full run. `--delete_db_on_start`
+is forced off whenever `localization:=true`; deleting the map you are about to
+localize against is a footgun, not a preference.
+
+Nav2 needs no changes between the two modes: its static layer consumes the same
+`map` topic either way.
+
+### Occupancy-grid tuning (why the map has usable free space)
+
+`launch/sortbots_rtabmap_robot.launch.py`'s `GRID_ARGS` passes RTAB-Map
+`--Grid/3D false --Grid/RayTracing true --Grid/RangeMax 5.0
+--Grid/MaxObstacleHeight 1.5`. Ray tracing is the load-bearing one: without it
+the only cells marked free are ones where a depth point happened to land on the
+floor, so `/map` stays overwhelmingly unknown even in rooms the robot drove
+through. `Grid/3D false` is what lets ray tracing work at all — RTAB-Map's own
+docs note that with `Grid/3D=true`, 3D ray tracing is silently *ignored* unless
+the build has OctoMap support.
+
+Measured on the primitive scene after ~80 s of driving: **52.9 m² free / 54.8%
+of the grid**, versus a near-empty map before. That matters because frontier
+exploration is literally "a free cell adjacent to an unknown cell" — with no
+believable free space there is nothing real to explore toward.
+
+Override with `rtabmap_args:=...`, but note it replaces the tuning wholesale.
+
 ## Remote access from a phone / remote Claude session (Tailscale)
 
 The web dashboard (`launch/sortbots_webui.launch.py` → `webui/serve.py` on 8081,

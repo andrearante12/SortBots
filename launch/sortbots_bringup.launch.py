@@ -59,6 +59,8 @@ def generate_launch_description():
     webui = LaunchConfiguration("webui")
     task_manager = LaunchConfiguration("task_manager")
     dashboard_port = LaunchConfiguration("dashboard_port")
+    localization = LaunchConfiguration("localization")
+    database_path = LaunchConfiguration("database_path")
 
     def _include(filename):
         return PythonLaunchDescriptionSource(os.path.join(LAUNCH_DIR, filename))
@@ -99,6 +101,22 @@ def generate_launch_description():
             default_value="8081",
             description="Port for the dashboard's HTTP server (webui/serve.py).",
         ),
+        DeclareLaunchArgument(
+            "localization",
+            default_value="false",
+            description=(
+                "Localize against the saved map instead of building one. "
+                "Nav2 is unaffected — it reads the same `map` topic either way."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "database_path",
+            # Mirrors the default in sortbots_rtabmap_robot.launch.py; kept in
+            # both because IncludeLaunchDescription passes a concrete value and
+            # can't defer to the includee's own default.
+            default_value=["~/.ros/sortbots_", robot_id, ".db"],
+            description="Where the map is saved to / loaded from.",
+        ),
 
         # 1. RTAB-Map SLAM (rviz off by default here).
         IncludeLaunchDescription(
@@ -107,6 +125,8 @@ def generate_launch_description():
                 "robot_id": robot_id,
                 "use_sim_time": use_sim_time,
                 "rviz": rviz,
+                "localization": localization,
+                "database_path": database_path,
             }.items(),
         ),
 
