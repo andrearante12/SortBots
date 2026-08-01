@@ -172,6 +172,21 @@ pieces with `nav2:=false`, `webui:=false`, `task_manager:=false`, `rviz:=true`.
 Startup order is tolerant: Nav2 autostarts and retries until RTAB-Map's map/TF
 appear.
 
+**Multi-robot:** `robot_ids:=robot_0,robot_1` brings up a full independent
+RTAB-Map + Nav2 + `task_manager` stack per robot (the dashboard/rosbridge
+stack stays singular). `localization`/`database_path`/`explore` apply only to
+the single robot named by `robot_id` (default `robot_0`) — every other robot
+in the list gets its own auto-computed map path and no explorer, matching
+what's actually been tested: one exploring robot, N robots mapping
+independently. TF needs no changes for this — frames are already
+`<robot>/`-prefixed on the shared global `/tf` (`scripts/_ros2_graphs.py`).
+`configs/nav2_params.yaml` hardcodes a few frame ids/one topic to `robot_0`;
+`sortbots_nav2.launch.py` rewrites them per-robot at launch time (see that
+file's docstring for why it's plain string substitution, not
+`nav2_common.RewrittenYaml`). True collaborative SLAM — a shared map, not
+just independent per-robot maps — is future work; see "Autonomous
+exploration" below for the frontier-claim-sharing slice that exists today.
+
 ### What the dashboard shows
 
 Open the printed URL (`http://localhost:8081/` locally, or the tailnet URL).
@@ -208,6 +223,10 @@ the head camera in the background.
 - **SLAM status badge** (header) — "mapping", flashes "loop closed" and counts
   total loop closures from `/robot_0/info`; goes red/"stale" if RTAB-Map stops
   publishing.
+- **Robot switcher** (header, next to the title) — populated from
+  `configs/robots.yaml` via `GET /api/robots`. Picking a different robot
+  reloads the page with `?robot=<id>` — every subscription on the page is
+  robot-specific, so this is a reload, not a live hot-swap.
 
 ### Driving
 
@@ -226,6 +245,91 @@ heading 0). The goal that was sent is echoed bottom-right. This sends a
 whatever `task_manager` is currently navigating — it's a manual override, same
 spirit as the drive-pad note above. Use the **Dispatch task** form for the
 queued pickup→dropoff workflow instead.
+
+## Autonomous exploration
+
+```bash
+scripts/run_demo.sh --explore              # hands-off: starts exploring immediately
+scripts/run_demo.sh --explore --localize   # explore to EXTEND an existing map instead of starting fresh
+```
+
+`nodes/explorer.py` finds frontiers (free cells bordering unknown space) in
+`/robot_0/map`, drives `navigate_to_pose` toward the best-scored one, and
+repeats until none remain reachable — then reports "exploration done" and
+stops. No waypoints, no human input.
+
+**Requires the occupancy-grid tuning documented above** (`GRID_ARGS` /
+`Grid/RayTracing`) — frontier detection needs real free space in the map to
+find a boundary to chase at all.
+
+From the dashboard's **Dispatch & task queue** panel: **Start**/**Stop**
+control exploration directly (`<robot>/explore_cmd`), the status line shows
+state / current goal / % of the grid mapped / blacklisted-goal count
+(`<robot>/explore_status`), and frontier candidates appear as colored dots on
+the map view (brighter = the one currently being pursued). **Save map**
+triggers RTAB-Map's own `backup` service for a labeled snapshot — the
+database is already being written continuously as it maps (see above), this
+just gives you a specific point-in-time copy.
+
+`task_manager.py` and `explorer.py` both drive the single `navigate_to_pose`
+action server, so they arbitrate: `task_manager` won't pop a dispatched task
+off its queue while the explorer reports `state: "exploring"`, and dispatching
+one anyway sends `explore_cmd: stop` first. Manual click-to-nav on the
+dashboard still preempts everything unconditionally — that's a deliberate
+override, same as always.
+
+**Tuning** lives in `configs/explorer.yaml` (frontier size cutoff, goal
+scoring, blacklist/claim radii and TTLs, replan cadence, done-after-N-empty
+cycles). Both were widened from their original values after live testing —
+this was the pre-flagged "SimpleProgressChecker will abort frontier goals
+too aggressively" risk from the exploration-testbed plan, and it showed up
+exactly as predicted:
+
+- `configs/nav2_params.yaml`'s `goal_checker.xy_goal_tolerance` was the real
+  culprit, not the progress checker. A frontier goal sits right at the edge
+  of currently-known space by definition, which is a harder final-approach
+  target than an interior waypoint — measured live, the robot routinely
+  settled ~0.2-0.25 m short and then just sat there never satisfying the
+  original 0.15 m tolerance. Widened to 0.25 m; goals started succeeding
+  immediately (three in a row on the very next run). Still tight enough for
+  `task_manager`'s dispatched pick/place docking, which has its own 0.5 m
+  `dock_offset_m` standoff on top of this.
+- `movement_time_allowance` (10.0 → 20.0) — the holonomic base needs a brief
+  rotate-in-place before committing to a heading on a long traverse, which
+  the original tight window read as "no progress" and aborted early.
+- `explorer.yaml`'s own `goal_timeout_s` (45 → 75) is a backstop for
+  whatever the two Nav2-level settings above don't catch; with the tolerance
+  fix it should now fire rarely.
+
+**Multi-robot claim sharing:** every explorer also publishes/subscribes a
+global (not robot-namespaced) `/explore/claims` topic — "I'm heading here,
+don't also send your robot to this frontier." This is a coordination signal
+only, **not map fusion**: each robot still builds and owns its own RTAB-Map
+database independently. True collaborative SLAM (shared map, shared pose
+graph) is future work.
+
+### The two action-server races this was built against
+
+Both bit real test runs before being fixed — worth knowing if you extend
+`explorer.py` or `task_manager.py`:
+
+1. **Don't explicitly cancel a goal you're about to replace.** Nav2's
+   `navigate_to_pose` is a single-goal action server: sending a new goal
+   already preempts whatever was running. An explicit `cancel_goal_async()`
+   on the OLD goal, fired right before sending the new one, is processed
+   asynchronously and reliably arrives *after* the new goal has already
+   preempted the old one — canceling the new goal instead. `explorer.py`
+   only cancels on an explicit `stop` (`nodes/explorer.py`'s
+   `_cancel_active_goal(cancel_on_server=...)`), never on its own
+   goal-timeout-and-replace path.
+2. **Goal-response/result callbacks must not read mutable instance state.**
+   A preempted goal's result future still completes later (as
+   ABORTED/CANCELED). If its callback reads `self._goal_target` instead of a
+   value captured at send time, it reads whatever the *current* goal is by
+   then — misattributing a stale failure to a goal that's still actively
+   navigating, and blacklisting a perfectly good target. `explorer.py` fixes
+   this with a generation counter: each goal's callbacks capture their own
+   generation number and no-op if a newer goal has since been sent.
 
 ## Map lifecycle: build a map once, navigate on it later
 

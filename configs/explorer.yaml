@@ -1,0 +1,57 @@
+# Frontier-exploration tuning for nodes/explorer.py.
+#
+# Plain top-level keys (not the `/**/<node>:` wildcard nav2_params.yaml
+# needs) — this file is loaded directly by explorer.py's own yaml.safe_load,
+# not by ROS 2's rcl_yaml_param_parser, so none of that gotcha applies here.
+
+# Discard frontier clusters smaller than this many cells. Below this a
+# cluster is usually sensor noise at a wall edge, not a real opening.
+min_frontier_cells: 8
+
+# score = cluster_size / distance**alpha. Higher alpha biases harder toward
+# nearby frontiers (less backtracking, more methodical); lower alpha biases
+# toward big far-away openings (faster coverage of open areas, more travel).
+alpha: 1.5
+
+# Reject frontier goals within this radius of an occupied cell. Matches
+# nav2_params.yaml's inflation_layer.inflation_radius — a goal any closer
+# risks planning into the robot's own footprint margin.
+inflate_radius_m: 0.4
+
+# Suppress candidates within this radius of a blacklisted (failed/timed-out)
+# point, so a rejected goal's immediate neighborhood isn't just re-tried next
+# cycle.
+blacklist_radius_m: 0.5
+
+# Forget a blacklist entry after this many seconds — the map may have
+# changed enough that a previously-unreachable frontier is worth retrying.
+# 0 = never expire.
+blacklist_ttl_s: 120.0
+
+# Cancel + blacklist a goal that hasn't finished within this long. Backstop
+# for cases nav2_params.yaml's SimpleProgressChecker doesn't catch. Was 45.0;
+# raised after live testing showed genuine multi-meter frontier goals
+# (holonomic base, ~0.3-0.5 m/s realistic speed, occasional recovery-behavior
+# detour) routinely needing more than that even while making real progress.
+goal_timeout_s: 75.0
+
+# How often to look for a new/better frontier.
+replan_period_s: 2.0
+
+# Consecutive empty replan cycles (no valid frontier candidates) before
+# declaring exploration done.
+done_after_empty_cycles: 5
+
+# Ignore frontiers farther than this from the robot. Keeps goals achievable
+# and bounds planning time — without this the explorer can pick a distant
+# frontier across the map while ignoring a closer, more useful one.
+max_goal_distance_m: 8.0
+
+# Occupancy value (0-100) at/above which a cell counts as an obstacle.
+occupied_thresh: 65
+
+# Multi-robot frontier-claim sharing (see explorer.py's module docstring —
+# this is NOT map fusion, just a "don't plan here, someone's already going"
+# signal over the shared /explore/claims topic).
+claim_radius_m: 1.0
+claim_ttl_s: 90.0

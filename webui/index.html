@@ -29,6 +29,10 @@
   #conn-dot { width: 10px; height: 10px; border-radius: 50%; background: #a33; }
   #conn-dot.connected { background: #3a3; }
   #conn-label { font-size: 0.8rem; color: #9aa; }
+  #robot-select {
+    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 3px 6px; font-size: 0.8rem;
+  }
   .panel {
     background: #1c1f24;
     border: 1px solid #2a2e35;
@@ -219,6 +223,21 @@
   .state-PICKING, .state-PLACING { background: #043; color: #7fb; }
   .state-FAILED { background: #400; color: #f77; }
 
+  /* -- autonomous exploration bar (nodes/explorer.py) --------------------- */
+  #explore-bar {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: none;
+    margin-bottom: 8px; font-size: 0.78rem; color: #9aa;
+  }
+  #explore-bar button {
+    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 4px 8px; font-size: 0.78rem; cursor: pointer;
+  }
+  #explore-bar button:hover { background: #222831; }
+  #explore-status {
+    font-family: monospace; color: #7bf; margin-left: auto;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
   /* -- phone / narrow viewport ------------------------------------------- */
   /* The dashboard is driven from a phone over the tailnet (see docs/running.md).
      Stack the stage above the right column and grow the pad hit targets. */
@@ -252,7 +271,8 @@
 </head>
 <body>
   <header>
-    <h1>SortBots — robot_0</h1>
+    <h1 id="page-title">SortBots</h1>
+    <select id="robot-select" title="Switch which robot the dashboard shows (reloads the page)"></select>
     <span id="conn-dot"></span>
     <span id="conn-label">connecting…</span>
     <div id="stage-mode">
@@ -335,6 +355,13 @@
         <select id="dropoff-select"></select>
         <button type="submit">Dispatch</button>
       </form>
+      <div id="explore-bar">
+        <span>Explore:</span>
+        <button type="button" id="explore-start" title="Start autonomous frontier exploration (nodes/explorer.py)">Start</button>
+        <button type="button" id="explore-stop" title="Stop exploring">Stop</button>
+        <button type="button" id="explore-save" title="Snapshot the current RTAB-Map database via its backup service">Save map</button>
+        <span id="explore-status">explorer: not running</span>
+      </div>
       <ul id="queue-list"></ul>
     </div>
   </div>

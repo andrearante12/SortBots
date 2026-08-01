@@ -4,11 +4,57 @@
 //   - webui/serve.py      (this page's own origin) — /api/waypoints
 // All three are brought up together by launch/sortbots_webui.launch.py.
 
-const ROBOT_ID = "robot_0";
+// Which robot this whole page talks to. Read once, synchronously, from
+// ?robot=<id> — every subscription below is constructed immediately at
+// script-load time against this single ROBOT_ID, so it can't be a value
+// that changes later without re-creating ~15 ROSLIB.Topic objects. Switching
+// robots (see the header <select id="robot-select">) therefore reloads the
+// page with a new query param rather than hot-swapping live — instant and
+// correct, just not seamless. Absent the param, defaults to "robot_0" —
+// identical to this dashboard's single-robot behavior before robots.yaml
+// existed, so a plain http://host:8081/ still works exactly as it always did.
+const ROBOT_ID = new URLSearchParams(window.location.search).get("robot") || "robot_0";
 const ROSBRIDGE_HOST = window.location.hostname || "localhost";
 const ROSBRIDGE_PORT = 9090;
 const VIDEO_PORT = 8080;
 const MAX_TRAIL_POINTS = 3000;
+
+document.getElementById("page-title").textContent = `SortBots — ${ROBOT_ID}`;
+document.title = `SortBots — ${ROBOT_ID}`;
+
+// Populate the robot switcher from configs/robots.yaml (via serve.py). Kept
+// separate from ROBOT_ID itself — this only decides what the DROPDOWN
+// offers; it never gates which robot the page actually subscribes to.
+fetch("/api/robots")
+  .then((r) => r.json())
+  .then((cfg) => {
+    const sel = document.getElementById("robot-select");
+    const ids = Array.isArray(cfg.robots) && cfg.robots.length ? cfg.robots : [ROBOT_ID];
+    for (const id of ids) {
+      const o = document.createElement("option");
+      o.value = id;
+      o.textContent = id;
+      sel.appendChild(o);
+    }
+    sel.value = ROBOT_ID;
+    // If the current ROBOT_ID isn't in the known list (e.g. a hand-typed
+    // ?robot=foo), sel.value silently fails to match any option and the
+    // dropdown shows the first entry instead of the truth — add it so what's
+    // selected always matches what the page is actually showing.
+    if (sel.value !== ROBOT_ID) {
+      const o = document.createElement("option");
+      o.value = ROBOT_ID;
+      o.textContent = `${ROBOT_ID} (unlisted)`;
+      sel.insertBefore(o, sel.firstChild);
+      sel.value = ROBOT_ID;
+    }
+    sel.addEventListener("change", () => {
+      const url = new URL(window.location.href);
+      url.searchParams.set("robot", sel.value);
+      window.location.href = url.toString();
+    });
+  })
+  .catch((e) => console.error("failed to load /api/robots", e));
 
 // -- connection -------------------------------------------------------
 
@@ -452,6 +498,89 @@ new ROSLIB.Topic({
   renderQueue();
 });
 
+// -- autonomous exploration (nodes/explorer.py) ---------------------------
+// explore_cmd/explore_status follow the same "String carrying JSON" pattern
+// as dispatch_task/task_status. There's no reliable "is explorer.py even
+// running" signal other than message absence, so the status line falls back
+// to "not running" if nothing has arrived in a while — the same staleness
+// idea as the SLAM badge above.
+
+const exploreCmdTopic = new ROSLIB.Topic({
+  ros,
+  name: `/${ROBOT_ID}/explore_cmd`,
+  messageType: "std_msgs/String",
+  reconnect_on_close: true,
+});
+
+document.getElementById("explore-start").addEventListener("click", () => {
+  exploreCmdTopic.publish(new ROSLIB.Message({ data: "start" }));
+});
+document.getElementById("explore-stop").addEventListener("click", () => {
+  exploreCmdTopic.publish(new ROSLIB.Message({ data: "stop" }));
+});
+
+const exploreStatusEl = document.getElementById("explore-status");
+let lastExploreStatus = null;
+let lastExploreStatusAt = 0;
+let exploreMsgUntil = 0; // suppresses the regular readout for a transient message (e.g. save confirmation)
+
+new ROSLIB.Topic({
+  ros,
+  name: `/${ROBOT_ID}/explore_status`,
+  messageType: "std_msgs/String",
+  reconnect_on_close: true,
+}).subscribe((msg) => {
+  try {
+    lastExploreStatus = JSON.parse(msg.data);
+  } catch (e) {
+    return;
+  }
+  lastExploreStatusAt = performance.now();
+});
+
+function updateExploreStatus() {
+  if (performance.now() < exploreMsgUntil) return;
+  const now = performance.now();
+  if (!lastExploreStatus || now - lastExploreStatusAt > 6000) {
+    exploreStatusEl.textContent = "explorer: not running";
+    return;
+  }
+  const s = lastExploreStatus;
+  const pct = s.explored_pct != null ? `${s.explored_pct}%` : "?";
+  const goal = s.current_goal
+    ? ` -> (${s.current_goal.x.toFixed(1)}, ${s.current_goal.y.toFixed(1)})`
+    : "";
+  exploreStatusEl.textContent =
+    `explorer: ${s.state}${goal} · mapped ${pct} · blacklisted ${s.blacklisted}`;
+}
+setInterval(updateExploreStatus, 500);
+
+// RTAB-Map's database is written continuously as it maps (see docs/running.md
+// "Map lifecycle") — this button doesn't create persistence, it triggers
+// rtabmap's own `backup` service (std_srvs/Empty) for a labeled, timestamped
+// snapshot of the working DB you can point --map at later.
+const rtabmapBackup = new ROSLIB.Service({
+  ros,
+  name: `/${ROBOT_ID}/rtabmap/backup`,
+  serviceType: "std_srvs/srv/Empty",
+});
+document.getElementById("explore-save").addEventListener("click", () => {
+  exploreMsgUntil = performance.now() + 3000;
+  exploreStatusEl.textContent = "saving…";
+  rtabmapBackup.callService(
+    new ROSLIB.ServiceRequest({}),
+    () => {
+      exploreMsgUntil = performance.now() + 3000;
+      exploreStatusEl.textContent = "map backed up ✓ (see ~/.ros/*.back)";
+    },
+    (err) => {
+      exploreMsgUntil = performance.now() + 3000;
+      exploreStatusEl.textContent = "map backup failed — see console";
+      console.error("rtabmap backup failed", err);
+    }
+  );
+});
+
 // -- map + robot trail ------------------------------------------------
 
 const canvas = document.getElementById("map-canvas");
@@ -521,8 +650,13 @@ new ROSLIB.Topic({
 // Its own OccupancyGrid with its own origin/resolution — NOT necessarily the
 // same grid as the SLAM map, so it's rendered to a separate offscreen canvas
 // (in its own cell space) and blitted in world coords during drawFrame().
-// 0..100 cost -> translucent yellow->red tint; 0 and unknown(-1) stay clear
-// so the map underneath still shows through.
+// 0..100 cost -> translucent yellow->red tint; 0 (known free) stays fully
+// clear. Unknown (-1) gets a faint violet tint of its own — nav2_params.yaml
+// sets track_unknown_space: true, so "the planner hasn't seen this yet" is a
+// real, distinct state from "the planner has seen this and it's clear",
+// which matters a lot once autonomous exploration is driving: a frontier is
+// exactly the boundary between these two. They used to render identically
+// (both `v <= 0` -> fully transparent), which silently erased that boundary.
 const costmapToggle = document.getElementById("costmap-toggle");
 let costmapInfo = null;
 
@@ -546,8 +680,15 @@ new ROSLIB.Topic({
       const v = data[row * w + col];
       const dstRow = h - 1 - row; // match worldToPixel's row flip
       const i = (dstRow * w + col) * 4;
-      if (v <= 0) {
-        img.data[i + 3] = 0; // free or unknown -> transparent
+      if (v < 0) {
+        img.data[i] = 140;
+        img.data[i + 1] = 110;
+        img.data[i + 2] = 220;
+        img.data[i + 3] = 26; // faint — a hint, not a competing layer
+        continue;
+      }
+      if (v === 0) {
+        img.data[i + 3] = 0; // known free -> transparent
         continue;
       }
       // Yellow (low cost) -> red (lethal). Alpha grows with cost but capped
@@ -561,6 +702,34 @@ new ROSLIB.Topic({
   }
   octx.putImageData(img, 0, 0);
   costmapCanvas = off;
+});
+
+// -- frontier markers (nodes/explorer.py, autonomous exploration) ---------
+// visualization_msgs/MarkerArray of SPHERE markers, one per frontier cluster
+// candidate, already colored/sized by the explorer (the best-scored one is
+// bigger and brighter orange — see explorer.py's _publish_frontier_markers).
+// Rebuilt wholesale from each message rather than diffed against the
+// previous one: the array always carries a DELETEALL first (action 2)
+// followed by the current ADD set (action 0), so replacing frontierMarkers
+// outright already reflects that without any special-casing here.
+let frontierMarkers = []; // [{x, y, r, color}]
+
+new ROSLIB.Topic({
+  ros,
+  name: `/${ROBOT_ID}/frontiers`,
+  messageType: "visualization_msgs/MarkerArray",
+  reconnect_on_close: true,
+}).subscribe((msg) => {
+  frontierMarkers = msg.markers
+    .filter((m) => m.action === 0) // ADD only; skip the leading DELETEALL
+    .map((m) => ({
+      x: m.pose.position.x,
+      y: m.pose.position.y,
+      r: (m.scale.x || 0.14) / 2,
+      color: `rgba(${Math.round((m.color.r || 0) * 255)}, ` +
+             `${Math.round((m.color.g || 0) * 255)}, ` +
+             `${Math.round((m.color.b || 0) * 255)}, ${m.color.a ?? 1})`,
+    }));
 });
 
 // -- Nav2 planned path ----------------------------------------------------
@@ -761,6 +930,17 @@ function drawFrame() {
     const dW = (cm.width * cm.resolution) / mapInfo.resolution;
     const dH = (cm.height * cm.resolution) / mapInfo.resolution;
     ctx.drawImage(costmapCanvas, dx, dy, dW, dH);
+  }
+
+  // Frontier candidates (autonomous exploration). Drawn under the trail/goal/
+  // robot marker so those stay legible even with many frontiers on screen.
+  for (const fm of frontierMarkers) {
+    const [px, py] = worldToPixel(fm.x, fm.y);
+    const r = Math.max(2, fm.r / mapInfo.resolution);
+    ctx.fillStyle = fm.color;
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, 2 * Math.PI);
+    ctx.fill();
   }
 
   // Nav2 planned path (orange), distinct from the cyan odom trail below.

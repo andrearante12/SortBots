@@ -1,9 +1,14 @@
-# Nav2 params for the SortBots warehouse demo, robot_0 only.
+# Nav2 params for the SortBots warehouse demo.
 #
-# Single-robot MVP: frame ids below are hardcoded to `robot_0/base_link` and
-# `robot_0/odom` to match `launch/sortbots_rtabmap_robot.launch.py`'s TF
-# tree. Multi-robot Nav2 (per-robot params via RewrittenYaml, or separate TF
-# trees) is deferred to the Phase 5+ multi-agent track — out of scope here.
+# Frame ids and one absolute topic below are written as `robot_0/base_link`,
+# `robot_0/odom`, `/robot_0/camera/depth/points`, `/robot_0/map` — this file
+# on disk IS the robot_0 params. For any other robot,
+# `launch/sortbots_nav2.launch.py` rewrites every "robot_0" substring in a
+# string value to the actual `robot_id` at launch time (see that file's
+# `_rewrite_robot_0()` — a value-substring replace, not RewrittenYaml,
+# because `global_frame` appears 4 times below wanting 3 different outcomes).
+# You will not see robot_1 anywhere in THIS file; it only ever exists in the
+# rewritten temp copy.
 #
 # No map_server / amcl: RTAB-Map (already running, see
 # sortbots_rtabmap_robot.launch.py) owns SLAM, publishes `map` (namespaced to
@@ -44,11 +49,27 @@
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.5
-      movement_time_allowance: 10.0
+      # Was 10.0. Loosened after live exploration testing: multi-meter
+      # frontier goals routinely need a brief rotate-in-place before the
+      # holonomic base commits to a heading, which the tight original window
+      # was reading as "no progress" and aborting — "Failed to make
+      # progress" in controller_server's log — well before the robot had
+      # actually stalled. This was a pre-flagged risk (SimpleProgressChecker
+      # aborting frontier goals too aggressively), not a new regression.
+      movement_time_allowance: 20.0
 
     goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.15
+      # Was 0.15. Measured live during frontier exploration: the robot
+      # routinely settles ~0.2-0.25 m from a frontier goal (e.g. one capture
+      # mid-run: goal (6.50, 3.65), robot at (6.31, 3.79) = 0.234 m) and then
+      # times out never satisfying 0.15 m — not because it's stuck, but
+      # because a frontier goal sits right at the edge of currently-known
+      # space, which is an inherently harder final-approach target than an
+      # interior waypoint. 0.25 m still leaves plenty of margin for
+      # task_manager's dispatched pick/place docking (dock_offset_m in
+      # configs/waypoints.yaml is a 0.5 m standoff already).
+      xy_goal_tolerance: 0.25
       yaw_goal_tolerance: 0.15
       stateful: true
 
@@ -152,7 +173,29 @@
       resolution: 0.05
       footprint: "[[0.25, 0.2], [0.25, -0.2], [-0.25, -0.2], [-0.25, 0.2]]"
       track_unknown_space: true
-      plugins: ["static_layer", "inflation_layer"]
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      # Without this the global costmap only ever sees RTAB-Map's projected
+      # SLAM map (static_layer) — a coarse, ~1 Hz-updated grid. Live obstacles
+      # that haven't made it into that grid yet are invisible to the GLOBAL
+      # planner, so it can route a long-distance frontier goal straight
+      # through them; the LOCAL costmap's own obstacle_layer (below) then
+      # fights the plan every replan cycle, and the robot can stall against
+      # geometry it's already staring at. Same depth_scan source as
+      # local_costmap's obstacle_layer — this was flagged as a known risk
+      # ("one-line change if it bites") and it bit on the first live
+      # exploration run: robot wedged against geometry, 45s goal timeouts,
+      # constant "Passing new path to controller" replans with zero progress.
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: depth_scan
+        depth_scan:
+          topic: /robot_0/camera/depth/points
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          max_obstacle_height: 1.5
+          min_obstacle_height: 0.05
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: true

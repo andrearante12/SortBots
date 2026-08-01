@@ -1,0 +1,17 @@
+# Robot ids the web dashboard's robot switcher offers (webui/app.js,
+# GET /api/robots in webui/serve.py). This is display-only bookkeeping — it
+# does NOT start or configure anything itself. Keep it in sync by hand with
+# whatever's actually brought up: scripts/spawn_warehouse.py --robots N and
+# launch/sortbots_bringup.launch.py robot_ids:=... .
+#
+# Switching robots in the dashboard reloads the page with a `?robot=<id>`
+# query param rather than hot-swapping subscriptions live — every one of
+# app.js's ~15 ROSLIB.Topic subscriptions is constructed once at page load
+# against a single ROBOT_ID; a live hot-swap would mean re-architecting all
+# of them to be re-creatable, which is real scope beyond a robot picker.
+# A reload is instant and correct; it just isn't seamless.
+
+default: robot_0
+robots:
+  - robot_0
+  - robot_1

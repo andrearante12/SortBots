@@ -26,6 +26,7 @@ import yaml
 
 WEBUI_DIR = Path(__file__).resolve().parent
 WAYPOINTS_CONFIG = WEBUI_DIR.parent / "configs" / "waypoints.yaml"
+ROBOTS_CONFIG = WEBUI_DIR.parent / "configs" / "robots.yaml"
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -45,12 +46,29 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if self.path == "/api/waypoints":
             self._serve_waypoints()
             return
+        if self.path == "/api/robots":
+            self._serve_robots()
+            return
         super().do_GET()
 
     def _serve_waypoints(self):
         with open(WAYPOINTS_CONFIG) as f:
             stations = yaml.safe_load(f)["stations"]
-        body = json.dumps(stations).encode("utf-8")
+        self._serve_json(stations)
+
+    def _serve_robots(self):
+        # configs/robots.yaml is display-only bookkeeping for the dashboard's
+        # robot switcher (see that file's header) — if it's missing, degrade
+        # to the single-robot default rather than erroring the whole page.
+        if ROBOTS_CONFIG.exists():
+            with open(ROBOTS_CONFIG) as f:
+                data = yaml.safe_load(f)
+        else:
+            data = {"default": "robot_0", "robots": ["robot_0"]}
+        self._serve_json(data)
+
+    def _serve_json(self, obj) -> None:
+        body = json.dumps(obj).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))

@@ -6,7 +6,7 @@ Owns one robot's task queue and drives it through:
     IDLE -> NAV_TO_PICKUP -> PICKING -> NAV_TO_DROPOFF -> PLACING -> DONE
                  \\-> FAILED (nav abort/reject) <-/
 
-Talks to two things, both already running:
+Talks to three things:
   - Nav2 (`launch/sortbots_nav2.launch.py`) via the `navigate_to_pose` action.
   - `nodes/scripted_pick.py` via plain String topics (not a ROS 2 service —
     matches the subscribe-and-poll style the Isaac side already uses for
@@ -16,6 +16,16 @@ Talks to two things, both already running:
     once its arm motion (and Isaac's mock-weld) finishes. A fixed timeout
     (`PICK_TIMEOUT_SEC`) is a safety net only, in case scripted_pick.py
     isn't running — the real completion signal is the result message.
+  - `nodes/explorer.py`, if it's running (optional; nothing below breaks if
+    it isn't). Both nodes drive the same single-goal-at-a-time
+    navigate_to_pose action server, so they arbitrate: this node subscribes
+    `<robot>/explore_status` and refuses to pop the task queue while the
+    explorer reports state "exploring", and it publishes "stop" on
+    `<robot>/explore_cmd` the moment a task is dispatched during that state
+    (see _on_explore_status / _on_dispatch). Nav2 itself would silently let
+    a new goal preempt the old one either way — this gate exists so the
+    explorer's own replan timer doesn't immediately fight back with another
+    frontier goal.
 
 No custom .msg/.srv package: the repo has no ament package scaffolding yet
 (everything runs as loose scripts — see docs/setup.md), so task dispatch and
@@ -111,6 +121,7 @@ class TaskManager(Node):
         self.state = "IDLE"
         self.current_task: Task | None = None
         self._pick_timeout_deadline: float | None = None
+        self._explorer_active = False
 
         self.nav_client = ActionClient(
             self, NavigateToPose, f"/{robot_id}/navigate_to_pose"
@@ -119,12 +130,16 @@ class TaskManager(Node):
             String, f"/{robot_id}/pick_request", 10
         )
         self.status_pub = self.create_publisher(String, f"/{robot_id}/task_status", 10)
+        self.explore_cmd_pub = self.create_publisher(String, f"/{robot_id}/explore_cmd", 10)
 
         self.create_subscription(
             String, f"/{robot_id}/dispatch_task", self._on_dispatch, 10
         )
         self.create_subscription(
             String, f"/{robot_id}/pick_result", self._on_pick_result, 10
+        )
+        self.create_subscription(
+            String, f"/{robot_id}/explore_status", self._on_explore_status, 10
         )
 
         self._nav_goal_handle = None
@@ -159,11 +174,26 @@ class TaskManager(Node):
             f"queued task {task.task_id}: {task.pickup} -> {task.dropoff} "
             f"(queue depth {len(self.queue)})"
         )
+        if self._explorer_active:
+            stop_msg = String()
+            stop_msg.data = "stop"
+            self.explore_cmd_pub.publish(stop_msg)
+            self.get_logger().info(
+                "dispatch received while explorer was active — sent stop so it "
+                "releases the nav goal server for this task"
+            )
+
+    def _on_explore_status(self, msg: String) -> None:
+        try:
+            status = json.loads(msg.data)
+        except json.JSONDecodeError:
+            return
+        self._explorer_active = status.get("state") == "exploring"
 
     # -- FSM ------------------------------------------------------------
 
     def _tick(self) -> None:
-        if self.state == "IDLE" and self.queue:
+        if self.state == "IDLE" and self.queue and not self._explorer_active:
             self.current_task = self.queue.popleft()
             self._start_nav(self.current_task.pickup, next_state="NAV_TO_PICKUP")
         elif self.state in ("PICKING", "PLACING") and self._pick_timeout_deadline is not None:

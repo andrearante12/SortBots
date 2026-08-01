@@ -18,7 +18,15 @@
 # Usage:
 #   scripts/run_demo.sh [--robot-id robot_0] [--robots 1] [--scene nvidia]
 #                       [--headless] [--teleop] [--localize] [--map PATH]
+#                       [--explore]
 #   scripts/run_demo.sh stop      # tear the whole pipeline down
+#
+# --explore starts nodes/explorer.py, which autonomously maps the warehouse
+# with no human input (frontier-based: drives toward the nearest unexplored
+# opening until none remain). Combine with --localize to instead navigate
+# hands-off on an already-built map (task_manager's dispatch queue still
+# works normally; nodes/task_manager.py and nodes/explorer.py arbitrate over
+# the shared Nav2 goal server — see task_manager.py's module docstring).
 #
 # Re-running it auto-stops any existing pipeline first, so it doubles as a
 # "reset the environment" button.
@@ -52,8 +60,9 @@ stop_pipeline() {
            controller_server planner_server smoother_server behavior_server \
            bt_navigator waypoint_follower velocity_smoother lifecycle_manager \
            component_container rosbridge_websocket web_video_server \
-           "webui/serve.py" webui_url.py task_manager.py rtabmap_cloud_pump.py \
-           web_video_watchdog.sh wasd_teleop "spawn_warehouse.py"; do
+           "webui/serve.py" webui_url.py task_manager.py explorer.py \
+           rtabmap_cloud_pump.py web_video_watchdog.sh wasd_teleop \
+           "spawn_warehouse.py"; do
     pkill -9 -f "$p" 2>/dev/null || true
   done
   sleep 1
@@ -68,7 +77,7 @@ fi
 # ---- args ----
 # Teleop defaults OFF — the dashboard drive pad replaces the WASD window.
 ROBOT_ID=robot_0; ROBOTS=1; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=0
-LOCALIZE=false; MAP_DB=""
+LOCALIZE=false; MAP_DB=""; EXPLORE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
@@ -79,7 +88,8 @@ while [[ $# -gt 0 ]]; do
     --no-teleop) TELEOP=0; shift;;  # accepted for back-compat (already the default)
     --localize) LOCALIZE=true; shift;;
     --map)      MAP_DB="$2";  shift 2;;
-    -h|--help) sed -n '2,33p' "$0"; exit 0;;
+    --explore)  EXPLORE=true; shift;;
+    -h|--help) sed -n '2,38p' "$0"; exit 0;;
     *) echo "[run_demo] unknown arg: $1"; exit 2;;
   esac
 done
@@ -147,7 +157,8 @@ setsid bash -c "source '$ROS_SETUP'; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
        robot_id:=$ROBOT_ID use_sim_time:=true rviz:=false \
        dashboard_port:=$DASHBOARD_PORT \
-       localization:=$LOCALIZE database_path:='$MAP_DB'" \
+       localization:=$LOCALIZE database_path:='$MAP_DB' \
+       explore:=$EXPLORE" \
   >"$BRINGUP_LOG" 2>&1 &
 sleep 12
 echo "[run_demo] ROS 2 stack up (see $BRINGUP_LOG)."
@@ -183,6 +194,7 @@ cat <<EOF
         - drag on the map to send a Nav2 goal; drive pad; pickup->dropoff dispatch
     * Nav2 + RTAB-Map   : running headless (rviz off; the dashboard replaces it)
     * Map               : $MAP_DB $( [[ "$LOCALIZE" == "true" ]] && echo "(localization — read-only)" || echo "(mapping — rebuilt this run)" )
+$( [[ $EXPLORE == "true" ]] && echo "    * Explorer          : autonomous frontier exploration — no human input needed" )
 $( [[ $TELEOP -eq 1 ]] && echo "    * WASD teleop       : w/s fwd-back  a/d turn  q/e strafe  space stop  k quit" )
   Logs : $SIM_LOG
          $BRINGUP_LOG
