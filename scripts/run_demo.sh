@@ -17,28 +17,34 @@
 #
 # Usage:
 #   scripts/run_demo.sh [--robot-id robot_0] [--robots 1] [--scene nvidia]
-#                       [--headless] [--teleop] [--localize] [--map PATH]
-#                       [--explore]
+#                       [--headless] [--teleop] [--localize | --resume]
+#                       [--map PATH] [--explore]
 #   scripts/run_demo.sh stop      # tear the whole pipeline down
 #
 # --explore starts nodes/explorer.py, which autonomously maps the warehouse
 # with no human input (frontier-based: drives toward the nearest unexplored
-# opening until none remain). Combine with --localize to instead navigate
-# hands-off on an already-built map (task_manager's dispatch queue still
-# works normally; nodes/task_manager.py and nodes/explorer.py arbitrate over
-# the shared Nav2 goal server — see task_manager.py's module docstring).
+# opening until none remain). Combine with --localize for hands-off
+# task_manager dispatch on an already-built map (nodes/task_manager.py and
+# nodes/explorer.py arbitrate over the shared Nav2 goal server — see
+# task_manager.py's module docstring) — NOT for continuing to explore new
+# territory, since --localize is read-only and never grows the map. For
+# that, use --resume --explore (see below).
 #
 # Re-running it auto-stops any existing pipeline first, so it doubles as a
 # "reset the environment" button.
 #
-# Map lifecycle — build a map once, then navigate on it afterwards:
+# Map lifecycle — three modes, build once and reuse:
 #
-#   scripts/run_demo.sh --teleop     # drive around; map builds from scratch
-#   scripts/run_demo.sh stop         # map persists in ~/.ros/sortbots_<id>.db
-#   scripts/run_demo.sh --localize   # reopen that map, localize, send nav goals
+#   scripts/run_demo.sh --teleop              # drive around; map builds from scratch
+#   scripts/run_demo.sh stop                  # map persists in ~/.ros/sortbots_<id>.db
+#   scripts/run_demo.sh --localize            # read-only: reopen that map, send nav goals
+#   scripts/run_demo.sh --resume --explore    # keep MAPPING: extend that map, autonomously
 #
-# Without --localize every run starts from an empty database, so a mapping run
-# always means what it says. --localize never deletes.
+# Default (neither flag) starts every run from an empty database, so a plain
+# mapping run always means what it says. --localize never modifies the map at
+# all. --resume is the middle ground: still mapping (RTAB-Map keeps growing
+# the pose graph), just starting from the existing database instead of an
+# empty one — "continue exploring from where a prior session left off".
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,7 +83,7 @@ fi
 # ---- args ----
 # Teleop defaults OFF — the dashboard drive pad replaces the WASD window.
 ROBOT_ID=robot_0; ROBOTS=1; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=0
-LOCALIZE=false; MAP_DB=""; EXPLORE=false
+LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
@@ -87,24 +93,36 @@ while [[ $# -gt 0 ]]; do
     --teleop)    TELEOP=1; shift;;
     --no-teleop) TELEOP=0; shift;;  # accepted for back-compat (already the default)
     --localize) LOCALIZE=true; shift;;
+    --resume)   RESUME=true; shift;;
     --map)      MAP_DB="$2";  shift 2;;
     --explore)  EXPLORE=true; shift;;
-    -h|--help) sed -n '2,38p' "$0"; exit 0;;
+    -h|--help) sed -n '2,47p' "$0"; exit 0;;
     *) echo "[run_demo] unknown arg: $1"; exit 2;;
   esac
 done
 
+if [[ "$LOCALIZE" == "true" && "$RESUME" == "true" ]]; then
+  echo "ERROR: --localize and --resume are mutually exclusive (read-only vs. keep-mapping)."
+  exit 2
+fi
+
 # Default matches launch/sortbots_rtabmap_robot.launch.py's database_path.
 [[ -z "$MAP_DB" ]] && MAP_DB="$HOME/.ros/sortbots_${ROBOT_ID}.db"
 
-# Localizing against a map that was never built is a confusing failure mode —
-# RTAB-Map comes up, publishes nothing, and every nav goal is rejected for want
-# of a map. Catch it here instead.
-if [[ "$LOCALIZE" == "true" && ! -f "$MAP_DB" ]]; then
-  echo "ERROR: --localize needs an existing map, but $MAP_DB does not exist."
+# Localizing/resuming against a map that was never built is a confusing
+# failure mode — RTAB-Map comes up, publishes nothing, and every nav goal is
+# rejected for want of a map. Catch it here instead.
+if [[ ( "$LOCALIZE" == "true" || "$RESUME" == "true" ) && ! -f "$MAP_DB" ]]; then
+  echo "ERROR: --localize/--resume need an existing map, but $MAP_DB does not exist."
   echo "       Build one first:  scripts/run_demo.sh --teleop"
   exit 1
 fi
+
+# --resume passes delete_db_on_start:=false explicitly below (bringup's
+# default is true otherwise) — mapping mode (RTAB-Map keeps growing the pose
+# graph, unlike --localize's read-only Mem/IncrementalMemory=false), started
+# from the EXISTING database instead of wiping it. This is the "continue
+# exploring from where a prior session left off" mode.
 
 # Must be a clean shell — Isaac's activate refuses if ROS 2 is sourced.
 if [[ -n "${AMENT_PREFIX_PATH:-}" ]]; then
@@ -141,8 +159,12 @@ else
 fi
 
 # ---- 2. ROS 2 side: SLAM + Nav2 + dashboard + task manager (one launch) ----
+DELETE_DB_ON_START=true
 if [[ "$LOCALIZE" == "true" ]]; then
   echo "[run_demo] LOCALIZATION mode — reusing the map at $MAP_DB (not modified)."
+elif [[ "$RESUME" == "true" ]]; then
+  DELETE_DB_ON_START=false
+  echo "[run_demo] RESUME mapping — extending the existing map at $MAP_DB."
 else
   echo "[run_demo] MAPPING mode — building a fresh map into $MAP_DB."
 fi
@@ -158,6 +180,7 @@ setsid bash -c "source '$ROS_SETUP'; \
        robot_id:=$ROBOT_ID use_sim_time:=true rviz:=false \
        dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
+       delete_db_on_start:=$DELETE_DB_ON_START \
        explore:=$EXPLORE" \
   >"$BRINGUP_LOG" 2>&1 &
 sleep 12
@@ -193,7 +216,7 @@ cat <<EOF
         - live SLAM map + trail, Nav2 path/costmap overlays, SLAM status
         - drag on the map to send a Nav2 goal; drive pad; pickup->dropoff dispatch
     * Nav2 + RTAB-Map   : running headless (rviz off; the dashboard replaces it)
-    * Map               : $MAP_DB $( [[ "$LOCALIZE" == "true" ]] && echo "(localization — read-only)" || echo "(mapping — rebuilt this run)" )
+    * Map               : $MAP_DB $( [[ "$LOCALIZE" == "true" ]] && echo "(localization — read-only)" || { [[ "$RESUME" == "true" ]] && echo "(resumed — extending existing map)" || echo "(mapping — rebuilt this run)"; } )
 $( [[ $EXPLORE == "true" ]] && echo "    * Explorer          : autonomous frontier exploration — no human input needed" )
 $( [[ $TELEOP -eq 1 ]] && echo "    * WASD teleop       : w/s fwd-back  a/d turn  q/e strafe  space stop  k quit" )
   Logs : $SIM_LOG

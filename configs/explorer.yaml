@@ -39,8 +39,16 @@ goal_timeout_s: 75.0
 replan_period_s: 2.0
 
 # Consecutive empty replan cycles (no valid frontier candidates) before
-# declaring exploration done.
-done_after_empty_cycles: 5
+# declaring exploration done. Was 5 (10s at replan_period_s=2.0); raised
+# after live testing on --resume: RTAB-Map's projected /map only reflects
+# the robot's IMMEDIATE surroundings right after startup against an existing
+# multi-session database (confirmed live: WM=706 nodes loaded, but only 3
+# active in the grid) — it only grows as the robot actively moves (watched
+# it climb 3->9 over 15s of driving). A resumed explorer sees almost no
+# frontiers at first for that reason alone, not because there's nothing left
+# to explore, and 10s isn't enough runway for even one successful goal to
+# kick the map-catchup into motion. 30 (60s) gives it room to try.
+done_after_empty_cycles: 30
 
 # Ignore frontiers farther than this from the robot. Keeps goals achievable
 # and bounds planning time — without this the explorer can pick a distant

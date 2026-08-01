@@ -76,7 +76,12 @@
     display: block;
     position: absolute; inset: 0;
     width: 100%; height: 100%;
-    object-fit: contain;   /* letterbox rather than distort the feed */
+    /* cover, not contain: the feed is 16:9 but the stage box is closer to
+       square, so "contain" letterboxed it with huge black bars top/bottom —
+       leaving the label/PiP/pads stranded in dead space instead of actually
+       overlaid on the picture. cover crops the sides instead, filling the
+       box edge-to-edge. */
+    object-fit: cover;
   }
   .stage-view.stage-pip {
     display: block;

@@ -353,8 +353,29 @@ never modified — verified by checksum across a full run. `--delete_db_on_start
 is forced off whenever `localization:=true`; deleting the map you are about to
 localize against is a footgun, not a preference.
 
-Nav2 needs no changes between the two modes: its static layer consumes the same
-`map` topic either way.
+Nav2 needs no changes between any of these modes: its static layer consumes
+the same `map` topic regardless.
+
+### Resuming exploration into an existing map
+
+`--localize` is deliberately read-only (`Mem/IncrementalMemory=false`) — it
+will never reveal new territory, so autonomous exploration against a
+`--localize` session just re-walks whatever was already known. To actually
+**continue exploring** — extend a map from a prior session instead of either
+starting fresh or being stuck read-only — use `--resume`:
+
+```bash
+scripts/run_demo.sh --resume --explore --map data/runs/<name>/map/rtabmap.db
+```
+
+`--resume` is mapping mode (RTAB-Map keeps growing the pose graph, same as a
+plain fresh run) but with `delete_db_on_start:=false`, so it starts from the
+existing database instead of wiping it. `--localize` and `--resume` are
+mutually exclusive (read-only vs. keep-mapping). The explorer's blacklist is
+in-memory only and does not persist across restarts — a fresh `explorer.py`
+process re-evaluates every current frontier from a clean slate, which is
+usually desirable (a previously-blacklisted point that's since been driven
+past may well be reachable now).
 
 ### Occupancy-grid tuning (why the map has usable free space)
 

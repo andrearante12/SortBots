@@ -77,6 +77,7 @@ def _make_per_robot_actions(
     task_manager,
     localization,
     database_path,
+    delete_db_on_start,
     explore,
     explore_autostart,
     robot_id_cfg,
@@ -89,14 +90,15 @@ def _make_per_robot_actions(
     actions = []
     for rid in robot_ids:
         rtabmap_args = {"robot_id": rid, "use_sim_time": use_sim_time, "rviz": rviz}
-        # Map-lifecycle overrides (localization / an explicit --map path) are
-        # a single-robot concept today — see module docstring. Every OTHER
-        # robot in a multi-robot robot_ids list falls through to
-        # sortbots_rtabmap_robot.launch.py's own per-robot default
-        # (~/.ros/sortbots_<rid>.db, mapping mode), which is already correct
-        # and collision-free without any override from here.
+        # Map-lifecycle overrides (localization / an explicit --map path /
+        # delete_db_on_start) are a single-robot concept today — see module
+        # docstring. Every OTHER robot in a multi-robot robot_ids list falls
+        # through to sortbots_rtabmap_robot.launch.py's own per-robot default
+        # (~/.ros/sortbots_<rid>.db, mapping mode, delete_db_on_start=true),
+        # which is already correct and collision-free without any override.
         if rid == primary_robot_id:
             rtabmap_args["localization"] = localization
+            rtabmap_args["delete_db_on_start"] = delete_db_on_start
             rtabmap_args["database_path"] = database_path
         actions.append(IncludeLaunchDescription(
             _include("sortbots_rtabmap_robot.launch.py"),
@@ -158,6 +160,7 @@ def generate_launch_description():
     dashboard_port = LaunchConfiguration("dashboard_port")
     localization = LaunchConfiguration("localization")
     database_path = LaunchConfiguration("database_path")
+    delete_db_on_start = LaunchConfiguration("delete_db_on_start")
     explore = LaunchConfiguration("explore")
     explore_autostart = LaunchConfiguration("explore_autostart")
 
@@ -227,6 +230,19 @@ def generate_launch_description():
             description="Where the map is saved to / loaded from.",
         ),
         DeclareLaunchArgument(
+            "delete_db_on_start",
+            default_value="true",
+            description=(
+                "Start mapping from an empty database. Set false (with "
+                "localization:=false) to RESUME mapping into an existing "
+                "database instead of wiping it — 'keep exploring from where "
+                "a prior session left off', as opposed to localization:=true "
+                "which is read-only and never grows the map. Ignored when "
+                "localization:=true (never deletes what you're localizing "
+                "against — see sortbots_rtabmap_robot.launch.py)."
+            ),
+        ),
+        DeclareLaunchArgument(
             "explore",
             default_value="false",
             description=(
@@ -262,7 +278,8 @@ def generate_launch_description():
             function=_make_per_robot_actions,
             args=[
                 use_sim_time, rviz, nav2, task_manager, localization,
-                database_path, explore, explore_autostart, robot_id, robot_ids,
+                database_path, delete_db_on_start, explore, explore_autostart,
+                robot_id, robot_ids,
             ],
         ),
     ])

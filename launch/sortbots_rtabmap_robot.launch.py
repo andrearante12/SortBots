@@ -59,6 +59,25 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #                        default 0.0 means "disabled", i.e. everything above
 #                        the robot gets projected down into the 2D map. 1.5 m
 #                        keeps shelf tops and ceiling structure out of it.
+#   Mem/InitWMWithAllNodes=true
+#                        Working Memory otherwise initializes with only the
+#                        PREVIOUS session's nodes (RTAB-Map's own docs: "When
+#                        false, it is initialized with nodes of the previous
+#                        session") — every earlier session's nodes sit
+#                        loaded-but-inactive in Long-Term Memory and only
+#                        reactivate as the robot happens to revisit them.
+#                        On a `--resume` run (mapping mode against an
+#                        existing multi-session database) that means /map
+#                        starts nearly empty even though the full graph is
+#                        intact — confirmed live: WM=706 nodes total but
+#                        only 3 active in the projected grid, and the
+#                        explorer immediately declared "done" against that
+#                        near-empty view. `true` loads the WHOLE database
+#                        active at startup instead. Safe on a from-scratch
+#                        mapping run too — nothing in LTM yet, so it's a
+#                        no-op there. (Localization mode already sets this
+#                        via upstream rtabmap.launch.py; mapping mode never
+#                        did, which is the gap this closes.)
 #
 # Grid/Sensor is left alone: its default (1 = depth image) is already correct,
 # and note it REPLACED the older Grid/FromDepth, which no longer exists.
@@ -66,7 +85,8 @@ GRID_ARGS = (
     "--Grid/3D false "
     "--Grid/RayTracing true "
     "--Grid/RangeMax 5.0 "
-    "--Grid/MaxObstacleHeight 1.5"
+    "--Grid/MaxObstacleHeight 1.5 "
+    "--Mem/InitWMWithAllNodes true"
 )
 
 
