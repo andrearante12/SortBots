@@ -84,6 +84,17 @@ def _make_nav2_group(context, use_sim_time, params_file):
     robot_id = LaunchConfiguration("robot_id").perform(context)
     rewritten_params = _rewrite_robot_0(params_file.perform(context), robot_id)
 
+    # Reactive-replanning BT (see the file's header for what it changes vs
+    # the stock tree). Injected as a parameter override rather than written
+    # into nav2_params.yaml so no machine-specific absolute path lands in
+    # configs. The path contains no "robot_0" substring for _rewrite_robot_0
+    # to mangle, and the XML's relative topic/service names resolve under
+    # each robot's namespace — one file serves all robots.
+    bt_xml = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "configs", "bt", "navigate_to_pose_reactive.xml",
+    )
+
     return [GroupAction([
             PushRosNamespace(robot_id),
 
@@ -146,7 +157,9 @@ def _make_nav2_group(context, use_sim_time, params_file):
                 executable="bt_navigator",
                 name="bt_navigator",
                 output="screen",
-                parameters=[rewritten_params],
+                # Later dicts override the params file.
+                parameters=[rewritten_params,
+                            {"default_nav_to_pose_bt_xml": bt_xml}],
             ),
             Node(
                 package="nav2_waypoint_follower",

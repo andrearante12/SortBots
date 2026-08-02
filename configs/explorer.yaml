@@ -28,12 +28,58 @@ blacklist_radius_m: 0.5
 # 0 = never expire.
 blacklist_ttl_s: 120.0
 
-# Cancel + blacklist a goal that hasn't finished within this long. Backstop
-# for cases nav2_params.yaml's SimpleProgressChecker doesn't catch. Was 45.0;
-# raised after live testing showed genuine multi-meter frontier goals
-# (holonomic base, ~0.3-0.5 m/s realistic speed, occasional recovery-behavior
-# detour) routinely needing more than that even while making real progress.
+# Cancel + blacklist a goal that hasn't finished within this long. Now the
+# LAST-RESORT backstop behind the stuck watchdog below (stuck_window_s /
+# stuck_min_displacement_m), which catches a wedged robot much sooner; this
+# only fires for goals that keep moving but never arrive. Was 45.0; raised
+# after live testing showed genuine multi-meter frontier goals (diff-drive
+# rotate-then-drive, ~0.3-0.5 m/s realistic speed, occasional
+# recovery-behavior detour) routinely needing more than that even while
+# making real progress.
 goal_timeout_s: 75.0
+
+# Stuck watchdog: if the robot moves less than stuck_min_displacement_m over
+# a sliding stuck_window_s while a goal is active, blacklist the goal and
+# retarget immediately instead of waiting out goal_timeout_s. Complements
+# Nav2's SimpleProgressChecker (0.5 m / 20 s): that one aborts a FollowPath
+# attempt and sends the BT into up to 6 clear/spin/wait/backup recovery
+# rounds first — multi-minute churn when the robot is genuinely wedged in a
+# corner. Firing during a Spin/BackUp recovery is intended: 15 s without
+# 0.15 m of net motion IS the corner-wedge case, and picking a different
+# frontier is the right answer.
+stuck_window_s: 15.0
+stuck_min_displacement_m: 0.15
+
+# Standoff goal placement: instead of sending Nav2 to the frontier cell
+# itself (frequently a wall corner at the edge of known space), place the
+# goal on the nearest known-free cell within goal_standoff_max_m of the
+# frontier that is at least goal_clearance_m from any occupied cell (keep
+# this > nav2_params.yaml's inflation_radius 0.4) and
+# goal_unknown_clearance_m from any unknown cell. Nav2 never has to drive
+# INTO an unmapped corner — the depth camera reveals the frontier just as
+# well from a standoff in open floor, and the goal pose faces the frontier.
+goal_standoff_max_m: 1.5
+goal_clearance_m: 0.45
+goal_unknown_clearance_m: 0.2
+
+# Escape mode: after this many CONSECUTIVE failed goals (stuck watchdog,
+# timeout, or Nav2 abort), abandon nearest-biased scoring for one goal and
+# jump to the FARTHEST valid frontier on the explored boundary, ignoring
+# max_goal_distance_m. Rationale: consecutive failures mean the robot is
+# wedged in a dead-end pocket, and because blacklisting only removes one
+# spot at a time (blacklist_radius_m), nearest-first keeps feeding it the
+# next frontier in the SAME pocket at 15+ s per failure. The farthest
+# boundary edge is by construction outside the pocket, and Nav2 routes to
+# it through known space. Resets on any goal success.
+escape_after_failures: 2
+
+# Openness scoring: score = size * openness^openness_exp / dist^alpha, where
+# openness is the fraction of known-free floor in a window of half-width
+# openness_radius_m around the goal. Wide-open frontiers beat tight-corner
+# ones of similar size/distance — corners are where the robot gets wedged.
+# openness_exp: 0.0 disables the term (reproduces the old scoring exactly).
+openness_radius_m: 0.8
+openness_exp: 1.0
 
 # How often to look for a new/better frontier.
 replan_period_s: 2.0
@@ -50,9 +96,13 @@ replan_period_s: 2.0
 # kick the map-catchup into motion. 30 (60s) gives it room to try.
 done_after_empty_cycles: 30
 
-# Ignore frontiers farther than this from the robot. Keeps goals achievable
+# Prefer frontiers within this distance of the robot. Keeps goals achievable
 # and bounds planning time — without this the explorer can pick a distant
-# frontier across the map while ignoring a closer, more useful one.
+# frontier across the map while ignoring a closer, more useful one. A
+# preference, not a hard filter: when NO frontier is within range (typical
+# after fully mapping a dead-end pocket), the explorer backtracks to the
+# nearest remaining frontier wherever it is, rather than wrongly declaring
+# exploration done.
 max_goal_distance_m: 8.0
 
 # Occupancy value (0-100) at/above which a cell counts as an obstacle.

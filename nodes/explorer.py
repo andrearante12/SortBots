@@ -89,6 +89,14 @@ DEFAULTS = {
     "occupied_thresh": 65,         # cell value >= this counts as an obstacle
     "claim_radius_m": 1.0,         # exclude frontiers this close to another robot's active claim
     "claim_ttl_s": 90.0,           # forget another robot's claim after this long
+    "goal_standoff_max_m": 1.5,    # search radius for a pulled-back goal around a frontier cell
+    "goal_clearance_m": 0.45,      # goal min distance from occupied cells (> inflation 0.4)
+    "goal_unknown_clearance_m": 0.2,  # goal min distance from unknown cells
+    "stuck_window_s": 15.0,        # stuck-watchdog sliding window
+    "stuck_min_displacement_m": 0.15,  # less motion than this over the window => stuck
+    "openness_radius_m": 0.8,      # window for the free-space fraction around a goal
+    "openness_exp": 1.0,           # weight of openness in scoring; 0.0 disables the term
+    "escape_after_failures": 2,    # consecutive failed goals before jumping to the farthest frontier
 }
 
 
@@ -131,8 +139,8 @@ class Frontier:
         self.size = len(cells)
 
 
-def find_frontiers(grid: np.ndarray, occupied_thresh: int, inflate_cells: int) -> list[Frontier]:
-    """Cluster frontier cells (free, adjacent to unknown) in `grid`.
+def grid_masks(grid: np.ndarray, occupied_thresh: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(unknown, occupied, free) boolean masks for an occupancy `grid`.
 
     `grid` is (height, width) int16, values -1 (unknown) or 0..100 (occupancy
     %), matching nav_msgs/OccupancyGrid's row-major convention where
@@ -142,7 +150,13 @@ def find_frontiers(grid: np.ndarray, occupied_thresh: int, inflate_cells: int) -
     unknown = grid < 0
     occupied = grid >= occupied_thresh
     free = (~unknown) & (~occupied)
+    return unknown, occupied, free
 
+
+def find_frontiers(
+    unknown: np.ndarray, occupied: np.ndarray, free: np.ndarray, inflate_cells: int
+) -> list[Frontier]:
+    """Cluster frontier cells (free, adjacent to unknown) from grid_masks()."""
     has_unknown_neighbor = np.zeros_like(free)
     has_unknown_neighbor[:-1, :] |= unknown[1:, :]
     has_unknown_neighbor[1:, :] |= unknown[:-1, :]
@@ -207,6 +221,17 @@ class ExplorerNode(Node):
         self._goal_handle = None
         self._goal_target: tuple[float, float] | None = None
         self._goal_sent_at: float | None = None
+        # (monotonic_ts, x, y) samples while a goal is active, for the stuck
+        # watchdog in _tick(). Cleared on every new goal and on goal end.
+        self._pose_history: deque[tuple[float, float, float]] = deque()
+        # Consecutive goals that ended in stuck/timeout/abort. At
+        # escape_after_failures, _plan_and_send switches to escape mode:
+        # nearest-biased scoring has demonstrably trapped us in a dead-end
+        # pocket (blacklist radius only kills one spot at a time, so the
+        # next-nearest frontier in the SAME pocket wins again), and the way
+        # out is the farthest frontier on the explored boundary instead.
+        # Reset on any goal success.
+        self._consec_failures = 0
         # Bumped on every _send_goal(); goal_response/nav_result callbacks
         # capture the generation they belong to and no-op if it's stale by
         # the time they fire. Necessary because Nav2's navigate_to_pose is a
@@ -257,6 +282,7 @@ class ExplorerNode(Node):
                 self.get_logger().info("explore_cmd: start")
                 self.state = "exploring"
                 self._empty_cycles = 0
+                self._consec_failures = 0
                 self._publish_status()
         elif cmd == "stop":
             self.get_logger().info("explore_cmd: stop")
@@ -348,7 +374,18 @@ class ExplorerNode(Node):
         if self.state != "exploring":
             return
         if self._goal_handle is not None:
-            if (
+            if self._is_stuck():
+                gx, gy = self._goal_target
+                self.get_logger().warn(
+                    f"stuck: moved <{self.cfg['stuck_min_displacement_m']}m in "
+                    f"{self.cfg['stuck_window_s']:.0f}s en route to ({gx:.2f}, {gy:.2f}) "
+                    f"— blacklisting + retargeting"
+                )
+                self._blacklist_point(gx, gy)
+                self._cancel_active_goal(cancel_on_server=False)
+                self._pose_history.clear()
+                self._consec_failures += 1
+            elif (
                 self._goal_sent_at is not None
                 and time.monotonic() - self._goal_sent_at > self.cfg["goal_timeout_s"]
             ):
@@ -359,10 +396,47 @@ class ExplorerNode(Node):
                 )
                 self._blacklist_point(gx, gy)
                 self._cancel_active_goal(cancel_on_server=False)
+                self._consec_failures += 1
             else:
                 self._publish_status()  # heartbeat while a goal is in flight
                 return
         self._plan_and_send()
+
+    def _is_stuck(self) -> bool:
+        """True if the robot has barely moved over the sliding stuck window.
+
+        Complements (does not replace) Nav2's own SimpleProgressChecker
+        (0.5 m / 20 s): that one aborts a FollowPath attempt, which sends the
+        BT into up to 6 clear/spin/wait/backup recovery rounds before the
+        goal finally ABORTs back to us — multi-minute churn when the robot is
+        genuinely wedged. This watchdog cuts that short. It firing DURING a
+        Spin/BackUp recovery is intended, not a bug: 15 s without 0.15 m of
+        net motion is exactly the corner-wedge case, and blacklist + pick a
+        different frontier is the right answer. The cancel is
+        cancel_on_server=False for the same reason as the timeout path — the
+        replacement goal preempts, stale callbacks no-op via the generation
+        counter.
+        """
+        pose = self._robot_pose()
+        if pose is None:
+            return False
+        now = time.monotonic()
+        self._pose_history.append((now, pose[0], pose[1]))
+        window = self.cfg["stuck_window_s"]
+        # Prune, but always keep one sample at age >= window as the anchor:
+        # sampling happens at the replan tick (2 s), so dropping everything
+        # older than the window outright would leave the oldest sample
+        # perpetually ~1 tick younger than the window and the filled check
+        # below would never pass.
+        while len(self._pose_history) >= 2 and now - self._pose_history[1][0] >= window:
+            self._pose_history.popleft()
+        oldest = self._pose_history[0]
+        if now - oldest[0] < window:
+            return False  # window not filled yet
+        max_disp = max(
+            math.hypot(x - oldest[1], y - oldest[2]) for _, x, y in self._pose_history
+        )
+        return max_disp < self.cfg["stuck_min_displacement_m"]
 
     def _plan_and_send(self):
         if self._grid is None or self._map_info is None:
@@ -376,29 +450,94 @@ class ExplorerNode(Node):
             return
         rx, ry = pose
         info = self._map_info
+        res = info.resolution
 
-        inflate_cells = max(0, round(self.cfg["inflate_radius_m"] / info.resolution))
-        frontiers = find_frontiers(self._grid, self.cfg["occupied_thresh"], inflate_cells)
+        unknown, occupied, free = grid_masks(self._grid, self.cfg["occupied_thresh"])
+        inflate_cells = max(0, round(self.cfg["inflate_radius_m"] / res))
+        frontiers = find_frontiers(unknown, occupied, free, inflate_cells)
         frontiers = [f for f in frontiers if f.size >= self.cfg["min_frontier_cells"]]
+
+        # Where a goal may actually be placed: known free space with clearance
+        # from both obstacles and unknown, so Nav2 never has to drive INTO an
+        # unmapped corner — the depth camera reveals the frontier just as well
+        # from a standoff in open floor.
+        clearance_cells = max(0, round(self.cfg["goal_clearance_m"] / res))
+        unknown_clear_cells = max(0, round(self.cfg["goal_unknown_clearance_m"] / res))
+        valid_goal = (
+            free
+            & ~_dilate4(occupied, clearance_cells)
+            & ~_dilate4(unknown, unknown_clear_cells)
+        )
+
+        goals = [self._goal_point(f, info, valid_goal) for f in frontiers]
 
         blacklist = self._active_blacklist()
         claims = self._active_claims()
-        candidates = []  # (score, x, y)
-        for f in frontiers:
-            gx, gy = self._goal_point(f, info)
+        open_cells = max(1, round(self.cfg["openness_radius_m"] / res))
+        h, w = free.shape
+        candidates = []  # (score, gx, gy, fx, fy)
+        far = []  # (dist, gx, gy, fx, fy): valid but beyond max_goal_distance_m
+        escape_pool = []  # (dist, gx, gy, fx, fy): every valid candidate, any distance
+        for f, ((gx, gy), (fx, fy), (giy, gix)) in zip(frontiers, goals):
             dist = math.hypot(gx - rx, gy - ry)
-            if dist > self.cfg["max_goal_distance_m"]:
-                continue
             if self._too_close(gx, gy, blacklist, self.cfg["blacklist_radius_m"]):
                 continue
             if self._too_close(gx, gy, claims, self.cfg["claim_radius_m"]):
                 continue
+            escape_pool.append((dist, gx, gy, fx, fy))
+            if dist > self.cfg["max_goal_distance_m"]:
+                far.append((dist, gx, gy, fx, fy))
+                continue
+            # Openness: fraction of known-free floor around the goal. Wide-open
+            # frontiers beat tight-corner ones of similar size/distance —
+            # corners are where the robot gets wedged. openness_exp 0.0 is the
+            # documented off-switch (term becomes 1.0, old scoring exactly).
+            patch = free[
+                max(0, giy - open_cells) : min(h, giy + open_cells + 1),
+                max(0, gix - open_cells) : min(w, gix + open_cells + 1),
+            ]
+            openness = float(patch.mean()) if patch.size else 0.0
             denom = max(dist, 0.05) ** self.cfg["alpha"]
-            candidates.append((f.size / denom, gx, gy))
+            score = f.size * openness ** self.cfg["openness_exp"] / denom
+            candidates.append((score, gx, gy, fx, fy))
 
         candidates.sort(key=lambda c: c[0], reverse=True)
+        if self._consec_failures >= self.cfg["escape_after_failures"] and escape_pool:
+            # Escape mode. Consecutive stuck/timeout/abort goals mean the
+            # nearest-biased scoring is feeding us frontiers inside the same
+            # unreachable dead-end pocket (blacklisting removes them one spot
+            # at a time, 15+ s each). Stop nibbling at the pocket: jump to the
+            # FARTHEST valid frontier on the explored boundary — by
+            # construction the most distant edge of known space from wherever
+            # we're wedged — and let Nav2 route back out through mapped
+            # territory. max_goal_distance_m is deliberately ignored here.
+            # Normal scoring resumes after the next goal success.
+            escape_pool.sort(key=lambda c: c[0], reverse=True)
+            _dist, gx, gy, fx, fy = escape_pool[0]
+            self.get_logger().warn(
+                f"escape: {self._consec_failures} consecutive failed goals — "
+                f"jumping to farthest frontier ({gx:.2f}, {gy:.2f}), {_dist:.1f}m away"
+            )
+            candidates = [(0.0, gx, gy, fx, fy)]
+        elif not candidates and far:
+            # Backtracking out of a fully-mapped dead end. When the robot
+            # finishes a deep pocket, every remaining frontier can be farther
+            # than max_goal_distance_m — with a hard cap that read as "no
+            # valid frontiers" and could end exploration with the map half
+            # done. No DFS-style path memory is needed: frontier selection is
+            # global over the whole map and Nav2's planner routes through
+            # known free space, so "backtrack" is simply "goal = nearest
+            # remaining frontier, wherever it is". The cap stays as a
+            # preference (bounded planning) rather than a filter.
+            far.sort(key=lambda c: c[0])
+            _dist, gx, gy, fx, fy = far[0]
+            self.get_logger().info(
+                f"no frontiers within {self.cfg['max_goal_distance_m']:.0f}m — "
+                f"backtracking to nearest remaining frontier at ({gx:.2f}, {gy:.2f})"
+            )
+            candidates = [(0.0, gx, gy, fx, fy)]
         best_xy = (candidates[0][1], candidates[0][2]) if candidates else None
-        self._publish_frontier_markers(frontiers, info, best=best_xy)
+        self._publish_frontier_markers([g[0] for g in goals], best=best_xy)
 
         if not candidates:
             self._empty_cycles += 1
@@ -414,25 +553,56 @@ class ExplorerNode(Node):
             return
 
         self._empty_cycles = 0
-        _score, gx, gy = candidates[0]
-        self._send_goal(gx, gy, rx, ry)
+        _score, gx, gy, fx, fy = candidates[0]
+        self._send_goal(gx, gy, fx, fy, rx, ry)
 
-    def _goal_point(self, f: Frontier, info) -> tuple[float, float]:
+    def _goal_point(
+        self, f: Frontier, info, valid_mask: np.ndarray
+    ) -> tuple[tuple[float, float], tuple[float, float], tuple[int, int]]:
+        """Standoff goal for one frontier cluster.
+
+        Returns ((gx, gy), (fx, fy), (giy, gix)): the goal in world coords,
+        the frontier look-at point in world coords, and the goal's grid cell.
+        The goal is the valid_mask cell (known free, clear of obstacles AND
+        unknown — see _plan_and_send) nearest the frontier within
+        goal_standoff_max_m, i.e. pulled back into open mapped floor instead
+        of sitting on the frontier edge itself, which is frequently a wall
+        corner the robot then wedges itself into.
+        """
         # The actual frontier cell nearest the cluster's centroid — guarantees
-        # the goal lands on a real frontier cell, not a possibly-invalid
-        # averaged point (clusters can be concave / L-shaped).
-        best_cell = min(
+        # the look-at point lands on a real frontier cell, not a
+        # possibly-invalid averaged point (clusters can be concave / L-shaped).
+        fr_iy, fr_ix = min(
             f.cells, key=lambda c: (c[0] - f.mean_iy) ** 2 + (c[1] - f.mean_ix) ** 2
         )
-        return cell_to_world(best_cell[0], best_cell[1], info)
+        fxy = cell_to_world(fr_iy, fr_ix, info)
 
-    def _send_goal(self, gx: float, gy: float, rx: float, ry: float):
+        half = max(0, round(self.cfg["goal_standoff_max_m"] / info.resolution))
+        h, w = valid_mask.shape
+        y0, x0 = max(0, fr_iy - half), max(0, fr_ix - half)
+        ys, xs = np.nonzero(valid_mask[y0 : min(h, fr_iy + half + 1), x0 : min(w, fr_ix + half + 1)])
+        if ys.size:
+            i = int(np.argmin((ys + y0 - fr_iy) ** 2 + (xs + x0 - fr_ix) ** 2))
+            giy, gix = int(ys[i]) + y0, int(xs[i]) + x0
+        else:
+            # No valid standoff cell nearby — fall back to the frontier cell
+            # itself (pre-standoff behavior; find_frontiers' inflation check
+            # already keeps it off inflated walls).
+            giy, gix = fr_iy, fr_ix
+        return cell_to_world(giy, gix, info), fxy, (giy, gix)
+
+    def _send_goal(self, gx: float, gy: float, fx: float, fy: float, rx: float, ry: float):
         if not self.nav_client.wait_for_server(timeout_sec=2.0):
             self.get_logger().error("navigate_to_pose server not available")
             return
-        # Face the frontier, not the direction of travel — the camera should
-        # look at the unknown space we're trying to reveal.
-        yaw = math.atan2(gy - ry, gx - rx)
+        # Face the frontier FROM THE GOAL — the camera should look at the
+        # unknown space we're trying to reveal once the robot arrives. (The
+        # old code aimed along robot->goal, a heading that's only right if
+        # the approach happens to be a straight line.)
+        if math.hypot(fx - gx, fy - gy) > 1e-3:
+            yaw = math.atan2(fy - gy, fx - gx)
+        else:
+            yaw = math.atan2(gy - ry, gx - rx)  # goal == frontier cell fallback
 
         goal = NavigateToPose.Goal()
         goal.pose = PoseStamped()
@@ -448,6 +618,7 @@ class ExplorerNode(Node):
         target = (gx, gy)
         self._goal_target = target
         self._goal_sent_at = time.monotonic()
+        self._pose_history.clear()  # fresh stuck window for the new goal
         self._publish_claim(gx, gy)
         self.get_logger().info(f"exploring -> ({gx:.2f}, {gy:.2f})")
 
@@ -462,8 +633,20 @@ class ExplorerNode(Node):
             return  # superseded by a newer goal before this one was even accepted
         goal_handle = future.result()
         if not goal_handle.accepted:
-            self.get_logger().warn(f"frontier goal rejected: {target}")
-            self._blacklist_point(*target)
+            # Do NOT blacklist on rejection. A rejection is Nav2 refusing to
+            # even try — in practice bt_navigator still activating during
+            # bringup (the action server exists before the BT is ready, so
+            # wait_for_server() passes and the goal bounces). It says nothing
+            # about the frontier itself. Blacklisting here killed two fresh
+            # explore runs on 2026-08-01: the robot's very first frontier is
+            # often its ONLY frontier, so reject -> blacklist -> 30 empty
+            # cycles -> "exploration done" with the robot never having moved.
+            # Clearing state lets _tick re-pick (usually the same) frontier on
+            # the next 2s cycle; genuine navigation failures still get
+            # blacklisted via the ABORTED path in _on_nav_result.
+            self.get_logger().warn(
+                f"frontier goal rejected (Nav2 not ready?): {target} — will retry"
+            )
             self._goal_handle = None
             self._goal_target = None
             self._goal_sent_at = None
@@ -485,11 +668,14 @@ class ExplorerNode(Node):
         self._goal_handle = None
         self._goal_target = None
         self._goal_sent_at = None
+        self._pose_history.clear()
         if status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().info(f"reached frontier {target}")
+            self._consec_failures = 0
         else:
             self.get_logger().warn(f"frontier goal to {target} ended status={status} — blacklisting")
             self._blacklist_point(*target)
+            self._consec_failures += 1
         self._publish_status()
 
     def _finish(self):
@@ -499,14 +685,13 @@ class ExplorerNode(Node):
 
     # -- visualization + status -------------------------------------------
 
-    def _publish_frontier_markers(self, frontiers: list[Frontier], info, best):
+    def _publish_frontier_markers(self, goal_points: list[tuple[float, float]], best):
         arr = MarkerArray()
         clear = Marker()
         clear.header.frame_id = "map"
         clear.action = Marker.DELETEALL
         arr.markers.append(clear)
-        for i, f in enumerate(frontiers):
-            gx, gy = self._goal_point(f, info)
+        for i, (gx, gy) in enumerate(goal_points):
             m = Marker()
             m.header.frame_id = "map"
             m.header.stamp = self.get_clock().now().to_msg()

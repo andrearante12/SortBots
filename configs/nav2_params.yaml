@@ -15,13 +15,18 @@
 # /robot_0/map by the launch file's `namespace` arg) and the map -> odom TF.
 # Nav2 only needs the planning/control/behavior stack.
 #
-# The XLeRobot base is holonomic (root_x/root_y/root_z joints, cmd_vel
-# consumes linear.x AND linear.y — see spawn_warehouse.py:_drive_velocities),
-# so the controller must support strafing. DWB gets holonomic Y-motion from
-# non-zero min_vel_y/max_vel_y/vy_samples below (no separate "holonomic"
-# flag — that's not a real DWB parameter, an earlier draft of this file
-# wrongly included one); a purely differential-drive controller (RPP,
-# regular MPPI defaults) would throw away half the robot's mobility.
+# The XLeRobot sim base is PHYSICALLY holonomic (root_x/root_y/root_z
+# joints, cmd_vel consumes linear.x AND linear.y — see
+# spawn_warehouse.py:_drive_velocities, and wasd_teleop.py still strafes with
+# q/e), but Nav2 deliberately drives it as a differential-drive robot: MPPI
+# with motion_model DiffDrive below, plus zeroed y-limits in
+# velocity_smoother. An earlier revision used DWB with y-velocity sampling
+# ("don't throw away half the robot's mobility") — in practice autonomous
+# strafing looked unnatural (the robot glides sideways) and pointed the
+# single forward-facing depth camera — the ONLY obstacle sensor — away from
+# the direction of travel. Diff-drive keeps the camera facing where the
+# robot is going. Brief reverse (vx_min -0.15) is retained for corner
+# escapes and the stock BackUp recovery (0.30 m @ 0.15 m/s).
 #
 # Top-level keys are `/**/<node_name>:`, not bare `<node_name>:`. Verified
 # live (ros-jazzy-navigation2 1.3.12): rcl_yaml_param_parser's bare-name
@@ -39,8 +44,12 @@
   ros__parameters:
     use_sim_time: true
     controller_frequency: 20.0
+    failure_tolerance: 0.3
     min_x_velocity_threshold: 0.001
-    min_y_velocity_threshold: 0.001
+    # 0.5, not 0.001: upstream Jazzy diff-drive convention — any odom y
+    # component is noise on a base Nav2 treats as non-holonomic, so filter
+    # it out of the controller's state estimate entirely.
+    min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
     progress_checker_plugins: ["progress_checker"]
     goal_checker_plugins: ["goal_checker"]
@@ -70,61 +79,119 @@
       # task_manager's dispatched pick/place docking (dock_offset_m in
       # configs/waypoints.yaml is a 0.5 m standoff already).
       xy_goal_tolerance: 0.25
-      yaw_goal_tolerance: 0.15
+      # Was 0.15. Under DiffDrive the final heading requires a rotate-in-place
+      # (no strafing/crabbing into alignment), and the explorer only needs the
+      # camera roughly facing the frontier — 8.6 degrees of precision bought
+      # nothing but extra settling time.
+      yaw_goal_tolerance: 0.25
       stateful: true
 
     FollowPath:
-      plugin: "dwb_core::DWBLocalPlanner"
-      debug_trajectory_details: true
-      # Holonomic: allow y-velocity sampling so the planner can strafe
-      # around obstacles instead of always turning first.
-      min_vel_x: -0.3
-      min_vel_y: -0.3
-      max_vel_x: 0.5
-      max_vel_y: 0.5
-      max_vel_theta: 1.0
-      min_speed_xy: 0.0
-      max_speed_xy: 0.5
-      min_speed_theta: 0.0
-      acc_lim_x: 1.0
-      acc_lim_y: 1.0
-      acc_lim_theta: 2.0
-      decel_lim_x: -1.0
-      decel_lim_y: -1.0
-      decel_lim_theta: -2.0
-      vx_samples: 15
-      vy_samples: 10
-      vtheta_samples: 20
-      sim_time: 1.5
-      linear_granularity: 0.05
-      angular_granularity: 0.025
+      # MPPI with a DiffDrive motion model — replaces the earlier holonomic
+      # DWB config (see file header for why). Values start from Jazzy's
+      # reference config (/opt/ros/jazzy/share/nav2_bringup/params/
+      # nav2_params.yaml) with velocity/accel limits matched to this robot
+      # and transform_tolerance to the repo-wide 0.3.
+      plugin: "nav2_mppi_controller::MPPIController"
+      time_steps: 56          # 56 * model_dt = 2.8 s rollout horizon
+      model_dt: 0.05          # = 1 / controller_frequency (20 Hz)
+      batch_size: 2000
+      iteration_count: 1
+      motion_model: "DiffDrive"
+      vx_max: 0.5             # the base's tuned top speed (see docs on RTF)
+      # Brief reverse only — enough for backing out of a corner, and matches
+      # the stock BT BackUp recovery speed (0.15 m/s). Forward preference
+      # comes from this asymmetry plus PreferForwardCritic; if runs show
+      # reverse-creep, raise PreferForwardCritic.cost_weight to 10.0.
+      vx_min: -0.15
+      vy_max: 0.0             # ignored under DiffDrive; set for documentation
+      wz_max: 1.0
+      ax_max: 1.0             # match velocity_smoother accel limits so
+      ax_min: -1.0            # rollouts predict what the base actually does
+      ay_max: 0.0
+      az_max: 2.0
+      vx_std: 0.2
+      vy_std: 0.0             # unused for non-holonomic models
+      wz_std: 0.4
+      prune_distance: 1.7
       transform_tolerance: 0.3
-      trans_stopped_velocity: 0.1
-      short_circuit_trajectory_evaluation: true
-      stateful: true
+      temperature: 0.3
+      gamma: 0.015
+      regenerate_noises: true
+      visualize: false        # true publishes /trajectories for debugging
+      TrajectoryVisualizer:
+        trajectory_step: 5
+        time_step: 3
       # Block-list style, not a flow-sequence: ROS 2's rcl_yaml_param_parser
       # (not plain pyyaml) failed to load a multi-line bracketed list with a
       # trailing comma here — controller_server errored "No critics defined
       # for FollowPath" even though the file parses fine under Python's
       # yaml.safe_load. Verified live against ros-jazzy-navigation2 1.3.12.
       critics:
-        - "RotateToGoal"
-        - "Oscillation"
-        - "BaseObstacle"
-        - "GoalAlign"
-        - "PathAlign"
-        - "PathDist"
-        - "GoalDist"
-      BaseObstacle.scale: 0.02
-      PathAlign.scale: 32.0
-      PathAlign.forward_point_distance: 0.1
-      GoalAlign.scale: 24.0
-      GoalAlign.forward_point_distance: 0.1
-      PathDist.scale: 32.0
-      GoalDist.scale: 24.0
-      RotateToGoal.scale: 32.0
-      RotateToGoal.slowing_factor: 5.0
-      RotateToGoal.lookahead_time: -1.0
+        - "ConstraintCritic"
+        - "CostCritic"
+        - "GoalCritic"
+        - "GoalAngleCritic"
+        - "PathAlignCritic"
+        - "PathFollowCritic"
+        - "PathAngleCritic"
+        - "PreferForwardCritic"
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 0.5
+      # CostCritic (Jazzy's default obstacle critic, not the older
+      # ObstaclesCritic): scores rollouts against the local costmap directly,
+      # so obstacle avoidance actually competes with path-following — under
+      # DWB, BaseObstacle.scale 0.02 vs PathDist 32.0 meant it barely did.
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.81
+        critical_cost: 300.0
+        consider_footprint: false   # inflation_radius 0.4 already covers the 0.5x0.4 footprint
+        collision_cost: 1000000.0
+        near_collision_cost: 253
+        near_goal_distance: 1.0
+        trajectory_point_step: 2
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 14.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+        use_path_orientations: false
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.4
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 1.0
+        mode: 0
 
 /**/local_costmap:
   local_costmap:
@@ -155,6 +222,16 @@
           # PointCloud2 topic for obstacle marking.
           max_obstacle_height: 1.5
           min_obstacle_height: 0.05
+          # Defaults are 2.5/3.0 m — far short of what the depth camera sees.
+          # 4.0 m marking gives ~8 s of warning at the 0.5 m/s top speed and
+          # is inside the D435's reliable depth band; raytrace 5.0 > 4.0 so a
+          # clear re-observation erases stale marks anywhere in the marking
+          # band (in-frustum only — no rear sensing, ghosts behind the robot
+          # persist by design). Same values on both costmaps: one number,
+          # one mental model (the 6x6 rolling window clips beyond ~3 m ahead
+          # anyway, but the diagonal corners reach ~4.2 m).
+          obstacle_max_range: 4.0
+          raytrace_max_range: 5.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
@@ -168,8 +245,15 @@
       global_frame: map
       robot_base_frame: robot_0/base_link
       transform_tolerance: 0.3
-      update_frequency: 1.0
-      publish_frequency: 1.0
+      # Was 1.0/1.0. 4 Hz updates cut worst-case obstacle->global-costmap
+      # latency from 1 s to 250 ms — this is what the reactive BT's 4 Hz
+      # IsPathValid check (configs/bt/navigate_to_pose_reactive.xml) is
+      # paced against. If logs show persistent "Map update loop missed its
+      # desired rate of 4.0000Hz", drop this to 2.0 first — the rate, not
+      # the sensing ranges, is the tuning knob. publish at 2 Hz for
+      # dashboard-overlay freshness (~240x240 grid, trivial bandwidth).
+      update_frequency: 4.0
+      publish_frequency: 2.0
       resolution: 0.05
       footprint: "[[0.25, 0.2], [0.25, -0.2], [-0.25, -0.2], [-0.25, 0.2]]"
       track_unknown_space: true
@@ -196,6 +280,12 @@
           clearing: true
           max_obstacle_height: 1.5
           min_obstacle_height: 0.05
+          # Same 4.0/5.0 as local_costmap (rationale there). On the GLOBAL
+          # costmap this is the change that actually widens planner
+          # perception: with the 2.5 m default, the global planner couldn't
+          # see a live obstacle until the robot was ~5 s from hitting it.
+          obstacle_max_range: 4.0
+          raytrace_max_range: 5.0
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: true
@@ -245,6 +335,12 @@
     global_costmap_topic: global_costmap/costmap_raw
     local_footprint_topic: local_costmap/published_footprint
     global_footprint_topic: global_costmap/published_footprint
+    # Stock plugins + stock BT. Known limitation: the robot has no rear
+    # sensing (single forward depth camera), so BackUp collision-checks
+    # against possibly-stale/unknown costmap cells behind the robot —
+    # acceptable at 0.15 m/s for 0.30 m. The explorer's standoff goal
+    # placement (nodes/explorer.py) is the primary "don't get wedged in a
+    # corner" fix; these recoveries are the backstop.
     behavior_plugins: ["spin", "backup", "drive_on_heading", "wait", "assisted_teleop"]
     spin:
       plugin: "nav2_behaviors::Spin"
@@ -271,7 +367,14 @@
     robot_base_frame: robot_0/base_link
     odom_topic: odom
     transform_tolerance: 0.3
-    # Unset: bt_navigator falls back to its built-in default trees.
+    # default_nav_to_pose_bt_xml is deliberately NOT set here: it's injected
+    # by sortbots_nav2.launch.py as a parameter override pointing at
+    # configs/bt/navigate_to_pose_reactive.xml (repo-relative, so nothing
+    # machine-specific lands in this file, and the path has no "robot_0"
+    # substring for _rewrite_robot_0 to mangle). All other bt_navigator
+    # defaults (plugin_lib_names, bt_loop_duration, server timeouts) are
+    # stock — the default plugin set already includes every node the custom
+    # tree uses, including nav2_is_path_valid_condition_bt_node.
 
 /**/waypoint_follower:
   ros__parameters:
@@ -290,10 +393,16 @@
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.5, 0.5, 1.0]
-    min_velocity: [-0.3, -0.3, -1.0]
-    max_accel: [1.0, 1.0, 2.0]
-    max_decel: [-1.0, -1.0, -2.0]
+    # Zeros in the y slots are the upstream Jazzy diff-drive convention: the
+    # smoother is the last hop before the sim base (cmd_vel_nav ->
+    # cmd_vel_smoothed -> cmd_vel), so it's the final guarantee no strafe
+    # command reaches the physically-holonomic base even if a controller
+    # regression reintroduces vy. min_velocity[0] must stay <= -0.15 or the
+    # stock BackUp recovery (0.30 m @ 0.15 m/s) silently stalls.
+    max_velocity: [0.5, 0.0, 1.0]
+    min_velocity: [-0.15, 0.0, -1.0]
+    max_accel: [1.0, 0.0, 2.0]
+    max_decel: [-1.0, 0.0, -2.0]
     odom_topic: odom
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

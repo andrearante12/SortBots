@@ -172,6 +172,18 @@ pieces with `nav2:=false`, `webui:=false`, `task_manager:=false`, `rviz:=true`.
 Startup order is tolerant: Nav2 autostarts and retries until RTAB-Map's map/TF
 appear.
 
+> **Every `/snapshot` request to web_video_server MUST carry
+> `qos_profile=sensor_data`.** web_video_server opens a fresh subscription per
+> snapshot request, and its default is RELIABLE; that per-request churn of
+> RELIABLE subscriptions kills Isaac's rgb/depth image writers outright at
+> around sim-t=100–140 s (the sim keeps stepping, `camera_info` — a different
+> publisher — keeps going, and Isaac logs nothing). Bisected live 2026-08-01:
+> Isaac alone is stable indefinitely; the full stack minus web_video_server is
+> stable; a steady RELIABLE subscriber (`depth_to_cloud`) is harmless; only
+> the churning snapshot subscriptions correlate with the death. Both consumers
+> (`webui/app.js`, `nodes/web_video_watchdog.sh`) already pass the parameter —
+> keep it on any new one, including ad-hoc `curl` checks.
+
 **Multi-robot:** `robot_ids:=robot_0,robot_1` brings up a full independent
 RTAB-Map + Nav2 + `task_manager` stack per robot (the dashboard/rosbridge
 stack stays singular). `localization`/`database_path`/`explore` apply only to
@@ -210,6 +222,23 @@ the head camera in the background.
 
 **The right column** is always visible: the **3D reconstruction** viewer on top,
 **dispatch + task queue** below.
+
+- **3D reconstruction** — RTAB-Map's assembled 3D map, orbit with the mouse
+  (drag to orbit, scroll to zoom, right-drag to pan), "reset view" reframes it.
+  Two selects:
+  - **voxels / points** — voxel cubes are lit, so vertical structure actually
+    reads as structure; points are cheaper and are also the automatic fallback
+    above 250k points.
+  - **photo / height** — the cloud's own colour, or a blue→red ramp by height,
+    which is far more legible when everything is warehouse-grey.
+
+  The panel subscribes to `/<robot>/recon_cloud`, not `cloud_map` directly —
+  `nodes/recon_cloud_relay.py` sits in between and enforces a hard 200k-point
+  budget. `cloud_map` grows without bound as the map does, and the vendored
+  roslib can't reassemble fragments once a message passes rosbridge's
+  `max_message_size`, so a budget is the only thing that keeps the panel
+  working on a long run. The info line reports the z range, which is the
+  quickest way to confirm the reconstruction is genuinely 3D.
 
 - **Map view** — the RTAB-Map occupancy grid, the robot's cyan
   odom trail, plus live Nav2 overlays:
@@ -258,6 +287,78 @@ scripts/run_demo.sh --explore --localize   # explore to EXTEND an existing map i
 repeats until none remain reachable — then reports "exploration done" and
 stops. No waypoints, no human input.
 
+**Motion is deliberately diff-drive, not holonomic.** The sim base can
+physically strafe, but Nav2 now runs MPPI with `motion_model: DiffDrive`
+(`configs/nav2_params.yaml`) — the earlier holonomic DWB setup made the
+robot glide sideways, which looked unnatural and pointed the only obstacle
+sensor (the forward depth camera) away from the direction of travel. Brief
+reverse (−0.15 m/s) is retained so BackUp recovery and corner escapes work.
+Teleop strafing (`q`/`e` in `wasd_teleop.py`) is unaffected — the base is
+still holonomic, Nav2 just never commands `linear.y`.
+
+**Corner/dead-end handling** (all tunable in `configs/explorer.yaml`):
+
+- *Standoff goals* — the goal is pulled back from the frontier cell into
+  known free floor with clearance from walls **and** unknown space, posed
+  facing the frontier; the camera reveals it from the standoff instead of
+  the robot driving nose-first into an unmapped corner.
+- *Stuck watchdog* — less than 0.15 m of net motion over 15 s with a goal
+  active ⇒ blacklist + retarget immediately (log line: `stuck: moved
+  <0.15m …`) instead of waiting out `goal_timeout_s` or Nav2's
+  multi-minute recovery churn.
+- *Openness scoring* — frontier score is weighted by the fraction of free
+  floor around the goal, so open-floor frontiers beat tight corners at
+  similar size/distance.
+- *Backtracking* — when no frontier is within `max_goal_distance_m`
+  (typical after fully mapping a dead-end pocket), the explorer targets the
+  nearest remaining frontier anywhere on the map rather than declaring
+  exploration done. No DFS-style path memory needed: frontier selection is
+  global and Nav2 plans the route back out through known space.
+- *Escape mode* — after `escape_after_failures` (default 2) consecutive
+  failed goals (stuck/timeout/abort), the explorer stops nibbling at the
+  pocket it's wedged in — blacklisting removes failed spots one at a time,
+  so nearest-first scoring would otherwise keep picking the next frontier
+  in the same pocket — and jumps to the **farthest** valid frontier on the
+  explored boundary (log line: `escape: N consecutive failed goals …`),
+  ignoring the distance cap. Normal nearest-biased scoring resumes on the
+  next success.
+
+### Reacting to moved/moving obstacles
+
+D* Lite was considered for this and deliberately **not** implemented: the
+stock Nav2 behavior tree already replanned the global path from scratch at
+1 Hz unconditionally, and NavFn A* on this grid costs single-digit
+milliseconds — an incremental planner has nothing to save. The actual
+bottlenecks were perception latency and the lack of a blocked-path trigger,
+which is what these three changes fix (worst-case reaction to a
+newly-blocked path drops from ~2 s to ~0.5 s):
+
+- **Sensing ranges** (`configs/nav2_params.yaml`): both costmaps mark
+  obstacles out to 4 m and raytrace-clear out to 5 m (Nav2's unset defaults
+  were 2.5/3.0 m). Still forward-frustum-only — a stale mark behind the
+  robot persists until the camera sweeps over it again; that's a sensor
+  limitation, not a config choice.
+- **Global costmap rate**: 1 Hz → 4 Hz updates (2 Hz publish), so a new
+  obstacle reaches the global planner in ≤250 ms.
+- **Reactive behavior tree** (`configs/bt/navigate_to_pose_reactive.xml`,
+  injected by `sortbots_nav2.launch.py` as a bt_navigator parameter
+  override): checks the current path against the costmap at 4 Hz via
+  planner_server's `/is_path_valid` and replans **immediately** when a
+  lethal cell lands on it, refreshes every 3 s otherwise, replans on goal
+  change, and keeps the stock recovery ladder. Unknown cells don't
+  invalidate a path, so frontier goals through unmapped space don't cause
+  replan thrash during exploration.
+
+Quick test without touching the sim setup: while the robot is en route on a
+long goal, drop a cube (~0.5 m, center ~0.25 m high so it sits in the
+0.05–1.5 m marking band) onto the planned path 2–4 m ahead via the Isaac
+GUI. Expect the costmap to mark it within ~0.25 s and a new `/robot_0/plan`
+around it within ~0.5 s (log: "Passing new path to controller" with no goal
+change) — MPPI swerves without entering recovery. Delete the cube while
+it's still in view and the path straightens within ≤3 s. Teleopping robot_1
+across robot_0's path works too (and crossing *behind* robot_0 demonstrates
+the no-rear-sensing ghost caveat).
+
 **Requires the occupancy-grid tuning documented above** (`GRID_ARGS` /
 `Grid/RayTracing`) — frontier detection needs real free space in the map to
 find a boundary to chase at all.
@@ -294,9 +395,10 @@ exactly as predicted:
   immediately (three in a row on the very next run). Still tight enough for
   `task_manager`'s dispatched pick/place docking, which has its own 0.5 m
   `dock_offset_m` standoff on top of this.
-- `movement_time_allowance` (10.0 → 20.0) — the holonomic base needs a brief
-  rotate-in-place before committing to a heading on a long traverse, which
-  the original tight window read as "no progress" and aborted early.
+- `movement_time_allowance` (10.0 → 20.0) — the base needs a brief
+  rotate-in-place before committing to a heading on a long traverse (even
+  more so now that it's driven diff-drive), which the original tight window
+  read as "no progress" and aborted early.
 - `explorer.yaml`'s own `goal_timeout_s` (45 → 75) is a backstop for
   whatever the two Nav2-level settings above don't catch; with the tolerance
   fix it should now fire rarely.
@@ -380,13 +482,33 @@ past may well be reachable now).
 ### Occupancy-grid tuning (why the map has usable free space)
 
 `launch/sortbots_rtabmap_robot.launch.py`'s `GRID_ARGS` passes RTAB-Map
-`--Grid/3D false --Grid/RayTracing true --Grid/RangeMax 5.0
+`--Grid/3D true --Grid/RayTracing true --Grid/RangeMax 5.0
 --Grid/MaxObstacleHeight 1.5`. Ray tracing is the load-bearing one: without it
 the only cells marked free are ones where a depth point happened to land on the
 floor, so `/map` stays overwhelmingly unknown even in rooms the robot drove
-through. `Grid/3D false` is what lets ray tracing work at all — RTAB-Map's own
-docs note that with `Grid/3D=true`, 3D ray tracing is silently *ignored* unless
-the build has OctoMap support.
+through.
+
+`Grid/3D` used to be `false` here, and this section used to claim that was
+"what lets ray tracing work at all". That was wrong, and it cost the dashboard
+its 3D panel — with 2D local grids, `cloud_map` is just the occupancy grid
+re-emitted as points, a ~0.15 m-tall pancake, and every `octomap_*` topic
+publishes empty because `OctoMap` skips any node whose local grid isn't 3D.
+The misreading was of `Grid/RayTracing`'s doc string: *"if `Grid/3D=true`,
+RTAB-Map should be **built with** OctoMap support, otherwise 3D ray tracing is
+ignored"* is a **build precondition**, not a prohibition — and this build
+satisfies it. In fact `Grid/3D` defaults to `true` on an OctoMap-enabled build
+(`Parameters.h:860-864` picks the default under `#ifdef RTABMAP_OCTOMAP`), so
+`false` was overriding the build's own default. The 2D `/map` is unaffected —
+`Grid/3D`'s own doc string says "a 2D map can be still generated if checked",
+and `OccupancyGrid::assemble()` transforms each cell with its real z and then
+keeps only x/y.
+
+What `Grid/3D=true` does cost is memory and time: empty cells go from O(area)
+to O(volume) per node. `Grid/RangeMax` is what bounds that volume, so it is the
+first lever to reach for if RTAB-Map starts eating RAM (then
+`Grid/DepthDecimation`, and only last `Grid/CellSize`, which changes `/map`'s
+resolution and so also Nav2's static layer and the explorer's
+`min_frontier_cells`).
 
 Measured on the primitive scene after ~80 s of driving: **52.9 m² free / 54.8%
 of the grid**, versus a near-empty map before. That matters because frontier
