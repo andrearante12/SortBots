@@ -164,7 +164,17 @@
         cost_power: 1
         cost_weight: 3.81
         critical_cost: 300.0
-        consider_footprint: false   # inflation_radius 0.4 already covers the 0.5x0.4 footprint
+        # false = score each rollout at the robot's CENTRE and let the
+        # inflation layer stand in for its extent. That is only sound if
+        # inflation_radius genuinely exceeds the footprint's corner reach
+        # (0.320 m for this 0.5 x 0.4 m base) by a real margin — it did not
+        # at the old 0.4 m, which is why the robot cornered tight and scraped
+        # shelves. With inflation_radius now 0.65 the assumption holds with
+        # 0.33 m to spare. Turning this true would check the actual rectangle
+        # instead, but costs a footprint collision test per rollout per step
+        # (2000 x 56) and the control loop already reports missed 20 Hz
+        # deadlines, so fix the clearance in the costmap rather than here.
+        consider_footprint: false
         collision_cost: 1000000.0
         near_collision_cost: 253
         near_goal_distance: 1.0
@@ -234,8 +244,30 @@
           raytrace_max_range: 5.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.4
+        # Was 3.0 / 0.4. The old pair gave the robot almost no room: the
+        # footprint below is 0.5 x 0.4 m, so its CORNER reaches 0.320 m from
+        # centre, and a 0.4 m inflation radius left just 0.08 m of clearance
+        # beyond that — which a turn (corners sweeping out to 0.320 m), a
+        # little pose error, or one late costmap update eats entirely. Live
+        # symptom: tight cornering, scraping the shelves, and wedging.
+        #
+        # It also starved MPPI. CostCritic runs with consider_footprint:
+        # false, i.e. the robot is scored as a POINT and inflation is the ONLY
+        # thing keeping it off obstacles — and with the whole cost gradient
+        # compressed into 0.08 m there was nothing to descend, just uniformly
+        # high cost nearby. That is a plausible cause of the rotate-in-place
+        # dithering seen in open space.
+        #
+        # 0.65 gives 0.33 m of clearance beyond the corner, and the lower
+        # scaling factor spreads the gradient out (0.33 vs 0.26 of peak at
+        # 0.65 m) so there is a smooth slope to follow rather than a wall.
+        # This does NOT block narrow gaps: only cells inside the INSCRIBED
+        # radius (0.20 m, the half-width) become 253/lethal-equivalent, and
+        # that is set by the footprint, not by this. Everything out to
+        # inflation_radius is merely expensive, so a doorway stays passable —
+        # it just stops being the cheapest line.
+        cost_scaling_factor: 2.5
+        inflation_radius: 0.65
       always_send_full_costmap: true
 
 /**/global_costmap:
@@ -304,8 +336,30 @@
         map_topic: /robot_0/map
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.4
+        # Was 3.0 / 0.4. The old pair gave the robot almost no room: the
+        # footprint below is 0.5 x 0.4 m, so its CORNER reaches 0.320 m from
+        # centre, and a 0.4 m inflation radius left just 0.08 m of clearance
+        # beyond that — which a turn (corners sweeping out to 0.320 m), a
+        # little pose error, or one late costmap update eats entirely. Live
+        # symptom: tight cornering, scraping the shelves, and wedging.
+        #
+        # It also starved MPPI. CostCritic runs with consider_footprint:
+        # false, i.e. the robot is scored as a POINT and inflation is the ONLY
+        # thing keeping it off obstacles — and with the whole cost gradient
+        # compressed into 0.08 m there was nothing to descend, just uniformly
+        # high cost nearby. That is a plausible cause of the rotate-in-place
+        # dithering seen in open space.
+        #
+        # 0.65 gives 0.33 m of clearance beyond the corner, and the lower
+        # scaling factor spreads the gradient out (0.33 vs 0.26 of peak at
+        # 0.65 m) so there is a smooth slope to follow rather than a wall.
+        # This does NOT block narrow gaps: only cells inside the INSCRIBED
+        # radius (0.20 m, the half-width) become 253/lethal-equivalent, and
+        # that is set by the footprint, not by this. Everything out to
+        # inflation_radius is merely expensive, so a doorway stays passable —
+        # it just stops being the cheapest line.
+        cost_scaling_factor: 2.5
+        inflation_radius: 0.65
       always_send_full_costmap: true
 
 /**/planner_server:

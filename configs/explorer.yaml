@@ -96,7 +96,13 @@ stuck_min_displacement_m: 0.15
 # INTO an unmapped corner — the depth camera reveals the frontier just as
 # well from a standoff in open floor, and the goal pose faces the frontier.
 goal_standoff_max_m: 1.5
-goal_clearance_m: 0.45
+# Raised 0.45 -> 0.6 alongside nav2_params.yaml's inflation_radius 0.4 -> 0.65.
+# A standoff goal placed 0.45 m from a wall now sits well inside the inflated
+# band, so Nav2 would be asked to park the robot somewhere it is actively
+# trying to avoid — the goal is reachable but expensive, which shows up as
+# slow, scraping final approaches. 0.6 keeps goals just outside the band
+# without demanding the wide-open floor that 0.65+ would.
+goal_clearance_m: 0.6
 goal_unknown_clearance_m: 0.2
 
 # Escape mode: after this many CONSECUTIVE failed goals (stuck watchdog,

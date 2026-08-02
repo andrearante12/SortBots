@@ -307,9 +307,10 @@ class ExplorerNode(Node):
         self.nav_client = ActionClient(self, NavigateToPose, f"/{robot_id}/navigate_to_pose")
         self.spin_client = ActionClient(self, Spin, f"/{robot_id}/spin")
 
-        # Operator steering hint: (x, y, monotonic_ts) or None. A soft bias on
-        # frontier scoring, deliberately NOT a goal — see _steer_bonus.
-        self._steer_hint: tuple[float, float, float] | None = None
+        # Operator steering queue: [[x, y, activated_ts|None], ...]. Entry 0 is
+        # the region being worked; the rest wait their turn. Deliberately NOT
+        # goals — see _on_hint.
+        self._steer_queue: list[list] = []
 
         self.create_subscription(OccupancyGrid, f"/{robot_id}/map", self._on_map, MAP_QOS)
         self.create_subscription(String, f"/{robot_id}/explore_cmd", self._on_cmd, 10)
@@ -399,15 +400,39 @@ class ExplorerNode(Node):
             self.get_logger().warn(f"explore_hint: bad payload {msg.data!r}")
             return
         if not h or "x" not in h or "y" not in h:
-            self._steer_hint = None
+            self._steer_queue = []
             self.get_logger().info("explore_hint: cleared — back to unbiased scoring")
+            self._publish_status()
             return
         try:
             x, y = float(h["x"]), float(h["y"])
         except (TypeError, ValueError):
             self.get_logger().warn(f"explore_hint: non-numeric point {msg.data!r}")
             return
-        self._steer_hint = (x, y, time.monotonic())
+
+        # append=true queues the area to visit AFTER the current one, rather
+        # than replacing it. The two gestures mean genuinely different things,
+        # so they behave differently: appending must NOT interrupt the region
+        # being worked (that's the whole point of a queue), while a plain hint
+        # means "go now" and preempts below.
+        if h.get("append"):
+            self._steer_queue.append([x, y, None])
+            behind = len(self._steer_queue) - 1
+            if behind == 0:
+                # Nothing was queued, so this is the active region now — it
+                # just doesn't preempt the goal in flight the way a plain
+                # hint does.
+                self.get_logger().info(
+                    f"explore_hint: steering toward ({x:.2f}, {y:.2f}) — queue was empty"
+                )
+            else:
+                self.get_logger().info(
+                    f"explore_hint: queued ({x:.2f}, {y:.2f}) — {behind} ahead of it"
+                )
+            self._publish_status()
+            return
+
+        self._steer_queue = [[x, y, time.monotonic()]]
         self.get_logger().info(
             f"explore_hint: steering toward ({x:.2f}, {y:.2f}) "
             f"for {self.cfg['steer_ttl_s']:.0f}s — retargeting now"
@@ -437,15 +462,40 @@ class ExplorerNode(Node):
         self._publish_status()
 
     def _active_hint(self) -> tuple[float, float] | None:
-        if self._steer_hint is None:
-            return None
-        x, y, ts = self._steer_hint
+        """Head of the steer queue, expiring stale entries as it goes."""
         ttl = self.cfg["steer_ttl_s"]
-        if ttl > 0 and time.monotonic() - ts >= ttl:
-            self._steer_hint = None
-            self.get_logger().info("explore_hint: expired — back to unbiased scoring")
-            return None
-        return (x, y)
+        while self._steer_queue:
+            head = self._steer_queue[0]
+            if head[2] is None:
+                # The TTL runs from when an entry becomes ACTIVE, not from
+                # when it was clicked — otherwise everything behind a
+                # long-running region would quietly expire while waiting its
+                # turn, and a queue you have to re-enter isn't a queue.
+                head[2] = time.monotonic()
+            if ttl > 0 and time.monotonic() - head[2] >= ttl:
+                self.get_logger().info(
+                    f"explore_hint: ({head[0]:.2f}, {head[1]:.2f}) expired after "
+                    f"{ttl:.0f}s"
+                )
+                self._advance_hint()
+                continue
+            return (head[0], head[1])
+        return None
+
+    def _advance_hint(self):
+        """Drop the current region and move to the next queued one."""
+        if not self._steer_queue:
+            return
+        self._steer_queue.pop(0)
+        if self._steer_queue:
+            nxt = self._steer_queue[0]
+            nxt[2] = time.monotonic()
+            self.get_logger().info(
+                f"explore_hint: moving on to ({nxt[0]:.2f}, {nxt[1]:.2f}) — "
+                f"{len(self._steer_queue) - 1} more queued after it"
+            )
+        else:
+            self.get_logger().info("explore_hint: queue empty — back to unbiased scoring")
 
     def _hint_area_explored(self, hint, unknown: np.ndarray, info) -> bool:
         """True once there is no unknown space left near the operator's click.
@@ -1068,14 +1118,17 @@ class ExplorerNode(Node):
         # region, so it keeps working inward until the area really is mapped —
         # which is what _hint_area_explored below actually tests.
         if hint is not None and self.cfg["steer_lock"] and candidates:
-            if self._hint_area_explored(hint, unknown, info):
+            # A loop, not an if: several queued regions can already be mapped
+            # (you queued an area the robot happened to cover on its way
+            # somewhere else), and skipping them one per tick would stall the
+            # queue for no reason.
+            while hint is not None and self._hint_area_explored(hint, unknown, info):
                 self.get_logger().info(
-                    f"explore_hint: area around ({hint[0]:.2f}, {hint[1]:.2f}) is mapped "
-                    f"— releasing steer lock"
+                    f"explore_hint: area around ({hint[0]:.2f}, {hint[1]:.2f}) is mapped"
                 )
-                self._steer_hint = None
-                hint = None
-            else:
+                self._advance_hint()
+                hint = self._active_hint()
+            if hint is not None:
                 candidates.sort(key=lambda c: math.hypot(c[1] - hint[0], c[2] - hint[1]))
         if self._consec_failures >= self.cfg["escape_after_failures"] and escape_pool:
             # Escape mode. Consecutive stuck/timeout/abort goals mean the
@@ -1451,6 +1504,9 @@ class ExplorerNode(Node):
             # via _active_hint() so an expired hint stops being advertised
             # even while a goal is in flight and _plan_and_send isn't running.
             "steer_hint": ({"x": hint[0], "y": hint[1]} if hint else None),
+            # The whole queue, head first, so the map can draw what's pending.
+            "steer_queue": [{"x": round(q[0], 2), "y": round(q[1], 2)}
+                            for q in self._steer_queue],
         }
         ref = self.cfg["reference_free_area_m2"]
         if ref > 0:

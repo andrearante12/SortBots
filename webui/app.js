@@ -573,9 +573,12 @@ function updateExploreStatus() {
   // The explorer is the authority on whether a hint is still live (it expires
   // them), so mirror its view rather than trusting our own optimistic marker.
   steerHint = s.steer_hint || null;
+  steerQueue = s.steer_queue || (steerHint ? [steerHint] : []);
   blacklistPoints = s.blacklist_points || [];
+  const queued = Math.max(0, steerQueue.length - 1);
   const steer = s.steer_hint
-    ? ` · steering (${s.steer_hint.x.toFixed(1)}, ${s.steer_hint.y.toFixed(1)})`
+    ? ` · steering (${s.steer_hint.x.toFixed(1)}, ${s.steer_hint.y.toFixed(1)})` +
+      (queued ? ` +${queued} queued` : "")
     : "";
   exploreStatusEl.textContent =
     `explorer: ${s.state}${goal}${cov} · blacklisted ${s.blacklisted}${steer}`;
@@ -618,7 +621,8 @@ const trail = [];
 let lastPose = null; // {x, y, yaw}
 let plan = []; // Nav2 planned path, world [x, y] points
 let goal = null; // {x, y, yaw} — current nav target marker
-let steerHint = null; // {x, y} — operator steering hint, mirrored from explore_status
+let steerHint = null; // {x, y} — active steering hint, mirrored from explore_status
+let steerQueue = []; // [{x, y}] head-first; entry 0 is the one being worked
 let blacklistPoints = []; // [{x, y, r, strikes, permanent}] from explore_status
 const blacklistToggle = document.getElementById("blacklist-toggle");
 let showBlacklist = blacklistToggle.checked;
@@ -1033,21 +1037,32 @@ function drawFrame() {
     }
   }
 
-  // Steering hint: a dashed ring, deliberately unlike the solid nav-goal ring
-  // — it marks a region the explorer is biased toward, not a pose it will
-  // drive to. Cleared by explore_status once the hint expires.
-  if (steerHint) {
-    const [px, py] = worldToPixel(steerHint.x, steerHint.y);
+  // Steering queue: dashed rings, deliberately unlike the solid nav-goal ring
+  // — these mark regions to explore, not poses to drive to. The head is drawn
+  // bright and thick (being worked now); queued ones are dimmer and numbered
+  // so the order is readable at a glance. Mirrored from explore_status, so
+  // entries vanish as the explorer finishes or expires them.
+  steerQueue.forEach((q, i) => {
+    const [px, py] = worldToPixel(q.x, q.y);
     const r = Math.max(6, 0.9 / mapInfo.resolution);
+    const head = i === 0;
     ctx.save();
-    ctx.strokeStyle = "#5cd0ff";
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = head ? "#5cd0ff" : "rgba(92,208,255,0.45)";
+    ctx.lineWidth = head ? 2 : 1.5;
     ctx.setLineDash([5, 4]);
     ctx.beginPath();
     ctx.arc(px, py, r, 0, 2 * Math.PI);
     ctx.stroke();
+    if (!head) {
+      ctx.setLineDash([]);
+      ctx.fillStyle = "rgba(92,208,255,0.7)";
+      ctx.font = "11px monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(i), px, py);
+    }
     ctx.restore();
-  }
+  });
 
   // Nav goal marker (from click-to-nav or dispatch): hollow ring + heading tick.
   if (goal) {
@@ -1135,7 +1150,7 @@ const mapModeBar = document.getElementById("map-mode");
 const mapHintEl = document.getElementById("map-hint");
 const MAP_MODE_HINTS = {
   goal: "Drag to set a Nav2 goal (press = position, drag = heading) — overrides any active task.",
-  steer: "Click to steer exploration toward that area — biases frontier choice, never interrupts it.",
+  steer: "Click to send exploration to that area now — shift-click to queue it for after.",
 };
 mapModeBar.addEventListener("click", (ev) => {
   const btn = ev.target.closest("button[data-mapmode]");
@@ -1154,10 +1169,17 @@ const exploreHintTopic = new ROSLIB.Topic({
   reconnect_on_close: true,
 });
 
-function sendExploreHint(x, y) {
-  exploreHintTopic.publish(new ROSLIB.Message({ data: JSON.stringify({ x, y }) }));
-  steerHint = { x, y }; // instant marker; explore_status confirms + expires it
-  goalStatus.textContent = `steering exploration toward x=${x.toFixed(2)} y=${y.toFixed(2)}`;
+// append=true queues the area to visit after the current one instead of
+// replacing it (shift-click). The explorer works each region until it's
+// mapped, then moves on by itself.
+function sendExploreHint(x, y, append) {
+  exploreHintTopic.publish(
+    new ROSLIB.Message({ data: JSON.stringify(append ? { x, y, append: true } : { x, y }) })
+  );
+  if (!append) steerHint = { x, y }; // instant marker; explore_status confirms + expires it
+  goalStatus.textContent = append
+    ? `queued exploration area x=${x.toFixed(2)} y=${y.toFixed(2)}`
+    : `steering exploration toward x=${x.toFixed(2)} y=${y.toFixed(2)}`;
 }
 
 canvas.addEventListener("mousedown", (ev) => {
@@ -1174,8 +1196,9 @@ window.addEventListener("mouseup", (ev) => {
   const [sx, sy] = goalPressWorld;
   goalPressWorld = null;
   if (mapMode === "steer") {
-    // Position only — a hint has no heading to express.
-    sendExploreHint(sx, sy);
+    // Position only — a hint has no heading to express. Shift appends to the
+    // queue instead of replacing it.
+    sendExploreHint(sx, sy, ev.shiftKey);
     return;
   }
   const [ux, uy] = pixelToWorld(...eventToCanvasPixel(ev));
