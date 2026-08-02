@@ -557,12 +557,27 @@ function updateExploreStatus() {
     return;
   }
   const s = lastExploreStatus;
-  const pct = s.explored_pct != null ? `${s.explored_pct}%` : "?";
+  // Prefer coverage_pct: free floor mapped as a fraction of a reference map
+  // (configs/explorer.yaml's reference_free_area_m2). explored_pct is the
+  // fallback and is NOT coverage — it divides by the current grid's own
+  // extent, which grows as RTAB-Map explores, so it can fall while the robot
+  // is making progress and reads ~44% on a finished map. Labelled distinctly
+  // so the two are never mistaken for each other in a demo.
+  const cov =
+    s.coverage_pct != null
+      ? ` · covered ${s.coverage_pct}%${s.free_area_m2 != null ? ` (${s.free_area_m2} m²)` : ""}`
+      : ` · mapped ${s.explored_pct != null ? `${s.explored_pct}%` : "?"}`;
   const goal = s.current_goal
     ? ` -> (${s.current_goal.x.toFixed(1)}, ${s.current_goal.y.toFixed(1)})`
     : "";
+  // The explorer is the authority on whether a hint is still live (it expires
+  // them), so mirror its view rather than trusting our own optimistic marker.
+  steerHint = s.steer_hint || null;
+  const steer = s.steer_hint
+    ? ` · steering (${s.steer_hint.x.toFixed(1)}, ${s.steer_hint.y.toFixed(1)})`
+    : "";
   exploreStatusEl.textContent =
-    `explorer: ${s.state}${goal} · mapped ${pct} · blacklisted ${s.blacklisted}`;
+    `explorer: ${s.state}${goal}${cov} · blacklisted ${s.blacklisted}${steer}`;
 }
 setInterval(updateExploreStatus, 500);
 
@@ -602,6 +617,7 @@ const trail = [];
 let lastPose = null; // {x, y, yaw}
 let plan = []; // Nav2 planned path, world [x, y] points
 let goal = null; // {x, y, yaw} — current nav target marker
+let steerHint = null; // {x, y} — operator steering hint, mirrored from explore_status
 let costmapCanvas = null; // offscreen render of the global costmap (own grid)
 
 // Pixel<->world use the SLAM map's grid (mapInfo). worldToPixel is also used
@@ -979,6 +995,22 @@ function drawFrame() {
     ctx.stroke();
   }
 
+  // Steering hint: a dashed ring, deliberately unlike the solid nav-goal ring
+  // — it marks a region the explorer is biased toward, not a pose it will
+  // drive to. Cleared by explore_status once the hint expires.
+  if (steerHint) {
+    const [px, py] = worldToPixel(steerHint.x, steerHint.y);
+    const r = Math.max(6, 0.9 / mapInfo.resolution);
+    ctx.save();
+    ctx.strokeStyle = "#5cd0ff";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, 2 * Math.PI);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   // Nav goal marker (from click-to-nav or dispatch): hollow ring + heading tick.
   if (goal) {
     const [px, py] = worldToPixel(goal.x, goal.y);
@@ -1054,6 +1086,42 @@ function sendNavGoal(x, y, yaw) {
     `nav goal sent: x=${x.toFixed(2)} y=${y.toFixed(2)} yaw=${yaw.toFixed(2)}`;
 }
 
+// What a map click means: "goal" (direct navigate_to_pose, the original
+// behaviour) or "steer" (an explore_hint that biases the explorer's frontier
+// scoring). They are genuinely different operations, not two ways to do one
+// thing: a nav goal competes with the explorer for the single-goal action
+// server and loses within about a second, whereas a hint never interrupts
+// exploration at all.
+let mapMode = "goal";
+const mapModeBar = document.getElementById("map-mode");
+const mapHintEl = document.getElementById("map-hint");
+const MAP_MODE_HINTS = {
+  goal: "Drag to set a Nav2 goal (press = position, drag = heading) — overrides any active task.",
+  steer: "Click to steer exploration toward that area — biases frontier choice, never interrupts it.",
+};
+mapModeBar.addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button[data-mapmode]");
+  if (!btn) return;
+  mapMode = btn.dataset.mapmode;
+  for (const b of mapModeBar.querySelectorAll("button")) {
+    b.classList.toggle("active", b === btn);
+  }
+  mapHintEl.textContent = MAP_MODE_HINTS[mapMode];
+});
+
+const exploreHintTopic = new ROSLIB.Topic({
+  ros,
+  name: `/${ROBOT_ID}/explore_hint`,
+  messageType: "std_msgs/String",
+  reconnect_on_close: true,
+});
+
+function sendExploreHint(x, y) {
+  exploreHintTopic.publish(new ROSLIB.Message({ data: JSON.stringify({ x, y }) }));
+  steerHint = { x, y }; // instant marker; explore_status confirms + expires it
+  goalStatus.textContent = `steering exploration toward x=${x.toFixed(2)} y=${y.toFixed(2)}`;
+}
+
 canvas.addEventListener("mousedown", (ev) => {
   if (!mapInfo) return; // no grid yet -> can't convert pixels to world
   ev.preventDefault();
@@ -1067,6 +1135,11 @@ window.addEventListener("mouseup", (ev) => {
   if (!mapInfo || !goalPressWorld) return;
   const [sx, sy] = goalPressWorld;
   goalPressWorld = null;
+  if (mapMode === "steer") {
+    // Position only — a hint has no heading to express.
+    sendExploreHint(sx, sy);
+    return;
+  }
   const [ux, uy] = pixelToWorld(...eventToCanvasPixel(ev));
   const [dx, dy] = [ux - sx, uy - sy];
   // Near-zero drag = a plain click: keep heading 0 rather than amplify jitter.

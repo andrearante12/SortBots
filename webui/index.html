@@ -305,6 +305,17 @@
     <div id="map-view" class="stage-view">
       <div id="map-bar">
         <label><input type="checkbox" id="costmap-toggle" checked /> costmap</label>
+        <!-- What a map click MEANS. "nav goal" is the original behaviour: a
+             direct navigate_to_pose, which the explorer preempts within a
+             second while it's running. "steer" publishes an explore_hint
+             instead, biasing frontier scoring toward the click without ever
+             pausing exploration — see nodes/explorer.py's _on_hint. -->
+        <div id="map-mode" class="segmented">
+          <button type="button" data-mapmode="goal" class="active"
+                  title="Drag sets a Nav2 goal directly (press = position, drag = heading). Overrides any active task — but while the explorer is running it will preempt this goal within about a second.">nav goal</button>
+          <button type="button" data-mapmode="steer"
+                  title="Click to bias autonomous exploration toward that area. Not a goal: the explorer keeps choosing its own frontiers, so it can't be stranded by an unreachable click. The hint fades after a minute.">steer</button>
+        </div>
         <span id="map-hint"
               title="Drag on the map to set a Nav2 goal: press sets the position, drag sets the heading. This overrides any task the task_manager is currently navigating — Nav2 always takes the newest goal.">
           Drag to set a Nav2 goal (press = position, drag = heading) — overrides any active task.
