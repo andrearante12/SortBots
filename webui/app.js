@@ -1134,9 +1134,24 @@ function sendNavGoal(x, y, yaw) {
       },
     },
   });
+  // Stop the explorer first, exactly as task_manager.py does before it
+  // dispatches (see its _on_dispatch). navigate_to_pose is a SINGLE-GOAL
+  // server: without this the explorer keeps issuing its own goals, the two
+  // preempt each other every second or so, and — worse — each preemption
+  // comes back to the explorer as an ABORTED result, which it scores as a
+  // navigation failure and blacklists. Observed live 2026-08-02: manual nav
+  // goals were silently poisoning good frontiers and driving spurious
+  // escapes, with nothing on either side reporting a conflict.
+  // Use `steer` mode to direct exploration without stopping it.
+  if (lastExploreStatus && lastExploreStatus.state === "exploring") {
+    exploreCmdTopic.publish(new ROSLIB.Message({ data: "stop" }));
+  }
   goal = { x, y, yaw }; // instant marker; /plan refreshes it once Nav2 replies
   goalStatus.textContent =
-    `nav goal sent: x=${x.toFixed(2)} y=${y.toFixed(2)} yaw=${yaw.toFixed(2)}`;
+    `nav goal sent: x=${x.toFixed(2)} y=${y.toFixed(2)} yaw=${yaw.toFixed(2)}` +
+    (lastExploreStatus && lastExploreStatus.state === "exploring"
+      ? " — exploration stopped (use steer mode to guide it instead)"
+      : "");
 }
 
 // What a map click means: "goal" (direct navigate_to_pose, the original
@@ -1145,22 +1160,31 @@ function sendNavGoal(x, y, yaw) {
 // thing: a nav goal competes with the explorer for the single-goal action
 // server and loses within about a second, whereas a hint never interrupts
 // exploration at all.
-let mapMode = "goal";
+// Persisted, because a reload silently reverting to "nav goal" is worse than
+// it sounds: the two modes look identical to click but do opposite things,
+// and a stray nav goal FIGHTS the explorer (see sendNavGoal) rather than
+// steering it. Observed live — a page refresh mid-run turned steer clicks
+// into competing Nav2 goals without anything on screen changing.
+let mapMode = localStorage.getItem("sortbots.mapMode") || "goal";
 const mapModeBar = document.getElementById("map-mode");
 const mapHintEl = document.getElementById("map-hint");
 const MAP_MODE_HINTS = {
-  goal: "Drag to set a Nav2 goal (press = position, drag = heading) — overrides any active task.",
+  goal: "Drag to set a Nav2 goal (press = position, drag = heading) — stops autonomous exploration.",
   steer: "Click to send exploration to that area now — shift-click to queue it for after.",
 };
+function applyMapMode(mode) {
+  mapMode = mode;
+  localStorage.setItem("sortbots.mapMode", mode);
+  for (const b of mapModeBar.querySelectorAll("button")) {
+    b.classList.toggle("active", b.dataset.mapmode === mode);
+  }
+  mapHintEl.textContent = MAP_MODE_HINTS[mode];
+}
 mapModeBar.addEventListener("click", (ev) => {
   const btn = ev.target.closest("button[data-mapmode]");
-  if (!btn) return;
-  mapMode = btn.dataset.mapmode;
-  for (const b of mapModeBar.querySelectorAll("button")) {
-    b.classList.toggle("active", b === btn);
-  }
-  mapHintEl.textContent = MAP_MODE_HINTS[mapMode];
+  if (btn) applyMapMode(btn.dataset.mapmode);
 });
+applyMapMode(mapMode);
 
 const exploreHintTopic = new ROSLIB.Topic({
   ros,
