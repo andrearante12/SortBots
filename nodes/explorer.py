@@ -410,8 +410,30 @@ class ExplorerNode(Node):
         self._steer_hint = (x, y, time.monotonic())
         self.get_logger().info(
             f"explore_hint: steering toward ({x:.2f}, {y:.2f}) "
-            f"for {self.cfg['steer_ttl_s']:.0f}s"
+            f"for {self.cfg['steer_ttl_s']:.0f}s — retargeting now"
         )
+
+        # Act on it IMMEDIATELY rather than waiting for the current goal to
+        # end. _tick returns early while a goal is healthy, so otherwise a
+        # hint sits queued behind whatever is running — and a goal that isn't
+        # failing can hold the robot for up to goal_timeout_s. Observed live
+        # 2026-08-02: a hint waited 11 s for the active goal to abort, and the
+        # goal after it ran 75 s to timeout before anything could change.
+        # Pointing at the map should mean "go there", not "go there once
+        # you're finished".
+        #
+        # Not a failure: no blacklist, no _consec_failures. Bump the
+        # generation before cancelling so the CANCELED result this produces
+        # isn't misread as a navigation failure by _on_nav_result — the same
+        # trap the no-replacement path in _tick documents.
+        if self._goal_handle is not None:
+            superseded = self._goal_handle
+            self._cancel_active_goal(cancel_on_server=False)
+            if not self._plan_and_send():
+                self._goal_generation += 1
+                superseded.cancel_goal_async()
+        else:
+            self._plan_and_send()
         self._publish_status()
 
     def _active_hint(self) -> tuple[float, float] | None:
