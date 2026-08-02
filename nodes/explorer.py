@@ -554,6 +554,17 @@ class ExplorerNode(Node):
             # no longer tracks, invisible to the stuck watchdog. Cancelling
             # for real is safe here for exactly the reason it's unsafe on the
             # normal path: there is no brand-new goal for it to race against.
+            #
+            # Bump the generation FIRST, to disown the goal before cancelling
+            # it. Otherwise the CANCELED result we are about to cause comes
+            # back with a generation that still matches, and _on_nav_result
+            # scores our own housekeeping as a navigation failure — blacklists
+            # the target and increments _consec_failures. Observed live
+            # 2026-08-02: that misattribution blacklisted the only frontier on
+            # the map within seconds of startup and drove a spurious escape.
+            # On the normal path _send_goal does this bump for us; this branch
+            # is the only one where nothing otherwise would.
+            self._goal_generation += 1
             superseded.cancel_goal_async()
 
     def _goal_fault(self) -> str | None:
@@ -661,18 +672,35 @@ class ExplorerNode(Node):
             f"startup spin: rotating {goal.target_yaw:.2f} rad for an initial 360-degree view"
         )
         self._spin_state = "running"
-        self.spin_client.send_goal_async(goal).add_done_callback(self._on_spin_response)
+        self.spin_client.send_goal_async(goal).add_done_callback(
+            lambda f: self._on_spin_response(f, retry=True)
+        )
 
     def _check_startup_spin(self):
         if self._spin_deadline is not None and time.monotonic() > self._spin_deadline:
             self.get_logger().warn("startup spin: deadline passed — carrying on without it")
             self._spin_state = "done"
 
-    def _on_spin_response(self, future):
+    def _on_spin_response(self, future, retry: bool = False):
         handle = future.result()
         if not handle.accepted:
-            self.get_logger().warn("startup spin rejected — carrying on without it")
-            self._spin_state = "done"
+            # server_is_ready() only proves the action server EXISTS. During
+            # bringup behavior_server advertises it while still inactive and
+            # answers "Action server is inactive. Rejecting the goal." —
+            # observed live 2026-08-02, rejected 176 ms before
+            # lifecycle_manager activated it. Same race the navigate_to_pose
+            # rejection path in _on_goal_response documents, so treat it the
+            # same way: retry rather than give up. _begin_startup_spin's
+            # deadline is what eventually calls it off.
+            if retry:
+                self.get_logger().warn(
+                    "startup spin rejected (behavior_server not active yet) — retrying",
+                    throttle_duration_sec=5.0,
+                )
+                self._spin_state = "pending"
+            else:
+                self.get_logger().warn("spin rejected — carrying on without it")
+                self._spin_state = "done"
             return
         handle.get_result_async().add_done_callback(self._on_spin_result)
 
@@ -749,7 +777,12 @@ class ExplorerNode(Node):
         )
         self._spin_state = "running"
         self._spin_deadline = time.monotonic() + self.cfg["startup_spin_timeout_s"]
-        self.spin_client.send_goal_async(goal).add_done_callback(self._on_spin_response)
+        # retry=False: a rejection here means Nav2 is unhealthy, and unlike at
+        # bringup there's no reason to expect that to resolve on its own —
+        # fall through to the escape goal rather than spin-retrying forever.
+        self.spin_client.send_goal_async(goal).add_done_callback(
+            lambda f: self._on_spin_response(f, retry=False)
+        )
         return True
 
     def _plan_and_send(self) -> bool:
