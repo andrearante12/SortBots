@@ -279,8 +279,12 @@ queued pickup→dropoff workflow instead.
 
 ```bash
 scripts/run_demo.sh --explore              # hands-off: starts exploring immediately
-scripts/run_demo.sh --explore --localize   # explore to EXTEND an existing map instead of starting fresh
+scripts/run_demo.sh --explore --resume     # EXTEND an existing map instead of starting fresh
 ```
+
+(`--resume`, not `--localize`: the latter is read-only and never grows the
+map, so exploring against it just re-walks what was already known. See
+"Resuming exploration into an existing map" below.)
 
 `nodes/explorer.py` finds frontiers (free cells bordering unknown space) in
 `/robot_0/map`, drives `navigate_to_pose` toward the best-scored one, and
@@ -296,8 +300,46 @@ reverse (−0.15 m/s) is retained so BackUp recovery and corner escapes work.
 Teleop strafing (`q`/`e` in `wasd_teleop.py`) is unaffected — the base is
 still holonomic, Nav2 just never commands `linear.y`.
 
+**Every Nav2 recovery depends on one easily-missed parameter.**
+`behavior_server` reads *three* frames, not two: `global_frame`,
+`robot_base_frame`, and `local_frame` — the odom-ish frame Spin, BackUp,
+DriveOnHeading and AssistedTeleop all integrate against. It defaults to a
+bare `odom`, which does not exist in a namespaced TF tree, so leaving it
+unset makes every recovery abort instantly with `No Transform available …
+"odom" does not exist` and turns the behavior tree's whole recovery branch
+into a no-op. That is not a subtle degradation: a wedged robot can then
+never physically free itself, and one exploration run failed 13 consecutive
+goals without moving. `configs/nav2_params.yaml` now sets
+`local_frame: robot_0/odom` (rewritten per robot by
+`sortbots_nav2.launch.py`). Same class of bug as the static layer's
+`map_topic` — an unqualified default that silently no-ops under namespacing.
+The explorer's startup spin (below) exists partly to surface a regression
+here on every single run.
+
+**Speed: the robot stops driving to places it has already seen.** The depth
+camera reveals a frontier from 4–5 m out (RTAB-Map `Grid/RangeMax 5.0`,
+costmap `raytrace_max_range 5.0`), but a standoff goal sits only 1.5 m from
+it — so the last several metres of every goal, plus a rotate-in-place to
+satisfy `yaw_goal_tolerance`, were spent arriving to look at mapped space.
+Now, once no frontier cell remains within `frontier_consumed_radius_m` of
+the point a goal was chosen to reveal, the goal counts as **satisfied**:
+cancelled and replaced immediately, with no blacklist entry and no failure
+count (log line: `frontier at (…) already revealed en route to (…) —
+retargeting (not a failure)`; counter `goals_consumed` in
+`explore_status`). Two guards stop it thrashing — `goal_min_age_s`, and an
+exact requirement that a new `/map` has arrived since the goal was sent,
+since on the grid that produced the candidate the check could only ever say
+"still there". If `goals_consumed / goals_sent` climbs above ~0.5 while the
+robot barely travels, `frontier_consumed_radius_m` is too large.
+
 **Corner/dead-end handling** (all tunable in `configs/explorer.yaml`):
 
+- *Startup spin* — one 2π rotation before the first frontier goal. At t=0 a
+  forward-only camera has seen a cone, so the first choice is close to a
+  guess, and frequently the *only* candidate. ~8 s of sim time buys a full
+  `Grid/RangeMax` disc. It doubles as a per-run check that recoveries work
+  at all (see `local_frame` above) — watch for `startup spin complete —
+  recoveries are functional`.
 - *Standoff goals* — the goal is pulled back from the frontier cell into
   known free floor with clearance from walls **and** unknown space, posed
   facing the frontier; the camera reveals it from the standoff instead of
@@ -321,7 +363,37 @@ still holonomic, Nav2 just never commands `linear.y`.
   in the same pocket — and jumps to the **farthest** valid frontier on the
   explored boundary (log line: `escape: N consecutive failed goals …`),
   ignoring the distance cap. Normal nearest-biased scoring resumes on the
-  next success.
+  next success. Escape also *pocket-blacklists* a
+  `escape_pocket_radius_m` disc around the robot, so the pocket dies in one
+  go rather than one 0.5 m spot per failure — applied only when the escape
+  target lies outside that disc, so it never blacklists its own destination.
+- *Hard escape* — at twice `escape_after_failures` (failed repeatedly **and**
+  failed to escape) the explorer spins in place before retargeting. That
+  combination almost always means a physical wedge with a stale local
+  costmap, and rotating is the highest-information action a forward-only
+  camera has.
+- *Sticky blacklist* — some frontiers are genuinely unreachable (behind a
+  rack, behind sim geometry, in a pocket the planner can't route into). With
+  a flat TTL they returned every `blacklist_ttl_s` forever, which both burned
+  goal cycles and made "exploration done" **structurally unreachable** —
+  there was always one more candidate, so the empty-cycle counter could never
+  run up. Re-blacklisting near an existing entry now bumps its *strike* count
+  instead of adding a neighbour; each strike multiplies its TTL
+  (`blacklist_ttl_growth`) and widens its radius, and at
+  `blacklist_permanent_strikes` it stops expiring. An unreachable frontier
+  costs three failure cycles and is then gone for good.
+- *Run-time budget* — `max_run_time_s` (default 2400 s wall) ends the run
+  regardless. Every other termination path depends on the frontier set going
+  empty, which a stalled perception stack can prevent indefinitely; this
+  guarantees the run finishes and the final map gets saved. A lost
+  `map → base_link` transform is logged as an error after 30 consecutive
+  ticks and force-finishes the run after 300, since that path otherwise
+  hangs silently in `exploring` forever.
+
+When exploration ends, the explorer logs a run summary — elapsed time, grid
+size, known/free/occupied m², coverage against the reference map, goal
+counters (`sent / reached / failed / consumed-early / rejected`) and the
+blacklist size, including how many entries went permanent.
 
 ### Reacting to moved/moving obstacles
 
@@ -457,6 +529,62 @@ localize against is a footgun, not a preference.
 
 Nav2 needs no changes between any of these modes: its static layer consumes
 the same `map` topic regardless.
+
+### Saving a map off a run
+
+Two artifacts are worth keeping, and they have different lifetimes: the
+**occupancy grid** (`.pgm` + `.yaml`) can only be captured while the stack is
+up, since it comes off the live `/map` topic; the **RTAB-Map database**
+(`.db`) can only be copied safely once the stack is *down*, because copying a
+live sqlite file mid-write gives a torn database. `scripts/save_map.sh` does
+both (needs ROS 2 sourced, unlike `run_demo.sh`):
+
+```bash
+scripts/save_map.sh --run nvidia_explore_20260802 --watch 3 &   # checkpoint every 3 min
+# ... explore until "exploration done" ...
+scripts/save_map.sh --run nvidia_explore_20260802 --label final
+scripts/save_map.sh --stop-watch
+scripts/run_demo.sh stop
+scripts/save_map.sh --run nvidia_explore_20260802 --db          # only now
+```
+
+Everything lands in `data/runs/<name>/map/`. The `--watch` loop exists for
+two reasons: `run_demo.sh stop` `pkill -9`s rtabmap only 2 s after SIGINT and
+can take the last minutes of mapping with it, and the checkpoint series
+doubles as a coverage-versus-time curve. It is deliberately *not* in
+`run_demo.sh`'s `PIPELINE_PATTERNS`, so teardown doesn't kill it before the
+final checkpoint lands; it ends itself once `/map` stops answering.
+`--occ`/`--free` are passed explicitly rather than left to `map_saver`'s
+defaults — unspecified thresholds are why this repo already has saved yamls
+disagreeing about `free_thresh` (0.25 vs 0.196).
+
+### How much of the warehouse is actually mapped
+
+```bash
+scripts/map_coverage.py data/runs/<name>/map/final.yaml \
+    --reference data/runs/nvidia_explore_20260801_145700/map/checkpoint_resume002.yaml
+scripts/map_coverage.py --live --watch 30      # against the running stack
+```
+
+Reports free / occupied / unknown / known in both cells and m². The file mode
+is ROS-free on purpose, so it still works after teardown.
+
+**`explored_pct` in the dashboard is not coverage.** It divides known cells
+by the *current* grid's own extent, and that extent grows as RTAB-Map
+explores — so it can fall while the robot is making progress. On the most
+complete map this repo has built it reads **43.8%**. Use `coverage_pct` /
+`free_area_m2` from `explore_status` instead, or this script. The denominator
+is `reference_free_area_m2` in `configs/explorer.yaml` (293.7 m², the free
+floor of that reference map). It is a ratio of scalar *areas*, deliberately
+not a cell-wise overlay — two RTAB-Map sessions have no common frame — and
+exceeding 100% just means this run mapped more than the reference did.
+
+One trap worth knowing if you write your own parser: in `mode: trinary`,
+classify by `map_saver`'s sentinel pixels (254 free / 205 unknown / 0
+occupied), *not* by the yaml thresholds. Unknown's implied occupancy is
+0.196078 and this repo's own saved yamls carry `free_thresh: 0.196` — 8e-5 of
+margin. A yaml written with `free_thresh: 0.2` would silently reclassify
+every unknown cell as free and report ~100% coverage on a half-explored map.
 
 ### Resuming exploration into an existing map
 

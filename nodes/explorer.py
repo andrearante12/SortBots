@@ -54,8 +54,9 @@ import rclpy
 import tf2_ros
 import yaml
 from action_msgs.msg import GoalStatus
+from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped
-from nav2_msgs.action import NavigateToPose
+from nav2_msgs.action import NavigateToPose, Spin
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.node import Node
@@ -97,6 +98,19 @@ DEFAULTS = {
     "openness_radius_m": 0.8,      # window for the free-space fraction around a goal
     "openness_exp": 1.0,           # weight of openness in scoring; 0.0 disables the term
     "escape_after_failures": 2,    # consecutive failed goals before jumping to the farthest frontier
+    "frontier_consumed_radius_m": 1.0,  # goal is satisfied once no frontier remains this close to it
+    "goal_min_age_s": 3.0,         # don't run the consumed check before a goal is this old
+    "blacklist_merge_radius_m": 0.75,   # re-blacklisting within this bumps strikes instead of adding
+    "blacklist_ttl_growth": 3.0,   # ttl = blacklist_ttl_s * growth**(strikes-1)
+    "blacklist_permanent_strikes": 3,   # at/above this many strikes an entry never expires
+    "blacklist_radius_growth_m": 0.25,  # per-strike widening of one entry's suppression radius
+    "blacklist_radius_max_m": 1.5,      # cap on that widening (keep below aisle width)
+    "escape_pocket_radius_m": 1.5,      # disc blacklisted around the robot when escape fires
+    "startup_spin": True,          # 360-degree spin before the first frontier goal
+    "startup_spin_yaw": 6.283185,  # 2*pi
+    "startup_spin_timeout_s": 60.0,     # wall-clock give-up waiting for, then running, the spin
+    "reference_free_area_m2": 0.0,      # denominator for coverage_pct; 0 disables
+    "max_run_time_s": 0.0,         # wall-clock budget before _finish() fires; 0 disables
 }
 
 
@@ -215,11 +229,22 @@ class ExplorerNode(Node):
         self._map_info = None
         self._grid: np.ndarray | None = None
         self._empty_cycles = 0
-        self._blacklist: list[list[float]] = []  # [x, y, monotonic_ts]
+        # [x, y, monotonic_ts, strikes, radius] — see _blacklist_point for why
+        # entries escalate instead of accumulating as independent neighbours.
+        self._blacklist: list[list[float]] = []
         self._other_claims: dict[str, tuple[float, float, float]] = {}  # robot_id -> (x, y, ts)
+        # Bumped on every /map message. _frontier_consumed() compares it
+        # against the seq a goal was chosen on, so a goal can never be
+        # abandoned on the same grid that produced it.
+        self._map_seq = 0
 
         self._goal_handle = None
         self._goal_target: tuple[float, float] | None = None
+        # (fx, fy): the frontier look-at point the active goal was chosen to
+        # reveal, and the map seq it was chosen on. Both drive
+        # _frontier_consumed(); cleared wherever _goal_target is cleared.
+        self._goal_frontier: tuple[float, float] | None = None
+        self._goal_map_seq: int | None = None
         self._goal_sent_at: float | None = None
         # (monotonic_ts, x, y) samples while a goal is active, for the stuck
         # watchdog in _tick(). Cleared on every new goal and on goal end.
@@ -245,10 +270,30 @@ class ExplorerNode(Node):
         # the separate cancel-on-timeout race (see _cancel_active_goal).
         self._goal_generation = 0
 
+        # Run statistics, all published in _publish_status() and summarized by
+        # _finish(). Reset together on explore_cmd=start.
+        self._started_at = time.monotonic()
+        self._goals_sent = 0
+        self._goals_succeeded = 0
+        self._goals_failed = 0
+        self._goals_consumed = 0   # abandoned early because the frontier was already revealed
+        self._rejections = 0       # consecutive goals Nav2 refused to accept
+        self._no_tf_ticks = 0      # consecutive ticks with no map->base_link transform
+        self._last_clusters = 0
+        self._last_candidates = 0
+
+        # Startup spin (see _begin_startup_spin): "pending" -> "running" ->
+        # "done". Published as `phase`, deliberately NOT as a `state` value —
+        # task_manager.py gates dispatch on state == "exploring" and would
+        # grab navigate_to_pose mid-spin if the explorer looked idle.
+        self._spin_state = "pending" if (autostart and cfg["startup_spin"]) else "done"
+        self._spin_deadline: float | None = None
+
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         self.nav_client = ActionClient(self, NavigateToPose, f"/{robot_id}/navigate_to_pose")
+        self.spin_client = ActionClient(self, Spin, f"/{robot_id}/spin")
 
         self.create_subscription(OccupancyGrid, f"/{robot_id}/map", self._on_map, MAP_QOS)
         self.create_subscription(String, f"/{robot_id}/explore_cmd", self._on_cmd, 10)
@@ -271,7 +316,17 @@ class ExplorerNode(Node):
 
     def _on_map(self, msg: OccupancyGrid):
         self._map_info = msg.info
-        self._grid = np.array(msg.data, dtype=np.int16).reshape(msg.info.height, msg.info.width)
+        # frombuffer, not np.array(list): rclpy hands int8[] over as an
+        # array.array, and reading it as a buffer is ~360x cheaper than
+        # element-wise conversion (measured 4.7 ms -> 0.013 ms on a 380x746
+        # grid). This runs at map rate, so it's worth the fallback branch for
+        # the plain-list case.
+        try:
+            flat = np.frombuffer(msg.data, dtype=np.int8).astype(np.int16)
+        except (TypeError, BufferError):
+            flat = np.array(msg.data, dtype=np.int16)
+        self._grid = flat.reshape(msg.info.height, msg.info.width)
+        self._map_seq += 1
 
     # -- external control (dashboard / task_manager) ----------------------
 
@@ -283,6 +338,14 @@ class ExplorerNode(Node):
                 self.state = "exploring"
                 self._empty_cycles = 0
                 self._consec_failures = 0
+                self._no_tf_ticks = 0
+                self._rejections = 0
+                self._started_at = time.monotonic()
+                # Spin on a manual start too, but only if we've never sent a
+                # goal — a stop/start in the middle of a run shouldn't cost
+                # another full rotation.
+                if self.cfg["startup_spin"] and self._goals_sent == 0:
+                    self._spin_state = "pending"
                 self._publish_status()
         elif cmd == "stop":
             self.get_logger().info("explore_cmd: stop")
@@ -315,6 +378,8 @@ class ExplorerNode(Node):
             self._goal_handle.cancel_goal_async()
         self._goal_handle = None
         self._goal_target = None
+        self._goal_frontier = None
+        self._goal_map_seq = None
         self._goal_sent_at = None
 
     # -- frontier-claim sharing (the concrete slice of collaborative
@@ -342,15 +407,63 @@ class ExplorerNode(Node):
 
     # -- blacklist ---------------------------------------------------------
 
-    def _blacklist_point(self, x: float, y: float):
-        self._blacklist.append([x, y, time.monotonic()])
+    def _blacklist_point(self, x: float, y: float, radius: float | None = None):
+        """Suppress future goals near (x, y), escalating on repeat failures.
 
-    def _active_blacklist(self) -> list[tuple[float, float]]:
-        ttl = self.cfg["blacklist_ttl_s"]
+        A flat TTL meant a genuinely unreachable frontier — behind a rack,
+        behind sim geometry the depth camera can't see past, in a pocket the
+        planner can't route into — came back every blacklist_ttl_s forever.
+        That burned goal cycles on a known-dead target AND made _finish()
+        structurally unreachable: there was always "one more" candidate, so
+        _empty_cycles could never run up to done_after_empty_cycles.
+
+        Re-blacklisting within blacklist_merge_radius_m of an existing entry
+        now bumps that entry's STRIKE count instead of appending a neighbour.
+        Each strike multiplies its TTL and widens its suppression radius, and
+        at blacklist_permanent_strikes it stops expiring entirely. Growth is
+        deliberately PER-ENTRY rather than driven by the global
+        _consec_failures: that counter has no spatial meaning, so keying off
+        it would inflate suppression map-wide, including in areas the robot
+        has never had trouble with.
+        """
+        merge = self.cfg["blacklist_merge_radius_m"]
+        for b in self._blacklist:
+            if math.hypot(x - b[0], y - b[1]) < merge:
+                b[2] = time.monotonic()
+                b[3] += 1
+                b[4] = min(
+                    self.cfg["blacklist_radius_max_m"],
+                    self.cfg["blacklist_radius_m"]
+                    + (b[3] - 1) * self.cfg["blacklist_radius_growth_m"],
+                )
+                ttl = self._blacklist_ttl(b)
+                self.get_logger().info(
+                    f"blacklist strike {int(b[3])} at ({b[0]:.2f}, {b[1]:.2f}) "
+                    f"— radius {b[4]:.2f}m, "
+                    + ("PERMANENT" if math.isinf(ttl) else f"ttl {ttl:.0f}s")
+                )
+                return
+        self._blacklist.append([
+            x, y, time.monotonic(), 1,
+            self.cfg["blacklist_radius_m"] if radius is None else radius,
+        ])
+
+    def _blacklist_ttl(self, b: list[float]) -> float:
+        base = self.cfg["blacklist_ttl_s"]
+        if base <= 0 or b[3] >= self.cfg["blacklist_permanent_strikes"]:
+            return math.inf
+        return base * self.cfg["blacklist_ttl_growth"] ** (b[3] - 1)
+
+    def _active_blacklist(self) -> list[tuple[float, float, float]]:
+        """Live entries as (x, y, radius). Sole owner of the expiry pruning."""
         now = time.monotonic()
-        if ttl > 0:
-            self._blacklist = [b for b in self._blacklist if now - b[2] < ttl]
-        return [(b[0], b[1]) for b in self._blacklist]
+        self._blacklist = [b for b in self._blacklist if now - b[2] < self._blacklist_ttl(b)]
+        return [(b[0], b[1], b[4]) for b in self._blacklist]
+
+    @staticmethod
+    def _blacklisted(x: float, y: float, entries: list[tuple[float, float, float]]) -> bool:
+        """Per-entry radii, unlike _too_close's single shared radius."""
+        return any(math.hypot(x - bx, y - by) < br for bx, by, br in entries)
 
     @staticmethod
     def _too_close(x: float, y: float, points: list[tuple[float, float]], radius: float) -> bool:
@@ -373,34 +486,208 @@ class ExplorerNode(Node):
     def _tick(self):
         if self.state != "exploring":
             return
+
+        budget = self.cfg["max_run_time_s"]
+        if budget > 0 and time.monotonic() - self._started_at > budget:
+            # Wall-clock backstop. Everything else that ends a run depends on
+            # the frontier set going empty, which a stalled perception stack
+            # or a genuinely unreachable remainder can prevent indefinitely.
+            # This guarantees the run terminates and the final map gets saved.
+            self.get_logger().warn(f"max_run_time_s ({budget:.0f}s) reached — finishing")
+            self._cancel_active_goal()
+            self._finish()
+            return
+
+        if self._spin_state == "pending":
+            self._begin_startup_spin()
+            self._publish_status()
+            return
+        if self._spin_state == "running":
+            self._check_startup_spin()
+            self._publish_status()
+            return
+
+        superseded = None
         if self._goal_handle is not None:
-            if self._is_stuck():
-                gx, gy = self._goal_target
+            # Order is load-bearing: a wedged robot must trip the stuck
+            # watchdog (which blacklists and counts a failure) rather than be
+            # excused by a "consumed" verdict it happens to also satisfy.
+            reason = self._goal_fault()
+            if reason is None and self._frontier_consumed():
+                reason = "consumed"
+            if reason is None:
+                self._publish_status()  # heartbeat while a goal is in flight
+                return
+
+            superseded = self._goal_handle
+            gx, gy = self._goal_target
+            if reason == "consumed":
+                fx, fy = self._goal_frontier
+                self._goals_consumed += 1
+                self.get_logger().info(
+                    f"frontier at ({fx:.2f}, {fy:.2f}) already revealed en route to "
+                    f"({gx:.2f}, {gy:.2f}) — retargeting (not a failure)"
+                )
+            elif reason == "stuck":
                 self.get_logger().warn(
                     f"stuck: moved <{self.cfg['stuck_min_displacement_m']}m in "
                     f"{self.cfg['stuck_window_s']:.0f}s en route to ({gx:.2f}, {gy:.2f}) "
                     f"— blacklisting + retargeting"
                 )
                 self._blacklist_point(gx, gy)
-                self._cancel_active_goal(cancel_on_server=False)
-                self._pose_history.clear()
                 self._consec_failures += 1
-            elif (
-                self._goal_sent_at is not None
-                and time.monotonic() - self._goal_sent_at > self.cfg["goal_timeout_s"]
-            ):
-                gx, gy = self._goal_target
+                self._pose_history.clear()
+            else:  # "timeout"
                 self.get_logger().warn(
                     f"goal to ({gx:.2f}, {gy:.2f}) timed out after "
                     f"{self.cfg['goal_timeout_s']:.0f}s — canceling + blacklisting"
                 )
                 self._blacklist_point(gx, gy)
-                self._cancel_active_goal(cancel_on_server=False)
                 self._consec_failures += 1
-            else:
-                self._publish_status()  # heartbeat while a goal is in flight
-                return
-        self._plan_and_send()
+            self._cancel_active_goal(cancel_on_server=False)
+
+        if not self._plan_and_send() and superseded is not None:
+            # _cancel_active_goal(cancel_on_server=False) above relies on a
+            # REPLACEMENT goal preempting the old one on the server. No
+            # replacement went out (no map, no TF, or no candidates), so
+            # nothing will — and Nav2 would keep driving to a goal this node
+            # no longer tracks, invisible to the stuck watchdog. Cancelling
+            # for real is safe here for exactly the reason it's unsafe on the
+            # normal path: there is no brand-new goal for it to race against.
+            superseded.cancel_goal_async()
+
+    def _goal_fault(self) -> str | None:
+        """"stuck" | "timeout" | None for the goal currently in flight."""
+        if self._is_stuck():
+            return "stuck"
+        if (
+            self._goal_sent_at is not None
+            and time.monotonic() - self._goal_sent_at > self.cfg["goal_timeout_s"]
+        ):
+            return "timeout"
+        return None
+
+    def _frontier_consumed(self) -> bool:
+        """True once nothing frontier-like remains near what this goal targeted.
+
+        Not a failure — a saved trip. The depth camera reveals a frontier from
+        4-5 m out (RTAB-Map Grid/RangeMax 5.0, costmap raytrace_max_range
+        5.0), but the goal is a standoff only goal_standoff_max_m (1.5 m)
+        away, so without this the robot spends its last several metres — plus
+        a rotate-in-place to satisfy yaw_goal_tolerance — arriving to look at
+        space it already mapped.
+
+        Deliberately does NOT re-run find_frontiers(): this sits on _tick's
+        hot early-return path. It recomputes the SAME predicate find_frontiers
+        uses (free & has-unknown-neighbour & ~dilate(occupied)) over a small
+        window around the target only — measured ~0.1 ms against ~7.5 ms for
+        the full clustering pass on a 380x746 grid. The window is padded by
+        the inflation radius and dilated identically so the answer is
+        bit-identical to what find_frontiers would say about those cells;
+        without the pad this would keep goals alive that find_frontiers would
+        never re-select.
+        """
+        if self._goal_frontier is None or self._grid is None or self._map_info is None:
+            return False
+        if (
+            self._goal_sent_at is None
+            or time.monotonic() - self._goal_sent_at < self.cfg["goal_min_age_s"]
+        ):
+            return False
+        # The real anti-thrash guard, and it's exact rather than tuned: the
+        # candidate came out of grid_masks() on map seq N, so on seq N this
+        # cell IS a frontier by construction and the check below could only
+        # ever say "still there". Requiring a NEW map bounds abandonment to
+        # RTAB-Map's publish rate no matter how fast _tick runs.
+        if self._map_seq == self._goal_map_seq:
+            return False
+
+        info = self._map_info
+        res = info.resolution
+        fx, fy = self._goal_frontier
+        ix = int((fx - info.origin.position.x) / res)
+        iy = int((fy - info.origin.position.y) / res)
+        r = max(1, round(self.cfg["frontier_consumed_radius_m"] / res))
+        pad = max(0, round(self.cfg["inflate_radius_m"] / res)) + 1
+        h, w = self._grid.shape
+        y0, y1 = max(0, iy - r), min(h, iy + r + 1)
+        x0, x1 = max(0, ix - r), min(w, ix + r + 1)
+        if y0 >= y1 or x0 >= x1:
+            return True  # the target fell outside the grid entirely
+
+        py0, py1 = max(0, y0 - pad), min(h, y1 + pad)
+        px0, px1 = max(0, x0 - pad), min(w, x1 + pad)
+        sub = self._grid[py0:py1, px0:px1]
+        unknown, occupied, free = grid_masks(sub, self.cfg["occupied_thresh"])
+        has_unknown_neighbor = np.zeros_like(free)
+        has_unknown_neighbor[:-1, :] |= unknown[1:, :]
+        has_unknown_neighbor[1:, :] |= unknown[:-1, :]
+        has_unknown_neighbor[:, :-1] |= unknown[:, 1:]
+        has_unknown_neighbor[:, 1:] |= unknown[:, :-1]
+        mask = free & has_unknown_neighbor & ~_dilate4(occupied, pad - 1)
+        return not bool(mask[y0 - py0 : y1 - py0, x0 - px0 : x1 - px0].any())
+
+    # -- startup spin ------------------------------------------------------
+
+    def _begin_startup_spin(self):
+        """One full rotation before the first frontier goal.
+
+        The robot has a single forward-facing depth camera, so at t=0 it knows
+        nothing about 3/4 of its surroundings and the first frontier choice is
+        very nearly a guess — frequently the only candidate, which is exactly
+        the fragility that killed two fresh runs (see _on_goal_response).
+        A 2*pi spin costs ~8 s of sim time and hands the scorer a full
+        Grid/RangeMax disc instead of a cone. It also functions as a per-run
+        regression test for behavior_server's local_frame (configs/
+        nav2_params.yaml): before that fix, this exact action aborted
+        instantly on every attempt.
+        """
+        if self._spin_deadline is None:
+            self._spin_deadline = time.monotonic() + self.cfg["startup_spin_timeout_s"]
+        if time.monotonic() > self._spin_deadline:
+            self.get_logger().warn("startup spin: /spin server never appeared — skipping")
+            self._spin_state = "done"
+            return
+        if not self.spin_client.server_is_ready():
+            return  # behavior_server still coming up; retry next tick
+
+        goal = Spin.Goal()
+        goal.target_yaw = float(self.cfg["startup_spin_yaw"])
+        # MUST be set: nav2_behaviors' Spin only enforces a timeout when
+        # command_time_allowance_ > 0, so the zero default means a spin that
+        # stalls (e.g. odom TF drops out) never gives up.
+        goal.time_allowance = Duration(sec=20)
+        self.get_logger().info(
+            f"startup spin: rotating {goal.target_yaw:.2f} rad for an initial 360-degree view"
+        )
+        self._spin_state = "running"
+        self.spin_client.send_goal_async(goal).add_done_callback(self._on_spin_response)
+
+    def _check_startup_spin(self):
+        if self._spin_deadline is not None and time.monotonic() > self._spin_deadline:
+            self.get_logger().warn("startup spin: deadline passed — carrying on without it")
+            self._spin_state = "done"
+
+    def _on_spin_response(self, future):
+        handle = future.result()
+        if not handle.accepted:
+            self.get_logger().warn("startup spin rejected — carrying on without it")
+            self._spin_state = "done"
+            return
+        handle.get_result_async().add_done_callback(self._on_spin_result)
+
+    def _on_spin_result(self, future):
+        status = future.result().status
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            self.get_logger().info("startup spin complete — recoveries are functional")
+        else:
+            self.get_logger().warn(
+                f"spin ended status={status} — carrying on. If the behavior_server log "
+                f"shows a TF error, check its local_frame in configs/nav2_params.yaml "
+                f"(must be {self.robot_id}/odom, not nav2's bare 'odom' default) — that "
+                f"same setting also disables every BT recovery."
+            )
+        self._spin_state = "done"
 
     def _is_stuck(self) -> bool:
         """True if the robot has barely moved over the sliding stuck window.
@@ -424,10 +711,10 @@ class ExplorerNode(Node):
         self._pose_history.append((now, pose[0], pose[1]))
         window = self.cfg["stuck_window_s"]
         # Prune, but always keep one sample at age >= window as the anchor:
-        # sampling happens at the replan tick (2 s), so dropping everything
-        # older than the window outright would leave the oldest sample
-        # perpetually ~1 tick younger than the window and the filled check
-        # below would never pass.
+        # sampling happens once per replan tick, so dropping everything older
+        # than the window outright would leave the oldest sample perpetually
+        # ~1 tick younger than the window and the filled check below would
+        # never pass.
         while len(self._pose_history) >= 2 and now - self._pose_history[1][0] >= window:
             self._pose_history.popleft()
         oldest = self._pose_history[0]
@@ -438,16 +725,67 @@ class ExplorerNode(Node):
         )
         return max_disp < self.cfg["stuck_min_displacement_m"]
 
-    def _plan_and_send(self):
+    def _maybe_hard_escape_spin(self) -> bool:
+        """Spin in place when escape mode alone hasn't broken the deadlock.
+
+        At twice escape_after_failures the robot has failed repeatedly AND
+        failed to escape, which usually means it is physically wedged with a
+        stale local costmap. With a forward-only depth camera, rotating in
+        place is the highest-information-per-second action available: it
+        re-raytraces every direction at once. Fire-and-forget — _tick's spin
+        branch waits it out, then replans (still in escape mode, since
+        _consec_failures is untouched).
+        """
+        if self._consec_failures < 2 * self.cfg["escape_after_failures"]:
+            return False
+        if self._spin_state != "done" or not self.spin_client.server_is_ready():
+            return False
+        goal = Spin.Goal()
+        goal.target_yaw = math.pi
+        goal.time_allowance = Duration(sec=20)
+        self.get_logger().warn(
+            f"hard escape: {self._consec_failures} consecutive failures — "
+            f"spinning in place to re-observe before retargeting"
+        )
+        self._spin_state = "running"
+        self._spin_deadline = time.monotonic() + self.cfg["startup_spin_timeout_s"]
+        self.spin_client.send_goal_async(goal).add_done_callback(self._on_spin_response)
+        return True
+
+    def _plan_and_send(self) -> bool:
+        """Pick and dispatch the next frontier goal. True iff one went out.
+
+        The return value matters: _tick() clears the previous goal WITHOUT
+        cancelling it on the server, on the assumption that the replacement
+        preempts it. Every early return here breaks that assumption, so
+        _tick needs to know.
+        """
         if self._grid is None or self._map_info is None:
-            return
+            return False
+        if self._maybe_hard_escape_spin():
+            return False
         pose = self._robot_pose()
         if pose is None:
+            self._no_tf_ticks += 1
             self.get_logger().warn(
-                f"no map->{self.robot_id}/base_link TF yet — can't plan",
+                f"no map->{self.robot_id}/base_link TF yet — can't plan "
+                f"({self._no_tf_ticks} ticks)",
                 throttle_duration_sec=5.0,
             )
-            return
+            # A silent forever-hang otherwise: this path returns before
+            # _empty_cycles is touched, so a lost map->base_link transform
+            # (RTAB-Map losing odometry) leaves the explorer heart-beating in
+            # "exploring" with nothing to end the run.
+            if self._no_tf_ticks == 30:
+                self.get_logger().error(
+                    f"no map->{self.robot_id}/base_link TF for 30 consecutive ticks — "
+                    f"RTAB-Map odometry is probably lost; exploration is stalled"
+                )
+            elif self._no_tf_ticks > 300:
+                self.get_logger().error("TF has been missing far too long — finishing")
+                self._finish()
+            return False
+        self._no_tf_ticks = 0
         rx, ry = pose
         info = self._map_info
         res = info.resolution
@@ -480,7 +818,7 @@ class ExplorerNode(Node):
         escape_pool = []  # (dist, gx, gy, fx, fy): every valid candidate, any distance
         for f, ((gx, gy), (fx, fy), (giy, gix)) in zip(frontiers, goals):
             dist = math.hypot(gx - rx, gy - ry)
-            if self._too_close(gx, gy, blacklist, self.cfg["blacklist_radius_m"]):
+            if self._blacklisted(gx, gy, blacklist):
                 continue
             if self._too_close(gx, gy, claims, self.cfg["claim_radius_m"]):
                 continue
@@ -518,6 +856,16 @@ class ExplorerNode(Node):
                 f"escape: {self._consec_failures} consecutive failed goals — "
                 f"jumping to farthest frontier ({gx:.2f}, {gy:.2f}), {_dist:.1f}m away"
             )
+            # Pocket-blacklist where we're wedged. Blacklisting only the goals
+            # actually attempted removes the pocket one blacklist_radius_m
+            # spot at a time, so scoring keeps handing back the NEXT untried
+            # frontier in the SAME pocket. A disc around the robot kills the
+            # whole pocket at once. Applied AFTER the escape target is picked,
+            # and only when that target is outside the disc — otherwise the
+            # escape would blacklist its own destination and the next tick
+            # would throw it away.
+            if _dist > self.cfg["escape_pocket_radius_m"]:
+                self._blacklist_point(rx, ry, radius=self.cfg["escape_pocket_radius_m"])
             candidates = [(0.0, gx, gy, fx, fy)]
         elif not candidates and far:
             # Backtracking out of a fully-mapped dead end. When the robot
@@ -538,6 +886,8 @@ class ExplorerNode(Node):
             candidates = [(0.0, gx, gy, fx, fy)]
         best_xy = (candidates[0][1], candidates[0][2]) if candidates else None
         self._publish_frontier_markers([g[0] for g in goals], best=best_xy)
+        self._last_clusters = len(frontiers)
+        self._last_candidates = len(candidates)
 
         if not candidates:
             self._empty_cycles += 1
@@ -550,11 +900,11 @@ class ExplorerNode(Node):
                 self._finish()
             else:
                 self._publish_status()
-            return
+            return False
 
         self._empty_cycles = 0
         _score, gx, gy, fx, fy = candidates[0]
-        self._send_goal(gx, gy, fx, fy, rx, ry)
+        return self._send_goal(gx, gy, fx, fy, rx, ry)
 
     def _goal_point(
         self, f: Frontier, info, valid_mask: np.ndarray
@@ -591,10 +941,19 @@ class ExplorerNode(Node):
             giy, gix = fr_iy, fr_ix
         return cell_to_world(giy, gix, info), fxy, (giy, gix)
 
-    def _send_goal(self, gx: float, gy: float, fx: float, fy: float, rx: float, ry: float):
-        if not self.nav_client.wait_for_server(timeout_sec=2.0):
-            self.get_logger().error("navigate_to_pose server not available")
-            return
+    def _send_goal(
+        self, gx: float, gy: float, fx: float, fy: float, rx: float, ry: float
+    ) -> bool:
+        # server_is_ready(), not wait_for_server(2.0): this runs inside the
+        # timer callback on a single-threaded executor, so a blocking wait
+        # stalls map callbacks and every other timer for the full timeout —
+        # and buys nothing, since _tick retries every cycle anyway.
+        if not self.nav_client.server_is_ready():
+            self.get_logger().warn(
+                "navigate_to_pose server not ready — retrying next tick",
+                throttle_duration_sec=5.0,
+            )
+            return False
         # Face the frontier FROM THE GOAL — the camera should look at the
         # unknown space we're trying to reveal once the robot arrives. (The
         # old code aimed along robot->goal, a heading that's only right if
@@ -617,7 +976,10 @@ class ExplorerNode(Node):
         gen = self._goal_generation
         target = (gx, gy)
         self._goal_target = target
+        self._goal_frontier = (fx, fy)
+        self._goal_map_seq = self._map_seq
         self._goal_sent_at = time.monotonic()
+        self._goals_sent += 1
         self._pose_history.clear()  # fresh stuck window for the new goal
         self._publish_claim(gx, gy)
         self.get_logger().info(f"exploring -> ({gx:.2f}, {gy:.2f})")
@@ -627,6 +989,7 @@ class ExplorerNode(Node):
             lambda f: self._on_goal_response(f, gen, target)
         )
         self._publish_status()
+        return True
 
     def _on_goal_response(self, future, gen: int, target: tuple[float, float]):
         if gen != self._goal_generation:
@@ -642,15 +1005,27 @@ class ExplorerNode(Node):
             # often its ONLY frontier, so reject -> blacklist -> 30 empty
             # cycles -> "exploration done" with the robot never having moved.
             # Clearing state lets _tick re-pick (usually the same) frontier on
-            # the next 2s cycle; genuine navigation failures still get
+            # the next cycle; genuine navigation failures still get
             # blacklisted via the ABORTED path in _on_nav_result.
+            self._rejections += 1
             self.get_logger().warn(
                 f"frontier goal rejected (Nav2 not ready?): {target} — will retry"
             )
+            if self._rejections == 10:
+                # Persistent rejection means a Nav2 lifecycle node died. The
+                # loop below would otherwise retry silently forever without
+                # ever incrementing _empty_cycles, so nothing ends the run.
+                self.get_logger().error(
+                    "10 consecutive goal rejections — bt_navigator/controller_server is "
+                    "probably down. Check the bringup log; exploration cannot proceed."
+                )
             self._goal_handle = None
             self._goal_target = None
+            self._goal_frontier = None
+            self._goal_map_seq = None
             self._goal_sent_at = None
             return
+        self._rejections = 0
         self._goal_handle = goal_handle
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(
@@ -667,20 +1042,54 @@ class ExplorerNode(Node):
         status = future.result().status
         self._goal_handle = None
         self._goal_target = None
+        self._goal_frontier = None
+        self._goal_map_seq = None
         self._goal_sent_at = None
         self._pose_history.clear()
         if status == GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().info(f"reached frontier {target}")
+            self._goals_succeeded += 1
             self._consec_failures = 0
         else:
             self.get_logger().warn(f"frontier goal to {target} ended status={status} — blacklisting")
             self._blacklist_point(*target)
+            self._goals_failed += 1
             self._consec_failures += 1
         self._publish_status()
 
+    def _area_stats(self) -> tuple[float, float, float]:
+        """(free_m2, occupied_m2, known_m2) for the current grid."""
+        if self._grid is None or self._map_info is None:
+            return (0.0, 0.0, 0.0)
+        cell = self._map_info.resolution ** 2
+        occ = int(np.count_nonzero(self._grid >= self.cfg["occupied_thresh"]))
+        known = int(np.count_nonzero(self._grid >= 0))
+        return ((known - occ) * cell, occ * cell, known * cell)
+
     def _finish(self):
-        self.get_logger().info("exploration done — no reachable frontiers left")
         self.state = "done"
+        elapsed = time.monotonic() - self._started_at
+        free_m2, occ_m2, known_m2 = self._area_stats()
+        ref = self.cfg["reference_free_area_m2"]
+        permanent = sum(
+            1 for b in self._blacklist if b[3] >= self.cfg["blacklist_permanent_strikes"]
+        )
+        shape = "?x?" if self._grid is None else f"{self._grid.shape[1]}x{self._grid.shape[0]}"
+        res = self._map_info.resolution if self._map_info is not None else float("nan")
+        self.get_logger().info(
+            "exploration done — no reachable frontiers left\n"
+            "  ==== run summary ====\n"
+            f"  elapsed    : {elapsed:.0f} s wall (~{elapsed / 60:.1f} min; sim runs ~0.45x real time)\n"
+            f"  grid       : {shape} @ {res:.3f} m\n"
+            f"  known area : {known_m2:.1f} m2 (free {free_m2:.1f}, occupied {occ_m2:.1f})\n"
+            + (f"  coverage   : {100.0 * free_m2 / ref:.1f}% of the {ref:.1f} m2 reference free floor\n"
+               if ref > 0 else "")
+            + f"  goals      : {self._goals_sent} sent / {self._goals_succeeded} reached / "
+              f"{self._goals_failed} failed / {self._goals_consumed} consumed-early / "
+              f"{self._rejections} rejected\n"
+            f"  blacklist  : {len(self._blacklist)} entries ({permanent} permanent)\n"
+            f"  save it    : scripts/save_map.sh --run <name> --label final"
+        )
         self._publish_status()
 
     # -- visualization + status -------------------------------------------
@@ -716,24 +1125,57 @@ class ExplorerNode(Node):
         self.frontier_pub.publish(arr)
 
     def _publish_status(self):
+        """JSON on explore_status.
+
+        webui/app.js reads state/current_goal/blacklisted/explored_pct and
+        task_manager.py reads state (comparing it to "exploring"), so those
+        four keep their exact types and meanings — in particular `state` never
+        gains a new value (the startup spin is reported as `phase` instead)
+        and `blacklisted` stays an int. Everything else here is additive; JSON
+        consumers ignore keys they don't ask for.
+        """
         known = total = None
         if self._grid is not None:
             known = int(np.count_nonzero(self._grid >= 0))
             total = int(self._grid.size)
+        free_m2, occ_m2, known_m2 = self._area_stats()
         status = {
             "state": self.state,
+            "phase": self._spin_state,
             "current_goal": (
                 {"x": self._goal_target[0], "y": self._goal_target[1]}
                 if self._goal_target
                 else None
             ),
             "blacklisted": len(self._blacklist),
-            # Cheap live proxy, NOT a scientific coverage metric: fraction of
-            # the current grid's own extent that is non-unknown. The grid
-            # itself grows as RTAB-Map explores, so this is "how filled-in is
-            # what we've drawn so far", not "% of the true room mapped".
-            "explored_pct": round(100.0 * known / total, 1) if known and total else None,
+            # Cheap live proxy, NOT a coverage metric: fraction of the current
+            # grid's own extent that is non-unknown. The grid grows as
+            # RTAB-Map explores, so this is "how filled-in is what we've drawn
+            # so far" and it can go DOWN — on the most complete map this repo
+            # has ever built it reads 43.8%. Use coverage_pct / free_area_m2
+            # below for anything you intend to defend as coverage.
+            "explored_pct": round(100.0 * known / total, 1) if total else None,
+            "known_area_m2": round(known_m2, 1),
+            "free_area_m2": round(free_m2, 1),
+            "occupied_area_m2": round(occ_m2, 1),
+            "frontier_clusters": self._last_clusters,
+            "frontier_candidates": self._last_candidates,
+            "goals_sent": self._goals_sent,
+            "goals_succeeded": self._goals_succeeded,
+            "goals_failed": self._goals_failed,
+            "goals_consumed": self._goals_consumed,
+            "goal_rejections": self._rejections,
+            "no_tf_ticks": self._no_tf_ticks,
+            "elapsed_s": round(time.monotonic() - self._started_at, 1),
         }
+        ref = self.cfg["reference_free_area_m2"]
+        if ref > 0:
+            # Free floor mapped as a fraction of the best prior full map's
+            # free floor. A ratio of scalar areas, deliberately not a
+            # cell-wise overlay: the two maps have no common frame. Exceeding
+            # 100% means this run mapped more than the reference did, which is
+            # the honest answer rather than a bug.
+            status["coverage_pct"] = round(100.0 * free_m2 / ref, 1)
         msg = String()
         msg.data = json.dumps(status)
         self.status_pub.publish(msg)

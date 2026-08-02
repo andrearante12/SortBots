@@ -353,6 +353,23 @@
     assisted_teleop:
       plugin: "nav2_behaviors::AssistedTeleop"
     global_frame: map
+    # nav2_behaviors' TimedBehavior reads THREE frames, not two
+    # (nav2_behaviors/timed_behavior.hpp:132-134). local_frame is the
+    # odom-ish frame the RELATIVE behaviors integrate against — spin.cpp,
+    # back_up.cpp, drive_on_heading.hpp and assisted_teleop.cpp all call
+    # getCurrentPose(..., local_frame_, robot_base_frame_, ...), i.e. every
+    # plugin in behavior_plugins above. It is declared with default "odom"
+    # (confirmed in libbehavior_server_core.so), and this TF tree only has
+    # robot_0/odom, so leaving it unset makes EVERY recovery abort instantly
+    # with "No Transform available ... 'odom' does not exist" — the BT's
+    # whole recovery branch becomes a no-op. Observed live 2026-08-02: an
+    # exploration run failed 13 consecutive goals with the robot physically
+    # immobile, because nothing could ever spin or back it out of a wedge.
+    # Same class of bug as static_layer's map_topic (see global_costmap):
+    # an unqualified frame/topic default that silently no-ops under
+    # namespacing. sortbots_nav2.launch.py's _rewrite_robot_0() handles the
+    # per-robot substitution, exactly as for robot_base_frame below.
+    local_frame: robot_0/odom
     robot_base_frame: robot_0/base_link
     transform_tolerance: 0.3
     simulate_ahead_time: 2.0
