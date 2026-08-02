@@ -75,6 +75,7 @@ def _make_per_robot_actions(
     rviz,
     nav2,
     task_manager,
+    scripted_pick,
     localization,
     database_path,
     delete_db_on_start,
@@ -121,6 +122,22 @@ def _make_per_robot_actions(
             condition=IfCondition(task_manager),
         ))
 
+        # The other half of the dispatch loop: task_manager publishes
+        # pick_request and blocks on pick_result, so without this every task
+        # stalls in PICKING until PICK_TIMEOUT_SEC. Primary robot only —
+        # spawn_warehouse.py only applies arm commands to robot_0, so starting
+        # it for a secondary robot would publish into a void.
+        if rid == primary_robot_id:
+            actions.append(ExecuteProcess(
+                cmd=[
+                    "python3",
+                    os.path.join(REPO_ROOT, "nodes", "scripted_pick.py"),
+                    "--robot-id", rid,
+                ],
+                output="screen",
+                condition=IfCondition(scripted_pick),
+            ))
+
         if rid == primary_robot_id:
             actions.append(GroupAction(
                 condition=IfCondition(explore),
@@ -157,6 +174,7 @@ def generate_launch_description():
     nav2 = LaunchConfiguration("nav2")
     webui = LaunchConfiguration("webui")
     task_manager = LaunchConfiguration("task_manager")
+    scripted_pick = LaunchConfiguration("scripted_pick")
     dashboard_port = LaunchConfiguration("dashboard_port")
     localization = LaunchConfiguration("localization")
     database_path = LaunchConfiguration("database_path")
@@ -207,6 +225,16 @@ def generate_launch_description():
             "task_manager",
             default_value="true",
             description="Start nodes/task_manager.py, the pickup->dropoff dispatch FSM.",
+        ),
+        DeclareLaunchArgument(
+            "scripted_pick",
+            default_value="true",
+            description=(
+                "Start nodes/scripted_pick.py, which answers task_manager's "
+                "pick_request by playing back configs/arm_poses.yaml. Primary "
+                "robot only. Set false to drive the arm purely from the "
+                "dashboard's arm pad."
+            ),
         ),
         DeclareLaunchArgument(
             "dashboard_port",
@@ -277,9 +305,9 @@ def generate_launch_description():
         OpaqueFunction(
             function=_make_per_robot_actions,
             args=[
-                use_sim_time, rviz, nav2, task_manager, localization,
-                database_path, delete_db_on_start, explore, explore_autostart,
-                robot_id, robot_ids,
+                use_sim_time, rviz, nav2, task_manager, scripted_pick,
+                localization, database_path, delete_db_on_start,
+                explore, explore_autostart, robot_id, robot_ids,
             ],
         ),
     ])

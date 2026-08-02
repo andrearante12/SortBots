@@ -67,7 +67,7 @@ stop_pipeline() {
            controller_server planner_server smoother_server behavior_server \
            bt_navigator waypoint_follower velocity_smoother lifecycle_manager \
            component_container rosbridge_websocket web_video_server \
-           "webui/serve.py" webui_url.py task_manager.py explorer.py \
+           "webui/serve.py" webui_url.py task_manager.py scripted_pick.py explorer.py \
            rtabmap_cloud_pump.py recon_cloud_relay.py \
            web_video_watchdog.sh wasd_teleop \
            "spawn_warehouse.py"; do

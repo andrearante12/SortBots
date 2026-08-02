@@ -95,10 +95,6 @@ RESULT_FILE = os.environ.get(
 # this is `/World/<robot>/Fixed_Jaw_tip`. Single-robot (robot_0) scope only.
 GRIPPER_LINK = "Fixed_Jaw_tip"
 
-# Mock-pick "package" surface height above the floor (m) — a placeholder
-# guess pending the real shelf/bin CAD height, same honesty caveat as the
-# station poses in configs/waypoints.yaml.
-PACKAGE_HEIGHT_M = 0.85
 PACKAGE_SIZE_M = 0.08
 
 # First arm's 6 non-fixed joints. `nodes/scripted_pick.py` commands these
@@ -115,6 +111,19 @@ PACKAGE_SIZE_M = 0.08
 ARM_JOINT_NAMES = ["Rotation", "Pitch", "Elbow", "Wrist_Pitch", "Wrist_Roll", "Jaw"]
 HEAD_JOINT_NAMES = ["head_pan_joint", "head_tilt_joint"]
 HEAD_JOINT_LIMITS = {"head_pan_joint": (-1.57, 1.57), "head_tilt_joint": (-0.76, 1.45)}
+
+# From xlerobot.urdf. head_cmd has always been clipped against its limits
+# below, but arm commands went straight into ArticulationAction unclamped —
+# so the dashboard's arm pad was the ONLY thing enforcing them, and a UI bug
+# could drive a joint past its stop with nothing reporting it. Clamp here too.
+ARM_JOINT_LIMITS = {
+    "Rotation": (-2.1, 2.1),
+    "Pitch": (-0.1, 3.45),
+    "Elbow": (-0.2, 3.14159),
+    "Wrist_Pitch": (-1.8, 1.8),
+    "Wrist_Roll": (-3.14159, 3.14159),
+    "Jaw": (0.0, 1.7),
+}
 
 
 def _dof_indices(dof_names: list[str], joint_names: list[str]) -> list[int]:
@@ -137,21 +146,48 @@ def _load_sensor_configs():
     return d435, mpu
 
 
-def _load_first_pickup_station():
-    """(x, y) of the first `kind: pickup` station in waypoints.yaml.
+def _load_station_props():
+    """Stations in waypoints.yaml that carry a `prop:` block.
 
-    Used only to place the Milestone-1 mock package prop at sim start;
-    `nodes/task_manager.py` is the source of truth for which station a
-    given task actually targets.
+    Returns [(name, kind, x, y, yaw, prop), ...] in file order.
+
+    Replaces the old `_load_first_pickup_station()`, whose (x, y)-only return
+    couldn't carry the deck height the package z is now derived from. Extra
+    keys in waypoints.yaml are inert everywhere else: task_manager.Station
+    reads only kind/pose/dock_offset_m/dock_lateral_m, and the dashboard reads
+    only `kind`.
     """
     import yaml
 
     with open(WAYPOINTS_CONFIG) as f:
         stations = yaml.safe_load(f)["stations"]
-    for spec in stations.values():
-        if spec["kind"] == "pickup":
-            return float(spec["pose"]["x"]), float(spec["pose"]["y"])
-    raise ValueError(f"no pickup station found in {WAYPOINTS_CONFIG}")
+    out = []
+    for name, spec in stations.items():
+        prop = spec.get("prop")
+        if not prop:
+            continue
+        pose = spec["pose"]
+        out.append((
+            name,
+            spec["kind"],
+            float(pose["x"]),
+            float(pose["y"]),
+            float(pose.get("yaw", 0.0)),
+            prop,
+        ))
+    return out
+
+
+def _package_z(deck_height_m: float) -> float:
+    """Package centre z so its bottom face rests on a deck at `deck_height_m`.
+
+    UsdGeom.Cube is origin-centred, so a size-S cube sitting on a surface at
+    height H has its centre at H + S/2. Derived rather than stored as a second
+    constant on purpose: the previous PACKAGE_HEIGHT_M = 0.85 literal had no
+    relationship to any geometry in the scene, and nothing would have told us
+    when it drifted.
+    """
+    return deck_height_m + PACKAGE_SIZE_M / 2.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -207,6 +243,18 @@ def parse_args() -> argparse.Namespace:
             "Per-robot motion model. `cmd_vel` (default) waits for external "
             "ROS 2 Twist messages on /robot_<n>/cmd_vel. The other modes are "
             "for ROS-2-free smoke tests."
+        ),
+    )
+    p.add_argument(
+        "--no-station-props",
+        dest="station_props",
+        action="store_false",
+        help=(
+            "Skip the shelves authored at every configs/waypoints.yaml station "
+            "carrying a `prop:` block. Escape hatch for when a shelf lands "
+            "inside NVIDIA warehouse geometry — the station poses are estimates "
+            "and have never been confirmed against the real rack layout. The "
+            "package then spawns on the floor at the first pickup pose instead."
         ),
     )
     p.add_argument(
@@ -615,6 +663,8 @@ def _start_extra_ros_subscribers(robot_name: str):
 
     Returns (node, pick_state, head_state):
       - pick_state["data"]: last pick_cmd string, "" before the first one.
+      - pick_state["seq"]: message counter, so the caller can distinguish a
+        newly-arrived "detach" from one it already acted on.
       - head_state["pan"]/["tilt"]: last head_cmd values, 0.0 before the
         first one (matches the physics_overrides default of held-at-0).
     Call `rclpy.spin_once(node, timeout_sec=0.001)` once per sim tick — NOT
@@ -638,12 +688,18 @@ def _start_extra_ros_subscribers(robot_name: str):
         pass  # already initialized (e.g. by Isaac's own bridge internals)
 
     node = Node(f"{robot_name}_extra_ros_bridge")
-    pick_state = {"data": ""}
+    # `seq` makes the release edge-triggerable. "attach" wants to be level-
+    # triggered (re-teleport the package every tick while held), but "detach"
+    # is a one-shot event — the main loop fires the drop only when `seq`
+    # changes, so it can't re-place the box every tick afterwards.
+    pick_state = {"data": "", "seq": 0}
     head_state = {"pan": 0.0, "tilt": 0.0}
 
-    node.create_subscription(
-        String, f"/{robot_name}/pick_cmd", lambda msg: pick_state.__setitem__("data", msg.data), 10
-    )
+    def _on_pick_cmd(msg):
+        pick_state["data"] = msg.data
+        pick_state["seq"] += 1
+
+    node.create_subscription(String, f"/{robot_name}/pick_cmd", _on_pick_cmd, 10)
 
     def _on_head_cmd(msg):
         by_name = dict(zip(msg.name, msg.position))
@@ -678,15 +734,61 @@ def _read_arm_cmd(robot_name: str):
     by_name = dict(zip(names, positions))
     if not all(n in by_name for n in ARM_JOINT_NAMES):
         return None
-    return np.array([float(by_name[n]) for n in ARM_JOINT_NAMES])
+    # Clamp: nothing else on this path enforces the URDF limits (see
+    # ARM_JOINT_LIMITS). A teleop pad is exactly the thing that will one day
+    # send a joint past its stop.
+    return np.array([
+        float(np.clip(by_name[n], *ARM_JOINT_LIMITS[n])) for n in ARM_JOINT_NAMES
+    ])
 
 
-def _spawn_package(stage, prim_path: str, x: float, y: float):
+def _spawn_shelf(stage, prim_path: str, x: float, y: float, yaw_rad: float,
+                 deck_height_m: float, size):
+    """A deck slab on four legs, as static colliders, centred on (x, y).
+
+    The NVIDIA warehouse has nothing an SO-101-class arm can pick from: its
+    racks start well above the ~0.50 m this arm reaches fully extended, and
+    editing a streamed asset reference is not something we want to own. So the
+    demo brings its own shelf and places it at the station pose.
+
+    Reuses build_warehouse._author_box, which authors a UV-mapped Mesh rather
+    than a UsdGeom.Cube — Kit's RTX delegate won't generate UVs for a Cube, so
+    Cubes render flat grey. Static: CollisionAPI only, no RigidBodyAPI, so it
+    never moves and costs the solver nothing.
+    """
+    import math
+
+    from build_warehouse import _author_box
+
+    yaw_deg = math.degrees(yaw_rad)
+    sx, sy, sz = (float(v) for v in size)
+
+    _author_box(
+        stage, f"{prim_path}/Deck", (sx, sy, sz),
+        (x, y, deck_height_m - sz / 2.0), rotate_xyz=(0.0, 0.0, yaw_deg),
+    )
+
+    leg = 0.05
+    leg_h = max(deck_height_m - sz, 0.01)
+    cos_y, sin_y = math.cos(yaw_rad), math.sin(yaw_rad)
+    inset_x = sx / 2.0 - leg
+    inset_y = sy / 2.0 - leg
+    for i, (ox, oy) in enumerate([(1, 1), (1, -1), (-1, 1), (-1, -1)]):
+        # Leg offsets are in the shelf's own frame, rotated into world by yaw.
+        lx = x + (ox * inset_x) * cos_y - (oy * inset_y) * sin_y
+        ly = y + (ox * inset_x) * sin_y + (oy * inset_y) * cos_y
+        _author_box(
+            stage, f"{prim_path}/Leg_{i}", (leg, leg, leg_h),
+            (lx, ly, leg_h / 2.0), rotate_xyz=(0.0, 0.0, yaw_deg),
+        )
+
+
+def _spawn_package(stage, prim_path: str, x: float, y: float, z: float):
     """A free Cube the mock pick teleports onto the gripper.
 
-    No rigid-body physics — Milestone 1 only needs the box to visibly ride
-    the gripper and stay put once released. Real grasp physics arrives in
-    Phase 4's scripted IK pick (weld-assist on contact).
+    No rigid-body physics: the box only has to visibly ride the gripper and
+    stay put once released. `_place_package_on_surface` handles the release.
+    Real grasp physics is the successor to all of this — see that function.
     """
     from pxr import Gf, UsdGeom
 
@@ -694,7 +796,7 @@ def _spawn_package(stage, prim_path: str, x: float, y: float):
     cube.CreateSizeAttr(PACKAGE_SIZE_M)
     xformable = UsdGeom.Xformable(cube)
     xformable.ClearXformOpOrder()
-    xformable.AddTranslateOp().Set(Gf.Vec3d(x, y, PACKAGE_HEIGHT_M))
+    xformable.AddTranslateOp().Set(Gf.Vec3d(x, y, z))
 
 
 def _sync_package_to_gripper(stage, robot_name: str, package_prim_path: str) -> bool:
@@ -716,6 +818,50 @@ def _sync_package_to_gripper(stage, robot_name: str, package_prim_path: str) -> 
     xformable = UsdGeom.Xformable(package_prim)
     xformable.ClearXformOpOrder()
     xformable.AddTransformOp().Set(world_xform)
+    return True
+
+
+def _place_package_on_surface(stage, package_prim_path: str, decks) -> bool:
+    """Drop the package onto whatever it's currently over. Called on release.
+
+    Without this the box freezes in mid-air wherever the gripper let go — the
+    single most obviously-fake moment in the demo. `decks` is
+    [(x, y, half_sx, half_sy, deck_z), ...] from the station props; if the
+    package's XY is over one it lands on that deck, otherwise on the floor.
+
+    Station-agnostic on purpose: it works for any dropoff, and for a release
+    part-way through a run, without spawn_warehouse needing to know which
+    station task_manager navigated to (it deliberately doesn't).
+
+    Authors a Translate, not a Transform, so the wrist rotation the gripper
+    baked into the package's transform is dropped and the box lands square.
+
+    Still a teleport, same honesty caveat as the attach side. The successor is
+    real physics: give the package RigidBodyAPI + CollisionAPI, keep
+    physics:kinematicEnabled true while held and clear it on release so it
+    actually falls. That is deliberately NOT on the demo path — it depends on
+    the shelf colliders being right, on the gripper not interpenetrating, and
+    on the Jaw drive, which at stiffness 100 / max_force 100 (vs the arm's
+    1000/1000, see configs/physics_overrides/xlerobot.json) cannot hold
+    anything at all.
+    """
+    from pxr import Gf, Usd, UsdGeom
+
+    package_prim = stage.GetPrimAtPath(package_prim_path)
+    if not package_prim.IsValid():
+        return False
+    xformable = UsdGeom.Xformable(package_prim)
+    world_xform = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    pos = world_xform.ExtractTranslation()
+
+    rest_z = PACKAGE_SIZE_M / 2.0  # on the floor
+    for dx, dy, half_sx, half_sy, deck_z in decks:
+        if abs(pos[0] - dx) <= half_sx and abs(pos[1] - dy) <= half_sy:
+            rest_z = _package_z(deck_z)
+            break
+
+    xformable.ClearXformOpOrder()
+    xformable.AddTranslateOp().Set(Gf.Vec3d(float(pos[0]), float(pos[1]), rest_z))
     return True
 
 
@@ -848,20 +994,61 @@ def main() -> int:
         )
         emit("  chase_cam graph built (/robot_0/camera/chase/*)")
 
-    # Milestone 1 mock pick (robot_0 only): a package prop `nodes/task_manager.py`
-    # attaches/detaches via a plain rclpy pick_cmd subscriber (see
-    # _start_extra_ros_subscribers). Spawned at the first pickup station in
-    # configs/waypoints.yaml so it starts out looking shelved. Same node also
-    # carries head_cmd (head pan/tilt).
+    # Station props + the mock pick package (robot_0 only). Every station in
+    # configs/waypoints.yaml carrying a `prop:` block gets a shelf authored at
+    # its pose, and the package starts resting on the first pickup station's
+    # deck — so the scene the robot navigates to actually has something at a
+    # reachable height to pick from. `nodes/task_manager.py` attaches/detaches
+    # the package via a plain rclpy pick_cmd subscriber (see
+    # _start_extra_ros_subscribers); the same node carries head_cmd.
     package_prim_path = None
     extra_ros_node, pick_cmd_state, head_cmd_state = None, None, None
+    decks = []
     if "robot_0" in robots:
-        pkg_x, pkg_y = _load_first_pickup_station()
+        props = _load_station_props() if args.station_props else []
+        for name, kind, sx, sy, syaw, prop in props:
+            if prop.get("type") != "shelf":
+                emit(f"  station {name}: unknown prop type {prop.get('type')!r}, skipped")
+                continue
+            deck_h = float(prop["deck_height_m"])
+            size = prop["size"]
+            _spawn_shelf(stage, f"/World/station_{name}", sx, sy, syaw, deck_h, size)
+            decks.append((sx, sy, float(size[0]) / 2.0, float(size[1]) / 2.0, deck_h))
+            emit(f"  shelf for {name} ({kind}) at ({sx}, {sy}) deck_z={deck_h}")
+
+        pickup = next((p for p in props if p[1] == "pickup"), None)
         package_prim_path = "/World/package_0"
-        _spawn_package(stage, package_prim_path, pkg_x, pkg_y)
-        emit(f"  package_0 spawned at ({pkg_x}, {pkg_y}, {PACKAGE_HEIGHT_M})")
+        if pickup is not None:
+            _, _, pkg_x, pkg_y, _, pkg_prop = pickup
+            pkg_z = _package_z(float(pkg_prop["deck_height_m"]))
+        else:
+            # No prop'd pickup station (e.g. --no-station-props): fall back to
+            # the first pickup pose with the box on the floor, so the mock pick
+            # still has something to grab.
+            import yaml
+
+            with open(WAYPOINTS_CONFIG) as f:
+                stations = yaml.safe_load(f)["stations"]
+            first = next(s for s in stations.values() if s["kind"] == "pickup")
+            pkg_x, pkg_y = float(first["pose"]["x"]), float(first["pose"]["y"])
+            pkg_z = PACKAGE_SIZE_M / 2.0
+        _spawn_package(stage, package_prim_path, pkg_x, pkg_y, pkg_z)
+        emit(f"  package_0 spawned at ({pkg_x}, {pkg_y}, {pkg_z:.3f})")
+
         extra_ros_node, pick_cmd_state, head_cmd_state = _start_extra_ros_subscribers("robot_0")
         emit("  pick_cmd/head_cmd rclpy subscriber started")
+
+        # GRIPPER_LINK has never been confirmed against a live session, and
+        # _sync_package_to_gripper fails silently when it's wrong. Dump the
+        # articulation's children once so the real link names are in the log
+        # forever, and say up front whether the one we want resolves.
+        gripper_path = f"/World/robot_0/{GRIPPER_LINK}"
+        if stage.GetPrimAtPath(gripper_path).IsValid():
+            emit(f"  gripper link OK: {gripper_path}")
+        else:
+            names = [p.GetName() for p in stage.GetPrimAtPath("/World/robot_0").GetChildren()]
+            emit(f"  WARNING: gripper link {gripper_path} NOT FOUND — the mock "
+                 f"pick will silently do nothing. /World/robot_0 children: {names}")
 
     # Global /clock publisher so external ROS 2 nodes can `use_sim_time:=true`.
     # Bridges sim time → /clock at every playback tick.
@@ -906,6 +1093,10 @@ def main() -> int:
     dt = 1.0 / 60.0
     n_steps = None if args.forever else int(args.duration / dt)
     step = 0
+    # Last pick_cmd message acted on, so "detach" fires once per message
+    # rather than every tick (see the release block below).
+    last_pick_seq = pick_cmd_state["seq"] if pick_cmd_state else 0
+    warned_gripper = False
     while simulation_app.is_running():
         if n_steps is not None and step >= n_steps:
             break
@@ -970,12 +1161,26 @@ def main() -> int:
                         )
                     )
         if package_prim_path is not None:
-            # Level-triggered: state["data"] holds the last message, so
-            # re-checking "attach" every tick is idempotent, not a repeated
-            # trigger. "detach" (or no message yet) just stops the follow —
-            # the package stays wherever it last was.
+            # "attach" is level-triggered: state["data"] holds the last
+            # message, so re-teleporting every tick is idempotent, not a
+            # repeated trigger — that's what makes the box ride the gripper.
             if pick_cmd_state["data"] == "attach":
-                _sync_package_to_gripper(stage, "robot_0", package_prim_path)
+                if not _sync_package_to_gripper(stage, "robot_0", package_prim_path):
+                    # Returns False when GRIPPER_LINK doesn't resolve. Logged
+                    # once rather than every tick; the startup check above
+                    # already warned, this catches a mid-run regression.
+                    if not warned_gripper:
+                        emit("  WARNING: _sync_package_to_gripper found no "
+                             f"/World/robot_0/{GRIPPER_LINK} — package not following")
+                        warned_gripper = True
+            # "detach" is edge-triggered: releasing is a one-shot event, so it
+            # fires only on a NEW message. Level-triggering it would re-drop
+            # the box onto the deck every tick and pin it there.
+            elif (pick_cmd_state["data"] == "detach"
+                  and pick_cmd_state["seq"] != last_pick_seq):
+                _place_package_on_surface(stage, package_prim_path, decks)
+                emit("  package released")
+            last_pick_seq = pick_cmd_state["seq"]
         world.step(render=True)
         step += 1
         if step % 60 == 0:
