@@ -335,34 +335,68 @@ robot barely travels, `frontier_consumed_radius_m` is too large.
 ### Steering exploration by hand
 
 The map's **steer** mode (the `nav goal | steer` buttons above the map) lets
-you point the robot at an area without interrupting it. Clicking publishes
-`{"x": .., "y": ..}` on `<robot>/explore_hint`, which multiplies the score of
-nearby frontiers:
+you direct exploration without stopping it. A click publishes
+`{"x": .., "y": ..}` on `<robot>/explore_hint`; shift-click adds `"append":
+true` to QUEUE an area instead of replacing the current one. Publish `{}` to
+clear the queue.
 
-```
-score *= 1 + steer_weight * exp(-distance_to_hint / steer_decay_m)
-```
+While a hint is live the explorer heads for whichever frontier is **nearest
+your click**, ignoring `max_goal_distance_m`, and keeps working that region
+until it is mapped. It is still not a goal: the explorer picks real frontiers,
+so an unreachable click cannot strand it, and clearance/validity masks are
+hard filters applied before any of this.
 
-This is a **bias, not a goal**, and that distinction is the point. The map's
-other mode — plain click-to-nav — publishes straight to `navigate_to_pose`,
-which the explorer's own next goal preempts about a second later, so operator
-commands sent during exploration are simply overrun; the only way to stop
-that was to stop exploring. A hint instead leaves the robot choosing its own
-frontiers, avoiding walls, backtracking and escaping exactly as before, while
-preferring the region you pointed at. Consequences worth knowing:
+Three ways a region ends, all bounded:
 
-- It cannot strand the robot on an unreachable click. That frontier fails and
-  gets blacklisted like any other, and the hint expires after `steer_ttl_s`.
-- Frontiers within `steer_radius_m` of a hint ignore `max_goal_distance_m` —
-  without that, clicking the far side of the warehouse would do nothing,
-  since distant frontiers land in the backtracking pool that is only
-  consulted when there are no candidates at all.
-- Hints never bypass the obstacle-clearance and validity masks; those are
-  hard filters applied before scoring.
-- The hint shows as a dashed cyan ring on the map and in the status line, and
-  is mirrored from `explore_status` so the display expires with it.
+- the area is mapped — no unknown cells remain within `steer_radius_m` of the
+  click, so the queue advances (`explore_hint: ... is mapped`);
+- `steer_ttl_s` expires (the TTL runs from when a region becomes ACTIVE, not
+  when you clicked, so queued entries cannot expire while waiting);
+- the frontiers there prove unreachable and the sticky blacklist retires them.
 
-Publish `{}` on the same topic to clear a hint early.
+A click **preempts the goal in flight immediately** (~10 ms measured).
+Shift-click deliberately does not — queueing means "after this one".
+
+Four things this got wrong before, all of which are instructive:
+
+1. A pure score multiplier (`score *= 1 + steer_weight * exp(-d/steer_decay_m)`)
+   loses to the distance term for any far click: at `alpha 1.0` a frontier 2 m
+   away already beats an equal one 15 m away by 7.5x. It honoured a click for
+   one goal and then wandered off. `steer_weight`/`steer_decay_m` still exist
+   and still apply, but the region lock is what makes intent decisive.
+2. Restricting candidates to those within `steer_radius_m` of the click looks
+   right and is not: a frontier is a free cell ADJACENT TO unknown, so it sits
+   at the EDGE of unexplored space, never inside it. Clicking into an unmapped
+   area — the obvious gesture — found no frontier nearby and released
+   instantly. Hence "nearest to the hint", and a release test on UNKNOWN
+   cells rather than on frontiers.
+3. Escape mode bypasses the scored candidate list entirely, so it discarded
+   hints for as long as it was engaged — which, in a run where goals keep
+   failing, is most of the time. It now uses the same nearest-to-hint rule.
+4. Acting on a hint only at the next replan meant it queued behind the active
+   goal, which could hold the robot for up to `goal_timeout_s` (75 s observed).
+
+The queue draws on the map as dashed cyan rings — bright for the region being
+worked, dimmer and numbered for those waiting — mirrored from `explore_status`
+so they disappear as regions are finished or expire.
+
+**`nav goal` mode stops exploration.** `navigate_to_pose` is a single-goal
+server, so a manual goal and the explorer otherwise preempt each other every
+second or so — and each preemption returns to the explorer as ABORTED, which
+it scores as its own failure and blacklists, silently poisoning good frontiers
+and driving spurious escapes. Click-to-nav therefore publishes
+`explore_cmd=stop` first, exactly as `task_manager.py` does before dispatching.
+The map mode is remembered across reloads, because the two modes look
+identical to click and do opposite things.
+
+### Seeing why the explorer refuses an area
+
+The **blacklist** toggle next to `costmap` draws every blacklist entry at its
+real suppression radius: dashed orange for entries that will expire, solid red
+for permanent ones, with the strike count in the middle. Worth having because
+the escalating blacklist makes "2 strikes, expires in 6 minutes" and "3
+strikes, gone for good" otherwise indistinguishable. Off by default — it is a
+diagnostic, not demo chrome.
 
 **Corner/dead-end handling** (all tunable in `configs/explorer.yaml`):
 
