@@ -1413,6 +1413,22 @@ class ExplorerNode(Node):
                 else None
             ),
             "blacklisted": len(self._blacklist),
+            # The actual entries, so the dashboard can draw WHERE the explorer
+            # has written territory off and how hard. A bare count says
+            # "something is being refused" without saying where, which is
+            # exactly the question you have when the robot won't go somewhere.
+            # Bounded by blacklist_merge_radius_m (entries merge rather than
+            # accumulate), so this stays a short list, not a growing log.
+            "blacklist_points": [
+                {
+                    "x": round(b[0], 2),
+                    "y": round(b[1], 2),
+                    "r": round(b[4], 2),
+                    "strikes": int(b[3]),
+                    "permanent": b[3] >= self.cfg["blacklist_permanent_strikes"],
+                }
+                for b in self._blacklist
+            ],
             # Cheap live proxy, NOT a coverage metric: fraction of the current
             # grid's own extent that is non-unknown. The grid grows as
             # RTAB-Map explores, so this is "how filled-in is what we've drawn

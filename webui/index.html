@@ -305,6 +305,8 @@
     <div id="map-view" class="stage-view">
       <div id="map-bar">
         <label><input type="checkbox" id="costmap-toggle" checked /> costmap</label>
+        <label title="Show where the explorer has written territory off after failed goals. Dashed = will expire; solid = permanent (hit blacklist_permanent_strikes). The number is the strike count."><input
+              type="checkbox" id="blacklist-toggle" /> blacklist</label>
         <!-- What a map click MEANS. "nav goal" is the original behaviour: a
              direct navigate_to_pose, which the explorer preempts within a
              second while it's running. "steer" publishes an explore_hint

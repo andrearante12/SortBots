@@ -573,6 +573,7 @@ function updateExploreStatus() {
   // The explorer is the authority on whether a hint is still live (it expires
   // them), so mirror its view rather than trusting our own optimistic marker.
   steerHint = s.steer_hint || null;
+  blacklistPoints = s.blacklist_points || [];
   const steer = s.steer_hint
     ? ` · steering (${s.steer_hint.x.toFixed(1)}, ${s.steer_hint.y.toFixed(1)})`
     : "";
@@ -618,6 +619,12 @@ let lastPose = null; // {x, y, yaw}
 let plan = []; // Nav2 planned path, world [x, y] points
 let goal = null; // {x, y, yaw} — current nav target marker
 let steerHint = null; // {x, y} — operator steering hint, mirrored from explore_status
+let blacklistPoints = []; // [{x, y, r, strikes, permanent}] from explore_status
+const blacklistToggle = document.getElementById("blacklist-toggle");
+let showBlacklist = blacklistToggle.checked;
+blacklistToggle.addEventListener("change", () => {
+  showBlacklist = blacklistToggle.checked;
+});
 let costmapCanvas = null; // offscreen render of the global costmap (own grid)
 
 // Pixel<->world use the SLAM map's grid (mapInfo). worldToPixel is also used
@@ -993,6 +1000,37 @@ function drawFrame() {
       else ctx.lineTo(px, py);
     });
     ctx.stroke();
+  }
+
+  // Blacklisted areas: where the explorer has given up after failed goals.
+  // Off by default — it's a diagnostic overlay, not something you want
+  // cluttering the map during a demo. Drawn at each entry's ACTUAL
+  // suppression radius (which grows per strike), so what you see is exactly
+  // the area frontier selection is excluding. Solid = permanent.
+  if (showBlacklist) {
+    for (const b of blacklistPoints) {
+      const [px, py] = worldToPixel(b.x, b.y);
+      const r = Math.max(3, b.r / mapInfo.resolution);
+      ctx.save();
+      ctx.strokeStyle = b.permanent ? "#ff4d4d" : "#ff9a3c";
+      ctx.fillStyle = b.permanent ? "rgba(255,77,77,0.14)" : "rgba(255,154,60,0.10)";
+      ctx.lineWidth = 1.5;
+      if (!b.permanent) ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+      if (b.strikes > 1 && r > 8) {
+        ctx.save();
+        ctx.fillStyle = b.permanent ? "#ff8080" : "#ffbe80";
+        ctx.font = "10px monospace";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(String(b.strikes), px, py);
+        ctx.restore();
+      }
+    }
   }
 
   // Steering hint: a dashed ring, deliberately unlike the solid nav-goal ring
