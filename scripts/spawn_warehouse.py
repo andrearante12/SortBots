@@ -209,6 +209,16 @@ def parse_args() -> argparse.Namespace:
             "for ROS-2-free smoke tests."
         ),
     )
+    p.add_argument(
+        "--no-chase-cam",
+        action="store_true",
+        help=(
+            "Skip the 3rd-person chase camera. It is purely cosmetic (the "
+            "dashboard's PiP view) but costs a second render product, so this "
+            "halves the synthetic-data pipeline's work — useful for isolating "
+            "render-product problems, or on a GPU that's already saturated."
+        ),
+    )
     return p.parse_args()
 
 
@@ -771,9 +781,11 @@ def main() -> int:
     # `robots` dict tuple — that shape is unpacked at several call sites
     # already and a 5th element would need touching all of them.
     chase_cam, chase_cam_path = None, None
-    if "robot_0" in robots:
+    if "robot_0" in robots and not args.no_chase_cam:
         chase_cam, chase_cam_path = _spawn_chase_camera("/World/robot_0", d435)
         emit(f"  chase_cam spawned at {chase_cam_path}")
+    elif args.no_chase_cam:
+        emit("  chase_cam SKIPPED (--no-chase-cam)")
 
     world.reset()
 

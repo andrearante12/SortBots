@@ -197,9 +197,15 @@
      which flexes to fill the panel below the controls row. No fixed height:
      it takes whatever the column gives it (see the ResizeObserver in app.js). */
   #recon-panel { flex: 1 1 60%; min-height: 0; }
-  #recon-controls { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; flex: none; }
+  /* flex-wrap matters: h2 + info + 2 selects + button overflow the narrow
+     right column on smaller viewports otherwise. */
+  #recon-controls { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; flex: none; flex-wrap: wrap; }
   #recon-controls h2 { margin: 0; flex: none; }
   #recon-info { font-size: 0.75rem; font-family: monospace; color: #7bf; }
+  #recon-controls select {
+    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 3px 6px; font-size: 0.75rem;
+  }
   #recon-controls button {
     margin-left: auto; background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
     border-radius: 4px; padding: 4px 8px; font-size: 0.75rem; cursor: pointer;
@@ -347,10 +353,18 @@
       <div id="recon-controls">
         <h2>3D reconstruction</h2>
         <span id="recon-info">waiting for cloud…</span>
+        <select id="recon-mode" title="Voxel cubes are shaded, so vertical structure reads; points are cheaper">
+          <option value="voxels">voxels</option>
+          <option value="points">points</option>
+        </select>
+        <select id="recon-color" title="Photo uses the cloud's own colour; height ramps blue (floor) to red (shelf top)">
+          <option value="photo">photo</option>
+          <option value="height">height</option>
+        </select>
         <button type="button" id="recon-reset" title="Recenter the camera on the cloud">reset view</button>
       </div>
       <div id="recon-canvas"
-           title="RTAB-Map's assembled cloud (cloud_map). Drag to orbit, scroll to zoom, right-drag to pan. Grows as the robot explores."></div>
+           title="RTAB-Map's assembled cloud, budgeted by recon_cloud_relay.py. Drag to orbit, scroll to zoom, right-drag to pan. Grows as the robot explores."></div>
     </div>
     <div class="panel" id="ops-panel">
       <h2>Dispatch &amp; task queue</h2>

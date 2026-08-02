@@ -22,8 +22,15 @@ SERVER_BIN=/opt/ros/jazzy/lib/web_video_server/web_video_server
 
 fails=0
 while true; do
+  # qos_profile=sensor_data, same as the dashboard (webui/app.js): the probe
+  # makes web_video_server open a fresh subscription to an Isaac image topic,
+  # and a RELIABLE one can back-pressure Isaac's image writer — measured live
+  # 2026-08-01, this probe alone (every 10s, no dashboard open) preceded the
+  # rgb/depth publishers dying at sim-t~100-140s on every run, while camera_info
+  # (different publisher, never probed) survived. BEST_EFFORT cannot block the
+  # writer, so the probe stays harmless no matter how web_video_server behaves.
   bytes=$(curl -s --max-time 4 -o /dev/null -w '%{size_download}' \
-    "http://localhost:${PORT}/snapshot?topic=${TOPIC}" 2>/dev/null || echo 0)
+    "http://localhost:${PORT}/snapshot?topic=${TOPIC}&qos_profile=sensor_data" 2>/dev/null || echo 0)
   if [ "${bytes:-0}" -gt 0 ]; then
     fails=0
   else

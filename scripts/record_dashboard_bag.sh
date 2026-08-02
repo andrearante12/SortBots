@@ -59,7 +59,7 @@ TOPICS=(
     "/${ROBOT_ID}/global_costmap/costmap"
     "/${ROBOT_ID}/plan"
     "/${ROBOT_ID}/info"
-    "/${ROBOT_ID}/cloud_map"
+    "/${ROBOT_ID}/recon_cloud"
     "/${ROBOT_ID}/task_status"
     "/${ROBOT_ID}/camera/rgb"
     "/${ROBOT_ID}/camera/chase/rgb"
@@ -89,7 +89,7 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
     printf '  - %s\n' "${MISSING[@]}"
     echo
     echo "They'll be recorded as empty. Common causes:"
-    echo "  /${ROBOT_ID}/map, /info, /cloud_map  -> RTAB-Map not up (sortbots_rtabmap_robot.launch.py)"
+    echo "  /${ROBOT_ID}/map, /info, /recon_cloud -> RTAB-Map not up (sortbots_rtabmap_robot.launch.py)"
     echo "  /${ROBOT_ID}/global_costmap/costmap, /plan -> Nav2 not up (sortbots_nav2.launch.py)"
     echo "  /${ROBOT_ID}/task_status            -> nodes/task_manager.py not running"
     echo "  /${ROBOT_ID}/camera/*               -> Isaac Sim not publishing yet"

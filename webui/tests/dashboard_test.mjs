@@ -317,6 +317,28 @@ async function runFullAssertions(page) {
   check('3D panel ingested the recorded cloud', /\d/.test(recon) && !/waiting/i.test(recon),
         recon.trim());
 
+  // The whole point of Grid/3D=true: the cloud must have real vertical extent,
+  // not the ~0.15 m pancake a 2D projected grid produces. The info text reports
+  // it as "z <min>–<max> m", so assert on the span rather than trusting that
+  // *some* cloud arrived.
+  const zs = /z\s+(-?[\d.]+)–(-?[\d.]+)\s*m/.exec(recon);
+  const zSpan = zs ? parseFloat(zs[2]) - parseFloat(zs[1]) : 0;
+  check('reconstruction is genuinely 3D (z extent > 0.3 m)', zSpan > 0.3,
+        zs ? `${zSpan.toFixed(2)} m` : 'no z range in info text');
+  check('reconstruction renders as voxels by default', /\bvox\b/.test(recon), recon.trim());
+
+  // Everything above is decode-level and independent of rasterization, so it's
+  // safe to assert first and then drop to the cheap renderer. Headless Chrome
+  // rasterizes through SwiftShader (--enable-unsafe-swiftshader below), where
+  // tens of thousands of instanced cubes is ~12 triangles each in SOFTWARE and
+  // would stretch every remaining check in this file.
+  await page.eval(`(() => {
+    const s = document.getElementById('recon-mode');
+    s.value = 'points'; s.dispatchEvent(new Event('change'));
+  })()`);
+  const reconPts = await page.eval(`document.getElementById('recon-info').textContent`);
+  check('recon mode select switches to points', /\bpts\b/.test(reconPts), reconPts.trim());
+
   // --- task queue populated from recorded task_status ---
   const queue = await page.eval(`document.querySelectorAll('#queue-list li').length`);
   check('task queue populated from recorded task_status', queue > 0, `${queue} rows`);

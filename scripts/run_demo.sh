@@ -18,6 +18,7 @@
 # Usage:
 #   scripts/run_demo.sh [--robot-id robot_0] [--robots 1] [--scene nvidia]
 #                       [--headless] [--teleop] [--localize | --resume]
+#                       [--no-chase-cam]
 #                       [--map PATH] [--explore]
 #   scripts/run_demo.sh stop      # tear the whole pipeline down
 #
@@ -67,7 +68,8 @@ stop_pipeline() {
            bt_navigator waypoint_follower velocity_smoother lifecycle_manager \
            component_container rosbridge_websocket web_video_server \
            "webui/serve.py" webui_url.py task_manager.py explorer.py \
-           rtabmap_cloud_pump.py web_video_watchdog.sh wasd_teleop \
+           rtabmap_cloud_pump.py recon_cloud_relay.py \
+           web_video_watchdog.sh wasd_teleop \
            "spawn_warehouse.py"; do
     pkill -9 -f "$p" 2>/dev/null || true
   done
@@ -83,6 +85,8 @@ fi
 # ---- args ----
 # Teleop defaults OFF — the dashboard drive pad replaces the WASD window.
 ROBOT_ID=robot_0; ROBOTS=1; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=0
+# Cosmetic 3rd-person cam = a second render product; --no-chase-cam drops it.
+NO_CHASE_CAM=""
 LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -90,6 +94,7 @@ while [[ $# -gt 0 ]]; do
     --robots)   ROBOTS="$2";   shift 2;;
     --scene)    SCENE="$2";    shift 2;;
     --headless) HEADLESS="--headless"; shift;;
+    --no-chase-cam) NO_CHASE_CAM="--no-chase-cam"; shift;;
     --teleop)    TELEOP=1; shift;;
     --no-teleop) TELEOP=0; shift;;  # accepted for back-compat (already the default)
     --localize) LOCALIZE=true; shift;;
@@ -139,7 +144,7 @@ echo "[run_demo] launching Isaac Sim ($SCENE, $ROBOTS robot(s), $HEADLESS)..."
 rm -f "$SIM_RESULT"
 setsid bash -c "source '$REPO_ROOT/scripts/activate_isaac.sh' >/dev/null 2>&1; \
   exec python '$REPO_ROOT/scripts/spawn_warehouse.py' $HEADLESS --forever \
-       --robots $ROBOTS --scene $SCENE --drive cmd_vel" \
+       --robots $ROBOTS --scene $SCENE --drive cmd_vel $NO_CHASE_CAM" \
   >"$SIM_LOG" 2>&1 &
 
 echo "[run_demo] waiting for the warehouse to load"

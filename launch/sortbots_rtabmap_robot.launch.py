@@ -44,21 +44,53 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # unknown cell", so a map with no believable free space makes the explorer
 # chase phantom frontiers a metre in front of itself.
 #
-#   Grid/3D=false        2D projected grid. ALSO the reason ray tracing works
-#                        at all: the Grid/RayTracing docs note that with
-#                        Grid/3D=true, 3D ray tracing is silently IGNORED
-#                        unless RTAB-Map was built with OctoMap support.
+#   Grid/3D=true         3D voxel local grids. This is what gives the
+#                        dashboard's reconstruction panel (and the octomap_*
+#                        topics) real geometry — with `false` the assembled
+#                        cloud_map is the 2D grid re-emitted as points, a
+#                        15 cm-tall pancake across the whole warehouse.
+#
+#                        It is also THIS BUILD'S OWN DEFAULT. Parameters.h
+#                        (rtabmap-0.22, lines 860-864) defaults Grid/3D to
+#                        true `#ifdef RTABMAP_OCTOMAP` and false otherwise,
+#                        and this build has OctoMap (it advertises
+#                        octomap_binary/octomap_full/octomap_grid/...).
+#                        An earlier version of this comment claimed `false`
+#                        was "the reason ray tracing works at all", reading
+#                        Grid/RayTracing's "if Grid/3D=true, RTAB-Map should
+#                        be BUILT WITH OctoMap support, otherwise 3D ray
+#                        tracing is ignored" as a prohibition rather than the
+#                        build precondition it is. It is satisfied here.
+#
+#                        The 2D /map is unaffected — Grid/3D's own docs say
+#                        "a 2D map can be still generated if checked", and
+#                        OccupancyGrid::assemble() transforms each cell with
+#                        its true z and then keeps only x/y. What it does
+#                        cost is memory and time: empty cells go from
+#                        O(area) to O(volume) per node, which is why
+#                        Grid/RangeMax below is now load-bearing.
 #   Grid/RayTracing=true the actual fix — fills the space between the sensor
-#                        and each occupied cell with free.
+#                        and each occupied cell with free. Under Grid/3D it
+#                        runs a throwaway per-node OctoMap and still emits
+#                        groundCells/obstacleCells/emptyCells; emptyCells is
+#                        the free-space carrier the explorer depends on.
 #   Grid/RangeMax=5.0    already the upstream default; set explicitly because
 #                        we depend on it. Also honest about the real D435,
 #                        whose usable depth dies around 5-6 m — the sim's USD
 #                        clippingRange goes to 50 m, which would otherwise let
 #                        the sim map far more per frame than hardware can.
+#                        Under Grid/3D=true it is the only thing bounding the
+#                        ray-traced VOLUME per node, so it is also the first
+#                        lever to reach for if rtabmap starts eating RAM.
 #   Grid/MaxObstacleHeight=1.5
 #                        default 0.0 means "disabled", i.e. everything above
 #                        the robot gets projected down into the 2D map. 1.5 m
 #                        keeps shelf tops and ceiling structure out of it.
+#                        Note this now doubles as the reconstruction's height
+#                        ceiling: raising it to ~2.5 m makes a prettier 3D
+#                        panel but pushes shelf tops back into the 2D /map,
+#                        so the two uses are in tension. 1.5 m is already
+#                        20x the pre-Grid/3D pancake.
 #   Mem/InitWMWithAllNodes=true
 #                        Working Memory otherwise initializes with only the
 #                        PREVIOUS session's nodes (RTAB-Map's own docs: "When
@@ -82,11 +114,20 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Grid/Sensor is left alone: its default (1 = depth image) is already correct,
 # and note it REPLACED the older Grid/FromDepth, which no longer exists.
 GRID_ARGS = (
-    "--Grid/3D false "
+    "--Grid/3D true "
     "--Grid/RayTracing true "
     "--Grid/RangeMax 5.0 "
     "--Grid/MaxObstacleHeight 1.5 "
-    "--Mem/InitWMWithAllNodes true"
+    "--Mem/InitWMWithAllNodes true "
+    # Grid/3D floods the projected 2D map with empty-cell evidence (3D rays
+    # sweep a volume; every empty voxel above/around an obstacle projects onto
+    # its column), so with the default weights (hit 0.7 / miss 0.4) obstacles
+    # get out-voted: measured 2026-08-01, occupied cells fell from 7,361 (2D
+    # grids, ~5 min in) to 659 (3D grids, same duration) while free DOUBLED.
+    # Weight hits harder and misses lighter so a wall seen a few times
+    # survives the ray-traced empties stacked on top of it.
+    "--GridGlobal/ProbHit 0.8 "
+    "--GridGlobal/ProbMiss 0.45"
 )
 
 
@@ -203,6 +244,17 @@ def generate_launch_description():
                 "subscribe_rgbd":     "false",
                 "approx_sync":        "true",
                 "rviz":               rviz,
+                # Upstream's rtabmap_viz is a SEPARATE argument from rviz and
+                # defaults to true, so RTAB-Map's own Qt/OpenGL 3D viewer was
+                # running even under the unified bringup, which sets rviz=false
+                # precisely because the web dashboard replaces it. That was
+                # merely wasteful before; with Grid/3D=true it renders the full
+                # 3D cloud, and on an 8 GB card already hosting Isaac Sim the
+                # contention is enough to starve Isaac's camera render products
+                # — the sim keeps stepping while RGB/depth quietly stop, which
+                # shows up as "SLAM: stale" and a map that freezes mid-run.
+                # Tie it to the same flag so standalone use still gets a GUI.
+                "rtabmap_viz":        rviz,
                 "namespace":          robot_id,
                 "use_sim_time":       use_sim_time,
                 # Map persistence. Without these, upstream silently defaults to
@@ -224,6 +276,19 @@ def generate_launch_description():
             cmd=[
                 "python3",
                 os.path.join(REPO_ROOT, "nodes", "rtabmap_cloud_pump.py"),
+                "--robot-id", robot_id,
+            ],
+            output="screen",
+        ),
+
+        # Bounds what the dashboard actually pulls over rosbridge. With
+        # Grid/3D=true cloud_map grows without limit as the map does, and the
+        # vendored roslib can't reassemble fragments — see the relay's
+        # docstring for why a point budget beats a bigger max_message_size.
+        ExecuteProcess(
+            cmd=[
+                "python3",
+                os.path.join(REPO_ROOT, "nodes", "recon_cloud_relay.py"),
                 "--robot-id", robot_id,
             ],
             output="screen",

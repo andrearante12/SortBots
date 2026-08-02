@@ -119,8 +119,19 @@ function wireCameraStream(elId, topic) {
       setTimeout(tick, CAMERA_POLL_MS);
     };
     probe.onerror = () => setTimeout(tick, CAMERA_ERROR_BACKOFF_MS);
+    // qos_profile=sensor_data makes web_video_server subscribe BEST_EFFORT
+    // instead of its RELIABLE default. This is not cosmetic: Isaac's image
+    // writer publishes RELIABLE, and a RELIABLE subscriber that wedges (which
+    // this web_video_server recurrently does — see the header comment) can
+    // back-pressure the publisher itself. Measured live 2026-08-01: with a
+    // RELIABLE image subscriber attached, Isaac's rgb/depth topics died at
+    // sim-t~100-140s on every run; Isaac alone ran indefinitely. A
+    // best-effort subscriber can never block the writer, so a wedged video
+    // server costs us the camera panes (until the watchdog restarts it), not
+    // the whole SLAM pipeline.
     probe.src =
-      `http://${ROSBRIDGE_HOST}:${VIDEO_PORT}/snapshot?topic=/${ROBOT_ID}/${topic}&_=${Date.now()}`;
+      `http://${ROSBRIDGE_HOST}:${VIDEO_PORT}/snapshot?topic=/${ROBOT_ID}/${topic}` +
+      `&qos_profile=sensor_data&_=${Date.now()}`;
   }
   tick();
 }
@@ -1063,16 +1074,31 @@ window.addEventListener("mouseup", (ev) => {
   sendNavGoal(sx, sy, yaw);
 });
 
-// -- 3D reconstruction (RTAB-Map cloud_map) -------------------------------
-// A three.js point-cloud viewer for RTAB-Map's assembled 3D map. The cloud is
-// a sensor_msgs/PointCloud2 in the `map` frame (z-up); rosbridge base64-encodes
-// its byte payload, which we decode and unpack into a THREE.Points geometry.
+// -- 3D reconstruction (RTAB-Map cloud_map, via the relay) ----------------
+// A three.js viewer for RTAB-Map's assembled 3D map. The cloud is a
+// sensor_msgs/PointCloud2 in the `map` frame (z-up); rosbridge base64-encodes
+// its byte payload, which we decode and render either as instanced voxel cubes
+// (default — shaded, so vertical structure actually reads) or as flat points.
 // The whole thing is wrapped so a missing/broken three.js can never take down
 // the rest of the dashboard.
+//
+// Note we subscribe to recon_cloud, NOT cloud_map: nodes/recon_cloud_relay.py
+// enforces a hard point budget and strips pcl::PointXYZRGB's padding, because
+// cloud_map itself grows without bound and the vendored roslib can't reassemble
+// fragments once it passes rosbridge's max_message_size.
 
-const POINTCLOUD_TOPIC = `/${ROBOT_ID}/cloud_map`;
-const POINTCLOUD_THROTTLE_MS = 1500; // cap rosbridge send rate (cloud can be MBs)
+const POINTCLOUD_TOPIC = `/${ROBOT_ID}/recon_cloud`;
+const POINTCLOUD_THROTTLE_MS = 3000; // the relay only emits when the pump fires (3s)
 const MAX_RENDER_POINTS = 400000;    // decimate above this to keep the browser snappy
+// Above this, fall back to plain points — cubes cost 12 triangles each. Set
+// deliberately ABOVE the relay's 200k budget so voxels are the normal path and
+// this is a genuine safety net (e.g. someone points the panel at raw cloud_map).
+const MAX_VOXEL_INSTANCES = 250000;
+const VOXEL_SIZE = 0.05;             // matches RTAB-Map's Grid/CellSize
+
+const QS = new URLSearchParams(window.location.search);
+const RECON_MODE_INIT = QS.get("recon") === "points" ? "points" : "voxels";
+const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
 
 (function initRecon() {
   const container = document.getElementById("recon-canvas");
@@ -1089,7 +1115,30 @@ const MAX_RENDER_POINTS = 400000;    // decimate above this to keep the browser 
   camera.up.set(0, 0, 1); // map frame is z-up (default three.js is y-up)
   camera.position.set(-4, -4, 4);
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  // A browser with no working WebGL context throws here ("Error creating WebGL
+  // context"), which used to take down the whole IIFE — including the
+  // subscription at the bottom — leaving #recon-info on its initial "waiting
+  // for cloud..." with no canvas and no clue. That reads exactly like a dead
+  // ROS topic, and sent us chasing rosbridge and QoS instead of the browser.
+  // Chrome drops WebGL on hybrid-graphics/Wayland setups when GPU init fails
+  // or hardware acceleration is off; chrome://gpu says which.
+  let renderer;
+  try {
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+  } catch (err) {
+    infoEl.textContent = "WebGL unavailable — see chrome://gpu";
+    infoEl.title = String((err && err.message) || err);
+    container.style.display = "grid";
+    container.style.placeItems = "center";
+    container.style.color = "#8a939f";
+    container.style.font = "0.8rem/1.5 monospace";
+    container.style.padding = "12px";
+    container.style.textAlign = "center";
+    container.textContent =
+      "3D panel needs WebGL, which this browser isn't providing.\n" +
+      "Check chrome://gpu, or enable hardware acceleration in settings.";
+    return;
+  }
   renderer.setPixelRatio(window.devicePixelRatio || 1);
   container.appendChild(renderer.domElement);
 
@@ -1109,6 +1158,15 @@ const MAX_RENDER_POINTS = 400000;    // decimate above this to keep the browser 
   scene.add(grid);
   scene.add(new THREE.AxesHelper(1.0));
 
+  // Voxels need lighting or they read as one solid silhouette, which defeats
+  // the point of drawing them as cubes. Nothing already in the scene cares:
+  // GridHelper is LineBasicMaterial, AxesHelper and the robot marker are
+  // MeshBasic/LineBasic, and the points path below is unlit too.
+  scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x101418, 0.9));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.7);
+  sun.position.set(1, 1.5, 3);
+  scene.add(sun);
+
   // The point cloud itself (geometry replaced on each new message).
   const cloudMat = new THREE.PointsMaterial({
     size: 0.03,
@@ -1116,6 +1174,26 @@ const MAX_RENDER_POINTS = 400000;    // decimate above this to keep the browser 
     vertexColors: true,
   });
   let cloudPoints = null;
+
+  // -- voxel path --------------------------------------------------------
+  // Per-instance colour comes from setColorAt() alone. Do NOT also set
+  // vertexColors:true here "to make the colours apply" — it is not needed
+  // (verified by rendering both ways under the vendored r137 + swiftshader),
+  // and it actively breaks the panel: vertexColors makes color_vertex run
+  // `vColor *= color`, BoxGeometry has no color attribute, so the generic
+  // vertex-attribute default (0,0,0) applies and every cube renders BLACK.
+  // The failure is silent — geometry, lighting and instance count all look
+  // fine. If you ever do want vertexColors on this material, you must also
+  // give voxelGeom a unit "color" attribute.
+  const voxelGeom = new THREE.BoxGeometry(VOXEL_SIZE, VOXEL_SIZE, VOXEL_SIZE);
+  const voxelMat = new THREE.MeshLambertMaterial();
+  let voxelMesh = null;
+  let voxelCapacity = 0;
+  const tmpColor = new THREE.Color();
+
+  let lastCloud = null;                 // decoded payload, kept for re-render
+  let reconMode = RECON_MODE_INIT;      // "voxels" | "points"
+  let reconColor = RECON_COLOR_INIT;    // "photo"  | "height"
 
   // Robot pose marker: a small green sphere tracking lastPose (from TF).
   const robotMarker = new THREE.Mesh(
@@ -1126,6 +1204,10 @@ const MAX_RENDER_POINTS = 400000;    // decimate above this to keep the browser 
   scene.add(robotMarker);
 
   let didFitView = false;
+  let lastFitRadius = 0;
+  // Declared up here, not next to animate(), because sizeToContainer() runs
+  // during setup below and would hit the temporal dead zone otherwise.
+  let needsRender = true;
 
   function sizeToContainer() {
     const w = container.clientWidth || 1;
@@ -1133,6 +1215,7 @@ const MAX_RENDER_POINTS = 400000;    // decimate above this to keep the browser 
     renderer.setSize(w, h, false);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    needsRender = true;
   }
   sizeToContainer();
   // ResizeObserver rather than a window "resize" listener: the panel also
@@ -1145,20 +1228,36 @@ const MAX_RENDER_POINTS = 400000;    // decimate above this to keep the browser 
   }
   onStageResize = sizeToContainer; // let setStageMode() re-fit after a swap
 
-  // Frame the camera on the cloud's bounding box (called on first cloud and
-  // by the "reset view" button).
+  // Frame the camera on the cloud's bounds (called on first cloud and by the
+  // "reset view" button). Derived from the decoded payload rather than from
+  // cloudPoints.geometry.boundingSphere, because in voxel mode there is no
+  // cloudPoints — reading it there would silently leave the camera at its
+  // (-4,-4,4) init, staring at nothing.
+  function cloudRadius() {
+    const { min, max } = lastCloud;
+    return 0.5 * Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+  }
+
   function fitView() {
-    if (!cloudPoints) return;
-    cloudPoints.geometry.computeBoundingSphere();
-    const bs = cloudPoints.geometry.boundingSphere;
-    if (!bs || !isFinite(bs.radius) || bs.radius === 0) return;
-    controls.target.copy(bs.center);
-    const d = bs.radius * 2.2;
-    camera.position.set(bs.center.x - d, bs.center.y - d, bs.center.z + d);
-    camera.near = Math.max(0.05, bs.radius / 100);
-    camera.far = bs.radius * 20;
+    if (!lastCloud) return;
+    const { min, max } = lastCloud;
+    const center = new THREE.Vector3(
+      (min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2
+    );
+    const radius = cloudRadius();
+    if (!isFinite(radius) || radius === 0) return;
+    lastFitRadius = radius;
+    controls.target.copy(center);
+    // 1.6 rather than a looser factor: the panel is a narrow column, and the
+    // bounding sphere of a wide, flat map is dominated by its x/y diagonal, so
+    // a generous margin leaves the cloud as a speck in the middle of the grid.
+    const d = radius * 1.6;
+    camera.position.set(center.x - d, center.y - d, center.z + d);
+    camera.near = Math.max(0.05, radius / 100);
+    camera.far = radius * 20;
     camera.updateProjectionMatrix();
     controls.update();
+    needsRender = true;
   }
   document.getElementById("recon-reset").addEventListener("click", () => {
     didFitView = false; // let the next fit re-run explicitly
@@ -1198,6 +1297,10 @@ const MAX_RENDER_POINTS = 400000;    // decimate above this to keep the browser 
     const positions = new Float32Array(n * 3);
     const colors = new Float32Array(n * 3);
     const hasRgb = off.rgb != null;
+    // Tracked in the same pass as the decode — six compares per point, and
+    // both the height ramp and fitView() need them.
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
     let k = 0;
     for (let i = 0; i < total; i += stride) {
       const base = i * step;
@@ -1217,14 +1320,97 @@ const MAX_RENDER_POINTS = 400000;    // decimate above this to keep the browser 
       } else {
         colors[k * 3] = colors[k * 3 + 1] = colors[k * 3 + 2] = 0.8;
       }
+      if (x < min[0]) min[0] = x; if (x > max[0]) max[0] = x;
+      if (y < min[1]) min[1] = y; if (y > max[1]) max[1] = y;
+      if (z < min[2]) min[2] = z; if (z > max[2]) max[2] = z;
       k++;
     }
+    if (k === 0) { infoEl.textContent = "cloud empty"; return; }
 
+    // k may be < n if points were skipped — keep only the filled part.
+    lastCloud = {
+      positions: positions.subarray(0, k * 3),
+      colors: colors.subarray(0, k * 3),
+      n: k, total, stride, min, max,
+    };
+    rebuild();
+    // Re-frame while the map is still growing substantially. Fitting only once
+    // used to be fine when the first cloud was already most of the map; now the
+    // first cloud is often a few seconds of floor and the map ends up 20x
+    // larger, which would leave the camera parked on a speck. Once growth
+    // settles below the threshold the view stops moving under the user.
+    if (!didFitView || cloudRadius() > lastFitRadius * 1.5) {
+      fitView();
+      didFitView = true;
+    }
+  }
+
+  // -- render paths ------------------------------------------------------
+  // Per-point colour for the current colour mode. "photo" is the cloud's own
+  // rgb; "height" ramps blue (floor) -> cyan -> yellow -> red (shelf top),
+  // which is what actually makes vertical structure legible when the cloud's
+  // real colours are all warehouse-grey.
+  function colorAt(c, i) {
+    if (reconColor === "photo") {
+      return c.setRGB(
+        lastCloud.colors[i * 3], lastCloud.colors[i * 3 + 1], lastCloud.colors[i * 3 + 2]
+      );
+    }
+    const zMin = lastCloud.min[2];
+    const span = lastCloud.max[2] - zMin || 1;
+    const t = (lastCloud.positions[i * 3 + 2] - zMin) / span;
+    return c.setHSL(0.68 * (1 - t), 0.85, 0.25 + 0.35 * t);
+  }
+
+  function buildVoxels() {
+    const n = lastCloud.n;
+    if (n > voxelCapacity) {
+      // InstancedMesh buffers are fixed at construction, so grow in 50k steps
+      // and reuse — a steadily-growing map would otherwise reallocate on
+      // every single message.
+      if (voxelMesh) { scene.remove(voxelMesh); voxelMesh.dispose(); }
+      voxelCapacity = Math.ceil(n / 50000) * 50000;
+      voxelMesh = new THREE.InstancedMesh(voxelGeom, voxelMat, voxelCapacity);
+      // The bounding sphere comes from the GEOMETRY (one 5 cm cube at the
+      // origin), not from the instances, so three.js would cull the entire
+      // mesh the moment the origin left frame.
+      voxelMesh.frustumCulled = false;
+      scene.add(voxelMesh);
+    }
+
+    // Write translations straight into the instance matrix. Every instance is
+    // an axis-aligned unit-scale translation, so the basis is the identity and
+    // only elements 12/13/14 vary — much cheaper than n Object3D.updateMatrix()
+    // calls, and this runs on the main thread every time a cloud lands.
+    const m = voxelMesh.instanceMatrix.array;
+    for (let i = 0; i < n; i++) {
+      const o = i * 16;
+      m[o] = m[o + 5] = m[o + 10] = m[o + 15] = 1;
+      m[o + 1] = m[o + 2] = m[o + 3] = m[o + 4] = 0;
+      m[o + 6] = m[o + 7] = m[o + 8] = m[o + 9] = 0;
+      m[o + 11] = 0;
+      m[o + 12] = lastCloud.positions[i * 3];
+      m[o + 13] = lastCloud.positions[i * 3 + 1];
+      m[o + 14] = lastCloud.positions[i * 3 + 2];
+      voxelMesh.setColorAt(i, colorAt(tmpColor, i));
+    }
+    voxelMesh.count = n;
+    voxelMesh.instanceMatrix.needsUpdate = true;
+    if (voxelMesh.instanceColor) voxelMesh.instanceColor.needsUpdate = true;
+  }
+
+  function buildPoints() {
+    const n = lastCloud.n;
+    const colors = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      colorAt(tmpColor, i);
+      colors[i * 3] = tmpColor.r;
+      colors[i * 3 + 1] = tmpColor.g;
+      colors[i * 3 + 2] = tmpColor.b;
+    }
     const geom = new THREE.BufferGeometry();
-    // k may be < n if points were skipped — hand three.js only the filled part.
-    geom.setAttribute("position", new THREE.BufferAttribute(positions.subarray(0, k * 3), 3));
-    geom.setAttribute("color", new THREE.BufferAttribute(colors.subarray(0, k * 3), 3));
-
+    geom.setAttribute("position", new THREE.BufferAttribute(lastCloud.positions, 3));
+    geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
     if (cloudPoints) {
       cloudPoints.geometry.dispose();
       cloudPoints.geometry = geom;
@@ -1232,12 +1418,33 @@ const MAX_RENDER_POINTS = 400000;    // decimate above this to keep the browser 
       cloudPoints = new THREE.Points(geom, cloudMat);
       scene.add(cloudPoints);
     }
-
-    infoEl.textContent =
-      `${k.toLocaleString()} pts` + (stride > 1 ? ` (of ${total.toLocaleString()}, 1/${stride})` : "");
-
-    if (!didFitView) { fitView(); didFitView = true; }
   }
+
+  function rebuild() {
+    if (!lastCloud) return;
+    const useVoxels = reconMode === "voxels" && lastCloud.n <= MAX_VOXEL_INSTANCES;
+    if (useVoxels) buildVoxels(); else buildPoints();
+    // Toggle visibility rather than disposing, so flipping modes is instant.
+    if (voxelMesh) voxelMesh.visible = useVoxels;
+    if (cloudPoints) cloudPoints.visible = !useVoxels;
+
+    const { n, total, stride, min, max } = lastCloud;
+    const capped = reconMode === "voxels" && !useVoxels ? " — over cap, points" : "";
+    infoEl.textContent =
+      `${n.toLocaleString()} ${useVoxels ? "vox" : "pts"} · ` +
+      `z ${min[2].toFixed(1)}–${max[2].toFixed(1)} m` +
+      (stride > 1 ? ` (of ${total.toLocaleString()}, 1/${stride})` : "") + capped;
+    needsRender = true;
+  }
+
+  function wireSelect(id, initial, apply) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.value = initial;
+    el.addEventListener("change", () => { apply(el.value); rebuild(); });
+  }
+  wireSelect("recon-mode", RECON_MODE_INIT, (v) => { reconMode = v; });
+  wireSelect("recon-color", RECON_COLOR_INIT, (v) => { reconColor = v; });
 
   new ROSLIB.Topic({
     ros,
@@ -1248,13 +1455,34 @@ const MAX_RENDER_POINTS = 400000;    // decimate above this to keep the browser 
     reconnect_on_close: true,
   }).subscribe(onCloud);
 
+  // Render on demand, not every frame.
+  //
+  // This panel shares a GPU with Isaac Sim. Points were cheap enough to redraw
+  // at 60 fps forever, but a voxel build is ~100k instanced cubes (1.2M
+  // triangles), and burning that continuously while nothing changes is enough
+  // to starve Isaac's render products — the sim keeps stepping while its
+  // camera image topics silently stop (camera_info, which needs no rendering,
+  // keeps going). So draw only when something actually changed: a new cloud, a
+  // camera move, a resize, or the robot marker relocating.
+  controls.addEventListener("change", () => { needsRender = true; });
+
   function animate() {
     requestAnimationFrame(animate);
     if (lastPose) {
-      robotMarker.visible = true;
-      robotMarker.position.set(lastPose.x, lastPose.y, 0.15);
+      const moved = !robotMarker.visible
+        || Math.abs(robotMarker.position.x - lastPose.x) > 1e-3
+        || Math.abs(robotMarker.position.y - lastPose.y) > 1e-3;
+      if (moved) {
+        robotMarker.visible = true;
+        robotMarker.position.set(lastPose.x, lastPose.y, 0.15);
+        needsRender = true;
+      }
     }
+    // Cheap on CPU and emits "change" only when the camera really moves, so
+    // damping still settles smoothly without pinning the GPU.
     controls.update();
+    if (!needsRender) return;
+    needsRender = false;
     renderer.render(scene, camera);
   }
   animate();

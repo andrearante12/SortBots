@@ -247,7 +247,7 @@ def main() -> None:
         entry["messages"].append({"t": t_rel, "msg": extract_values(msg)})
 
     if cloud_best is not None:
-        topics[f"/{args.robot_id}/cloud_map"] = cloud_best[1]
+        topics[f"/{args.robot_id}/recon_cloud"] = cloud_best[1]
 
     duration = 0.0
     for entry in topics.values():
