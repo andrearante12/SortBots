@@ -425,6 +425,33 @@ class ExplorerNode(Node):
             return None
         return (x, y)
 
+    def _hint_area_explored(self, hint, unknown: np.ndarray, info) -> bool:
+        """True once there is no unknown space left near the operator's click.
+
+        This — not "are there frontiers within steer_radius_m" — is the right
+        question to end a steer lock on. Frontiers are free cells ADJACENT TO
+        unknown, so they sit on the boundary of unexplored space and never
+        inside it; clicking into the middle of an unmapped area (the obvious
+        way to say "go explore there") has no frontier near it at all until
+        the robot has already arrived. Testing for unknown cells instead means
+        the lock holds while there is genuinely something left to reveal, and
+        ends when the area is mapped.
+
+        A hint outside the current grid counts as NOT explored — the grid
+        grows as RTAB-Map maps, and a click past its present edge is exactly
+        the "go somewhere new" case.
+        """
+        res = info.resolution
+        ix = int((hint[0] - info.origin.position.x) / res)
+        iy = int((hint[1] - info.origin.position.y) / res)
+        r = max(1, round(self.cfg["steer_radius_m"] / res))
+        h, w = unknown.shape
+        y0, y1 = max(0, iy - r), min(h, iy + r + 1)
+        x0, x1 = max(0, ix - r), min(w, ix + r + 1)
+        if y0 >= y1 or x0 >= x1:
+            return False
+        return not bool(unknown[y0:y1, x0:x1].any())
+
     def _steer_bonus(self, gx: float, gy: float, hint) -> float:
         """Multiplier in [1, 1 + steer_weight] for a goal's distance to `hint`.
 
@@ -997,33 +1024,37 @@ class ExplorerNode(Node):
             score *= self._steer_bonus(gx, gy, hint)
             candidates.append((score, gx, gy, fx, fy))
 
-        # Region lock: while a hint is live, explore THAT area until it runs
-        # out of frontiers, rather than merely preferring it. A pure
-        # multiplicative bias loses to the size/distance term whenever the
-        # hinted area is far — at alpha 1.0 a frontier 2 m away already beats
-        # an equal one 15 m away by 7.5x, which swamps steer_weight — so a
-        # click across the map visibly "gave up" and wandered off. Restricting
-        # the candidate set makes the operator's intent decisive.
+        candidates.sort(key=lambda c: c[0], reverse=True)
+
+        # Region lock: while a hint is live, head for whichever frontier is
+        # NEAREST the operator's click, regardless of score.
         #
-        # Self-limiting, so an unreachable click can't deadlock exploration:
-        # failures inside the region blacklist normally and go permanent after
-        # blacklist_permanent_strikes, at which point nothing valid remains in
-        # the region and the lock releases itself below.
-        if hint is not None and self.cfg["steer_lock"]:
-            near = [c for c in candidates
-                    if math.hypot(c[1] - hint[0], c[2] - hint[1]) <= self.cfg["steer_radius_m"]]
-            if near:
-                candidates = near
-            elif not any(math.hypot(gx - hint[0], gy - hint[1]) <= self.cfg["steer_radius_m"]
-                         for _d, gx, gy, _fx, _fy in escape_pool):
+        # A multiplicative bias was not enough — at alpha 1.0 a frontier 2 m
+        # away beats an equal one 15 m away by 7.5x, which swamps
+        # steer_weight, so a far click was honoured for one goal and then
+        # abandoned. Nor is "restrict to frontiers within steer_radius_m of
+        # the click" right, which is what this used to do: a frontier is a
+        # free cell ADJACENT TO unknown, so it lives at the EDGE of unexplored
+        # space, never inside it. Clicking into the middle of an unmapped area
+        # — the obvious gesture for "go explore there" — therefore found no
+        # frontier within the radius and released instantly. Observed live
+        # 2026-08-02: every hint released ~13 s after being set, and the robot
+        # wandered 8-10 m away.
+        #
+        # Nearest-to-hint has no such geometry assumption. As the robot
+        # explores toward the click the frontier boundary advances into the
+        # region, so it keeps working inward until the area really is mapped —
+        # which is what _hint_area_explored below actually tests.
+        if hint is not None and self.cfg["steer_lock"] and candidates:
+            if self._hint_area_explored(hint, unknown, info):
                 self.get_logger().info(
-                    f"explore_hint: area around ({hint[0]:.2f}, {hint[1]:.2f}) has no "
-                    f"frontiers left — releasing steer lock"
+                    f"explore_hint: area around ({hint[0]:.2f}, {hint[1]:.2f}) is mapped "
+                    f"— releasing steer lock"
                 )
                 self._steer_hint = None
                 hint = None
-
-        candidates.sort(key=lambda c: c[0], reverse=True)
+            else:
+                candidates.sort(key=lambda c: math.hypot(c[1] - hint[0], c[2] - hint[1]))
         if self._consec_failures >= self.cfg["escape_after_failures"] and escape_pool:
             # Escape mode. Consecutive stuck/timeout/abort goals mean the
             # nearest-biased scoring is feeding us frontiers inside the same
@@ -1044,9 +1075,13 @@ class ExplorerNode(Node):
                 # had no effect whatsoever while escape was active.
                 # Still an escape, so the distance cap stays off and we still
                 # leave the pocket — just aimed where we were asked.
-                escape_pool.sort(
-                    key=lambda c: (self._steer_bonus(c[1], c[2], hint), c[0]), reverse=True
-                )
+                # Nearest to the hint, same rule the steer lock uses above —
+                # not the steer_bonus ordering, whose exponential decay
+                # flattens to ~1.0 for every candidate once the hint is more
+                # than a few decay lengths from all of them, silently falling
+                # back to "farthest" exactly when the operator most wants
+                # otherwise.
+                escape_pool.sort(key=lambda c: math.hypot(c[1] - hint[0], c[2] - hint[1]))
                 _dist, gx, gy, fx, fy = escape_pool[0]
                 self.get_logger().warn(
                     f"escape: {self._consec_failures} consecutive failed goals — "
