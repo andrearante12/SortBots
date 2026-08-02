@@ -332,6 +332,38 @@ since on the grid that produced the candidate the check could only ever say
 "still there". If `goals_consumed / goals_sent` climbs above ~0.5 while the
 robot barely travels, `frontier_consumed_radius_m` is too large.
 
+### Steering exploration by hand
+
+The map's **steer** mode (the `nav goal | steer` buttons above the map) lets
+you point the robot at an area without interrupting it. Clicking publishes
+`{"x": .., "y": ..}` on `<robot>/explore_hint`, which multiplies the score of
+nearby frontiers:
+
+```
+score *= 1 + steer_weight * exp(-distance_to_hint / steer_decay_m)
+```
+
+This is a **bias, not a goal**, and that distinction is the point. The map's
+other mode — plain click-to-nav — publishes straight to `navigate_to_pose`,
+which the explorer's own next goal preempts about a second later, so operator
+commands sent during exploration are simply overrun; the only way to stop
+that was to stop exploring. A hint instead leaves the robot choosing its own
+frontiers, avoiding walls, backtracking and escaping exactly as before, while
+preferring the region you pointed at. Consequences worth knowing:
+
+- It cannot strand the robot on an unreachable click. That frontier fails and
+  gets blacklisted like any other, and the hint expires after `steer_ttl_s`.
+- Frontiers within `steer_radius_m` of a hint ignore `max_goal_distance_m` —
+  without that, clicking the far side of the warehouse would do nothing,
+  since distant frontiers land in the backtracking pool that is only
+  consulted when there are no candidates at all.
+- Hints never bypass the obstacle-clearance and validity masks; those are
+  hard filters applied before scoring.
+- The hint shows as a dashed cyan ring on the map and in the status line, and
+  is mirrored from `explore_status` so the display expires with it.
+
+Publish `{}` on the same topic to clear a hint early.
+
 **Corner/dead-end handling** (all tunable in `configs/explorer.yaml`):
 
 - *Startup spin* — one 2π rotation before the first frontier goal. At t=0 a
@@ -371,7 +403,19 @@ robot barely travels, `frontier_consumed_radius_m` is too large.
   failed to escape) the explorer spins in place before retargeting. That
   combination almost always means a physical wedge with a stale local
   costmap, and rotating is the highest-information action a forward-only
-  camera has.
+  camera has. Rate-limited by `hard_escape_cooldown_s`, which is **not
+  optional**: the trigger is a level (the failure count stays high until a
+  goal succeeds), not an edge, so without a minimum gap the spin re-fires the
+  instant the previous one ends. That produced a live 8-second
+  spin/complete/spin loop that replaced exploration entirely.
+- *What counts as success* — early-abandoned goals reset the consecutive-
+  failure count **if the robot actually travelled** (`>
+  stuck_min_displacement_m`) to earn the reveal. This matters more than it
+  sounds: abandonment ends ~85% of goals in practice, so `STATUS_SUCCEEDED`
+  almost never fires, and a failure counter that only reset on it climbed
+  monotonically into permanent escape mode. Requiring real displacement is
+  what separates "revealed the frontier by driving there" from "sat still
+  while it evaporated", so a genuinely wedged robot still escalates.
 - *Sticky blacklist* — some frontiers are genuinely unreachable (behind a
   rack, behind sim geometry, in a pocket the planner can't route into). With
   a flat TTL they returned every `blacklist_ttl_s` forever, which both burned

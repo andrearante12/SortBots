@@ -111,6 +111,11 @@ DEFAULTS = {
     "startup_spin_timeout_s": 60.0,     # wall-clock give-up waiting for, then running, the spin
     "reference_free_area_m2": 0.0,      # denominator for coverage_pct; 0 disables
     "max_run_time_s": 0.0,         # wall-clock budget before _finish() fires; 0 disables
+    "steer_weight": 4.0,           # operator hint: peak score multiplier is 1 + this
+    "steer_decay_m": 3.0,          # hint influence falls off e-fold per this many metres
+    "steer_radius_m": 4.0,         # frontiers this close to a hint ignore max_goal_distance_m
+    "steer_ttl_s": 60.0,           # forget a hint after this long; 0 = never expire
+    "hard_escape_cooldown_s": 90.0,  # min gap between hard-escape spins
 }
 
 
@@ -246,6 +251,10 @@ class ExplorerNode(Node):
         self._goal_frontier: tuple[float, float] | None = None
         self._goal_map_seq: int | None = None
         self._goal_sent_at: float | None = None
+        # Robot pose when the active goal went out, so _goal_progress() can
+        # tell "revealed the frontier by driving there" from "sat still while
+        # it evaporated" — see the consumed branch in _tick.
+        self._goal_start_pose: tuple[float, float] | None = None
         # (monotonic_ts, x, y) samples while a goal is active, for the stuck
         # watchdog in _tick(). Cleared on every new goal and on goal end.
         self._pose_history: deque[tuple[float, float, float]] = deque()
@@ -288,6 +297,8 @@ class ExplorerNode(Node):
         # grab navigate_to_pose mid-spin if the explorer looked idle.
         self._spin_state = "pending" if (autostart and cfg["startup_spin"]) else "done"
         self._spin_deadline: float | None = None
+        self._spin_reason = "startup"          # or "hard escape", for logging
+        self._last_hard_escape_at: float | None = None
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -295,8 +306,13 @@ class ExplorerNode(Node):
         self.nav_client = ActionClient(self, NavigateToPose, f"/{robot_id}/navigate_to_pose")
         self.spin_client = ActionClient(self, Spin, f"/{robot_id}/spin")
 
+        # Operator steering hint: (x, y, monotonic_ts) or None. A soft bias on
+        # frontier scoring, deliberately NOT a goal — see _steer_bonus.
+        self._steer_hint: tuple[float, float, float] | None = None
+
         self.create_subscription(OccupancyGrid, f"/{robot_id}/map", self._on_map, MAP_QOS)
         self.create_subscription(String, f"/{robot_id}/explore_cmd", self._on_cmd, 10)
+        self.create_subscription(String, f"/{robot_id}/explore_hint", self._on_hint, 10)
         # Deliberately global, not /{robot_id}/-namespaced: every robot's
         # explorer needs to see every OTHER robot's claims.
         self.create_subscription(String, "/explore/claims", self._on_claim, 10)
@@ -359,6 +375,68 @@ class ExplorerNode(Node):
         else:
             self.get_logger().warn(f"explore_cmd: unknown command {msg.data!r}")
 
+    # -- operator steering -------------------------------------------------
+
+    def _on_hint(self, msg: String):
+        """`{"x": .., "y": ..}` — "explore over there", or `{}` to clear.
+
+        Deliberately a scoring BIAS rather than a goal. The dashboard's
+        click-to-nav publishes straight to navigate_to_pose, which the
+        explorer's next goal preempts about a second later — so operator
+        commands were simply overrun, and the only way to stop that was to
+        stop exploring altogether. A hint instead makes frontiers near the
+        clicked point win ties, so the robot heads that way while still
+        choosing its own goals, still avoiding walls, still backtracking and
+        escaping on its own. Nothing about autonomy is suspended, which is
+        why this can't strand the robot if the operator clicks somewhere
+        unreachable: an unreachable frontier just fails and gets blacklisted
+        as usual, and the hint expires after steer_ttl_s.
+        """
+        try:
+            h = json.loads(msg.data)
+        except (json.JSONDecodeError, TypeError):
+            self.get_logger().warn(f"explore_hint: bad payload {msg.data!r}")
+            return
+        if not h or "x" not in h or "y" not in h:
+            self._steer_hint = None
+            self.get_logger().info("explore_hint: cleared — back to unbiased scoring")
+            return
+        try:
+            x, y = float(h["x"]), float(h["y"])
+        except (TypeError, ValueError):
+            self.get_logger().warn(f"explore_hint: non-numeric point {msg.data!r}")
+            return
+        self._steer_hint = (x, y, time.monotonic())
+        self.get_logger().info(
+            f"explore_hint: steering toward ({x:.2f}, {y:.2f}) "
+            f"for {self.cfg['steer_ttl_s']:.0f}s"
+        )
+        self._publish_status()
+
+    def _active_hint(self) -> tuple[float, float] | None:
+        if self._steer_hint is None:
+            return None
+        x, y, ts = self._steer_hint
+        ttl = self.cfg["steer_ttl_s"]
+        if ttl > 0 and time.monotonic() - ts >= ttl:
+            self._steer_hint = None
+            self.get_logger().info("explore_hint: expired — back to unbiased scoring")
+            return None
+        return (x, y)
+
+    def _steer_bonus(self, gx: float, gy: float, hint) -> float:
+        """Multiplier in [1, 1 + steer_weight] for a goal's distance to `hint`.
+
+        Exponential rather than a hard radius so there is no cliff: a frontier
+        just outside the operator's click is still preferred over one on the
+        far side of the map, and the bias degrades smoothly into normal
+        scoring instead of switching off.
+        """
+        if hint is None:
+            return 1.0
+        d = math.hypot(gx - hint[0], gy - hint[1])
+        return 1.0 + self.cfg["steer_weight"] * math.exp(-d / max(0.1, self.cfg["steer_decay_m"]))
+
     def _cancel_active_goal(self, cancel_on_server: bool = True):
         # cancel_on_server=False is for the timeout path: _tick() calls this
         # immediately before _plan_and_send() sends a REPLACEMENT goal in the
@@ -380,6 +458,7 @@ class ExplorerNode(Node):
         self._goal_target = None
         self._goal_frontier = None
         self._goal_map_seq = None
+        self._goal_start_pose = None
         self._goal_sent_at = None
 
     # -- frontier-claim sharing (the concrete slice of collaborative
@@ -524,9 +603,23 @@ class ExplorerNode(Node):
             if reason == "consumed":
                 fx, fy = self._goal_frontier
                 self._goals_consumed += 1
+                # Reset the failure streak IF the robot actually travelled to
+                # earn this. Consumption is the normal healthy outcome — live
+                # 2026-08-02 it ended 24 of 28 goals, so STATUS_SUCCEEDED
+                # essentially never fires and _consec_failures, which only
+                # reset on that, climbed monotonically into permanent escape
+                # mode (3 pointless 9-14 m cross-map jumps in 10 minutes).
+                # But resetting unconditionally would be just as wrong: a
+                # wedged robot whose frontier gets cleared by someone else's
+                # raytrace would keep zeroing the counter and never escalate.
+                # Requiring real displacement separates "revealed it by
+                # driving there" from "it evaporated while we sat still".
+                moved = self._goal_progress()
+                if moved >= self.cfg["stuck_min_displacement_m"]:
+                    self._consec_failures = 0
                 self.get_logger().info(
                     f"frontier at ({fx:.2f}, {fy:.2f}) already revealed en route to "
-                    f"({gx:.2f}, {gy:.2f}) — retargeting (not a failure)"
+                    f"({gx:.2f}, {gy:.2f}) after {moved:.2f}m — retargeting (not a failure)"
                 )
             elif reason == "stuck":
                 self.get_logger().warn(
@@ -566,6 +659,15 @@ class ExplorerNode(Node):
             # is the only one where nothing otherwise would.
             self._goal_generation += 1
             superseded.cancel_goal_async()
+
+    def _goal_progress(self) -> float:
+        """Straight-line distance covered since the active goal was sent."""
+        if self._goal_start_pose is None:
+            return 0.0
+        pose = self._robot_pose()
+        if pose is None:
+            return 0.0
+        return math.hypot(pose[0] - self._goal_start_pose[0], pose[1] - self._goal_start_pose[1])
 
     def _goal_fault(self) -> str | None:
         """"stuck" | "timeout" | None for the goal currently in flight."""
@@ -672,6 +774,7 @@ class ExplorerNode(Node):
             f"startup spin: rotating {goal.target_yaw:.2f} rad for an initial 360-degree view"
         )
         self._spin_state = "running"
+        self._spin_reason = "startup"
         self.spin_client.send_goal_async(goal).add_done_callback(
             lambda f: self._on_spin_response(f, retry=True)
         )
@@ -707,7 +810,7 @@ class ExplorerNode(Node):
     def _on_spin_result(self, future):
         status = future.result().status
         if status == GoalStatus.STATUS_SUCCEEDED:
-            self.get_logger().info("startup spin complete — recoveries are functional")
+            self.get_logger().info(f"{self._spin_reason} spin complete — recoveries are functional")
         else:
             self.get_logger().warn(
                 f"spin ended status={status} — carrying on. If the behavior_server log "
@@ -768,6 +871,18 @@ class ExplorerNode(Node):
             return False
         if self._spin_state != "done" or not self.spin_client.server_is_ready():
             return False
+        # Cooldown. The trigger is a LEVEL (_consec_failures stays high until
+        # a goal succeeds), not an edge, so without this the spin re-fires the
+        # instant the previous one finishes and the robot spins forever
+        # instead of exploring. Observed live 2026-08-02: once the counter got
+        # stuck high, this became an 8-second spin/complete/spin loop that ran
+        # until the run was killed. One spin per cooldown window is plenty —
+        # the point is to re-observe once, then go try a goal.
+        now = time.monotonic()
+        if self._last_hard_escape_at is not None and \
+                now - self._last_hard_escape_at < self.cfg["hard_escape_cooldown_s"]:
+            return False
+        self._last_hard_escape_at = now
         goal = Spin.Goal()
         goal.target_yaw = math.pi
         goal.time_allowance = Duration(sec=20)
@@ -776,6 +891,7 @@ class ExplorerNode(Node):
             f"spinning in place to re-observe before retargeting"
         )
         self._spin_state = "running"
+        self._spin_reason = "hard escape"
         self._spin_deadline = time.monotonic() + self.cfg["startup_spin_timeout_s"]
         # retry=False: a rejection here means Nav2 is unhealthy, and unlike at
         # bringup there's no reason to expect that to resolve on its own —
@@ -844,6 +960,7 @@ class ExplorerNode(Node):
 
         blacklist = self._active_blacklist()
         claims = self._active_claims()
+        hint = self._active_hint()
         open_cells = max(1, round(self.cfg["openness_radius_m"] / res))
         h, w = free.shape
         candidates = []  # (score, gx, gy, fx, fy)
@@ -856,7 +973,13 @@ class ExplorerNode(Node):
             if self._too_close(gx, gy, claims, self.cfg["claim_radius_m"]):
                 continue
             escape_pool.append((dist, gx, gy, fx, fy))
-            if dist > self.cfg["max_goal_distance_m"]:
+            # A hinted frontier ignores the distance cap. Without this,
+            # clicking the far side of the warehouse would do nothing at all:
+            # those frontiers land in `far`, which is only consulted when
+            # there are no candidates whatsoever, so the bias could never
+            # apply to exactly the case the operator most wants it for.
+            hinted = hint is not None and math.hypot(gx - hint[0], gy - hint[1]) <= self.cfg["steer_radius_m"]
+            if dist > self.cfg["max_goal_distance_m"] and not hinted:
                 far.append((dist, gx, gy, fx, fy))
                 continue
             # Openness: fraction of known-free floor around the goal. Wide-open
@@ -870,6 +993,7 @@ class ExplorerNode(Node):
             openness = float(patch.mean()) if patch.size else 0.0
             denom = max(dist, 0.05) ** self.cfg["alpha"]
             score = f.size * openness ** self.cfg["openness_exp"] / denom
+            score *= self._steer_bonus(gx, gy, hint)
             candidates.append((score, gx, gy, fx, fy))
 
         candidates.sort(key=lambda c: c[0], reverse=True)
@@ -1011,6 +1135,7 @@ class ExplorerNode(Node):
         self._goal_target = target
         self._goal_frontier = (fx, fy)
         self._goal_map_seq = self._map_seq
+        self._goal_start_pose = (rx, ry)
         self._goal_sent_at = time.monotonic()
         self._goals_sent += 1
         self._pose_history.clear()  # fresh stuck window for the new goal
@@ -1056,6 +1181,7 @@ class ExplorerNode(Node):
             self._goal_target = None
             self._goal_frontier = None
             self._goal_map_seq = None
+            self._goal_start_pose = None
             self._goal_sent_at = None
             return
         self._rejections = 0
@@ -1077,6 +1203,7 @@ class ExplorerNode(Node):
         self._goal_target = None
         self._goal_frontier = None
         self._goal_map_seq = None
+        self._goal_start_pose = None
         self._goal_sent_at = None
         self._pose_history.clear()
         if status == GoalStatus.STATUS_SUCCEEDED:
@@ -1172,6 +1299,7 @@ class ExplorerNode(Node):
             known = int(np.count_nonzero(self._grid >= 0))
             total = int(self._grid.size)
         free_m2, occ_m2, known_m2 = self._area_stats()
+        hint = self._active_hint()
         status = {
             "state": self.state,
             "phase": self._spin_state,
@@ -1200,6 +1328,9 @@ class ExplorerNode(Node):
             "goal_rejections": self._rejections,
             "no_tf_ticks": self._no_tf_ticks,
             "elapsed_s": round(time.monotonic() - self._started_at, 1),
+            # via _active_hint() so an expired hint stops being advertised
+            # even while a goal is in flight and _plan_and_send isn't running.
+            "steer_hint": ({"x": hint[0], "y": hint[1]} if hint else None),
         }
         ref = self.cfg["reference_free_area_m2"]
         if ref > 0:

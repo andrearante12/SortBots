@@ -125,6 +125,13 @@ escape_pocket_radius_m: 1.5
 # the robot is physically wedged with a stale local costmap, and with a
 # single forward-facing depth camera a rotation is the highest-information
 # action available: it re-observes every direction at once.
+#
+# The cooldown is not optional. The trigger is a LEVEL, not an edge —
+# consecutive-failure counts stay high until a goal succeeds — so without a
+# minimum gap the spin re-fires the instant the previous one ends. Observed
+# live 2026-08-02: an 8-second spin/complete/spin loop that replaced
+# exploration entirely until the run was killed.
+hard_escape_cooldown_s: 90.0
 
 # Startup spin: one full rotation before the first frontier goal. At t=0 the
 # robot has seen only the forward cone, so the first frontier choice is
@@ -233,6 +240,40 @@ reference_free_area_m2: 293.7
 # gets saved. 2400 s = 40 min wall, which is roughly 18 min of sim time at
 # the ~0.45x real-time factor.
 max_run_time_s: 2400
+
+# Operator steering. Publishing {"x": .., "y": ..} on <robot>/explore_hint
+# (the dashboard's map does this in "steer" mode) biases frontier scoring
+# toward that point:
+#
+#   score *= 1 + steer_weight * exp(-distance_to_hint / steer_decay_m)
+#
+# It is a BIAS, not a goal, and that distinction is the whole point. The
+# dashboard's click-to-nav publishes straight to navigate_to_pose, so the
+# explorer's next goal preempts it about a second later — operator commands
+# were simply overrun, and the only way to stop that was to stop exploring.
+# A hint instead lets the robot keep choosing its own goals, keep avoiding
+# walls, keep backtracking and escaping, while preferring the region you
+# pointed at. It therefore can't strand the robot on an unreachable click:
+# that frontier fails and gets blacklisted like any other, and the hint
+# expires on its own.
+#
+# steer_weight 4.0 = up to a 5x score multiplier at the clicked point, which
+# comfortably outweighs the size/distance terms nearby without overriding the
+# obstacle-clearance and validity masks (those are hard filters applied
+# before scoring, and a hint never touches them).
+steer_weight: 4.0
+# Exponential rather than a hard radius, so there is no cliff: a frontier just
+# outside the click still beats one across the map, and the bias fades
+# smoothly back into normal scoring.
+steer_decay_m: 3.0
+# Frontiers this close to a hint ignore max_goal_distance_m. Without it,
+# clicking the far side of the warehouse would do nothing at all — those
+# frontiers land in the `far` pool, which is only consulted when there are no
+# candidates at all, i.e. never in the case you most want steering for.
+steer_radius_m: 4.0
+# Hints fade rather than latch, so a forgotten click can't quietly distort a
+# long run. 0 = never expire.
+steer_ttl_s: 60.0
 
 # Multi-robot frontier-claim sharing (see explorer.py's module docstring —
 # this is NOT map fusion, just a "don't plan here, someone's already going"
