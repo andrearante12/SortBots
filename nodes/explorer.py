@@ -1007,12 +1007,32 @@ class ExplorerNode(Node):
             # we're wedged — and let Nav2 route back out through mapped
             # territory. max_goal_distance_m is deliberately ignored here.
             # Normal scoring resumes after the next goal success.
-            escape_pool.sort(key=lambda c: c[0], reverse=True)
-            _dist, gx, gy, fx, fy = escape_pool[0]
-            self.get_logger().warn(
-                f"escape: {self._consec_failures} consecutive failed goals — "
-                f"jumping to farthest frontier ({gx:.2f}, {gy:.2f}), {_dist:.1f}m away"
-            )
+            if hint is not None:
+                # Operator intent beats the heuristic. Escape is a GUESS about
+                # where to go when wedged; a hint is someone telling us. Since
+                # escape bypasses the scored candidate list entirely, without
+                # this branch a hint is silently ignored for as long as escape
+                # stays engaged — which, in a run where goals keep failing, is
+                # most of the time. Observed live 2026-08-02: operator clicks
+                # had no effect whatsoever while escape was active.
+                # Still an escape, so the distance cap stays off and we still
+                # leave the pocket — just aimed where we were asked.
+                escape_pool.sort(
+                    key=lambda c: (self._steer_bonus(c[1], c[2], hint), c[0]), reverse=True
+                )
+                _dist, gx, gy, fx, fy = escape_pool[0]
+                self.get_logger().warn(
+                    f"escape: {self._consec_failures} consecutive failed goals — "
+                    f"steering to the frontier nearest your hint ({gx:.2f}, {gy:.2f}), "
+                    f"{_dist:.1f}m away"
+                )
+            else:
+                escape_pool.sort(key=lambda c: c[0], reverse=True)
+                _dist, gx, gy, fx, fy = escape_pool[0]
+                self.get_logger().warn(
+                    f"escape: {self._consec_failures} consecutive failed goals — "
+                    f"jumping to farthest frontier ({gx:.2f}, {gy:.2f}), {_dist:.1f}m away"
+                )
             # Pocket-blacklist where we're wedged. Blacklisting only the goals
             # actually attempted removes the pocket one blacklist_radius_m
             # spot at a time, so scoring keeps handing back the NEXT untried
