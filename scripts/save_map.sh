@@ -102,7 +102,14 @@ if [[ "$DB" == true ]]; then
   # A live sqlite file copied mid-write gives a torn database, and RTAB-Map
   # writes continuously, so refuse rather than produce something that looks
   # fine until it's resumed.
-  if pgrep -f "rtabmap" >/dev/null 2>&1; then
+  # Match the NODE executables, not the bare string "rtabmap", and never
+  # match this script or its parent shell. A loose `pgrep -f rtabmap` also
+  # matches any command line that merely MENTIONS the database path —
+  # including the shell that invoked this script — so the guard fired with
+  # nothing actually running and refused a legitimate copy.
+  RUNNING=$(pgrep -f "rtabmap_slam|rtabmap_viz|rtabmap_util|rgbd_odometry" \
+            | grep -vx -e "$$" -e "$PPID" | wc -l)
+  if [ "$RUNNING" -gt 0 ]; then
     echo "[save_map] rtabmap is still running — copying its sqlite DB now would" >&2
     echo "           produce a torn file. Run 'scripts/run_demo.sh stop' first." >&2
     exit 1
