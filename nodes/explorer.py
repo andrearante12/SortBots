@@ -114,7 +114,8 @@ DEFAULTS = {
     "steer_weight": 4.0,           # operator hint: peak score multiplier is 1 + this
     "steer_decay_m": 3.0,          # hint influence falls off e-fold per this many metres
     "steer_radius_m": 4.0,         # frontiers this close to a hint ignore max_goal_distance_m
-    "steer_ttl_s": 60.0,           # forget a hint after this long; 0 = never expire
+    "steer_lock": True,            # restrict candidates to the hinted area, not just prefer it
+    "steer_ttl_s": 300.0,          # forget a hint after this long; 0 = never expire
     "hard_escape_cooldown_s": 90.0,  # min gap between hard-escape spins
 }
 
@@ -995,6 +996,32 @@ class ExplorerNode(Node):
             score = f.size * openness ** self.cfg["openness_exp"] / denom
             score *= self._steer_bonus(gx, gy, hint)
             candidates.append((score, gx, gy, fx, fy))
+
+        # Region lock: while a hint is live, explore THAT area until it runs
+        # out of frontiers, rather than merely preferring it. A pure
+        # multiplicative bias loses to the size/distance term whenever the
+        # hinted area is far — at alpha 1.0 a frontier 2 m away already beats
+        # an equal one 15 m away by 7.5x, which swamps steer_weight — so a
+        # click across the map visibly "gave up" and wandered off. Restricting
+        # the candidate set makes the operator's intent decisive.
+        #
+        # Self-limiting, so an unreachable click can't deadlock exploration:
+        # failures inside the region blacklist normally and go permanent after
+        # blacklist_permanent_strikes, at which point nothing valid remains in
+        # the region and the lock releases itself below.
+        if hint is not None and self.cfg["steer_lock"]:
+            near = [c for c in candidates
+                    if math.hypot(c[1] - hint[0], c[2] - hint[1]) <= self.cfg["steer_radius_m"]]
+            if near:
+                candidates = near
+            elif not any(math.hypot(gx - hint[0], gy - hint[1]) <= self.cfg["steer_radius_m"]
+                         for _d, gx, gy, _fx, _fy in escape_pool):
+                self.get_logger().info(
+                    f"explore_hint: area around ({hint[0]:.2f}, {hint[1]:.2f}) has no "
+                    f"frontiers left — releasing steer lock"
+                )
+                self._steer_hint = None
+                hint = None
 
         candidates.sort(key=lambda c: c[0], reverse=True)
         if self._consec_failures >= self.cfg["escape_after_failures"] and escape_pool:

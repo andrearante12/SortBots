@@ -271,9 +271,25 @@ steer_decay_m: 3.0
 # frontiers land in the `far` pool, which is only consulted when there are no
 # candidates at all, i.e. never in the case you most want steering for.
 steer_radius_m: 4.0
-# Hints fade rather than latch, so a forgotten click can't quietly distort a
-# long run. 0 = never expire.
-steer_ttl_s: 60.0
+# Region LOCK, not just a preference: while a hint is live, only frontiers
+# within steer_radius_m of it are eligible. A pure multiplicative bias is not
+# enough when the hinted area is far away — at alpha 1.0 a frontier 2 m out
+# already beats an equal one 15 m out by 7.5x, which swamps steer_weight, so
+# a click across the map visibly "gave up" and wandered off after one goal.
+# Restricting the candidate set makes operator intent decisive, which is the
+# point of pointing.
+#
+# It cannot deadlock exploration: failures inside the region blacklist as
+# normal and go permanent after blacklist_permanent_strikes, at which point
+# nothing valid is left in the region and the lock releases itself (logged).
+# Set false to fall back to bias-only behaviour.
+steer_lock: true
+# Long enough to actually drive somewhere across the warehouse and finish it
+# (was 60 s, which expired mid-transit and looked like giving up). The lock
+# normally ends by exhausting the area rather than by timing out; this is the
+# safety net so a forgotten click can't distort a long run forever.
+# 0 = never expire.
+steer_ttl_s: 300.0
 
 # Multi-robot frontier-claim sharing (see explorer.py's module docstring —
 # this is NOT map fusion, just a "don't plan here, someone's already going"
