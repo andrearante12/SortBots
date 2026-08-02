@@ -97,6 +97,18 @@ GRIPPER_LINK = "Fixed_Jaw_tip"
 
 PACKAGE_SIZE_M = 0.08
 
+# Height of the arm's shoulder (the `Rotation` joint) above base_link, summed
+# straight out of xlerobot.urdf: arm_base_joint z=+0.7600 then Rotation
+# z=+0.0165. The arm is mounted on a mast, NOT at chassis height — which is the
+# single most important number for placing anything the robot has to pick from.
+#
+# Everything reachable lives in a sphere of roughly 0.40-0.50 m around this
+# point, so a pick surface wants to be somewhat BELOW it (reach forward and
+# slightly down), not near the floor. A deck at 0.30 m asks the arm to reach
+# half a metre straight down, which is the edge of its envelope pointing the
+# wrong way.
+ARM_SHOULDER_Z_ABOVE_BASE_M = 0.7765
+
 # First arm's 6 non-fixed joints. `nodes/scripted_pick.py` commands these
 # by name. DOF INDICES ARE NOT HARDCODED — Isaac's actual articulation DOF
 # order does NOT follow xlerobot.urdf's declaration order (verified live:
@@ -742,14 +754,45 @@ def _read_arm_cmd(robot_name: str):
     ])
 
 
+def _station_materials(stage):
+    """OmniPBR materials for the hand-built station props, made once.
+
+    Reuses the texture pipeline build_warehouse already has (the same
+    assets/textures/*.jpg the primitive scene uses). Without this the shelves
+    render flat white: _author_box makes UV-mapped geometry but binds nothing,
+    and UsdPreviewSurface doesn't render textures in Kit's RTX path anyway —
+    OmniPBR is the only thing that does here.
+
+    Returns {} if the textures aren't present (fetch_warehouse_textures.py was
+    never run), so a missing texture downgrades to untextured rather than
+    killing the spawn.
+    """
+    from build_warehouse import TEXTURE_ROLES, TEXTURES_DIR, _make_texture_material
+
+    from pxr import UsdGeom
+
+    materials = {}
+    UsdGeom.Scope.Define(stage, "/World/StationLooks")
+    for role in ("shelves", "boxes"):
+        tex = TEXTURES_DIR / TEXTURE_ROLES[role]
+        if not tex.is_file():
+            continue
+        materials[role] = _make_texture_material(
+            stage, f"/World/StationLooks/{role}", tex
+        )
+    return materials
+
+
 def _spawn_shelf(stage, prim_path: str, x: float, y: float, yaw_rad: float,
-                 deck_height_m: float, size):
+                 deck_height_m: float, size, materials=None):
     """A deck slab on four legs, as static colliders, centred on (x, y).
 
-    The NVIDIA warehouse has nothing an SO-101-class arm can pick from: its
-    racks start well above the ~0.50 m this arm reaches fully extended, and
-    editing a streamed asset reference is not something we want to own. So the
-    demo brings its own shelf and places it at the station pose.
+    The NVIDIA warehouse has nothing this arm can pick from at a sane height,
+    and editing a streamed asset reference is not something we want to own. So
+    the demo brings its own shelf and places it at the station pose. See
+    `type: usd` in configs/waypoints.yaml for referencing a real NVIDIA prop
+    instead; this stays the offline/no-network fallback and is what the
+    primitive scene needs.
 
     Reuses build_warehouse._author_box, which authors a UV-mapped Mesh rather
     than a UsdGeom.Cube — Kit's RTX delegate won't generate UVs for a Cube, so
@@ -758,15 +801,18 @@ def _spawn_shelf(stage, prim_path: str, x: float, y: float, yaw_rad: float,
     """
     import math
 
-    from build_warehouse import _author_box
+    from build_warehouse import _author_box, _bind
 
     yaw_deg = math.degrees(yaw_rad)
     sx, sy, sz = (float(v) for v in size)
+    materials = materials or {}
 
-    _author_box(
+    deck = _author_box(
         stage, f"{prim_path}/Deck", (sx, sy, sz),
         (x, y, deck_height_m - sz / 2.0), rotate_xyz=(0.0, 0.0, yaw_deg),
     )
+    if "shelves" in materials:
+        _bind(deck, materials["shelves"])
 
     leg = 0.05
     leg_h = max(deck_height_m - sz, 0.01)
@@ -777,10 +823,70 @@ def _spawn_shelf(stage, prim_path: str, x: float, y: float, yaw_rad: float,
         # Leg offsets are in the shelf's own frame, rotated into world by yaw.
         lx = x + (ox * inset_x) * cos_y - (oy * inset_y) * sin_y
         ly = y + (ox * inset_x) * sin_y + (oy * inset_y) * cos_y
-        _author_box(
+        leg_prim = _author_box(
             stage, f"{prim_path}/Leg_{i}", (leg, leg, leg_h),
             (lx, ly, leg_h / 2.0), rotate_xyz=(0.0, 0.0, yaw_deg),
         )
+        if "shelves" in materials:
+            _bind(leg_prim, materials["shelves"])
+
+
+def _spawn_usd_prop(stage, prim_path: str, x: float, y: float, yaw_rad: float,
+                    ref: str, scale: float = 1.0, z: float = 0.0) -> bool:
+    """Reference a real USD asset (an NVIDIA warehouse prop) at the station.
+
+    `ref` is either a path relative to the Isaac asset root — e.g.
+    `Isaac/Props/KLT_Bin/small_KLT_visual_collision.usd` — or an absolute
+    URL/filesystem path, which is passed through untouched. Relative refs
+    resolve through the same get_assets_root_path() the warehouse itself uses,
+    so they stream and cache exactly like full_warehouse.usd and add no new
+    dependency beyond what `--scene nvidia` already needs.
+
+    Assets worth knowing about (verified present on the 5.0 asset server, and
+    whether they ship colliders):
+
+      Isaac/Props/KLT_Bin/small_KLT_visual_collision.usd   collider  tote/bin
+      Isaac/Environments/Simple_Warehouse/Props/SM_RackShelf_01.usd
+                                                          collider  rack shelf
+      Isaac/Props/PackingTable/packing_table.usd           collider  (14 MB)
+      Isaac/Props/Pallet/pallet.usd                                  pallet
+      Isaac/Props/Blocks/red_block.usd                    NO physics graspable
+      Isaac/Props/YCB/Axis_Aligned/061_foam_brick.usd                graspable
+
+    HEIGHTS ARE NOT VERIFIED. These were authored for human-scale warehouses
+    and Franka-class arms; this arm's shoulder is at ~0.83 m above the floor
+    with a ~0.45 m envelope around it. Check what a prop actually looks like
+    next to the robot before trusting it — `deck_height_m` in waypoints.yaml
+    stays the pick height regardless of what the asset's own geometry does,
+    so a mismatched prop is a cosmetic problem, not a silent wrong-pose one.
+
+    Returns False if the asset root can't be resolved, so the caller can fall
+    back to the hand-built shelf rather than spawning nothing.
+    """
+    import math
+
+    from isaacsim.core.utils.stage import add_reference_to_stage
+    from pxr import Gf, UsdGeom
+
+    if "://" not in ref and not ref.startswith("/"):
+        try:
+            from isaacsim.storage.native import get_assets_root_path
+
+            root = get_assets_root_path()
+        except Exception:
+            root = None
+        if not root:
+            return False
+        ref = f"{root.rstrip('/')}/{ref.lstrip('/')}"
+
+    add_reference_to_stage(usd_path=ref, prim_path=prim_path)
+    xform = UsdGeom.Xformable(stage.GetPrimAtPath(prim_path))
+    xform.ClearXformOpOrder()
+    xform.AddTranslateOp().Set(Gf.Vec3d(float(x), float(y), float(z)))
+    xform.AddRotateXYZOp().Set(Gf.Vec3f(0.0, 0.0, float(math.degrees(yaw_rad))))
+    if scale != 1.0:
+        xform.AddScaleOp().Set(Gf.Vec3f(float(scale), float(scale), float(scale)))
+    return True
 
 
 def _spawn_package(stage, prim_path: str, x: float, y: float, z: float):
@@ -1006,15 +1112,38 @@ def main() -> int:
     decks = []
     if "robot_0" in robots:
         props = _load_station_props() if args.station_props else []
+        station_materials = _station_materials(stage) if props else {}
         for name, kind, sx, sy, syaw, prop in props:
-            if prop.get("type") != "shelf":
-                emit(f"  station {name}: unknown prop type {prop.get('type')!r}, skipped")
-                continue
+            ptype = prop.get("type", "shelf")
             deck_h = float(prop["deck_height_m"])
-            size = prop["size"]
-            _spawn_shelf(stage, f"/World/station_{name}", sx, sy, syaw, deck_h, size)
+            size = prop.get("size", [0.90, 0.40, 0.06])
+            prim = f"/World/station_{name}"
+
+            if ptype == "usd":
+                ok = _spawn_usd_prop(
+                    stage, prim, sx, sy, syaw,
+                    ref=prop["ref"],
+                    scale=float(prop.get("scale", 1.0)),
+                    z=float(prop.get("z", 0.0)),
+                )
+                if ok:
+                    emit(f"  usd prop for {name} ({kind}) at ({sx}, {sy}): {prop['ref']}")
+                else:
+                    # Asset root unreachable (offline / no Nucleus). Falling
+                    # back keeps the pick geometry intact — the demo still
+                    # works, it just looks like a white slab again.
+                    emit(f"  usd prop for {name} unreachable, falling back to built-in shelf")
+                    _spawn_shelf(stage, prim, sx, sy, syaw, deck_h, size, station_materials)
+            elif ptype == "shelf":
+                _spawn_shelf(stage, prim, sx, sy, syaw, deck_h, size, station_materials)
+                emit(f"  shelf for {name} ({kind}) at ({sx}, {sy}) deck_z={deck_h}")
+            else:
+                emit(f"  station {name}: unknown prop type {ptype!r}, skipped")
+                continue
+
+            # deck_height_m is the pick height whatever the prop looks like,
+            # so the release footprint is the same either way.
             decks.append((sx, sy, float(size[0]) / 2.0, float(size[1]) / 2.0, deck_h))
-            emit(f"  shelf for {name} ({kind}) at ({sx}, {sy}) deck_z={deck_h}")
 
         pickup = next((p for p in props if p[1] == "pickup"), None)
         package_prim_path = "/World/package_0"

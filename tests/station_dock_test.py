@@ -25,10 +25,21 @@ pytest.importorskip("rclpy", reason="task_manager imports rclpy at module scope"
 
 from task_manager import Station, load_stations  # noqa: E402
 
-# Summed URDF link origins Rotation -> Fixed_Jaw_tip. This is the fully
-# extended straight-line reach from the shoulder, so it is an upper bound —
-# a usable dock offset has to be comfortably inside it.
-ARM_REACH_M = 0.50
+# Summed URDF link origins Rotation -> Fixed_Jaw_tip: fully extended
+# straight-line reach FROM THE SHOULDER. An upper bound, so anything usable
+# has to sit comfortably inside it.
+ARM_REACH_M = 0.45
+
+# Shoulder height above the FLOOR: xlerobot.urdf's arm_base_joint puts the arm
+# base 0.7600 above base_link, Rotation adds 0.0165, and the robot spawns at
+# z=0.05. The arm is on a mast, not at chassis height.
+#
+# This distinction is the whole point of these assertions. An earlier version
+# compared deck_height_m directly against ARM_REACH_M, which silently mixed
+# two different reference frames — it "passed" a 0.30 m deck that in fact sat
+# half a metre BELOW the shoulder, at the very edge of the envelope pointing
+# straight down. Reach is measured from the shoulder, never from the floor.
+ARM_SHOULDER_Z_M = 0.7765 + 0.05
 
 
 def station(**over) -> Station:
@@ -120,12 +131,32 @@ def test_prop_decks_are_reachable_and_consistent(stations):
         prop = spec.get("prop")
         if not prop:
             continue
-        assert prop["type"] == "shelf", f"{name}: spawn_warehouse only knows 'shelf'"
+        ptype = prop.get("type", "shelf")
+        assert ptype in ("shelf", "usd"), f"{name}: unknown prop type {ptype!r}"
+        if ptype == "usd":
+            assert prop.get("ref"), f"{name}: type: usd needs a `ref`"
+
         deck = float(prop["deck_height_m"])
-        assert 0.0 < deck < ARM_REACH_M, (
-            f"{name}: deck_height_m={deck} is not plausibly reachable"
+        # Vertical drop from the shoulder to the pick surface. Must leave real
+        # horizontal reach behind, otherwise the arm is at full stretch just
+        # getting DOWN to the deck and can't extend forward at all.
+        drop = ARM_SHOULDER_Z_M - deck
+        assert abs(drop) < ARM_REACH_M, (
+            f"{name}: deck_height_m={deck} is {drop:+.2f} m from the shoulder "
+            f"(z={ARM_SHOULDER_Z_M:.2f}), beyond the {ARM_REACH_M} m envelope"
         )
-        sx, sy, sz = (float(v) for v in prop["size"])
+        horizontal = math.sqrt(max(ARM_REACH_M**2 - drop**2, 0.0))
+        assert horizontal > 0.20, (
+            f"{name}: deck_height_m={deck} leaves only {horizontal:.2f} m of "
+            f"horizontal reach — the arm would be at full stretch reaching down"
+        )
+        assert horizontal > stations[name].dock_offset_m, (
+            f"{name}: dock_offset_m={stations[name].dock_offset_m} exceeds the "
+            f"{horizontal:.2f} m of horizontal reach available at deck height "
+            f"{deck} — the base parks further away than the arm can reach"
+        )
+
+        sx, sy, sz = (float(v) for v in prop.get("size", [0.9, 0.4, 0.06]))
         assert sz < deck, f"{name}: deck slab ({sz}) is thicker than its own height ({deck})"
         assert sx > 0 and sy > 0
 

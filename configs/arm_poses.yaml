@@ -21,8 +21,16 @@
 # CAPTURED AGAINST: nothing yet (placeholders).
 #   scene:        --scene nvidia
 #   spawn:        robot_0 (-4.5, 4.5, 0.05)
-#   deck_height:  0.30 m
-#   dock_offset:  0.28 m
+#   deck_height:  0.68 m
+#   dock_offset:  0.30 m
+#
+# Geometry note for whoever captures these: the arm is on a MAST. Its shoulder
+# sits ~0.83 m above the floor (urdf arm_base_joint 0.7600 + Rotation 0.0165 +
+# spawn 0.05), and the deck is at 0.68 — only ~0.15 m BELOW the shoulder. So
+# the real pick pose reaches roughly HORIZONTALLY, tilted slightly down. The
+# placeholder angles below still describe a big reach-down motion from when
+# the deck was (wrongly) at 0.30 m, so expect them to look distinctly off
+# before you re-capture. That is the known state, not a new bug.
 # =========================================================================
 #
 # Consumed by nodes/arm_poses.py (loader + validator) and played back by
