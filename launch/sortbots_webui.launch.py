@@ -28,6 +28,7 @@ import os
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -36,12 +37,24 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def generate_launch_description():
     dashboard_port = LaunchConfiguration("dashboard_port")
+    serve = LaunchConfiguration("serve")
 
     return LaunchDescription([
         DeclareLaunchArgument(
             "dashboard_port",
             default_value="8081",
             description="Port for webui/serve.py (the dashboard's own HTTP server).",
+        ),
+        DeclareLaunchArgument(
+            "serve",
+            default_value="true",
+            description=(
+                "Start webui/serve.py here. scripts/run_console.sh passes false and "
+                "runs it itself, from a shell with NO ROS 2 sourced: in console mode "
+                "serve.py launches scripts/run_demo.sh, which refuses to run when "
+                "AMENT_PREFIX_PATH is set. Anything started by this launch file "
+                "inherits the sourced environment, hence the split."
+            ),
         ),
 
         Node(
@@ -87,6 +100,7 @@ def generate_launch_description():
             output="screen",
         ),
         ExecuteProcess(
+            condition=IfCondition(serve),
             cmd=[
                 "python3",
                 os.path.join(REPO_ROOT, "webui", "serve.py"),

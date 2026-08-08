@@ -154,6 +154,120 @@ launch (`launch/sortbots_bringup.launch.py`), and prints the dashboard URL.
 rviz is off by default (the dashboard replaces it); add `--teleop` for the old
 WASD terminal window. Tear it all down with `scripts/run_demo.sh stop`.
 
+### Console mode: launching scenarios from the dashboard
+
+`run_demo.sh` stays the CLI path and is unchanged. But you can also start and
+stop the sim **from the dashboard's Scenarios tab**, which is the nicer way to
+work through a series of runs (and the only way to do it from your phone).
+
+That needs one structural change, because the dashboard used to be *inside* the
+pipeline: the bringup started rosbridge/web_video_server/`serve.py`, and
+`run_demo.sh stop` killed them. A "start the sim" button can't live in a process
+the sim owns — the first click would kill the page mid-request. So console mode
+splits the dashboard out into a process that outlives sim runs:
+
+```bash
+scripts/run_console.sh          # clean terminal, no ROS sourced. Leave it running.
+```
+
+That starts only rosbridge (9090), web_video_server (8080) and
+`webui/serve.py --control` (8081), prints the dashboard URL, and stays in the
+foreground. Open the dashboard, switch the header to **scenarios**, pick a card
+and hit **Start**: `webui/session.py` runs `scripts/run_demo.sh` for you with
+`--keep-console`, which makes its teardown spare the console processes and
+makes the bringup start with `webui:=false` (two rosbridges would fight over
+port 9090). **Stop** tears the sim down and leaves the console — and your open
+page — up.
+
+- Ctrl-C in the console terminal stops the console only; a running sim keeps
+  going. `scripts/run_console.sh stop` takes down both.
+- Each run gets `data/sessions/<timestamp>_<scenario>/` with `console.log`
+  (what the tab tails) and `session.json`.
+- The console can be restarted mid-run: on startup it re-adopts a live pipeline
+  rather than claiming nothing is running.
+- Without a console, `serve.py` runs read-only and the tab says so instead of
+  offering buttons that can't work.
+
+#### Driving it from a script (or a coding agent)
+
+Everything the tab does is also one command. `scripts/sim_ctl.sh` wraps the
+control API so nothing has to hand-write JSON or reason about foreground vs
+background:
+
+```bash
+scripts/sim_ctl.sh console start                  # detached; waits until :8081 answers
+scripts/sim_ctl.sh list                           # scenarios (works with no console up)
+scripts/sim_ctl.sh dry-run explore_fresh headless=true   # print the command, launch nothing
+scripts/sim_ctl.sh start explore_fresh headless=true
+scripts/sim_ctl.sh wait running --timeout 420     # first run streams NVIDIA assets
+scripts/sim_ctl.sh status                         # state, phase, scenario, elapsed
+scripts/sim_ctl.sh log --lines 100
+scripts/sim_ctl.sh stop                           # sim down, console stays up
+```
+
+Exit codes are the interface — branch on them, not on the text: `0` success,
+`1` command failure (bad scenario, rejected start, run went to `failed`), `3`
+no console, `4` no session (which is how you ask "is anything running?"), `124`
+timed out. `wait` dumps the last 30 log lines when a run fails.
+
+Coding agents should use the **`sim-run` skill** (`.claude/skills/sim-run/`),
+which carries this runbook plus the failure modes; `CLAUDE.md` points at it.
+
+The phase readout (`starting Isaac Sim → loading the warehouse → sim publishing
+→ starting RTAB-Map + Nav2 → ROS 2 stack up → running`) is parsed out of
+`run_demo.sh`'s own progress lines by `PHASE_PATTERNS` in `webui/session.py`.
+If you reword those echoes, update that table in the same commit.
+
+> **The control API is not authenticated.** `serve.py` binds `0.0.0.0`, so with
+> `--control` any tailnet device can launch a scenario. Containment is that
+> scenario names resolve by allowlist against `configs/scenarios/`, and every
+> argument handed to `run_demo.sh` is built by the fixed, typed `RUN_FLAGS`
+> table in `webui/session.py` — no free-text value from a request reaches a
+> shell. Tailscale ACLs are the actual perimeter.
+
+#### Adding a scenario
+
+A scenario is a reviewable preset for `run_demo.sh`, one YAML per file in
+`configs/scenarios/` (the filename stem must equal `name`):
+
+```yaml
+name: explore_fresh
+title: Frontier exploration — fresh map
+description: >
+  Shown on the card. Say what the run does and what it proves.
+status: ready                 # ready | planned (planned lists but can't start)
+run:                          # allowlisted keys only — see RUN_FLAGS
+  scene: nvidia               # nvidia | primitive
+  robots: 1                   # 1..2
+  robot_id: robot_0
+  headless: false
+  chase_cam: true             # false -> --no-chase-cam
+  explore: true
+  resume: false               # resume and localize are mutually exclusive
+  localize: false
+  teleop: false
+  map: null                   # null -> ~/.ros/sortbots_<robot_id>.db
+overrides: [headless, robots] # which keys the card exposes as controls
+capture:
+  bag: false                  # true also records scripts/record_explore_bag.sh
+```
+
+Unknown `run:` keys are rejected, not forwarded — the card renders with status
+`invalid` and the reason, which is also what you get from the offline check:
+
+```bash
+python3 webui/session.py --list
+python3 webui/session.py --print-argv explore_resume        # prints the exact command
+python3 webui/session.py --print-argv explore_fresh --set headless=true
+```
+
+`status: planned` is for scenarios whose environment doesn't exist yet — the
+card lists them greyed out with a tooltip rather than pretending they run. Two
+known gaps for the planned test suite: a person-avoidance scene needs a new
+`--scene` value with an animated actor in `scripts/spawn_warehouse.py`, and
+multi-robot coordination needs `run_demo.sh` to thread `robot_ids` through to
+the bringup (today it only passes `robot_id`).
+
 ### Unified ROS-2 bringup on its own
 
 If Isaac Sim is already running (e.g. you launched `scripts/spawn_warehouse.py`
@@ -832,6 +946,21 @@ across five viewports: layout fits without scrolling, PiP swap, map mode, the
 grid renders undistorted, click-to-nav round-trips to the right world
 coordinate, the trail and robot marker draw, keyboard driving and its form
 guard, and the polling gate. Exit code is non-zero on any failure.
+
+The Scenarios tab has its own test, which needs **no fixture** — it talks only
+to `serve.py`'s control API, so the real thing runs entirely offline:
+
+```bash
+node webui/tests/scenarios_test.mjs                  # add --screenshot DIR for PNGs
+```
+
+It runs `serve.py` twice (with and without `--control`, since "the console
+isn't running" is a state the tab has to explain rather than fail in) and
+asserts the view switch hides the live view and its header chrome, that a card
+renders per scenario with its override controls, that only `ready` scenarios
+are startable, that the camera pollers idle behind the hidden panel, and that
+nothing scrolls horizontally at three viewports. It never POSTs
+`/api/session/start`, so it cannot launch a sim.
 
 ### 4. Replay through the real stack (optional)
 

@@ -11,6 +11,12 @@
      carries `min-height: 0` so it can actually shrink below its content size
      (without it, flex items refuse to shrink and the page overflows again). */
   html, body { height: 100%; }
+  /* The [hidden] attribute is how the view switcher hides the live view and
+     the scenarios view. It only works because of this rule: the UA stylesheet
+     gives [hidden] display:none, but any author `display` declaration beats
+     it — and .panel/#right-col/.segmented all set display:flex. Without the
+     !important, "hiding" the live view would do nothing at all. */
+  [hidden] { display: none !important; }
   body {
     margin: 0;
     font-family: system-ui, sans-serif;
@@ -45,15 +51,19 @@
   }
   .panel h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa; margin: 0 0 8px; }
 
-  /* -- header: stage mode segmented control ------------------------------ */
-  #stage-mode { display: flex; gap: 0; margin-left: 12px; }
-  #stage-mode button {
+  /* -- header: segmented controls ---------------------------------------- */
+  /* Two of these now: the top-level view switcher (live / scenarios) and the
+     stage mode (camera / map). Same treatment, so the header reads as one
+     control vocabulary rather than two invented ones. */
+  .segmented { display: flex; gap: 0; margin-left: 12px; }
+  .segmented button {
     background: #14161a; color: #9aa; border: 1px solid #2a2e35;
     padding: 4px 12px; font-size: 0.78rem; cursor: pointer;
   }
-  #stage-mode button:first-child { border-radius: 5px 0 0 5px; }
-  #stage-mode button:last-child { border-radius: 0 5px 5px 0; border-left: none; }
-  #stage-mode button.active { background: #2d5; color: #111; font-weight: 600; }
+  .segmented button:first-child { border-radius: 5px 0 0 5px; }
+  .segmented button:last-child { border-radius: 0 5px 5px 0; border-left: none; }
+  .segmented button.active { background: #2d5; color: #111; font-weight: 600; }
+  #view-mode { margin-left: 4px; }
   #slam-badge {
     padding: 1px 8px; border-radius: 3px; font-size: 0.75rem; font-family: monospace;
     background: #234; color: #7bf; margin-left: auto;
@@ -249,6 +259,75 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
 
+  /* -- scenarios view (webui/scenarios.js) -------------------------------- */
+  /* A sibling grid item spanning both columns rather than a wrapper around the
+     live view: wrapping #stage-panel and #right-col in a container would make
+     them children of that container instead of the body grid, and the whole
+     1.7fr/1fr layout above would collapse. Switching views just toggles
+     [hidden] on the three top-level items. */
+  #view-scenarios { grid-column: 1 / -1; min-height: 0; }
+  #scenario-head { display: flex; align-items: center; gap: 10px; flex: none; flex-wrap: wrap; margin-bottom: 8px; }
+  #scenario-head h2 { margin: 0; flex: none; }
+  #scenario-hint { font-size: 0.75rem; color: #9aa; }
+  /* Scenario list left, the running session's status + log right. */
+  #scenario-body { display: grid; grid-template-columns: 1.1fr 1fr; gap: 10px; flex: 1 1 auto; min-height: 0; }
+  #scenario-list { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; }
+
+  .scenario-card {
+    background: #14161a; border: 1px solid #2a2e35; border-radius: 6px;
+    padding: 10px; flex: none;
+  }
+  .scenario-card.selected { border-color: #2d5; }
+  .scenario-card.disabled { opacity: 0.55; }
+  .scenario-card h3 { margin: 0 0 5px; font-size: 0.9rem; font-weight: 600; }
+  .scenario-card p { margin: 0; font-size: 0.78rem; line-height: 1.4; color: #9aa; }
+  .scenario-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .scenario-row label { display: flex; align-items: center; gap: 4px; font-size: 0.76rem; color: #9aa; cursor: pointer; }
+  .scenario-row input[type="number"] {
+    width: 46px; background: #14161a; color: #e6e6e6;
+    border: 1px solid #2a2e35; border-radius: 4px; padding: 2px 4px; font-size: 0.76rem;
+  }
+  .scenario-row button {
+    margin-left: auto; background: #2d5; color: #111; border: none; font-weight: 600;
+    border-radius: 4px; padding: 5px 12px; font-size: 0.8rem; cursor: pointer;
+  }
+  .scenario-row button:hover:not(:disabled) { background: #3e6; }
+  .scenario-row button:disabled { background: #2a2e35; color: #778; cursor: not-allowed; }
+  /* Same class-per-state chip pattern as the task queue's .state-* badges. */
+  .sc-badge { padding: 1px 6px; border-radius: 3px; font-size: 0.7rem; font-family: monospace; }
+  .sc-ready { background: #043; color: #2d5; }
+  .sc-planned { background: #234; color: #7bf; }
+  .sc-invalid { background: #400; color: #f77; }
+
+  #session-pane { display: flex; flex-direction: column; min-height: 0; }
+  #session-strip {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: none;
+    margin-bottom: 6px; font-family: monospace; font-size: 0.76rem; color: #7bf;
+  }
+  #session-stop {
+    margin-left: auto; background: #14161a; color: #f77; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 4px 10px; font-size: 0.78rem; cursor: pointer;
+  }
+  #session-stop:hover:not(:disabled) { background: #222831; }
+  #session-stop:disabled { color: #667; cursor: not-allowed; }
+  #session-log {
+    flex: 1 1 auto; min-height: 0; overflow: auto; margin: 0;
+    background: #000; border: 1px solid #2a2e35; border-radius: 4px; padding: 8px;
+    font-family: monospace; font-size: 0.7rem; line-height: 1.4; color: #9c9;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  /* Before anything is running this pane is most of the panel; without this it
+     reads as a rendering failure rather than as "nothing to show yet". */
+  #session-log:empty::before {
+    content: "No session output yet. Start a scenario and scripts/run_demo.sh's output appears here.";
+    color: #556;
+  }
+  #console-warning {
+    flex: none; margin-bottom: 8px; padding: 8px 10px; border-radius: 6px;
+    background: #221a10; border: 1px solid #4a3a1a; color: #fb7; font-size: 0.78rem;
+  }
+  #console-warning code { color: #fd9; }
+
   /* -- phone / narrow viewport ------------------------------------------- */
   /* The dashboard is driven from a phone over the tailnet (see docs/running.md).
      Stack the stage above the right column and grow the pad hit targets. */
@@ -264,6 +343,11 @@
     #right-col { flex-direction: row; }
     #recon-panel, #ops-panel { flex: 1 1 50%; min-width: 0; }
     #dispatch-form select { min-width: 0; flex: 1 1 auto; max-width: 100%; }
+    /* The scenario list and its log won't both fit across a phone; stack them
+       and give the log a fixed slice so the cards stay reachable. */
+    #scenario-body { grid-template-columns: 1fr; grid-auto-rows: auto; }
+    #view-scenarios { min-height: 70vh; }
+    #session-log { min-height: 140px; }
     #drive-pad { grid-template-columns: repeat(3, 48px); grid-template-rows: repeat(3, 48px); }
     #aim-pad { grid-template-columns: repeat(3, 40px); grid-template-rows: repeat(3, 40px); }
     .pad-overlay { opacity: 0.85; }  /* no hover on touch — keep them legible */
@@ -286,7 +370,13 @@
     <select id="robot-select" title="Switch which robot the dashboard shows (reloads the page)"></select>
     <span id="conn-dot"></span>
     <span id="conn-label">connecting…</span>
-    <div id="stage-mode">
+    <div id="view-mode" class="segmented">
+      <button type="button" data-view="live" class="active"
+              title="The running robot: cameras, map, drive pad, dispatch">live</button>
+      <button type="button" data-view="scenarios"
+              title="Pick a scenario and start or stop the simulation itself">scenarios</button>
+    </div>
+    <div id="stage-mode" class="segmented">
       <button type="button" data-stage="camera" class="active">camera</button>
       <button type="button" data-stage="map">map</button>
     </div>
@@ -398,6 +488,32 @@
     </div>
   </div>
 
+  <!-- Scenarios: start and stop the simulation itself. Served by webui/serve.py
+       over plain HTTP, NOT rosbridge — deliberately, since the whole point is
+       to work when nothing is running (rosbridge included). See
+       webui/scenarios.js and webui/session.py. -->
+  <div class="panel" id="view-scenarios" hidden>
+    <div id="scenario-head">
+      <h2>Scenarios</h2>
+      <span id="scenario-hint"
+            title="Each card is a preset for scripts/run_demo.sh, defined in configs/scenarios/*.yaml. Starting one launches Isaac Sim plus the whole ROS 2 stack; this dashboard stays up throughout.">
+        Presets from configs/scenarios/ — starting one launches Isaac Sim and the ROS 2 stack.
+      </span>
+    </div>
+    <div id="console-warning" hidden></div>
+    <div id="scenario-body">
+      <div id="scenario-list"></div>
+      <div id="session-pane">
+        <div id="session-strip">
+          <span id="session-state">no session</span>
+          <button type="button" id="session-stop" disabled
+                  title="Tear down Isaac Sim and the ROS 2 stack. The dashboard console stays up.">Stop</button>
+        </div>
+        <pre id="session-log" title="Live output from scripts/run_demo.sh for this session (also saved to data/sessions/&lt;id&gt;/console.log)."></pre>
+      </div>
+    </div>
+  </div>
+
 <!-- Vendored (webui/vendor/roslib.min.js) rather than a CDN so the dashboard is
      fully self-contained over the tailnet — no public-internet dependency to
      load the page. Refresh with:
@@ -414,6 +530,10 @@
 <script src="vendor/three.min.js"></script>
 <script src="vendor/OrbitControls.js"></script>
 <script src="app.js"></script>
+<!-- The scenarios tab. Independent of app.js and of ROS entirely: it talks
+     only to webui/serve.py's control API, so it still works (and can start the
+     sim) when rosbridge has nothing to say. -->
+<script src="scenarios.js"></script>
 <!-- Manual arm teleop pad + pose capture. Self-mounting and independent of
      app.js (own rosbridge connection, own injected CSS) so it stayed a
      one-line diff here while other branches were editing this file. -->

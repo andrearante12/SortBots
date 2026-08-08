@@ -100,8 +100,15 @@ const CAMERA_ERROR_BACKOFF_MS = 1500;
 // worth fetching — in map mode that drops the head cam's polling entirely.
 // The timer keeps ticking while hidden rather than being cleared, so the feed
 // resumes on its own when the stage swaps, with no restart wiring.
+//
+// The offsetParent check covers the whole live view being hidden (the
+// scenarios tab in webui/scenarios.js sets [hidden] on #stage-panel): the
+// stage classes are still on the images then, so the class test alone would
+// keep both cameras polling web_video_server at 2.5fps behind a hidden panel.
+// display:none is exactly the case offsetParent reports as null.
 function isFeedVisible(img) {
-  return img.classList.contains("stage-main") || img.classList.contains("stage-pip");
+  if (!img.classList.contains("stage-main") && !img.classList.contains("stage-pip")) return false;
+  return img.offsetParent !== null;
 }
 
 function wireCameraStream(elId, topic) {

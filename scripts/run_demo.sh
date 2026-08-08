@@ -19,8 +19,13 @@
 #   scripts/run_demo.sh [--robot-id robot_0] [--robots 1] [--scene nvidia]
 #                       [--headless] [--teleop] [--localize | --resume]
 #                       [--no-chase-cam]
-#                       [--map PATH] [--explore]
-#   scripts/run_demo.sh stop      # tear the whole pipeline down
+#                       [--map PATH] [--explore] [--keep-console]
+#   scripts/run_demo.sh stop [--keep-console]   # tear the pipeline down
+#
+# --keep-console leaves the dashboard stack (rosbridge, web_video_server,
+# webui/serve.py) alone and tells the bringup not to start its own copy. It is
+# what scripts/run_console.sh + the dashboard's Scenarios tab use, so the page
+# you clicked "Start" on survives the run it launched. Not needed by hand.
 #
 # --explore starts nodes/explorer.py, which autonomously maps the warehouse
 # with no human input (frontier-based: drives toward the nearest unexplored
@@ -56,27 +61,46 @@ SIM_RESULT="/tmp/isaac_spawn_warehouse_result.txt"
 BRINGUP_LOG="/tmp/sortbots_demo_bringup.log"
 DASHBOARD_PORT=8081
 
+# The dashboard stack (rosbridge, web_video_server, webui/serve.py) is listed
+# separately because scripts/run_console.sh can own it INSTEAD of the bringup:
+# in console mode those processes outlive individual sim runs, which is what
+# lets the Scenarios tab start and stop the pipeline from the browser without
+# killing the page it's served from. --keep-console spares them.
+CONSOLE_PATTERNS=(rosbridge_websocket web_video_server "webui/serve.py" \
+                  webui_url.py web_video_watchdog.sh)
+PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz2 \
+                   controller_server planner_server smoother_server behavior_server \
+                   bt_navigator waypoint_follower velocity_smoother lifecycle_manager \
+                   component_container task_manager.py scripted_pick.py explorer.py \
+                   rtabmap_cloud_pump.py recon_cloud_relay.py wasd_teleop \
+                   "spawn_warehouse.py")
+# Note scripts/save_map.sh --watch is deliberately absent from that list. Its
+# checkpoint loop has to OUTLIVE teardown: rtabmap gets pkill -9'd only 2 s
+# after SIGINT below, and the last checkpoint is exactly the one worth
+# keeping. The loop ends itself once /map stops answering.
+KEEP_CONSOLE=false
+
 stop_pipeline() {
-  echo "[run_demo] stopping any running pipeline..."
+  if [[ "$KEEP_CONSOLE" == "true" ]]; then
+    echo "[run_demo] stopping any running pipeline (keeping the dashboard console)..."
+  else
+    echo "[run_demo] stopping any running pipeline..."
+  fi
   # SIGINT the top-level launch first so it can shut its children (Nav2
   # lifecycle nodes, rtabmap, rosbridge) down cleanly, then hard-kill leftovers.
   pkill -INT -f "sortbots_bringup.launch.py" 2>/dev/null || true
   pkill -INT -f "sortbots_rtabmap_robot.launch.py" 2>/dev/null || true
   sleep 2
-  for p in rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz2 \
-           controller_server planner_server smoother_server behavior_server \
-           bt_navigator waypoint_follower velocity_smoother lifecycle_manager \
-           component_container rosbridge_websocket web_video_server \
-           "webui/serve.py" webui_url.py task_manager.py scripted_pick.py explorer.py \
-           rtabmap_cloud_pump.py recon_cloud_relay.py \
-           web_video_watchdog.sh wasd_teleop \
-           "spawn_warehouse.py"; do
+  PATTERNS=("${PIPELINE_PATTERNS[@]}")
+  [[ "$KEEP_CONSOLE" == "true" ]] || PATTERNS+=("${CONSOLE_PATTERNS[@]}")
+  for p in "${PATTERNS[@]}"; do
     pkill -9 -f "$p" 2>/dev/null || true
   done
   sleep 1
 }
 
 if [[ "${1:-}" == "stop" ]]; then
+  [[ "${2:-}" == "--keep-console" ]] && KEEP_CONSOLE=true
   stop_pipeline
   echo "[run_demo] stopped."
   exit 0
@@ -101,7 +125,11 @@ while [[ $# -gt 0 ]]; do
     --resume)   RESUME=true; shift;;
     --map)      MAP_DB="$2";  shift 2;;
     --explore)  EXPLORE=true; shift;;
-    -h|--help) sed -n '2,47p' "$0"; exit 0;;
+    # Set by webui/session.py when the Scenarios tab launches a run: the
+    # dashboard console is already up and owns rosbridge/web_video_server, so
+    # don't kill it on teardown and don't start a second copy in the bringup.
+    --keep-console) KEEP_CONSOLE=true; shift;;
+    -h|--help) sed -n '2,53p' "$0"; exit 0;;
     *) echo "[run_demo] unknown arg: $1"; exit 2;;
   esac
 done
@@ -138,6 +166,10 @@ fi
 
 # Always reset first so re-running is a clean restart.
 stop_pipeline
+
+# The "[run_demo] ..." progress lines below are parsed by webui/session.py
+# (PHASE_PATTERNS) to drive the Scenarios tab's phase readout. Reword them
+# freely, but update that table in the same commit.
 
 # ---- 1. Isaac Sim ----
 echo "[run_demo] launching Isaac Sim ($SCENE, $ROBOTS robot(s), $HEADLESS)..."
@@ -178,12 +210,16 @@ echo "[run_demo] launching RTAB-Map + Nav2 + web dashboard + task manager..."
 # shebang resolves to /usr/bin/python3 even if this script was started from a
 # conda-active shell (conda's python breaks rclpy's compiled extension — see
 # launch/sortbots_webui.launch.py's docstring).
+# In console mode the dashboard stack is already up and outside this pipeline,
+# so the bringup must NOT start a second one — two rosbridges would fight over
+# port 9090 and the loser dies silently.
+WEBUI=true; [[ "$KEEP_CONSOLE" == "true" ]] && WEBUI=false
 setsid bash -c "source '$ROS_SETUP'; \
   export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
   export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
        robot_id:=$ROBOT_ID use_sim_time:=true rviz:=false \
-       dashboard_port:=$DASHBOARD_PORT \
+       webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
        delete_db_on_start:=$DELETE_DB_ON_START \
        explore:=$EXPLORE" \

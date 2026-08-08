@@ -33,7 +33,7 @@ We currently have a working simulation of our intended robot imported into an re
 ## Docs
 
 - [`docs/setup.md`](docs/setup.md) — full setup: Isaac Sim + ROS 2 + RTAB-Map (optional ManiSkill at the end)
-- [`docs/running.md`](docs/running.md) — optional ManiSkill arm-manipulation demos
+- [`docs/running.md`](docs/running.md) — running everything: the demo, console mode and scenarios, autonomous exploration, map lifecycle, remote access, dashboard tests
 
 
 ## Run commands
@@ -43,12 +43,50 @@ Open a fresh shell at the repo root. Never activate both simulators in the same 
 
 ### Isaac Sim (mobile / multi-robot / ROS 2 / VSLAM track)
 
+Two ways in. **Console mode** is the one to use day to day — you start the
+dashboard once and launch runs from the browser (including from your phone):
+
+```bash
+./scripts/run_console.sh       # dashboard only; leave this terminal running
+```
+
+Then open <http://localhost:8081/> (or the tailnet URL it prints), switch the
+header to **scenarios**, pick one and hit **Start**. That launches Isaac Sim +
+RTAB-Map + Nav2 + the task manager for you and streams the launcher's output
+into the tab; **Stop** tears the run down and leaves the dashboard up, ready
+for the next one. Scenarios are presets in
+[`configs/scenarios/`](configs/scenarios/) — today `explore_fresh` (map from
+scratch, autonomous frontier exploration) and `explore_resume` (extend the map
+a previous run built). Adding one is a YAML file; see
+[`docs/running.md`](docs/running.md#adding-a-scenario).
+
+```bash
+./scripts/run_console.sh stop  # console + any running sim
+```
+
+Scriptable equivalent, for automation or a coding agent —
+`scripts/sim_ctl.sh {console start|list|dry-run|start|wait|status|log|stop}`,
+with exit codes as the interface:
+
+```bash
+./scripts/sim_ctl.sh console start
+./scripts/sim_ctl.sh start explore_fresh headless=true
+./scripts/sim_ctl.sh wait running --timeout 420
+./scripts/sim_ctl.sh stop
+```
+
+**Or drive it from the CLI**, unchanged:
+
 ```bash
 ./scripts/run_demo.sh          # launch the whole demo
+./scripts/run_demo.sh --explore  # ...and explore autonomously
 ./scripts/run_demo.sh stop     # shut it all down
 ```
 
 `run_demo.sh` brings up the entire pipeline in one command. Drive the robot around and the map fills in live. Re-running it resets the environment. The first run auto-builds the robot USD and streams the NVIDIA warehouse (a few minutes; cached after).
+
+Without a console running, the scenarios tab is read-only: it lists what exists
+and says how to start the console, rather than offering buttons that can't work.
 
 ### ManiSkill (arm manipulation track)
 
