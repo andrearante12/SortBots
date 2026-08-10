@@ -18,8 +18,14 @@ env/
 .DS_Store
 *.swp
 
-# Claude Code local settings (per-user)
-.claude/
+# Claude Code. Agent-facing project config is shared like any other source —
+# the sim runbook shouldn't have to be rediscovered on every clone or machine.
+# Per-user state (settings.local.json, scheduled task locks) stays out.
+# Note: negating a path under an ignored DIRECTORY doesn't work, so the ignore
+# has to be `.claude/*` (contents), not `.claude/` (the directory itself).
+.claude/*
+!.claude/settings.json
+!.claude/skills/
 
 # Local install/run artifacts
 *.bak

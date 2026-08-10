@@ -1,0 +1,118 @@
+# Named stations for task dispatch (pickup shelves / dropoff zones), in the
+# `map` frame Nav2 navigates against.
+#
+# ===================== THE TWO NUMBERS THAT MATTER =====================
+#
+# ARM SHOULDER HEIGHT ~0.83 m above the floor. The arm is on a MAST, not at
+# chassis height: xlerobot.urdf's `arm_base_joint` puts the arm base 0.7600 m
+# above base_link, then `Rotation` adds 0.0165, and the robot spawns at
+# z=0.05. So the whole reachable workspace is a sphere centred near waist
+# height on a person, not down by the wheels.
+#
+# ARM REACH ~0.45 m from that shoulder (summing the link origins Rotation ->
+# Fixed_Jaw_tip). Everything the robot can touch is inside that sphere.
+#
+# Together those set both numbers below:
+#   deck_height_m ~0.68  -> about 0.15 m below the shoulder, so the arm
+#                           reaches forward and slightly DOWN (its strongest
+#                           direction) instead of straight down at full stretch
+#   dock_offset_m ~0.30  -> horizontal reach available at that height is
+#                           sqrt(0.45^2 - 0.15^2) ~ 0.42 m, so 0.30 m of
+#                           standoff leaves margin for the base's own footprint
+#
+# An earlier version of this file had deck_height_m: 0.30, which asked the arm
+# to reach half a metre straight down — the edge of its envelope, pointing the
+# wrong way. It also had dock_offset_m: 0.5, which exceeds the arm's entire
+# length. Both are fixed above; both are still worth confirming live.
+#
+# =======================================================================
+#
+# STAGE 1 POSES — deliberately near the robot's spawn point (-4.5, 4.5), NOT
+# at the real rack row, so the floor is provably clear and the nav legs are
+# short. Once nav -> pick -> carry -> place works here, move the stations out
+# to the rack row (roughly shelf_a (-4.5, 8.3), zone_b (0.5, 2.0)) for longer,
+# more demo-worthy legs. Moving them means RE-CAPTURING configs/arm_poses.yaml
+# — the recorded joint angles are only valid for the geometry they were taken
+# against. Keeping deck_height_m identical between stages makes that a no-op.
+#
+# `prop:` is read only by scripts/spawn_warehouse.py, which authors something
+# at that pose so there is actually a surface at a reachable height to pick
+# from. Inert everywhere else: task_manager.Station reads only kind / pose /
+# dock_offset_m / dock_lateral_m, and the dashboard reads only `kind`.
+#
+# Two prop types:
+#
+#   type: shelf   hand-built deck-on-legs, textured from assets/textures/.
+#                 Works offline, works in the primitive scene. The fallback.
+#     deck_height_m: top surface z (world), the height the pick pose keys off
+#     size: [x, y, z] of the deck slab
+#
+#   type: usd     reference a real asset. `ref` is relative to the Isaac asset
+#                 root (streams + caches exactly like full_warehouse.usd, no
+#                 new dependency) or an absolute URL / path.
+#     ref:  asset path
+#     z:    where to put the asset's ORIGIN (most props are floor-standing, so
+#           0.0); deck_height_m stays the pick height regardless
+#     scale: uniform scale, default 1.0
+#
+# Verified present on the 5.0 asset server, with collider status:
+#   Isaac/Props/KLT_Bin/small_KLT_visual_collision.usd     collider   tote/bin
+#   Isaac/Environments/Simple_Warehouse/Props/SM_RackShelf_01.usd
+#                                                          collider   rack shelf
+#   Isaac/Props/PackingTable/packing_table.usd             collider   14 MB
+#   Isaac/Props/Pallet/pallet.usd                                     pallet
+#   Isaac/Props/Blocks/red_block.usd                       NO physics graspable
+#   Isaac/Props/YCB/Axis_Aligned/061_foam_brick.usd                   graspable
+#
+# Their heights are NOT verified — they were authored for human-scale
+# warehouses and Franka-class arms. Look at one next to the robot before
+# trusting it. A mismatched prop is cosmetic: deck_height_m still drives the
+# pick, so the pose stays right even if the asset looks wrong.
+
+stations:
+  shelf_a:
+    kind: pickup
+    pose: { x: -4.5, y: 5.5, yaw: 1.5708 }   # facing +y, 1 m ahead of spawn
+    dock_offset_m: 0.30
+    dock_lateral_m: 0.0
+    prop:
+      type: shelf
+      deck_height_m: 0.68
+      size: [0.90, 0.40, 0.06]
+      # To try the real NVIDIA rack shelf instead, swap the three lines above
+      # for these and re-run — no code change:
+      #   type: usd
+      #   ref: Isaac/Environments/Simple_Warehouse/Props/SM_RackShelf_01.usd
+      #   z: 0.0
+      #   deck_height_m: 0.68
+      #   size: [0.90, 0.40, 0.06]
+
+  shelf_b:
+    kind: pickup
+    pose: { x: -3.0, y: 5.5, yaw: 1.5708 }
+    dock_offset_m: 0.30
+    dock_lateral_m: 0.0
+    prop:
+      type: shelf
+      deck_height_m: 0.68
+      size: [0.90, 0.40, 0.06]
+
+  zone_a:
+    kind: dropoff
+    pose: { x: -4.5, y: 3.0, yaw: -1.5708 }  # facing -y, back toward open floor
+    dock_offset_m: 0.30
+    dock_lateral_m: 0.0
+    prop:
+      type: shelf
+      deck_height_m: 0.68
+      size: [0.90, 0.40, 0.06]
+
+  zone_b:
+    kind: dropoff
+    pose: { x: -3.0, y: 3.0, yaw: -1.5708 }
+    dock_offset_m: 0.30
+    dock_lateral_m: 0.0
+    prop:
+      type: shelf
+      deck_height_m: 0.68
+      size: [0.90, 0.40, 0.06]

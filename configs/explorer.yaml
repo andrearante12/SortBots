@@ -1,0 +1,304 @@
+# Frontier-exploration tuning for nodes/explorer.py.
+#
+# Plain top-level keys (not the `/**/<node>:` wildcard nav2_params.yaml
+# needs) — this file is loaded directly by explorer.py's own yaml.safe_load,
+# not by ROS 2's rcl_yaml_param_parser, so none of that gotcha applies here.
+
+# Discard frontier clusters smaller than this many cells. Below this a
+# cluster is usually sensor noise at a wall edge, not a real opening. Was 8 =
+# 0.40 m of frontier edge at 0.05 m/cell; a real doorway is ~1 m (20 cells),
+# so 8 mostly bought sub-doorway fragments that each cost a full goal cycle
+# to chase. 12 (0.60 m) is still far narrower than anything the ~0.5 x 0.4 m
+# base could drive through, and it also helps the run TERMINATE: residual
+# one-cell specks along a mapped wall otherwise keep resetting _empty_cycles.
+min_frontier_cells: 12
+
+# score = cluster_size / distance**alpha. Higher alpha biases harder toward
+# nearby frontiers (less backtracking, more methodical); lower alpha biases
+# toward big far-away openings (faster coverage of open areas, more travel).
+# Was 1.5, which is a far stronger nearest-bias than it reads: at 1.5 an
+# 8-cell frontier 1 m away (score 8) essentially ties a 200-cell frontier 8 m
+# away (score 8.8), so the scorer nibbles at specks and never commits to the
+# big opening. At 1.0 that becomes 8 vs 25. The nearest-bias existed to avoid
+# wasting a long drive on a goal that turns out to be uninteresting, and
+# frontier_consumed_radius_m below removes most of that cost — a far goal is
+# now abandoned the moment the camera reveals it. 1.0 is also the classic
+# Yamauchi frontier formulation.
+alpha: 1.0
+
+# Reject frontier goals within this radius of an occupied cell. Matches
+# nav2_params.yaml's inflation_layer.inflation_radius — a goal any closer
+# risks planning into the robot's own footprint margin.
+inflate_radius_m: 0.4
+
+# Suppress candidates within this radius of a blacklisted (failed/timed-out)
+# point, so a rejected goal's immediate neighborhood isn't just re-tried next
+# cycle. This is the radius for a FIRST strike; see the escalation block
+# below.
+blacklist_radius_m: 0.5
+
+# Forget a blacklist entry after this many seconds — the map may have
+# changed enough that a previously-unreachable frontier is worth retrying.
+# 0 = never expire. Base TTL for a first strike.
+blacklist_ttl_s: 120.0
+
+# Blacklist escalation. A flat TTL meant a genuinely unreachable frontier —
+# behind a rack, behind sim geometry, in a pocket the planner can't route
+# into — came back every blacklist_ttl_s forever. That wasted goal cycles on
+# a known-dead target, and worse, made "exploration done" structurally
+# unreachable: there was always one more candidate, so done_after_empty_cycles
+# could never count up. Now, re-blacklisting within blacklist_merge_radius_m
+# of an existing entry bumps that entry's STRIKE count instead of appending a
+# neighbour; each strike multiplies its TTL and widens its radius, and at
+# blacklist_permanent_strikes it stops expiring. So an unreachable frontier
+# costs 3 failure cycles and is then gone for good.
+#
+# Growth is per-ENTRY, not driven by the global consecutive-failure count:
+# that counter has no spatial meaning, so keying off it would inflate
+# suppression across the whole map including areas that have never failed.
+# The spatial version of that idea is escape_pocket_radius_m below.
+blacklist_merge_radius_m: 0.75
+blacklist_ttl_growth: 3.0        # 120 s -> 360 s -> permanent
+blacklist_permanent_strikes: 3
+blacklist_radius_growth_m: 0.25
+# Cap the widening well below the ~2-3 m NVIDIA warehouse aisle width, so a
+# heavily-struck entry can never wall off a whole corridor.
+blacklist_radius_max_m: 1.5
+
+# Cancel + blacklist a goal that hasn't finished within this long. Now the
+# LAST-RESORT backstop behind the stuck watchdog below (stuck_window_s /
+# stuck_min_displacement_m), which catches a wedged robot much sooner; this
+# only fires for goals that keep moving but never arrive. Was 45.0; raised
+# after live testing showed genuine multi-meter frontier goals (diff-drive
+# rotate-then-drive, ~0.3-0.5 m/s realistic speed, occasional
+# recovery-behavior detour) routinely needing more than that even while
+# making real progress.
+goal_timeout_s: 75.0
+
+# Stuck watchdog: if the robot moves less than stuck_min_displacement_m over
+# a sliding stuck_window_s while a goal is active, blacklist the goal and
+# retarget immediately instead of waiting out goal_timeout_s. Complements
+# Nav2's SimpleProgressChecker (0.5 m / 20 s): that one aborts a FollowPath
+# attempt and sends the BT into up to 6 clear/spin/wait/backup recovery
+# rounds first — multi-minute churn when the robot is genuinely wedged in a
+# corner. Firing during a Spin/BackUp recovery is intended: 15 s without
+# 0.15 m of net motion IS the corner-wedge case, and picking a different
+# frontier is the right answer.
+stuck_window_s: 15.0
+stuck_min_displacement_m: 0.15
+
+# Standoff goal placement: instead of sending Nav2 to the frontier cell
+# itself (frequently a wall corner at the edge of known space), place the
+# goal on the nearest known-free cell within goal_standoff_max_m of the
+# frontier that is at least goal_clearance_m from any occupied cell (keep
+# this > nav2_params.yaml's inflation_radius 0.4) and
+# goal_unknown_clearance_m from any unknown cell. Nav2 never has to drive
+# INTO an unmapped corner — the depth camera reveals the frontier just as
+# well from a standoff in open floor, and the goal pose faces the frontier.
+goal_standoff_max_m: 1.5
+# Raised 0.45 -> 0.6 alongside nav2_params.yaml's inflation_radius 0.4 -> 0.65.
+# A standoff goal placed 0.45 m from a wall now sits well inside the inflated
+# band, so Nav2 would be asked to park the robot somewhere it is actively
+# trying to avoid — the goal is reachable but expensive, which shows up as
+# slow, scraping final approaches. 0.6 keeps goals just outside the band
+# without demanding the wide-open floor that 0.65+ would.
+goal_clearance_m: 0.6
+goal_unknown_clearance_m: 0.2
+
+# Escape mode: after this many CONSECUTIVE failed goals (stuck watchdog,
+# timeout, or Nav2 abort), abandon nearest-biased scoring for one goal and
+# jump to the FARTHEST valid frontier on the explored boundary, ignoring
+# max_goal_distance_m. Rationale: consecutive failures mean the robot is
+# wedged in a dead-end pocket, and because blacklisting only removes one
+# spot at a time (blacklist_radius_m), nearest-first keeps feeding it the
+# next frontier in the SAME pocket at 15+ s per failure. The farthest
+# boundary edge is by construction outside the pocket, and Nav2 routes to
+# it through known space. Resets on any goal success.
+escape_after_failures: 2
+
+# When escape fires, also blacklist a disc of this radius around the robot's
+# CURRENT position. Blacklisting only the goals actually attempted removes
+# the pocket one blacklist_radius_m spot at a time, so scoring keeps handing
+# back the next untried frontier in the same pocket; a disc kills the pocket
+# in one go. 1.5 m, not 2.0: warehouse aisles are ~2-3 m wide, so a 2 m disc
+# reliably spans a full aisle and can strand a legitimate corridor frontier
+# for the whole TTL. Only applied when the escape target itself lies outside
+# the disc, so escape never blacklists its own destination.
+escape_pocket_radius_m: 1.5
+
+# At twice escape_after_failures — failed repeatedly AND failed to escape —
+# spin in place once before retargeting. That combination almost always means
+# the robot is physically wedged with a stale local costmap, and with a
+# single forward-facing depth camera a rotation is the highest-information
+# action available: it re-observes every direction at once.
+#
+# The cooldown is not optional. The trigger is a LEVEL, not an edge —
+# consecutive-failure counts stay high until a goal succeeds — so without a
+# minimum gap the spin re-fires the instant the previous one ends. Observed
+# live 2026-08-02: an 8-second spin/complete/spin loop that replaced
+# exploration entirely until the run was killed.
+hard_escape_cooldown_s: 90.0
+
+# Startup spin: one full rotation before the first frontier goal. At t=0 the
+# robot has seen only the forward cone, so the first frontier choice is
+# nearly a guess — and frequently the ONLY candidate, which is exactly what
+# killed two fresh runs on 2026-08-01. ~8 s of sim time buys a full
+# Grid/RangeMax disc. It also acts as a per-run regression test for
+# behavior_server's local_frame (configs/nav2_params.yaml): before that fix
+# this action aborted instantly every time, and so did every BT recovery.
+startup_spin: true
+startup_spin_yaw: 6.283185       # 2*pi
+# Wall-clock give-up, covering two different waits: how long to keep waiting
+# for behavior_server's /spin action to appear at bringup (Nav2 lifecycle
+# activation is typically 15-25 s, and the explorer starts alongside it), and
+# how long to let a spin that has been accepted keep running before carrying
+# on without it. Generous on purpose — a skipped spin is a worse outcome than
+# a slow one, and the spin itself is only ~8 s of sim time (~18 s wall).
+startup_spin_timeout_s: 60.0
+
+# Openness scoring: score = size * openness^openness_exp / dist^alpha, where
+# openness is the fraction of known-free floor in a window of half-width
+# openness_radius_m around the goal. Wide-open frontiers beat tight-corner
+# ones of similar size/distance — corners are where the robot gets wedged.
+# openness_exp: 0.0 disables the term (reproduces the old scoring exactly).
+openness_radius_m: 0.8
+openness_exp: 1.0
+
+# Early goal abandonment. The depth camera (RTAB-Map Grid/RangeMax 5.0,
+# costmap raytrace_max_range 5.0) usually reveals a frontier from 4-5 m out,
+# but the goal is a standoff only goal_standoff_max_m (1.5 m) from it — so
+# without this the robot spends its last several metres, plus a
+# rotate-in-place to satisfy yaw_goal_tolerance, arriving to look at space it
+# already mapped. Once no frontier cell remains within
+# frontier_consumed_radius_m of the point a goal was chosen to reveal, that
+# goal counts as SATISFIED: cancelled and replaced immediately, with no
+# blacklist entry and no failure count (it is a saved trip, not a failure).
+#
+# 1.0 m = 20 cells: wider than a cluster's own drift as it dissolves, tight
+# enough that an unrelated opening next door can't keep a dead goal alive.
+# Two guards prevent thrash — goal_min_age_s, and an exact requirement that a
+# NEW /map has arrived since the goal was sent (the candidate came out of the
+# previous grid, on which the check could only ever say "still there").
+# Watch goals_consumed / goals_sent in explore_status: above ~0.5 with little
+# net travel means this radius is too large.
+frontier_consumed_radius_m: 1.0
+goal_min_age_s: 3.0
+
+# How often to look for a new/better frontier. Was 2.0. A full replan is
+# ~9 ms on the largest grid this repo has produced (380x746) and the
+# goal-in-flight early-return path is ~0.1 ms, so 1 Hz costs under 1% of a
+# core. It halves the abandon-and-retarget latency above, halves post-goal
+# dead time, and doubles the pose sampling density for the stuck watchdog.
+# It adds no Nav2 churn: _tick returns early whenever a goal is healthy, so
+# ticking faster never sends more goals.
+replan_period_s: 1.0
+
+# Consecutive empty replan cycles (no valid frontier candidates) before
+# declaring exploration done. Was 5 (10s at replan_period_s=2.0); raised
+# after live testing on --resume: RTAB-Map's projected /map only reflects
+# the robot's IMMEDIATE surroundings right after startup against an existing
+# multi-session database (confirmed live: WM=706 nodes loaded, but only 3
+# active in the grid) — it only grows as the robot actively moves (watched
+# it climb 3->9 over 15s of driving). A resumed explorer sees almost no
+# frontiers at first for that reason alone, not because there's nothing left
+# to explore, and 10s isn't enough runway for even one successful goal to
+# kick the map-catchup into motion. 30 (60s) gives it room to try.
+# Raised 30 -> 60 alongside replan_period_s 2.0 -> 1.0: this key counts
+# CYCLES, and the 60 SECONDS above is the number that matters, so halving the
+# period without doubling this would silently halve the resume grace period.
+done_after_empty_cycles: 60
+
+# Prefer frontiers within this distance of the robot. Keeps goals achievable
+# and bounds planning time — without this the explorer can pick a distant
+# frontier across the map while ignoring a closer, more useful one. A
+# preference, not a hard filter: when NO frontier is within range (typical
+# after fully mapping a dead-end pocket), the explorer backtracks to the
+# nearest remaining frontier wherever it is, rather than wrongly declaring
+# exploration done. Was 8.0 on a map that turns out to be roughly 19 x 37 m
+# — a quarter of the long axis, so the scorer never saw the aisle structure
+# and pinballed between neighbouring fragments. 12 m is ~24 s of driving at
+# 0.5 m/s, comfortably inside goal_timeout_s, and over-committing to a
+# distant goal is now cheap because frontier_consumed_radius_m abandons it as
+# soon as the camera reveals the target. Compounds with alpha — change both
+# together or neither.
+max_goal_distance_m: 12.0
+
+# Occupancy value (0-100) at/above which a cell counts as an obstacle.
+occupied_thresh: 65
+
+# Denominator for the live `coverage_pct` in explore_status, and for the
+# _finish() run summary: the free floor area of the most complete map this
+# repo has built. Measured once with
+#   scripts/map_coverage.py data/runs/nvidia_explore_20260801_145700/map/checkpoint_resume002.yaml
+# (380 x 746 @ 0.05 m -> 117478 free cells -> 293.7 m2). 0 disables the key.
+#
+# It is a ratio of scalar AREAS, deliberately not a cell-wise overlay — the
+# two maps have no common frame. Not a hard target either: a run that maps
+# more than the reference reports over 100%, which is the honest answer.
+# `explored_pct` is NOT this number; it divides by the current grid's own
+# extent and reads 43.8% on the very map that defines 100% here.
+reference_free_area_m2: 293.7
+
+# Wall-clock budget for one exploration run; 0 disables. Backstop of last
+# resort: everything else that ends a run depends on the frontier set going
+# empty, which a stalled perception stack or an unreachable remainder can
+# prevent indefinitely. This guarantees the run terminates so the final map
+# gets saved. 2400 s = 40 min wall, which is roughly 18 min of sim time at
+# the ~0.45x real-time factor.
+max_run_time_s: 2400
+
+# Operator steering. Publishing {"x": .., "y": ..} on <robot>/explore_hint
+# (the dashboard's map does this in "steer" mode) biases frontier scoring
+# toward that point:
+#
+#   score *= 1 + steer_weight * exp(-distance_to_hint / steer_decay_m)
+#
+# It is a BIAS, not a goal, and that distinction is the whole point. The
+# dashboard's click-to-nav publishes straight to navigate_to_pose, so the
+# explorer's next goal preempts it about a second later — operator commands
+# were simply overrun, and the only way to stop that was to stop exploring.
+# A hint instead lets the robot keep choosing its own goals, keep avoiding
+# walls, keep backtracking and escaping, while preferring the region you
+# pointed at. It therefore can't strand the robot on an unreachable click:
+# that frontier fails and gets blacklisted like any other, and the hint
+# expires on its own.
+#
+# steer_weight 4.0 = up to a 5x score multiplier at the clicked point, which
+# comfortably outweighs the size/distance terms nearby without overriding the
+# obstacle-clearance and validity masks (those are hard filters applied
+# before scoring, and a hint never touches them).
+steer_weight: 4.0
+# Exponential rather than a hard radius, so there is no cliff: a frontier just
+# outside the click still beats one across the map, and the bias fades
+# smoothly back into normal scoring.
+steer_decay_m: 3.0
+# Frontiers this close to a hint ignore max_goal_distance_m. Without it,
+# clicking the far side of the warehouse would do nothing at all — those
+# frontiers land in the `far` pool, which is only consulted when there are no
+# candidates at all, i.e. never in the case you most want steering for.
+steer_radius_m: 4.0
+# Region LOCK, not just a preference: while a hint is live, only frontiers
+# within steer_radius_m of it are eligible. A pure multiplicative bias is not
+# enough when the hinted area is far away — at alpha 1.0 a frontier 2 m out
+# already beats an equal one 15 m out by 7.5x, which swamps steer_weight, so
+# a click across the map visibly "gave up" and wandered off after one goal.
+# Restricting the candidate set makes operator intent decisive, which is the
+# point of pointing.
+#
+# It cannot deadlock exploration: failures inside the region blacklist as
+# normal and go permanent after blacklist_permanent_strikes, at which point
+# nothing valid is left in the region and the lock releases itself (logged).
+# Set false to fall back to bias-only behaviour.
+steer_lock: true
+# Long enough to actually drive somewhere across the warehouse and finish it
+# (was 60 s, which expired mid-transit and looked like giving up). The lock
+# normally ends by exhausting the area rather than by timing out; this is the
+# safety net so a forgotten click can't distort a long run forever.
+# 0 = never expire.
+steer_ttl_s: 300.0
+
+# Multi-robot frontier-claim sharing (see explorer.py's module docstring —
+# this is NOT map fusion, just a "don't plan here, someone's already going"
+# signal over the shared /explore/claims topic).
+claim_radius_m: 1.0
+claim_ttl_s: 90.0

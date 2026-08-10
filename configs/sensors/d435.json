@@ -10,8 +10,8 @@
   "focal_length_mm": 1.93,
   "horizontal_aperture_mm": 2.7288,
   "vertical_aperture_mm": 1.5444,
-  "clipping_range_m": [0.105, 10.0],
+  "clipping_range_m": [0.105, 50.0],
   "distortion_model": "plumb_bob",
   "distortion_coeffs": [0.0, 0.0, 0.0, 0.0, 0.0],
-  "notes": "Intrinsics tuned so the bridge's ROS2CameraInfoHelper publishes K ~ [605, 0, 424, 0, 605, 240, 0, 0, 1] at 848x480 (D435 datasheet HFOV 87 deg, VFOV 58 deg). Distortion is all-zero because rs2::align rectifies the aligned color stream. Phase 5 may sweep to match a per-unit EEPROM calibration."
+  "notes": "Intrinsics tuned so the bridge's ROS2CameraInfoHelper publishes K ~ [605, 0, 424, 0, 605, 240, 0, 0, 1] at 848x480 (D435 datasheet HFOV 87 deg, VFOV 58 deg). Distortion is all-zero because rs2::align rectifies the aligned color stream. Phase 5 may sweep to match a per-unit EEPROM calibration. clipping_range_m's far value is a deliberate divergence from the real D435 datasheet (~10m effective depth range): rgb and depth share one Camera prim/render product in Isaac, so one clippingRange value bounds both — a real D435's RGB stream has no such distance limit (only depth is IR-range-limited), so the far clip is set well past the depth sensor's realistic range purely so the RGB image doesn't render black past 10m. If per-unit depth-range fidelity matters later (Phase 5+), split into two Camera prims instead of shrinking this back down."
 }

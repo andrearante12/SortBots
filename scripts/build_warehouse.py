@@ -24,24 +24,40 @@ import os
 import sys
 from pathlib import Path
 
-# Sibling for emit_factory. Module-level imports stay stdlib only.
+import yaml
+
+# Sibling for emit_factory. Module-level imports stay stdlib-or-pyyaml only —
+# no pxr/omni here, so --help and doc/test introspection work without the
+# Isaac venv.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _isaac_utils import emit_factory, guard_against_ros2  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TEXTURES_DIR = REPO_ROOT / "assets" / "textures"
+ROBOTS_CONFIG = REPO_ROOT / "configs" / "robots.yaml"
 
 RESULT_FILE = os.environ.get(
     "ISAAC_WAREHOUSE_BUILD_RESULT", "/tmp/isaac_warehouse_build_result.txt"
 )
 
 
-# Public constants — importable by spawn + test scripts.
-SPAWN_POSITIONS: dict[str, tuple[float, float, float]] = {
-    "robot_0": (-3.0, -1.0, 0.05),
-    "robot_1": (-3.0, 1.0, 0.05),
-}
+def _load_spawn_positions(scene: str) -> dict[str, tuple[float, float, float]]:
+    """Fleet roster spawn poses for `scene`, in configs/robots.yaml order.
+
+    configs/robots.yaml is the single source of truth for robot ids + spawn
+    poses, shared with spawn_warehouse.py (actual robot placement) and
+    launch/sortbots_bringup.launch.py (static map -> <id>/map anchors, which
+    must match the spawn pose for RTAB-Map's per-robot frame to align with
+    the merged /map).
+    """
+    with open(ROBOTS_CONFIG) as f:
+        roster = yaml.safe_load(f)
+    return {r["id"]: tuple(r["spawn"][scene]) for r in roster["robots"]}
+
+
+# Public constant — importable by spawn + test scripts.
+SPAWN_POSITIONS: dict[str, tuple[float, float, float]] = _load_spawn_positions("primitive")
 
 ZONES: dict[str, tuple[float, float, float]] = {
     "pickup": (-4.0, -2.5, 0.0),
