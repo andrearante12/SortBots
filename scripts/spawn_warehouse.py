@@ -10,8 +10,8 @@ Both robots curve gently in the warehouse, each one publishing:
     /<robot>/odom              nav_msgs/Odometry
     /<robot>/camera/rgb        sensor_msgs/Image
     /<robot>/camera/depth      sensor_msgs/Image (32FC1, meters)
-    /<robot>/camera/chase/rgb   sensor_msgs/Image (3rd-person chase cam; robot_0 only)
-    /<robot>/camera/chase/depth sensor_msgs/Image (32FC1, meters; robot_0 only)
+    /<robot>/camera/chase/rgb   sensor_msgs/Image (3rd-person chase cam; first N robots)
+    /<robot>/camera/chase/depth sensor_msgs/Image (32FC1, meters; first N robots)
     /<robot>/tf                tf2_msgs/TFMessage  (full articulation tree)
 
 and subscribing:
@@ -70,20 +70,10 @@ WAREHOUSE_USD = REPO_ROOT / "scenes" / "warehouse_v0.usd"
 NVIDIA_WAREHOUSE_REL = "Isaac/Environments/Simple_Warehouse/full_warehouse.usd"
 NVIDIA_WAREHOUSE_FALLBACK_REL = "Isaac/Environments/Simple_Warehouse/warehouse.usd"
 
-# Spawn points inside NVIDIA's warehouse: just in front of the shelving, a
-# good middle ground between NVIDIA's open Carter spawn (-6, -1) and deep
-# in-aisle. The racks run along +y with x-centers ~5 m apart and span
-# y~8.8..24.8; (-4.5, 4.5) is open floor a few metres ahead of the first rack
-# row, so the robot sees the stocked shelves without being boxed in. z matches
-# the primitive scene's ride height.
-NVIDIA_SPAWN_POSITIONS: dict[str, tuple[float, float, float]] = {
-    "robot_0": (-4.5, 4.5, 0.05),
-    "robot_1": (-4.5, 6.5, 0.05),
-}
-
 D435_CONFIG = REPO_ROOT / "configs" / "sensors" / "d435.json"
 MPU6050_CONFIG = REPO_ROOT / "configs" / "sensors" / "mpu6050.json"
 WAYPOINTS_CONFIG = REPO_ROOT / "configs" / "waypoints.yaml"
+ROBOTS_CONFIG = REPO_ROOT / "configs" / "robots.yaml"
 RESULT_FILE = os.environ.get(
     "ISAAC_SPAWN_WAREHOUSE_RESULT", "/tmp/isaac_spawn_warehouse_result.txt"
 )
@@ -190,6 +180,29 @@ def _load_station_props():
     return out
 
 
+def _load_spawn_positions(scene: str) -> dict[str, tuple[float, float, float]]:
+    """Fleet roster spawn poses for `scene`, in configs/robots.yaml order.
+
+    configs/robots.yaml is the single source of truth for robot ids + spawn
+    poses — also read by build_warehouse.py (primitive-scene authoring) and
+    launch/sortbots_bringup.launch.py (static map -> <id>/map anchors, which
+    must match this pose for RTAB-Map's per-robot frame to align with the
+    merged /map).
+    """
+    import yaml
+
+    with open(ROBOTS_CONFIG) as f:
+        roster = yaml.safe_load(f)
+    return {r["id"]: tuple(r["spawn"][scene]) for r in roster["robots"]}
+
+
+def _roster_size() -> int:
+    import yaml
+
+    with open(ROBOTS_CONFIG) as f:
+        return len(yaml.safe_load(f)["robots"])
+
+
 def _package_z(deck_height_m: float) -> float:
     """Package centre z so its bottom face rests on a deck at `deck_height_m`.
 
@@ -203,8 +216,12 @@ def _package_z(deck_height_m: float) -> float:
 
 
 def parse_args() -> argparse.Namespace:
+    max_robots = _roster_size()
     p = argparse.ArgumentParser(
-        description="Spawn 2 XLeRobots in the warehouse and publish per-robot ROS 2 topics."
+        description=(
+            f"Spawn up to {max_robots} XLeRobots (configs/robots.yaml) in the "
+            "warehouse and publish per-robot ROS 2 topics."
+        )
     )
     p.add_argument("--headless", dest="headless", action="store_true")
     p.add_argument("--no-headless", dest="headless", action="store_false")
@@ -230,10 +247,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--robots",
         type=int,
-        default=2,
-        choices=(1, 2),
-        help="How many XLeRobots to spawn (default 2). Use 1 to save VRAM "
-        "for the single-robot teleop + RTAB-Map demo.",
+        default=min(2, max_robots),
+        choices=tuple(range(1, max_robots + 1)),
+        help=f"How many XLeRobots to spawn, in configs/robots.yaml order "
+        f"(default {min(2, max_robots)}, max {max_robots}). Use 1 to save "
+        "VRAM for the single-robot teleop + RTAB-Map demo.",
     )
     g = p.add_mutually_exclusive_group()
     g.add_argument(
@@ -272,11 +290,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--no-chase-cam",
         action="store_true",
+        help="Shorthand for --chase-cam-robots 0.",
+    )
+    p.add_argument(
+        "--chase-cam-robots",
+        type=int,
+        default=None,
+        metavar="N",
         help=(
-            "Skip the 3rd-person chase camera. It is purely cosmetic (the "
-            "dashboard's PiP view) but costs a second render product, so this "
-            "halves the synthetic-data pipeline's work — useful for isolating "
-            "render-product problems, or on a GPU that's already saturated."
+            "How many robots (first N in configs/robots.yaml order) get a "
+            "3rd-person chase camera. Purely cosmetic (the dashboard's main/"
+            "PiP view) but each one costs a second render product per robot "
+            "on top of its own head camera — useful for isolating "
+            "render-product problems, or on a GPU that's already saturated. "
+            "Default: every spawned robot (matches --robots)."
         ),
     )
     return p.parse_args()
@@ -997,18 +1024,14 @@ def main() -> int:
     # Pick the warehouse + matching spawn-point table for the chosen scene.
     if args.warehouse_url:
         warehouse_ref = args.warehouse_url
-        spawn_positions = NVIDIA_SPAWN_POSITIONS
+        spawn_positions = _load_spawn_positions("nvidia")
         emit(f"  warehouse_ref={warehouse_ref} (override)")
     elif args.scene == "nvidia":
         warehouse_ref = _resolve_nvidia_warehouse()
-        spawn_positions = NVIDIA_SPAWN_POSITIONS
+        spawn_positions = _load_spawn_positions("nvidia")
     else:
-        # Local import so build_warehouse's stdlib-only top-level still works
-        # for documentation introspection; only needed for the primitive scene.
-        from build_warehouse import SPAWN_POSITIONS
-
         warehouse_ref = str(_ensure_warehouse_usd())
-        spawn_positions = SPAWN_POSITIONS
+        spawn_positions = _load_spawn_positions("primitive")
         emit(f"  warehouse_ref={warehouse_ref}")
 
     # Spawn only the first `--robots` entries (single-robot teleop saves VRAM).
@@ -1028,16 +1051,32 @@ def main() -> int:
         robots[name] = (robot, cam, cam_path, imu_path)
         emit(f"  spawned {name} at {pos}, cam={cam_path}, imu={imu_path}")
 
-    # 3rd-person chase camera (robot_0 only, single-robot scope elsewhere in
-    # this file). Spawned alongside the head camera but kept out of the
-    # `robots` dict tuple — that shape is unpacked at several call sites
-    # already and a 5th element would need touching all of them.
-    chase_cam, chase_cam_path = None, None
-    if "robot_0" in robots and not args.no_chase_cam:
-        chase_cam, chase_cam_path = _spawn_chase_camera("/World/robot_0", d435)
-        emit(f"  chase_cam spawned at {chase_cam_path}")
-    elif args.no_chase_cam:
-        emit("  chase_cam SKIPPED (--no-chase-cam)")
+    # 3rd-person chase camera for the first N robots (configs/robots.yaml
+    # order). Kept out of the `robots` dict tuple — that shape is unpacked at
+    # several call sites already and a 5th element would need touching all of
+    # them. A real GPU cost (a second render product per robot, on top of its
+    # own head camera). --no-chase-cam is shorthand for N=0; default N is
+    # every spawned robot. Fleet runs usually want N=1: the dashboard only
+    # shows ROBOT_ID's chase feed, so robot_1's chase cam is pure waste.
+    if args.no_chase_cam:
+        n_chase = 0
+    elif args.chase_cam_robots is None:
+        n_chase = len(robots)
+    else:
+        n_chase = max(0, min(args.chase_cam_robots, len(robots)))
+    chase_names = list(robots)[:n_chase]
+    chase_cams: dict[str, tuple] = {}  # name -> (Camera, prim_path)
+    if not chase_names:
+        reason = "--no-chase-cam" if args.no_chase_cam else f"--chase-cam-robots {n_chase}"
+        emit(f"  chase_cam SKIPPED ({reason})")
+    else:
+        for name in chase_names:
+            cam, cam_path = _spawn_chase_camera(f"/World/{name}", d435)
+            chase_cams[name] = (cam, cam_path)
+            emit(f"  chase_cam spawned for {name} at {cam_path}")
+        skipped = [n for n in robots if n not in chase_cams]
+        if skipped:
+            emit(f"  chase_cam skipped for {', '.join(skipped)} (--chase-cam-robots {n_chase})")
 
     world.reset()
 
@@ -1046,9 +1085,9 @@ def main() -> int:
     for name, (_, cam, _, _) in robots.items():
         cam.initialize()
         _orient_camera_to_ros(cam)
-    if chase_cam is not None:
-        chase_cam.initialize()
-        _orient_chase_camera(chase_cam)
+    for name, (cam, _) in chase_cams.items():
+        cam.initialize()
+        _orient_chase_camera(cam)
 
     # IMU mount is authored relative to base_link from the MPU config, so the
     # base_link -> imu_link transform is exactly (offset, rotation). wxyz -> ijkr.
@@ -1086,19 +1125,19 @@ def main() -> int:
         )
         emit(f"  graphs built for {name}")
 
-    if chase_cam_path is not None:
+    for name, (_, cam_path) in chase_cams.items():
         build_chase_camera_graph(
-            graph_path="/World/robot_0/ChaseCameraGraph",
-            camera_prim_path=chase_cam_path,
-            namespace="robot_0",
+            graph_path=f"/World/{name}/ChaseCameraGraph",
+            camera_prim_path=cam_path,
+            namespace=name,
             rgb_topic="camera/chase/rgb",
             depth_topic="camera/chase/depth",
             camera_info_topic="camera/chase/camera_info",
             width=d435["width"],
             height=d435["height"],
-            frame_id="robot_0/chase_camera_optical",
+            frame_id=f"{name}/chase_camera_optical",
         )
-        emit("  chase_cam graph built (/robot_0/camera/chase/*)")
+        emit(f"  chase_cam graph built (/{name}/camera/chase/*)")
 
     # Station props + the mock pick package (robot_0 only). Every station in
     # configs/waypoints.yaml carrying a `prop:` block gets a shelf authored at

@@ -72,10 +72,11 @@
   #slam-badge.stale { background: #400; color: #f77; }
 
   /* -- the stage --------------------------------------------------------- */
-  /* One box holding all three primary views (chase cam, head cam, map) plus
+  /* One box holding chase cam, head cam (hidden by default), and map, plus
      the two control pads as translucent overlays. Exactly one view carries
-     .stage-main at a time; at most one other carries .stage-pip. Everything
-     inside is absolutely positioned against this box. */
+     .stage-main at a time; at most one other carries .stage-pip (map mode
+     keeps chase as the inset). Everything inside is absolutely positioned
+     against this box. */
   #stage-panel { padding: 0; position: relative; background: #000; }
   /* A dead feed renders its alt text (web_video_server down, or not up yet) —
      keep that diagnostic visible but small and muted so it doesn't shout over
@@ -118,12 +119,16 @@
   #stage-panel:hover #pip-hint { opacity: 1; }
 
   /* -- map view (inside the stage) --------------------------------------- */
-  /* The canvas keeps its backing store at the map's grid size and is displayed
-     with an aspect-ratio box, so its bounding rect matches the drawn image
-     exactly — which is what eventToCanvasPixel() in app.js relies on to invert
-     clicks back to world coordinates. app.js sets the aspect-ratio when a map
-     arrives. Do NOT switch this to object-fit: the resulting letterbox inside
-     the element would silently offset every nav goal. */
+  /* The canvas backing store is a FIXED square (app.js's MAP_CANVAS_PX) and
+     the aspect-ratio below is set once, not per-message — earlier both were
+     driven straight from the incoming OccupancyGrid's own width/height, so
+     the box visibly resized on nearly every /map update once a fleet's fused
+     grid started growing every second or so (read as the map continuously
+     zooming). A fixed backing store still keeps the element's bounding rect
+     equal to the drawn image, which eventToCanvasPixel() in app.js relies on
+     to invert clicks back to world coordinates — do NOT switch this to
+     object-fit: the resulting letterbox inside the element would silently
+     offset every nav goal. */
   /* Top padding clears the absolutely-positioned #stage-label; the bar's right
      padding clears the PiP inset. Both overlays sit above this view, so the
      map's own chrome has to be inset out from under them. */
@@ -131,11 +136,12 @@
     display: flex; flex-direction: column;
     padding: 38px 12px 12px; box-sizing: border-box;
   }
-  /* width:100% + aspect-ratio (set by app.js from the grid dims) sizes the box,
-     max-height caps it to the stage — a replaced element preserves its aspect
-     ratio under a max-* constraint, so the canvas letterboxes itself and the
-     bounding rect stays equal to the drawn image. Deliberately NOT flex:1 1
-     auto: flex stretch would override the aspect ratio and distort the map. */
+  /* width:100% + the fixed 1/1 aspect-ratio (set once by app.js) sizes the
+     box, max-height caps it to the stage — a replaced element preserves its
+     aspect ratio under a max-* constraint, so the canvas letterboxes itself
+     and the bounding rect stays equal to the drawn image. Deliberately NOT
+     flex:1 1 auto: flex stretch would override the aspect ratio and distort
+     the map. */
   #map-canvas {
     flex: 0 1 auto; min-height: 0;
     width: 100%; height: auto; max-height: 100%;
@@ -380,7 +386,7 @@
       <button type="button" data-stage="camera" class="active">camera</button>
       <button type="button" data-stage="map">map</button>
     </div>
-    <span id="slam-badge" title="RTAB-Map SLAM status (from /robot_0/info)">SLAM: waiting…</span>
+    <span id="slam-badge" title="RTAB-Map SLAM status (from the active robot's /info)">SLAM: waiting…</span>
   </header>
 
   <div class="panel" id="stage-panel">
@@ -455,7 +461,7 @@
     <div class="panel" id="recon-panel">
       <div id="recon-controls">
         <h2>3D reconstruction</h2>
-        <span id="recon-info">waiting for cloud…</span>
+        <span id="recon-info" title="Per active robot (/&lt;id&gt;/recon_cloud), not the fused 2D /map">waiting for cloud…</span>
         <select id="recon-mode" title="Voxel cubes are shaded, so vertical structure reads; points are cheaper">
           <option value="voxels">voxels</option>
           <option value="points">points</option>
@@ -467,7 +473,7 @@
         <button type="button" id="recon-reset" title="Recenter the camera on the cloud">reset view</button>
       </div>
       <div id="recon-canvas"
-           title="RTAB-Map's assembled cloud, budgeted by recon_cloud_relay.py. Drag to orbit, scroll to zoom, right-drag to pan. Grows as the robot explores."></div>
+           title="This robot's RTAB-Map cloud only (not fleet-fused) — budgeted by recon_cloud_relay.py. Drag to orbit, scroll to zoom, right-drag to pan. Grows as THIS robot explores; the 2D stage is the fused /map."></div>
     </div>
     <div class="panel" id="ops-panel">
       <h2>Dispatch &amp; task queue</h2>

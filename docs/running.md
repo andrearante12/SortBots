@@ -242,6 +242,7 @@ run:                          # allowlisted keys only — see RUN_FLAGS
   robot_id: robot_0
   headless: false
   chase_cam: true             # false -> --no-chase-cam
+  chase_cam_robots: null      # null = every spawned robot; int = first N only
   explore: true
   resume: false               # resume and localize are mutually exclusive
   localize: false
@@ -262,11 +263,15 @@ python3 webui/session.py --print-argv explore_fresh --set headless=true
 ```
 
 `status: planned` is for scenarios whose environment doesn't exist yet — the
-card lists them greyed out with a tooltip rather than pretending they run. Two
-known gaps for the planned test suite: a person-avoidance scene needs a new
-`--scene` value with an animated actor in `scripts/spawn_warehouse.py`, and
-multi-robot coordination needs `run_demo.sh` to thread `robot_ids` through to
-the bringup (today it only passes `robot_id`).
+card lists them greyed out with a tooltip rather than pretending they run. One
+known gap for the planned test suite: a person-avoidance scene needs a new
+`--scene` value with an animated actor in `scripts/spawn_warehouse.py`.
+
+Multi-robot coordination (`explore_fleet`, `robots: 2`) is `status: ready` —
+`run_demo.sh` derives `--robot-ids` from `--robots` against
+`configs/robots.yaml`'s order and threads it through to the bringup's
+`robot_ids:=`, which brings up a full stack (RTAB-Map + Nav2 + task_manager +
+explorer) per robot. See "Multi-robot" below.
 
 ### Unified ROS-2 bringup on its own
 
@@ -299,40 +304,61 @@ appear.
 > keep it on any new one, including ad-hoc `curl` checks.
 
 **Multi-robot:** `robot_ids:=robot_0,robot_1` brings up a full independent
-RTAB-Map + Nav2 + `task_manager` stack per robot (the dashboard/rosbridge
-stack stays singular). `localization`/`database_path`/`explore` apply only to
-the single robot named by `robot_id` (default `robot_0`) — every other robot
-in the list gets its own auto-computed map path and no explorer, matching
-what's actually been tested: one exploring robot, N robots mapping
-independently. TF needs no changes for this — frames are already
-`<robot>/`-prefixed on the shared global `/tf` (`scripts/_ros2_graphs.py`).
-`configs/nav2_params.yaml` hardcodes a few frame ids/one topic to `robot_0`;
-`sortbots_nav2.launch.py` rewrites them per-robot at launch time (see that
-file's docstring for why it's plain string substitution, not
-`nav2_common.RewrittenYaml`). True collaborative SLAM — a shared map, not
-just independent per-robot maps — is future work; see "Autonomous
-exploration" below for the frontier-claim-sharing slice that exists today.
+RTAB-Map + Nav2 + `task_manager` + explorer stack per robot (the
+dashboard/rosbridge stack stays singular). `scripts/run_demo.sh --robots N`
+derives this list from `configs/robots.yaml`'s order automatically; pass
+`--robot-ids` directly to override it. `localization`/`database_path`
+(map-lifecycle overrides) still apply only to the single robot named by
+`robot_id` (default `robot_0`) — every other robot in the list gets its own
+auto-computed map path, which is already correct and collision-free without
+an override. `explore`, unlike those, now applies to every robot in the list.
+TF needs no changes for this — frames are already `<robot>/`-prefixed on the
+shared global `/tf` (`scripts/_ros2_graphs.py`). `configs/nav2_params.yaml`
+hardcodes a few frame ids/one topic to `robot_0`; `sortbots_nav2.launch.py`
+rewrites them per-robot at launch time (see that file's docstring for why
+it's plain string substitution, not `nav2_common.RewrittenYaml`).
+
+Each robot's RTAB-Map owns its own SLAM grid, in its own `<robot_id>/map`
+frame (see `sortbots_rtabmap_robot.launch.py`'s `map_frame_id`) — this is
+still NOT collaborative SLAM (no shared pose graph, no inter-robot loop
+closure). What ties the fleet together is `nodes/map_merge.py`: the bringup
+publishes a static `map -> <robot_id>/map` transform per robot from its known
+spawn pose (`configs/robots.yaml`, keyed by the `scene` launch arg — must
+match `spawn_warehouse.py --scene`), and `map_merge.py` uses those anchors to
+resample every robot's grid into one world-anchored `/map` — occupied beats
+free beats unknown where two robots' grids disagree about a cell. Nav2's
+`global_frame: map` and every explorer's default `--map-topic /map` both
+point at this fused grid, so a robot plans and picks frontiers using space
+ANY robot has mapped. See "Autonomous exploration" below for the
+frontier-claim-sharing layer on top of that.
 
 ### What the dashboard shows
 
 Open the printed URL (`http://localhost:8081/` locally, or the tailnet URL).
 The page is sized to fit one viewport — nothing scrolls except the task queue.
 
-**The stage** (the big box on the left) shows one view at a time, with a second
-one as a picture-in-picture inset:
+**The stage** (the big box on the left) shows one view at a time, with an
+optional picture-in-picture inset:
 
-- **Chase cam** (default) large, **head cam** as the inset. **Click the inset to
-  swap** which feed is large.
+- **Chase cam** (default) large, no inset. The head camera still renders in
+  Isaac (RTAB-Map needs it) but the dashboard no longer polls it as a PiP —
+  that stream was browser-side load for a view nobody was watching.
 - **Map mode** — the `camera` / `map` buttons in the header swap the map into
   the stage in place of the cameras; the chase cam stays as the inset so you
   don't lose sight of the robot while picking a goal. Switching back restores
-  whichever camera you last had large.
+  chase cam.
 - **Drive pad** (bottom-left) and **head-aim pad** (bottom-right) float over the
   stage as translucent overlays — they fade up on hover, or on tap on a phone.
   The aim pad is hidden in map mode, where head pan/tilt means nothing.
 
 A feed that's off the stage stops being fetched, so map mode isn't paying for
-the head camera in the background.
+the chase camera's full-size decode, and the head camera isn't polled at all
+while it's hidden.
+
+Fleet runs (`explore_fleet`) spawn a chase cam on **robot_0 only** by default
+(`chase_cam_robots: 1`) — the dashboard shows that robot's feed, so robot_1's
+3rd-person cam would be a wasted render product. Override with
+`chase_cam_robots=2` (or `=0` / `chase_cam=false`) via `sim_ctl.sh` if needed.
 
 **The right column** is always visible: the **3D reconstruction** viewer on top,
 **dispatch + task queue** below.
@@ -669,10 +695,17 @@ exactly as predicted:
 
 **Multi-robot claim sharing:** every explorer also publishes/subscribes a
 global (not robot-namespaced) `/explore/claims` topic — "I'm heading here,
-don't also send your robot to this frontier." This is a coordination signal
-only, **not map fusion**: each robot still builds and owns its own RTAB-Map
-database independently. True collaborative SLAM (shared map, shared pose
-graph) is future work.
+don't also send your robot to this frontier." Each robot still builds and
+owns its own RTAB-Map database independently (not a shared pose graph — see
+"Multi-robot" above for how `nodes/map_merge.py` fuses the resulting grids
+into one `/map` instead); claim-sharing is the coordination layer on top of
+that shared grid. A claim is refreshed every replan tick its goal stays
+healthy, released explicitly the moment that goal ends (success, failure, or
+preemption — not left to expire), and published `TRANSIENT_LOCAL` so a robot
+that starts exploring after its peers still sees their current claims
+immediately. Frontier candidates near another robot's current TF pose are
+also excluded, not just near its claimed goal — a claim marks where a peer
+is headed, not the path it's driving to get there.
 
 ### The two action-server races this was built against
 

@@ -16,11 +16,22 @@
 # CLEAN terminal — do NOT `source /opt/ros/...` or activate Isaac first.
 #
 # Usage:
-#   scripts/run_demo.sh [--robot-id robot_0] [--robots 1] [--scene nvidia]
+#   scripts/run_demo.sh [--robot-id robot_0] [--robots 1] [--robot-ids IDS]
+#                       [--scene nvidia]
 #                       [--headless] [--teleop] [--localize | --resume]
-#                       [--no-chase-cam]
+#                       [--no-chase-cam | --chase-cam-robots N]
 #                       [--map PATH] [--explore] [--keep-console]
 #   scripts/run_demo.sh stop [--keep-console]   # tear the pipeline down
+#
+# --robots N spawns N robots in Isaac (configs/robots.yaml order) AND brings
+# up a full RTAB-Map + Nav2 + task_manager + explorer stack for each — the
+# same N, always, because the ROS side derives --robot-ids from --robots
+# against that same roster unless you pass --robot-ids explicitly. Every
+# robot's own SLAM grid gets fused into one world-anchored /map (see
+# nodes/map_merge.py) that Nav2 and every explorer plan against by default,
+# so robots explore collaboratively rather than as independent single-robot
+# runs sharing a warehouse. --robot-id (singular) still names which ONE
+# robot --localize/--resume/--map/--teleop apply to.
 #
 # --keep-console leaves the dashboard stack (rosbridge, web_video_server,
 # webui/serve.py) alone and tells the bringup not to start its own copy. It is
@@ -73,6 +84,7 @@ PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz
                    bt_navigator waypoint_follower velocity_smoother lifecycle_manager \
                    component_container task_manager.py scripted_pick.py explorer.py \
                    rtabmap_cloud_pump.py recon_cloud_relay.py wasd_teleop \
+                   map_merge.py static_transform_publisher \
                    "spawn_warehouse.py")
 # Note scripts/save_map.sh --watch is deliberately absent from that list. Its
 # checkpoint loop has to OUTLIVE teardown: rtabmap gets pkill -9'd only 2 s
@@ -108,17 +120,21 @@ fi
 
 # ---- args ----
 # Teleop defaults OFF — the dashboard drive pad replaces the WASD window.
-ROBOT_ID=robot_0; ROBOTS=1; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=0
-# Cosmetic 3rd-person cam = a second render product; --no-chase-cam drops it.
-NO_CHASE_CAM=""
+ROBOT_ID=robot_0; ROBOTS=1; ROBOT_IDS=""; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=0
+# Cosmetic 3rd-person cam = a second render product per robot. --no-chase-cam
+# drops all of them; --chase-cam-robots N keeps them on the first N robots
+# only (dashboard only shows robot_id's feed, so fleet runs usually want 1).
+CHASE_CAM_ARGS=""
 LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
     --robots)   ROBOTS="$2";   shift 2;;
+    --robot-ids) ROBOT_IDS="$2"; shift 2;;
     --scene)    SCENE="$2";    shift 2;;
     --headless) HEADLESS="--headless"; shift;;
-    --no-chase-cam) NO_CHASE_CAM="--no-chase-cam"; shift;;
+    --no-chase-cam) CHASE_CAM_ARGS="--no-chase-cam"; shift;;
+    --chase-cam-robots) CHASE_CAM_ARGS="--chase-cam-robots $2"; shift 2;;
     --teleop)    TELEOP=1; shift;;
     --no-teleop) TELEOP=0; shift;;  # accepted for back-compat (already the default)
     --localize) LOCALIZE=true; shift;;
@@ -137,6 +153,22 @@ done
 if [[ "$LOCALIZE" == "true" && "$RESUME" == "true" ]]; then
   echo "ERROR: --localize and --resume are mutually exclusive (read-only vs. keep-mapping)."
   exit 2
+fi
+
+# --robot-ids threads straight through to the bringup's robot_ids:= (which
+# brings up a full RTAB-Map + Nav2 + task_manager + explorer stack per id —
+# see launch/sortbots_bringup.launch.py). Left unset (the common case), it's
+# derived from --robots against configs/robots.yaml's order — the same
+# roster scripts/spawn_warehouse.py --robots N uses to place robots in Isaac,
+# so "N robots spawned" and "N robots brought up" can't drift apart.
+if [[ -z "$ROBOT_IDS" ]]; then
+  ROBOT_IDS=$(python3 -c "
+import yaml
+with open('$REPO_ROOT/configs/robots.yaml') as f:
+    roster = yaml.safe_load(f)
+ids = [r['id'] for r in roster['robots']][:$ROBOTS]
+print(','.join(ids))
+")
 fi
 
 # Default matches launch/sortbots_rtabmap_robot.launch.py's database_path.
@@ -176,7 +208,7 @@ echo "[run_demo] launching Isaac Sim ($SCENE, $ROBOTS robot(s), $HEADLESS)..."
 rm -f "$SIM_RESULT"
 setsid bash -c "source '$REPO_ROOT/scripts/activate_isaac.sh' >/dev/null 2>&1; \
   exec python '$REPO_ROOT/scripts/spawn_warehouse.py' $HEADLESS --forever \
-       --robots $ROBOTS --scene $SCENE --drive cmd_vel $NO_CHASE_CAM" \
+       --robots $ROBOTS --scene $SCENE --drive cmd_vel $CHASE_CAM_ARGS" \
   >"$SIM_LOG" 2>&1 &
 
 echo "[run_demo] waiting for the warehouse to load"
@@ -218,7 +250,8 @@ setsid bash -c "source '$ROS_SETUP'; \
   export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
   export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
-       robot_id:=$ROBOT_ID use_sim_time:=true rviz:=false \
+       robot_id:=$ROBOT_ID robot_ids:=$ROBOT_IDS scene:=$SCENE \
+       use_sim_time:=true rviz:=false \
        webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
        delete_db_on_start:=$DELETE_DB_ON_START \
@@ -252,7 +285,7 @@ cat <<EOF
 
 ============================================================
   SortBots warehouse SLAM demo is UP
-    * Isaac Sim window  : NVIDIA warehouse + $ROBOT_ID
+    * Isaac Sim window  : NVIDIA warehouse + $ROBOT_IDS
     * Web dashboard     : http://localhost:$DASHBOARD_PORT/  (or the tailnet URL above)
         - live SLAM map + trail, Nav2 path/costmap overlays, SLAM status
         - drag on the map to send a Nav2 goal; drive pad; pickup->dropoff dispatch

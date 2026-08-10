@@ -296,12 +296,16 @@ async function main() {
     await sleep(400);
     const back = await page.eval(`(() => {
       const vis = ${VISIBLE};
+      // stage-main can be chase, head, or map — chase is absent on robots
+      // without a chase product (explore_fleet: chase_cam_robots: 1), and the
+      // offline harness has no web_video_server so the probe also falls back.
+      const main = document.querySelector('#stage-panel .stage-main');
       return { stage: vis('stage-panel'), scenarios: vis('view-scenarios'),
                stageMode: vis('stage-mode'),
-               chaseOnStage: document.getElementById('chase-stream').offsetParent !== null };
+               hasStageMain: !!(main && main.offsetParent !== null) };
     })()`);
     check(`${vp.label}: switching back restores the live view`,
-          back.stage && !back.scenarios && back.stageMode && back.chaseOnStage);
+          back.stage && !back.scenarios && back.stageMode && back.hasStageMain);
   }
 
   // 4. read-only mode: the tab must explain itself, not silently no-op

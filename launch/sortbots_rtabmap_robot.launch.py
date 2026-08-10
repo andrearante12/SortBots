@@ -229,6 +229,28 @@ def generate_launch_description():
             launch_arguments={
                 "rgb_topic":          ["/", robot_id, "/camera/rgb"],
                 "depth_topic":        ["/", robot_id, "/camera/depth"],
+                # Upstream rtabmap.launch.py does NOT remap rgb/image from
+                # rgb_topic directly — it bakes rgb_topic_relay /
+                # depth_topic_relay inside an OpaqueFunction via
+                # LaunchConfiguration('rgb_topic').perform(context) and then
+                # DeclareLaunchArgument's the result. IncludeLaunchDescription
+                # shares the parent launch context across every robot we
+                # spawn, so the SECOND robot's Include sees those relay
+                # names already set by the first and silently keeps
+                # robot_0's topics. Verified live 2026-08-09 on
+                # explore_fleet: robot_1's rtabmap cmdline had
+                #   -r rgb/image:=/robot_0/camera/rgb
+                #   -r depth/image:=/robot_0/camera/depth
+                #   -r rgb/camera_info:=/robot_1/camera/camera_info
+                # (camera_info is a lazy LaunchConfiguration, not a baked
+                # relay, so it alone resolved correctly). robot_1 was
+                # therefore building its cloud from robot_0's cameras —
+                # 3D recon froze on the dashboard for robot_1 while the
+                # bots kept moving. compressed:=false (our default) means
+                # relay == topic, so pass both explicitly per robot the
+                # same way bringup already forces per-robot database_path.
+                "rgb_topic_relay":    ["/", robot_id, "/camera/rgb"],
+                "depth_topic_relay":  ["/", robot_id, "/camera/depth"],
                 "camera_info_topic":  ["/", robot_id, "/camera/camera_info"],
                 "imu_topic":          ["/", robot_id, "/imu"],
                 # RTAB-Map waits for the first IMU sample before initializing.
@@ -238,6 +260,14 @@ def generate_launch_description():
                 "frame_id":           [robot_id, "/base_link"],
                 "odom_frame_id":      [robot_id, "/odom"],
                 "odom_topic":         ["/", robot_id, "/odom"],
+                # Left unset, this defaults to the bare "map" — the same name
+                # every OTHER robot's RTAB-Map would also use for its own,
+                # unrelated map origin. Per-robot SLAM lives at <robot_id>/map;
+                # the bare "map" frame is reserved for the world-anchored,
+                # merged grid that launch/sortbots_bringup.launch.py publishes
+                # a static map -> <robot_id>/map transform into (see
+                # nodes/map_merge.py).
+                "map_frame_id":       [robot_id, "/map"],
                 # Use the sim's perfect odom as the motion prior; don't ask
                 # RTAB-Map to compute visual odometry.
                 "visual_odometry":    "false",

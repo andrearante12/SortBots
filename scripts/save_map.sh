@@ -4,11 +4,14 @@
 # Two things are worth saving off a mapping run, and they have different
 # lifetimes:
 #   * the OCCUPANCY GRID (.pgm + .yaml) — what Nav2 and the dashboard render,
-#     and what scripts/map_coverage.py measures. Written from the live /map
-#     topic, so it can only be captured while the stack is up.
-#   * the RTAB-MAP DATABASE (.db) — the full pose graph, needed to resume the
-#     session later (run_demo.sh --resume --map <path>). A live sqlite file,
-#     so it can only be copied safely once the stack is DOWN (--db).
+#     and what scripts/map_coverage.py measures. Written from the live,
+#     world-anchored /map topic (nodes/map_merge.py's fused grid — the same
+#     topic regardless of robot count), so it can only be captured while the
+#     stack is up. --robot-id doesn't affect this half.
+#   * the RTAB-MAP DATABASE (.db) — one robot's own full pose graph, needed
+#     to resume ITS session later (run_demo.sh --resume --robot-id <rid> --map
+#     <path>). A live sqlite file, so it can only be copied safely once the
+#     stack is DOWN (--db); --robot-id selects which robot's DB.
 #
 # Usage:
 #   scripts/save_map.sh --run NAME [--label final]     # one shot, stack running
@@ -84,8 +87,11 @@ mkdir -p "$OUT_DIR"
 
 save_once() {
   local label="$1"
+  # /map: the fused, world-anchored grid nodes/map_merge.py publishes — the
+  # same topic no matter how many robots are running or which --robot-id was
+  # passed (that flag only steers the --db branch below).
   ros2 run nav2_map_server map_saver_cli \
-      -t "/${ROBOT_ID}/map" -f "${OUT_DIR}/${label}" \
+      -t "/map" -f "${OUT_DIR}/${label}" \
       --occ "$OCC" --free "$FREE" --fmt pgm --mode trinary \
       --ros-args -p use_sim_time:=true -p save_map_timeout:=5.0 \
       >"${OUT_DIR}/.save_map.log" 2>&1

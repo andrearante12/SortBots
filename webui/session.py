@@ -122,6 +122,30 @@ def _switch(flag: str, when: bool):
     return build
 
 
+def _chase_cam_robots(flag: str):
+    """How many robots get a cosmetic chase cam (first N in roster order).
+
+    None/omitted -> run_demo.sh / spawn_warehouse default (every spawned
+    robot). 0 is valid and equivalent to chase_cam:false / --no-chase-cam,
+    but kept as its own flag so a fleet scenario can say "1" without
+    fighting the boolean. Accepts int or digit-string (CLI --set).
+    """
+    def build(value):
+        if value is None:
+            return []
+        # bool is a subclass of int; reject true/false before int().
+        if isinstance(value, bool):
+            raise ScenarioError(f"{flag}: expected an int, got {value!r}")
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            raise ScenarioError(f"{flag}: expected an int, got {value!r}") from None
+        if n < 0 or n > _MAX_ROBOTS:
+            raise ScenarioError(f"{flag}: {n} out of range 0..{_MAX_ROBOTS}")
+        return [flag, str(n)]
+    return build
+
+
 def _map_path(flag: str):
     def build(value):
         if value in (None, ""):
@@ -136,14 +160,40 @@ def _map_path(flag: str):
     return build
 
 
+def _robot_ids(flag: str):
+    """Comma-separated robot ids, e.g. `robot_0,robot_1`. Empty/None omits
+    the flag entirely — run_demo.sh then derives it from --robots against
+    configs/robots.yaml's own order, same as it does when this key is left
+    out of a scenario's `run:` block.
+    """
+    rx = re.compile(r"^[A-Za-z0-9_]+(,[A-Za-z0-9_]+)*$")
+
+    def build(value):
+        if value in (None, ""):
+            return []
+        if not isinstance(value, str) or not rx.match(value):
+            raise ScenarioError(f"{flag}: {value!r} does not match {rx.pattern}")
+        return [flag, value]
+    return build
+
+
+def _roster_size() -> int:
+    with open(REPO_ROOT / "configs" / "robots.yaml") as f:
+        return len(yaml.safe_load(f)["robots"])
+
+
 # Declaration order is argv order — keep it stable so logged commands are
 # comparable between runs.
+_MAX_ROBOTS = _roster_size()
+
 RUN_FLAGS = {
     "scene": _choice("--scene", {"nvidia", "primitive"}),
-    "robots": _int_range("--robots", 1, 2),
+    "robots": _int_range("--robots", 1, _MAX_ROBOTS),
     "robot_id": _pattern("--robot-id", re.compile(r"^[A-Za-z0-9_]+$")),
+    "robot_ids": _robot_ids("--robot-ids"),
     "headless": _switch("--headless", when=True),
     "chase_cam": _switch("--no-chase-cam", when=False),
+    "chase_cam_robots": _chase_cam_robots("--chase-cam-robots"),
     "teleop": _switch("--teleop", when=True),
     "localize": _switch("--localize", when=True),
     "resume": _switch("--resume", when=True),
@@ -155,8 +205,10 @@ RUN_DEFAULTS = {
     "scene": "nvidia",
     "robots": 1,
     "robot_id": "robot_0",
+    "robot_ids": None,
     "headless": False,
     "chase_cam": True,
+    "chase_cam_robots": None,
     "teleop": False,
     "localize": False,
     "resume": False,
@@ -273,12 +325,16 @@ def apply_overrides(scenario: dict, overrides: dict | None) -> dict:
     for key, value in overrides.items():
         if key not in allowed:
             raise ScenarioError(f"override {key!r} is not offered by scenario {scenario['name']!r}")
-        default = RUN_DEFAULTS[key]
+        # Coerce from the scenario's own typed default when present, else the
+        # RUN_DEFAULTS type. chase_cam_robots defaults to None in RUN_DEFAULTS
+        # but scenarios that expose it set an int — use that so CLI --set
+        # strings and form values become ints before build_argv.
+        default = run[key] if key in run else RUN_DEFAULTS[key]
         if isinstance(default, bool):
             if isinstance(value, str):
                 value = value.lower() == "true"
             run[key] = bool(value)
-        elif isinstance(default, int):
+        elif isinstance(default, int) and not isinstance(default, bool):
             run[key] = int(value)
         else:
             run[key] = value

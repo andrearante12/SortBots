@@ -66,7 +66,12 @@ Prefer offline. Seconds, no GPU, no display, no ROS:
 node webui/tests/scenarios_test.mjs   # scenarios tab (no fixture needed)
 node webui/tests/dashboard_test.mjs   # dashboard (needs webui/testdata/)
 python3 webui/session.py --list       # scenario validation
+python3 -m pytest tests/              # pure-python node logic (system python3 — see below)
 ```
+
+`tests/*_test.py` needs the SYSTEM python3 (`/usr/bin/python3 -m pytest`), not
+conda's — conda's base env doesn't have pytest, and this is the same
+PATH-ordering gotcha as the rclpy one above, just for a different package.
 
 Never point a browser at a live sim to test the dashboard — record a bag, build
 a fixture, replay it offline.

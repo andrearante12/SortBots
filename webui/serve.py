@@ -100,12 +100,17 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self._serve_json(stations)
 
     def _serve_robots(self):
-        # configs/robots.yaml is display-only bookkeeping for the dashboard's
-        # robot switcher (see that file's header) — if it's missing, degrade
+        # configs/robots.yaml is the fleet roster (ids + per-scene spawn
+        # poses); the dashboard only needs the id list, so reduce each
+        # `robots:` entry ({id, spawn}) to its id here. Missing file degrades
         # to the single-robot default rather than erroring the whole page.
         if ROBOTS_CONFIG.exists():
             with open(ROBOTS_CONFIG) as f:
-                data = yaml.safe_load(f)
+                raw = yaml.safe_load(f)
+            data = {
+                "default": raw["default"],
+                "robots": [r["id"] for r in raw["robots"]],
+            }
         else:
             data = {"default": "robot_0", "robots": ["robot_0"]}
         self._serve_json(data)

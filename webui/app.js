@@ -30,6 +30,7 @@ fetch("/api/robots")
   .then((cfg) => {
     const sel = document.getElementById("robot-select");
     const ids = Array.isArray(cfg.robots) && cfg.robots.length ? cfg.robots : [ROBOT_ID];
+    fleetRobotIds = ids;
     for (const id of ids) {
       const o = document.createElement("option");
       o.value = id;
@@ -37,6 +38,12 @@ fetch("/api/robots")
       sel.appendChild(o);
     }
     sel.value = ROBOT_ID;
+    // Every OTHER robot in the roster gets drawn on this page's own map
+    // canvas alongside ROBOT_ID (see the "fleet: peer robots" section below)
+    // — setupPeer no-ops for ROBOT_ID itself. Function declaration, so it's
+    // hoisted and callable here even though it's defined later in the file.
+    for (const id of ids) setupPeer(id);
+    refreshMapStageLabel();
     // If the current ROBOT_ID isn't in the known list (e.g. a hand-typed
     // ?robot=foo), sel.value silently fails to match any option and the
     // dropdown shows the first entry instead of the truth — add it so what's
@@ -111,9 +118,35 @@ function isFeedVisible(img) {
   return img.offsetParent !== null;
 }
 
+// Chase cam is optional per robot (explore_fleet: chase_cam_robots: 1 → only
+// robot_0). Without this flag the map-mode PiP stays a broken-image icon that
+// reads as "dashboard is out of date / web_video_server is dead" even when
+// /map and recon are live. Probe via the same Image() path as the feed —
+// fetch() to :8080 from :8081 is cross-origin and useless here.
+let chaseAvailable = true; // flipped false after a failed probe with no prior frame
+let chaseEverOk = false;
+
+function markChaseMissing() {
+  if (!chaseAvailable) return;
+  chaseAvailable = false;
+  const chaseImg = document.getElementById("chase-stream");
+  if (chaseImg) {
+    chaseImg.removeAttribute("src");
+    chaseImg.alt = `no chase cam on ${ROBOT_ID} (fleet keeps chase on robot_0 only)`;
+  }
+  // Drop the broken PiP / full-stage chase view. Map is the useful default
+  // when verifying a fleet run; camera toggle still reaches the head cam.
+  setStageMode(stageMode === "chase" ? "map" : stageMode);
+}
+
 function wireCameraStream(elId, topic) {
   const img = document.getElementById(elId);
+  const isChase = elId === "chase-stream";
   function tick() {
+    // Stop hammering web_video_server once we know this robot has no chase
+    // product — otherwise every 1.5s error backoff still opens a subscribe
+    // that can never succeed.
+    if (isChase && !chaseAvailable) return;
     if (!isFeedVisible(img)) {
       setTimeout(tick, CAMERA_POLL_MS);
       return;
@@ -122,10 +155,20 @@ function wireCameraStream(elId, topic) {
     // Swap the visible src only once the new frame is fully loaded, so the
     // panel never flashes blank between polls.
     probe.onload = () => {
+      if (isChase) {
+        chaseEverOk = true;
+        chaseAvailable = true;
+      }
       img.src = probe.src;
       setTimeout(tick, CAMERA_POLL_MS);
     };
-    probe.onerror = () => setTimeout(tick, CAMERA_ERROR_BACKOFF_MS);
+    probe.onerror = () => {
+      // One miss with no prior frame is enough: missing chase topics fail
+      // immediately (curl exit 52 / HTTP empty), while a wedged video server
+      // that previously worked keeps chaseEverOk true and just backs off.
+      if (isChase && !chaseEverOk) markChaseMissing();
+      else setTimeout(tick, CAMERA_ERROR_BACKOFF_MS);
+    };
     // qos_profile=sensor_data makes web_video_server subscribe BEST_EFFORT
     // instead of its RELIABLE default. This is not cosmetic: Isaac's image
     // writer publishes RELIABLE, and a RELIABLE subscriber that wedges (which
@@ -143,25 +186,26 @@ function wireCameraStream(elId, topic) {
   tick();
 }
 
-wireCameraStream("camera-stream", "camera/rgb");
-wireCameraStream("chase-stream", "camera/chase/rgb");
-
 // -- stage mode -----------------------------------------------------------
 // The stage box shows exactly one main view, plus at most one picture-in-
 // picture inset:
 //
-//   "chase" -> chase cam large, head cam as PiP   (default)
-//   "head"  -> head cam large,  chase cam as PiP  (clicking the PiP swaps)
+//   "chase" -> chase cam large, no PiP                 (default)
+//   "head"  -> head cam large,  no PiP                 (reachable only if
+//              something still promotes it; camera toggle restores chase)
 //   "map"   -> map large,       chase cam as PiP
 //
-// Clicking the PiP swaps the two cameras; the header's camera/map buttons
-// switch between the map and whichever camera mode was last active.
+// The header's camera/map buttons switch between the map and whichever
+// camera mode was last active.
 
 const STAGE_LABELS = {
   chase: "3rd person (chase cam)",
   head: "Head camera",
+  // Updated live once /api/robots + /map arrive — see refreshMapStageLabel().
   map: "Map, trail & nav",
 };
+let fleetRobotIds = [ROBOT_ID]; // filled from /api/robots; drives the map label
+let mapMetaLabel = ""; // e.g. "219×326 · fused" from the /map handler
 
 const chaseEl = document.getElementById("chase-stream");
 const headEl = document.getElementById("camera-stream");
@@ -177,20 +221,36 @@ let lastCameraMode = "chase"; // restored when switching back from the map
 let onStageResize = () => {};
 
 function setStageMode(mode) {
+  // No chase product on this robot → never park the stage on a broken <img>.
+  // Camera toggle uses head instead; map mode drops the PiP entirely.
+  if (!chaseAvailable && mode === "chase") mode = "head";
+
   stageMode = mode;
   if (mode !== "map") lastCameraMode = mode;
 
   const main = { chase: chaseEl, head: headEl, map: mapViewEl }[mode];
-  // In map mode the chase cam keeps a corner so you never lose sight of the
-  // robot while picking a goal.
-  const pip = mode === "chase" ? headEl : chaseEl;
+  // Head-cam PiP intentionally removed: Isaac still renders that camera
+  // regardless (RTAB-Map's actual SLAM input, not just a view — it can't be
+  // turned off), so hiding it here doesn't reduce server-side load, but it
+  // stops the browser from polling/decoding a stream nobody is looking at,
+  // and — more importantly — there's no more PiP to click-to-promote, so
+  // lastCameraMode can never become "head" and the camera toggle always
+  // lands back on chase (or head, when chase is missing). In map mode the
+  // chase cam still keeps a corner so you never lose sight of the robot
+  // while picking a goal — unless this robot has no chase cam at all.
+  const pip = mode === "map" && chaseAvailable ? chaseEl : null;
 
   for (const el of [chaseEl, headEl, mapViewEl]) {
     el.classList.toggle("stage-main", el === main);
     el.classList.toggle("stage-pip", el === pip);
   }
 
-  stageLabel.textContent = STAGE_LABELS[mode];
+  if (mode === "map") refreshMapStageLabel();
+  else if (mode === "head" && !chaseAvailable) {
+    stageLabel.textContent = `Head camera · no chase on ${ROBOT_ID}`;
+  } else {
+    stageLabel.textContent = STAGE_LABELS[mode];
+  }
   pipHint.style.display = pip ? "" : "none";
   // Head pan/tilt has no meaning while looking at the map.
   aimOverlay.style.display = mode === "map" ? "none" : "";
@@ -201,7 +261,22 @@ function setStageMode(mode) {
   onStageResize();
 }
 
-// Clicking either camera while it's the inset promotes it to main.
+// Map stage label: make it obvious the canvas is nodes/map_merge.py's fused
+// /map (every robot's SLAM grid resampled into one world frame), not the
+// active robot's private /<id>/map. Without this, a fleet run that looks
+// "fine" can still be misread as single-robot when only one marker is
+// obvious and the other is off-screen in the padding.
+function refreshMapStageLabel() {
+  if (stageMode !== "map") return;
+  const n = fleetRobotIds.length;
+  const base = n > 1
+    ? `Fused fleet map (${n} robots)`
+    : "Map, trail & nav";
+  stageLabel.textContent = mapMetaLabel ? `${base} · ${mapMetaLabel}` : base;
+}
+
+// Clicking the chase cam while it's the map-mode inset promotes it to main.
+// headEl stays in the listener for back-compat if something re-adds head PiP.
 for (const el of [chaseEl, headEl]) {
   el.addEventListener("click", () => {
     if (el.classList.contains("stage-pip")) {
@@ -217,6 +292,12 @@ for (const btn of document.querySelectorAll("#stage-mode button")) {
 }
 
 setStageMode("chase");
+
+// Start snapshot polls only after the stage classes are coherent — otherwise
+// markChaseMissing can race setStageMode's first paint, and the HTML default
+// (head as .stage-pip) would briefly poll a feed we intentionally hide.
+wireCameraStream("camera-stream", "camera/rgb");
+wireCameraStream("chase-stream", "camera/chase/rgb");
 
 // -- camera aim (head pan/tilt) -------------------------------------------
 // Unlike cmd_vel, head_cmd is a POSITION target (see spawn_warehouse.py's
@@ -623,7 +704,6 @@ document.getElementById("explore-save").addEventListener("click", () => {
 const canvas = document.getElementById("map-canvas");
 const ctx = canvas.getContext("2d");
 let mapInfo = null;
-let mapImageData = null;
 const trail = [];
 let lastPose = null; // {x, y, yaw}
 let plan = []; // Nav2 planned path, world [x, y] points
@@ -638,18 +718,82 @@ blacklistToggle.addEventListener("change", () => {
 });
 let costmapCanvas = null; // offscreen render of the global costmap (own grid)
 
-// Pixel<->world use the SLAM map's grid (mapInfo). worldToPixel is also used
-// to place the costmap/plan/goal overlays, so everything shares one frame.
-function worldToPixel(x, y) {
-  const col = (x - mapInfo.origin.position.x) / mapInfo.resolution;
-  const row = (y - mapInfo.origin.position.y) / mapInfo.resolution;
-  return [col, mapInfo.height - 1 - row];
+// -- fixed view: canvas-pixels-per-metre + a world-space origin -----------
+// The canvas backing store is a FIXED size (see MAP_CANVAS_PX below), NOT
+// the merged /map grid's own cell dimensions. Earlier this canvas literally
+// WAS the grid — `canvas.width/height` and the CSS aspect-ratio were set
+// straight from the incoming OccupancyGrid's width/height, so every /map
+// message resized the element. That was tolerable for one slow-growing
+// single-robot grid; with a fleet fusing two robots' progress into one grid
+// (nodes/map_merge.py), the extent grows on nearly every message, and the
+// canvas — and everything drawn in it — visibly resized every second or so.
+// Read as the whole map continuously zooming in and out.
+//
+// Instead: the raw grid is rasterized into an OFFSCREEN canvas at 1 cell = 1
+// pixel (unchanged), then blitted into this FIXED on-screen canvas via
+// drawImage at whatever scale the current `view` says — same technique the
+// costmap overlay already used for its own, differently-scaled grid. `view`
+// only gets recomputed when the incoming grid no longer fits it (grow-only,
+// matching map_merge's own extent — see ensureViewFits), not on every
+// message, so the on-screen scale is stable for the length of an
+// exploration run instead of drifting continuously.
+const MAP_CANVAS_PX = 900;
+canvas.width = MAP_CANVAS_PX;
+canvas.height = MAP_CANVAS_PX;
+canvas.style.aspectRatio = "1 / 1";
+
+let view = null; // {scale (canvas px per metre), originX, originY (world metres, canvas (0, canvasPx))}
+let mapOffscreen = null; // 1 cell = 1 px raster of the current /map grid
+let mapOffscreenInfo = null; // the info that produced mapOffscreen
+
+function ensureViewFits(info) {
+  const minX = info.origin.position.x;
+  const minY = info.origin.position.y;
+  const maxX = minX + info.width * info.resolution;
+  const maxY = minY + info.height * info.resolution;
+
+  if (view) {
+    const viewSpan = MAP_CANVAS_PX / view.scale;
+    const fits =
+      minX >= view.originX && maxX <= view.originX + viewSpan &&
+      minY >= view.originY && maxY <= view.originY + viewSpan;
+    // Retighten only when the view has become substantially bigger than the
+    // data actually needs (not on every minor fluctuation — THAT'S what the
+    // original continuous-zoom bug was). Every earlier (re)fit baked in its
+    // own PAD_M around whatever the extent was AT THAT TIME and then never
+    // shrank, so a map that grew through several fits ended up with padding
+    // compounding on padding — the fixed view stayed stable, just at a scale
+    // that made the explored area look small in a lot of empty margin.
+    const dataSpan = Math.max(maxX - minX, maxY - minY, 1);
+    const oversized = fits && viewSpan > dataSpan * 1.4;
+    if (fits && !oversized) return;
+  }
+
+  // (Re)fit with padding, so exploring right up to the current edge doesn't
+  // force another refit on the very next message.
+  const PAD_M = 1.5;
+  const spanX = (maxX - minX) + PAD_M * 2;
+  const spanY = (maxY - minY) + PAD_M * 2;
+  const scale = MAP_CANVAS_PX / Math.max(spanX, spanY, 1);
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  const halfSpanM = MAP_CANVAS_PX / scale / 2;
+  view = { scale, originX: centerX - halfSpanM, originY: centerY - halfSpanM };
 }
 
-// Inverse of worldToPixel: canvas pixel (map-grid coords) -> world (map frame).
-function pixelToWorld(col, row) {
-  const x = col * mapInfo.resolution + mapInfo.origin.position.x;
-  const y = (mapInfo.height - 1 - row) * mapInfo.resolution + mapInfo.origin.position.y;
+// Pixel<->world, against the fixed `view` — stable across a run regardless
+// of how the underlying grid grows. worldToPixel is also used to place the
+// costmap/plan/goal/peer overlays, so everything shares one frame.
+function worldToPixel(x, y) {
+  const px = (x - view.originX) * view.scale;
+  const py = MAP_CANVAS_PX - (y - view.originY) * view.scale;
+  return [px, py];
+}
+
+// Inverse of worldToPixel: canvas pixel -> world (map frame).
+function pixelToWorld(px, py) {
+  const x = px / view.scale + view.originX;
+  const y = (MAP_CANVAS_PX - py) / view.scale + view.originY;
   return [x, y];
 }
 
@@ -658,23 +802,32 @@ function yawFromQuat(qz, qw) {
   return Math.atan2(2 * qw * qz, 1 - 2 * qz * qz);
 }
 
+// /map (not /${ROBOT_ID}/map): nodes/map_merge.py's fused, world-anchored
+// grid, in the shared "map" frame — the same frame lookupPose() below walks
+// TF up to. Each robot's OWN SLAM grid is published at /<rid>/map but lives
+// in that robot's <rid>/map frame (a static, per-robot-offset anchor from
+// its spawn pose — see launch/sortbots_bringup.launch.py), so drawing THAT
+// grid's pixels against a TF-derived world-frame pose would misalign the
+// map image against the robot marker by exactly the spawn offset. /map is
+// also what makes one canvas showing every robot's fused progress possible.
 new ROSLIB.Topic({
   ros,
-  name: `/${ROBOT_ID}/map`,
+  name: "/map",
   messageType: "nav_msgs/OccupancyGrid",
   reconnect_on_close: true,
 }).subscribe((msg) => {
   mapInfo = msg.info;
+  ensureViewFits(msg.info);
   const w = msg.info.width;
   const h = msg.info.height;
-  canvas.width = w;
-  canvas.height = h;
-  // Display the canvas at the grid's own aspect ratio (CSS caps it to the
-  // stage box). This keeps the map undistorted AND keeps the element's
-  // bounding rect equal to the drawn image, which eventToCanvasPixel() below
-  // depends on to invert clicks back into world coordinates.
-  canvas.style.aspectRatio = `${w} / ${h}`;
-  const imgData = ctx.createImageData(w, h);
+  // Rasterize into the OFFSCREEN canvas at 1 cell = 1 px — the visible
+  // #map-canvas stays a fixed MAP_CANVAS_PX square (see ensureViewFits'
+  // comment above) and is only ever drawn into via drawImage in drawFrame().
+  const off = mapOffscreen || document.createElement("canvas");
+  off.width = w;
+  off.height = h;
+  const octx = off.getContext("2d");
+  const imgData = octx.createImageData(w, h);
   const data = msg.data;
   for (let row = 0; row < h; row++) {
     for (let col = 0; col < w; col++) {
@@ -688,7 +841,14 @@ new ROSLIB.Topic({
       imgData.data[i + 3] = 255;
     }
   }
-  mapImageData = imgData;
+  octx.putImageData(imgData, 0, 0);
+  mapOffscreen = off;
+  mapOffscreenInfo = msg.info;
+  // Surface merge health in the stage label — growing WxH is the quickest
+  // live check that map_merge is actually fusing (a single-robot /map stays
+  // roughly square around that robot; a fleet /map spans both spawn anchors).
+  mapMetaLabel = `${w}×${h}`;
+  refreshMapStageLabel();
 });
 
 // -- Nav2 global costmap overlay (toggleable) -----------------------------
@@ -805,6 +965,7 @@ new ROSLIB.Topic({
 // badge flashes green on a closure and counts total closures; it goes stale
 // (red) if Info stops arriving.
 const slamBadge = document.getElementById("slam-badge");
+slamBadge.title = `RTAB-Map SLAM status (from /${ROBOT_ID}/info)`;
 let loopClosureCount = 0;
 let lastInfoAt = 0;
 let loopFlashUntil = 0;
@@ -914,6 +1075,83 @@ function lookupPose(frame) {
   return null;
 }
 
+// -- fleet: other robots' pose/trail/plan/frontiers -----------------------
+// Camera feeds, drive/aim pads, dispatch, and click-to-nav/steer all stay
+// scoped to ROBOT_ID (the "active" robot this page load is for — see the
+// header comment on ROBOT_ID for why switching robots reloads the page
+// rather than hot-swapping). The fused 2D map and the 3D recon pose
+// markers both need the rest of the fleet: with /map world-anchored (see
+// the /map subscription above) every robot's pose/trail/plan/frontiers
+// already share one frame, so drawing them together is just tracking each
+// peer's own small slice of state and giving it its own color.
+// Peers are lighter-weight than ROBOT_ID's own state: no goal marker (a
+// peer's plan already ends at its goal), no costmap (Nav2's costmap is
+// per-robot-namespaced and only useful for the one you're driving), no
+// click-to-nav/steer targeting.
+const PEER_COLORS = [
+  { pose: "#ffb020", trail: "rgba(255,176,32,0.85)", plan: "#c792ea" },
+  { pose: "#ff5da2", trail: "rgba(255,93,162,0.85)", plan: "#7ee787" },
+];
+const peerRobots = new Map(); // robot_id -> {trail, lastPose, plan, frontierMarkers, steerQueue, blacklistPoints, color}
+
+function setupPeer(id) {
+  if (id === ROBOT_ID || peerRobots.has(id)) return;
+  const color = PEER_COLORS[peerRobots.size % PEER_COLORS.length];
+  const state = {
+    id, trail: [], lastPose: null, plan: [],
+    frontierMarkers: [], steerQueue: [], blacklistPoints: [],
+    color,
+  };
+  peerRobots.set(id, state);
+
+  new ROSLIB.Topic({
+    ros, name: `/${id}/plan`, messageType: "nav_msgs/Path", reconnect_on_close: true,
+  }).subscribe((msg) => {
+    state.plan = msg.poses.map((ps) => [ps.pose.position.x, ps.pose.position.y]);
+  });
+
+  new ROSLIB.Topic({
+    ros, name: `/${id}/frontiers`, messageType: "visualization_msgs/MarkerArray", reconnect_on_close: true,
+  }).subscribe((msg) => {
+    state.frontierMarkers = msg.markers
+      .filter((m) => m.action === 0)
+      .map((m) => ({
+        x: m.pose.position.x,
+        y: m.pose.position.y,
+        r: (m.scale.x || 0.14) / 2,
+        color: `rgba(${Math.round((m.color.r || 0) * 255)}, ` +
+               `${Math.round((m.color.g || 0) * 255)}, ` +
+               `${Math.round((m.color.b || 0) * 255)}, ${m.color.a ?? 1})`,
+      }));
+  });
+
+  new ROSLIB.Topic({
+    ros, name: `/${id}/explore_status`, messageType: "std_msgs/String", reconnect_on_close: true,
+  }).subscribe((msg) => {
+    let s;
+    try {
+      s = JSON.parse(msg.data);
+    } catch (e) {
+      return;
+    }
+    state.steerQueue = s.steer_queue || (s.steer_hint ? [s.steer_hint] : []);
+    state.blacklistPoints = s.blacklist_points || [];
+  });
+}
+
+function updatePeerPose(id, state) {
+  const pose = lookupPose(`${id}/base_link`);
+  if (!pose) return;
+  const { x, y } = pose.t;
+  const yaw = yawFromQuat(pose.q.z, pose.q.w);
+  state.lastPose = { x, y, yaw };
+  const last = state.trail[state.trail.length - 1];
+  if (!last || Math.hypot(x - last[0], y - last[1]) > 0.02) {
+    state.trail.push([x, y]);
+    if (state.trail.length > MAX_TRAIL_POINTS) state.trail.shift();
+  }
+}
+
 function onTfMessage(msg) {
   for (const tr of msg.transforms || []) {
     tfTree.set(normFrame(tr.child_frame_id), {
@@ -923,18 +1161,20 @@ function onTfMessage(msg) {
     });
   }
   const pose = lookupPose(TF_TARGET_FRAME);
-  if (!pose) return;
-  const { x, y } = pose.t;
-  const yaw = yawFromQuat(pose.q.z, pose.q.w);
-  lastPose = { x, y, yaw };
-  // Only extend the trail on real movement — /tf arrives at ~60 Hz and a
-  // stationary robot would otherwise burn through MAX_TRAIL_POINTS standing
-  // still, silently truncating the history that's actually interesting.
-  const last = trail[trail.length - 1];
-  if (!last || Math.hypot(x - last[0], y - last[1]) > 0.02) {
-    trail.push([x, y]);
-    if (trail.length > MAX_TRAIL_POINTS) trail.shift();
+  if (pose) {
+    const { x, y } = pose.t;
+    const yaw = yawFromQuat(pose.q.z, pose.q.w);
+    lastPose = { x, y, yaw };
+    // Only extend the trail on real movement — /tf arrives at ~60 Hz and a
+    // stationary robot would otherwise burn through MAX_TRAIL_POINTS standing
+    // still, silently truncating the history that's actually interesting.
+    const last = trail[trail.length - 1];
+    if (!last || Math.hypot(x - last[0], y - last[1]) > 0.02) {
+      trail.push([x, y]);
+      if (trail.length > MAX_TRAIL_POINTS) trail.shift();
+    }
   }
+  for (const [id, state] of peerRobots) updatePeerPose(id, state);
 }
 
 new ROSLIB.Topic({
@@ -953,18 +1193,45 @@ new ROSLIB.Topic({
   reconnect_on_close: true,
 }).subscribe(onTfMessage);
 
+// nodes/map_merge.py's per-robot map -> <rid>/map anchors — deliberately a
+// SEPARATE subscription from /tf, not throttled: those anchors are only
+// republished once per second (map_merge's own publish_period_s), and
+// sharing /tf's 50ms throttle window with Isaac's ~60Hz-per-robot odometry
+// traffic meant an anchor essentially never won that window, so a robot's
+// marker could sit permanently missing depending on nothing but luck.
+// TRANSIENT_LOCAL on that topic (not requestable from this vendored
+// roslib — it has no QoS override) still means whichever anchors already
+// exist land immediately on subscribe, same guarantee /map already gets.
+new ROSLIB.Topic({
+  ros,
+  name: "/map_anchors",
+  messageType: "tf2_msgs/TFMessage",
+  reconnect_on_close: true,
+}).subscribe(onTfMessage);
+
 function drawFrame() {
   requestAnimationFrame(drawFrame);
   // Nothing to draw to while the map is off-stage. The subscriptions stay
   // live, so the map/trail/plan are current the instant it's swapped back in.
   if (stageMode !== "map") return;
-  if (!mapImageData) return;
-  ctx.putImageData(mapImageData, 0, 0); // raw pixels; ignores alpha (base layer)
-  if (!mapInfo) return;
+  if (!mapOffscreen || !mapInfo || !view) return;
+  ctx.clearRect(0, 0, MAP_CANVAS_PX, MAP_CANVAS_PX);
+  // Blit the raw grid (rasterized 1 cell = 1 px into mapOffscreen by the /map
+  // handler above) into the fixed on-screen canvas at the current view scale
+  // — same drawImage-into-world-coords technique the costmap overlay below
+  // already used for its own, differently-scaled grid.
+  {
+    const info = mapOffscreenInfo;
+    const [dx, dy] = worldToPixel(info.origin.position.x, info.origin.position.y + info.height * info.resolution);
+    const dW = info.width * info.resolution * view.scale;
+    const dH = info.height * info.resolution * view.scale;
+    ctx.imageSmoothingEnabled = false; // keep cells crisp, matching the old 1:1 putImageData look
+    ctx.drawImage(mapOffscreen, dx, dy, dW, dH);
+  }
 
   // Costmap overlay (own grid): blit its offscreen render into map-frame
-  // world coords, scaled by the resolution ratio. drawImage composits the
-  // per-pixel alpha over the map, unlike putImageData above.
+  // world coords at the current view scale — drawImage composits its
+  // per-pixel alpha over the map, unlike the base layer's opaque blit above.
   if (costmapCanvas && costmapInfo && costmapToggle.checked) {
     const cm = costmapInfo;
     // Offscreen top-left corner = (min x, max y) of the costmap in world.
@@ -972,8 +1239,8 @@ function drawFrame() {
       cm.origin.position.x,
       cm.origin.position.y + cm.height * cm.resolution
     );
-    const dW = (cm.width * cm.resolution) / mapInfo.resolution;
-    const dH = (cm.height * cm.resolution) / mapInfo.resolution;
+    const dW = (cm.width * cm.resolution)  * view.scale;
+    const dH = (cm.height * cm.resolution)  * view.scale;
     ctx.drawImage(costmapCanvas, dx, dy, dW, dH);
   }
 
@@ -981,7 +1248,7 @@ function drawFrame() {
   // robot marker so those stay legible even with many frontiers on screen.
   for (const fm of frontierMarkers) {
     const [px, py] = worldToPixel(fm.x, fm.y);
-    const r = Math.max(2, fm.r / mapInfo.resolution);
+    const r = Math.max(2, fm.r  * view.scale);
     ctx.fillStyle = fm.color;
     ctx.beginPath();
     ctx.arc(px, py, r, 0, 2 * Math.PI);
@@ -991,7 +1258,7 @@ function drawFrame() {
   // Nav2 planned path (orange), distinct from the cyan odom trail below.
   if (plan.length > 1) {
     ctx.strokeStyle = "#ff9a3c";
-    ctx.lineWidth = Math.max(1, 0.06 / mapInfo.resolution);
+    ctx.lineWidth = Math.max(1, 0.06  * view.scale);
     ctx.beginPath();
     plan.forEach(([x, y], i) => {
       const [px, py] = worldToPixel(x, y);
@@ -1003,7 +1270,7 @@ function drawFrame() {
 
   if (trail.length > 1) {
     ctx.strokeStyle = "#2dd4ff";
-    ctx.lineWidth = Math.max(1, 0.05 / mapInfo.resolution);
+    ctx.lineWidth = Math.max(1, 0.05  * view.scale);
     ctx.beginPath();
     trail.forEach(([x, y], i) => {
       const [px, py] = worldToPixel(x, y);
@@ -1021,7 +1288,7 @@ function drawFrame() {
   if (showBlacklist) {
     for (const b of blacklistPoints) {
       const [px, py] = worldToPixel(b.x, b.y);
-      const r = Math.max(3, b.r / mapInfo.resolution);
+      const r = Math.max(3, b.r  * view.scale);
       ctx.save();
       ctx.strokeStyle = b.permanent ? "#ff4d4d" : "#ff9a3c";
       ctx.fillStyle = b.permanent ? "rgba(255,77,77,0.14)" : "rgba(255,154,60,0.10)";
@@ -1051,7 +1318,7 @@ function drawFrame() {
   // entries vanish as the explorer finishes or expires them.
   steerQueue.forEach((q, i) => {
     const [px, py] = worldToPixel(q.x, q.y);
-    const r = Math.max(6, 0.9 / mapInfo.resolution);
+    const r = Math.max(6, 0.9  * view.scale);
     const head = i === 0;
     ctx.save();
     ctx.strokeStyle = head ? "#5cd0ff" : "rgba(92,208,255,0.45)";
@@ -1074,7 +1341,7 @@ function drawFrame() {
   // Nav goal marker (from click-to-nav or dispatch): hollow ring + heading tick.
   if (goal) {
     const [px, py] = worldToPixel(goal.x, goal.y);
-    const r = Math.max(3, 0.25 / mapInfo.resolution);
+    const r = Math.max(3, 0.25  * view.scale);
     ctx.strokeStyle = "#ff9a3c";
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -1089,7 +1356,7 @@ function drawFrame() {
 
   if (lastPose) {
     const [px, py] = worldToPixel(lastPose.x, lastPose.y);
-    const r = Math.max(2, 0.2 / mapInfo.resolution);
+    const r = Math.max(2, 0.2  * view.scale);
     ctx.fillStyle = "#2d5";
     ctx.beginPath();
     ctx.arc(px, py, r, 0, 2 * Math.PI);
@@ -1101,7 +1368,113 @@ function drawFrame() {
     ctx.moveTo(px, py);
     ctx.lineTo(px + r * 2 * Math.cos(lastPose.yaw), py - r * 2 * Math.sin(lastPose.yaw));
     ctx.stroke();
+    drawRobotLabel(px, py, r, ROBOT_ID, "#2d5");
   }
+
+  // Every other robot in the fleet, in its own color — same layering as
+  // ROBOT_ID above (frontiers under plan/trail under pose) minus the goal
+  // ring, which a peer's plan already implies (see setupPeer's docstring).
+  for (const state of peerRobots.values()) {
+    for (const fm of state.frontierMarkers) {
+      const [px, py] = worldToPixel(fm.x, fm.y);
+      const r = Math.max(2, fm.r  * view.scale);
+      ctx.fillStyle = fm.color;
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, 2 * Math.PI);
+      ctx.fill();
+    }
+
+    if (state.plan.length > 1) {
+      ctx.strokeStyle = state.color.plan;
+      ctx.lineWidth = Math.max(1, 0.06  * view.scale);
+      ctx.beginPath();
+      state.plan.forEach(([x, y], i) => {
+        const [px, py] = worldToPixel(x, y);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      });
+      ctx.stroke();
+    }
+
+    if (state.trail.length > 1) {
+      ctx.strokeStyle = state.color.trail;
+      ctx.lineWidth = Math.max(1, 0.05  * view.scale);
+      ctx.beginPath();
+      state.trail.forEach(([x, y], i) => {
+        const [px, py] = worldToPixel(x, y);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      });
+      ctx.stroke();
+    }
+
+    if (showBlacklist) {
+      for (const b of state.blacklistPoints) {
+        const [px, py] = worldToPixel(b.x, b.y);
+        const r = Math.max(3, b.r  * view.scale);
+        ctx.save();
+        ctx.strokeStyle = state.color.pose;
+        ctx.globalAlpha = 0.5;
+        ctx.lineWidth = 1.5;
+        if (!b.permanent) ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.arc(px, py, r, 0, 2 * Math.PI);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    state.steerQueue.forEach((q, i) => {
+      const [px, py] = worldToPixel(q.x, q.y);
+      const r = Math.max(6, 0.9  * view.scale);
+      ctx.save();
+      ctx.strokeStyle = state.color.pose;
+      ctx.globalAlpha = i === 0 ? 0.85 : 0.4;
+      ctx.lineWidth = i === 0 ? 2 : 1.5;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, 2 * Math.PI);
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    if (state.lastPose) {
+      const [px, py] = worldToPixel(state.lastPose.x, state.lastPose.y);
+      const r = Math.max(2, 0.2  * view.scale);
+      ctx.fillStyle = state.color.pose;
+      ctx.beginPath();
+      ctx.arc(px, py, r, 0, 2 * Math.PI);
+      ctx.fill();
+      ctx.strokeStyle = state.color.pose;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(
+        px + r * 2 * Math.cos(state.lastPose.yaw),
+        py - r * 2 * Math.sin(state.lastPose.yaw)
+      );
+      ctx.stroke();
+      drawRobotLabel(px, py, r, state.id, state.color.pose);
+    }
+  }
+}
+
+// Short id label next to a pose marker — without it a fleet map with two
+// trails reads as "one robot and some orange noise", and you can't tell
+// whether map_anchors + peer TF are actually resolving for the other bot.
+function drawRobotLabel(px, py, r, id, color) {
+  const label = id.replace(/^robot_/, "r");
+  ctx.save();
+  ctx.font = "600 11px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = color;
+  ctx.strokeStyle = "rgba(0,0,0,0.65)";
+  ctx.lineWidth = 3;
+  const x = px + r + 4;
+  const y = py - r - 2;
+  ctx.strokeText(label, x, y);
+  ctx.fillText(label, x, y);
+  ctx.restore();
 }
 requestAnimationFrame(drawFrame);
 
@@ -1360,13 +1733,42 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
   let reconMode = RECON_MODE_INIT;      // "voxels" | "points"
   let reconColor = RECON_COLOR_INIT;    // "photo"  | "height"
 
-  // Robot pose marker: a small green sphere tracking lastPose (from TF).
+  // Pose markers: active robot is green (matches the 2D #2d5 marker);
+  // peers reuse PEER_COLORS from the fleet map. Until peers were added
+  // here, the 3D panel only ever showed one sphere — easy to misread as
+  // "the other robot isn't in the scene" when it's just not drawn.
+  const markerGeom = new THREE.SphereGeometry(0.15, 16, 12);
   const robotMarker = new THREE.Mesh(
-    new THREE.SphereGeometry(0.15, 16, 12),
+    markerGeom,
     new THREE.MeshBasicMaterial({ color: 0x22dd55 })
   );
   robotMarker.visible = false;
   scene.add(robotMarker);
+  const peerMarkers = new Map(); // robot_id -> Mesh
+
+  function peerMarkerFor(id, colorHex) {
+    let mesh = peerMarkers.get(id);
+    if (mesh) return mesh;
+    mesh = new THREE.Mesh(
+      markerGeom,
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(colorHex) })
+    );
+    mesh.visible = false;
+    scene.add(mesh);
+    peerMarkers.set(id, mesh);
+    return mesh;
+  }
+
+  function syncPoseMarker(mesh, pose) {
+    if (!pose) return false;
+    const moved = !mesh.visible
+      || Math.abs(mesh.position.x - pose.x) > 1e-3
+      || Math.abs(mesh.position.y - pose.y) > 1e-3;
+    if (!moved) return false;
+    mesh.visible = true;
+    mesh.position.set(pose.x, pose.y, 0.15);
+    return true;
+  }
 
   let didFitView = false;
   let lastFitRadius = 0;
@@ -1595,8 +1997,11 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
 
     const { n, total, stride, min, max } = lastCloud;
     const capped = reconMode === "voxels" && !useVoxels ? " — over cap, points" : "";
+    // Prefix with ROBOT_ID so a fleet tab isn't misread as a stale fused
+    // view: the 2D stage is /map (all robots), this panel is only
+    // /<ROBOT_ID>/recon_cloud — usually a much smaller footprint.
     infoEl.textContent =
-      `${n.toLocaleString()} ${useVoxels ? "vox" : "pts"} · ` +
+      `${ROBOT_ID} · ${n.toLocaleString()} ${useVoxels ? "vox" : "pts"} · ` +
       `z ${min[2].toFixed(1)}–${max[2].toFixed(1)} m` +
       (stride > 1 ? ` (of ${total.toLocaleString()}, 1/${stride})` : "") + capped;
     needsRender = true;
@@ -1633,13 +2038,9 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
 
   function animate() {
     requestAnimationFrame(animate);
-    if (lastPose) {
-      const moved = !robotMarker.visible
-        || Math.abs(robotMarker.position.x - lastPose.x) > 1e-3
-        || Math.abs(robotMarker.position.y - lastPose.y) > 1e-3;
-      if (moved) {
-        robotMarker.visible = true;
-        robotMarker.position.set(lastPose.x, lastPose.y, 0.15);
+    if (syncPoseMarker(robotMarker, lastPose)) needsRender = true;
+    for (const [id, state] of peerRobots) {
+      if (syncPoseMarker(peerMarkerFor(id, state.color.pose), state.lastPose)) {
         needsRender = true;
       }
     }

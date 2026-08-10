@@ -1,19 +1,23 @@
 # Nav2 params for the SortBots warehouse demo.
 #
 # Frame ids and one absolute topic below are written as `robot_0/base_link`,
-# `robot_0/odom`, `/robot_0/camera/depth/points`, `/robot_0/map` — this file
-# on disk IS the robot_0 params. For any other robot,
-# `launch/sortbots_nav2.launch.py` rewrites every "robot_0" substring in a
-# string value to the actual `robot_id` at launch time (see that file's
-# `_rewrite_robot_0()` — a value-substring replace, not RewrittenYaml,
-# because `global_frame` appears 4 times below wanting 3 different outcomes).
-# You will not see robot_1 anywhere in THIS file; it only ever exists in the
-# rewritten temp copy.
+# `robot_0/odom`, `/robot_0/camera/depth/points` — this file on disk IS the
+# robot_0 params. For any other robot, `launch/sortbots_nav2.launch.py`
+# rewrites every "robot_0" substring in a string value to the actual
+# `robot_id` at launch time (see that file's `_rewrite_robot_0()` — a
+# value-substring replace, not RewrittenYaml, because `global_frame` appears
+# 4 times below wanting 3 different outcomes). You will not see robot_1
+# anywhere in THIS file; it only ever exists in the rewritten temp copy.
 #
 # No map_server / amcl: RTAB-Map (already running, see
-# sortbots_rtabmap_robot.launch.py) owns SLAM, publishes `map` (namespaced to
-# /robot_0/map by the launch file's `namespace` arg) and the map -> odom TF.
-# Nav2 only needs the planning/control/behavior stack.
+# sortbots_rtabmap_robot.launch.py) owns SLAM, publishing each robot's own
+# grid to /<robot_id>/map in that robot's own <robot_id>/map SLAM frame (not
+# the bare `map` frame — see that launch file's map_frame_id). The bare
+# `map` frame and the `/map` topic below belong to nodes/map_merge.py, which
+# fuses every robot's grid (transformed via the static map -> <robot_id>/map
+# anchors published in sortbots_bringup.launch.py) into one world-anchored
+# grid. Nav2's global_frame is that merged `map`; only static_layer's
+# map_topic below needs to point at it explicitly.
 #
 # The XLeRobot sim base is PHYSICALLY holonomic (root_x/root_y/root_z
 # joints, cmd_vel consumes linear.x AND linear.y — see
@@ -321,19 +325,37 @@
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: true
-        # MUST be absolute. A relative `map` here does NOT resolve to
-        # /robot_0/map: this costmap node lives in the `global_costmap`
-        # SUB-namespace, so a relative name resolves to
-        # /robot_0/global_costmap/map — a topic nothing publishes. The static
-        # layer then silently never receives a map ("Can't update static
-        # costmap layer, no map received"), the global costmap stays at its
-        # default 5x5 m of all-unknown, and because planner_server sets
-        # allow_unknown: true the planner still "succeeds" on short goals by
-        # planning blind through unknown space. That failure is nearly
-        # invisible from the dashboard, which is how it survived this long.
-        # Like the depth_scan topic above, this is absolute and so must be
-        # rewritten per robot when robot_1 arrives.
-        map_topic: /robot_0/map
+        # MUST be true for multi-robot (and often single-robot after a
+        # resume). RTAB-Map permanently paints whatever the depth camera
+        # saw into /map — including the OTHER robot when the two spawn
+        # in view of each other, and occasionally the robot's own body /
+        # a phantom at the spawn pose. Without footprint clearing, those
+        # occupied cells under base_link stay lethal in the global
+        # costmap, Navfn refuses every plan ("Failed to create plan with
+        # tolerance of: 0.30"), and the explorer spends the run in
+        # clear→spin→fail→blacklist→idle. Verified live 2026-08-09 on
+        # explore_fleet: start_cost=100 (lethal) with this false, plan
+        # from a free cell 1 m away succeeded; flipping this true dropped
+        # start_cost to ~87 and planning from the robot worked again.
+        # Default upstream is false.
+        footprint_clearing_enabled: true
+        # MUST be absolute. A relative `map` here does NOT resolve to /map:
+        # this costmap node lives in the `global_costmap` SUB-namespace, so a
+        # relative name resolves to /robot_0/global_costmap/map — a topic
+        # nothing publishes. The static layer then silently never receives a
+        # map ("Can't update static costmap layer, no map received"), the
+        # global costmap stays at its default 5x5 m of all-unknown, and
+        # because planner_server sets allow_unknown: true the planner still
+        # "succeeds" on short goals by planning blind through unknown space.
+        # That failure is nearly invisible from the dashboard, which is how
+        # it survived this long.
+        #
+        # /map (not /robot_0/map): nodes/map_merge.py publishes the fused,
+        # world-anchored grid there — the same topic for every robot, so
+        # unlike the depth_scan topic above this value has no "robot_0"
+        # substring and _rewrite_robot_0() leaves it alone (same as
+        # global_frame: map below).
+        map_topic: /map
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         # Was 3.0 / 0.4. The old pair gave the robot almost no room: the

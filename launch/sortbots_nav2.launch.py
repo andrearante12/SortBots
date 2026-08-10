@@ -61,10 +61,12 @@ def _rewrite_robot_0(params_path: str, robot_id: str) -> str:
     string VALUE replaced by `robot_id`. A value-level substring replace,
     not a key-name substitution — see the module docstring for why: it only
     ever touches the handful of values that actually hardcode robot_0
-    (`robot_0/base_link`, `robot_0/odom`, `/robot_0/camera/depth/points`,
-    `/robot_0/map`), and structurally cannot touch `global_frame: map`
+    (`robot_0/base_link`, `robot_0/odom`, `/robot_0/camera/depth/points`),
+    and structurally cannot touch `global_frame: map` or `map_topic: /map`
     since "robot_0" isn't a substring of "map" — no matter how the
-    surrounding yaml keys are nested, renamed, or reordered.
+    surrounding yaml keys are nested, renamed, or reordered. `/map` is the
+    merged world-anchored grid (nodes/map_merge.py) and is deliberately the
+    SAME topic for every robot, so this is correct, not an oversight.
 
     Always writes a fresh temp file, even for robot_id == "robot_0" (a
     no-op replace) — one code path, no special-casing the default robot.

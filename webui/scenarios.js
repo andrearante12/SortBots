@@ -45,6 +45,12 @@
   let hasControl = false;
   let session = null;
   let selected = null;
+  // Upper bound for the `robots` override input, from configs/robots.yaml's
+  // roster length (webui/serve.py's /api/robots) — not hardcoded, so adding
+  // a robot_2 entry to the roster widens this automatically. Falls back to 2
+  // (today's roster size) if the fetch fails; that's a UI-only ceiling, not
+  // a security check (webui/session.py re-validates every override anyway).
+  let maxRobots = 2;
   // null means "we haven't read the log yet" — the first read asks for the
   // tail so opening the tab mid-run doesn't dump the whole file.
   let logOffset = null;
@@ -93,8 +99,9 @@
     } else {
       input.type = "number";
       input.value = value;
-      input.min = "1";
-      input.max = "2";
+      // chase_cam_robots may be 0 (no chase cams); robots stays 1..max.
+      input.min = key === "chase_cam_robots" ? "0" : "1";
+      input.max = String(maxRobots);
       label.append(document.createTextNode(key), input);
     }
     return label;
@@ -342,5 +349,13 @@
   });
 
   setView("live");
-  loadScenarios().then(() => schedulePoll(0));
+  getJson("/api/robots")
+    .then((data) => {
+      if (Array.isArray(data.robots) && data.robots.length > 0) {
+        maxRobots = data.robots.length;
+      }
+    })
+    .catch(() => { /* keep the fallback of 2 */ })
+    .then(() => loadScenarios())
+    .then(() => schedulePoll(0));
 })();

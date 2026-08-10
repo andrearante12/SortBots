@@ -42,10 +42,19 @@ configs/nav2_params.yaml is rewritten per-robot at launch time (see
 sortbots_nav2.launch.py). The dashboard (webui) stays singular regardless of
 robot count. `localization`/`database_path`/`explore` apply ONLY to the
 single robot named by `robot_id` (default robot_0) — other robots in
-`robot_ids` get their own auto-computed map path and no explorer, matching
-the "explorer on robot_0 only" scope this was built and tested against.
-`robot_id` itself does not need to appear in `robot_ids` for its map/explore
-settings to be ignored cleanly; it's simplest to just include it.
+`robot_ids` get their own auto-computed map path, matching the multi-robot
+scope this was built and tested against. `robot_id` itself does not need to
+appear in `robot_ids` for its map settings to be ignored cleanly; it's
+simplest to just include it.
+
+Each robot's RTAB-Map owns its own SLAM at `<rid>/map`, unrelated to any
+other robot's. This file anchors every robot into a shared `map` frame with a
+static `map -> <rid>/map` transform published from that robot's known spawn
+pose (configs/robots.yaml, keyed by the `scene` arg — must match
+scripts/spawn_warehouse.py --scene), then runs nodes/map_merge.py once to
+fuse all the anchored grids into one world-anchored `/map`. That fused `/map`
+is what Nav2's global_frame and every explorer plan against by default — see
+nodes/map_merge.py's docstring for the full picture.
 """
 import os
 
@@ -60,6 +69,7 @@ from launch.actions import (
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 LAUNCH_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(LAUNCH_DIR)
@@ -67,6 +77,22 @@ REPO_ROOT = os.path.dirname(LAUNCH_DIR)
 
 def _include(filename):
     return PythonLaunchDescriptionSource(os.path.join(LAUNCH_DIR, filename))
+
+
+def _spawn_pose(scene: str, robot_id: str) -> tuple[float, float, float]:
+    """(x, y, z) for `robot_id` in `scene`, from configs/robots.yaml — the
+    same roster scripts/spawn_warehouse.py reads to place the robot in Isaac.
+    Read directly (not imported) since this launch file has no Python
+    dependency on scripts/.
+    """
+    import yaml
+
+    with open(os.path.join(REPO_ROOT, "configs", "robots.yaml")) as f:
+        roster = yaml.safe_load(f)
+    for r in roster["robots"]:
+        if r["id"] == robot_id:
+            return tuple(r["spawn"][scene])
+    raise KeyError(f"{robot_id!r} not in configs/robots.yaml")
 
 
 def _make_per_robot_actions(
@@ -83,24 +109,61 @@ def _make_per_robot_actions(
     explore_autostart,
     robot_id_cfg,
     robot_ids_cfg,
+    scene_cfg,
 ):
     primary_robot_id = robot_id_cfg.perform(context)
     raw = robot_ids_cfg.perform(context).strip()
     robot_ids = [r.strip() for r in raw.split(",") if r.strip()] if raw else [primary_robot_id]
+    scene = scene_cfg.perform(context)
 
     actions = []
     for rid in robot_ids:
+        # Anchors this robot's SLAM into the shared world frame: RTAB-Map
+        # publishes its OWN map at <rid>/map (sortbots_rtabmap_robot.launch.py
+        # sets map_frame_id), starting from wherever its odom happened to
+        # init — which is this robot's known spawn pose. nodes/map_merge.py
+        # looks this transform up to resample every robot's grid into one
+        # `/map`; get it wrong and two robots' grids fuse at the wrong offset.
+        x, y, z = _spawn_pose(scene, rid)
+        actions.append(Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name=f"{rid}_map_anchor",
+            output="screen",
+            arguments=[
+                "--x", str(x), "--y", str(y), "--z", str(z),
+                "--frame-id", "map", "--child-frame-id", f"{rid}/map",
+            ],
+            parameters=[{"use_sim_time": use_sim_time}],
+        ))
+
         rtabmap_args = {"robot_id": rid, "use_sim_time": use_sim_time, "rviz": rviz}
         # Map-lifecycle overrides (localization / an explicit --map path /
         # delete_db_on_start) are a single-robot concept today — see module
-        # docstring. Every OTHER robot in a multi-robot robot_ids list falls
+        # docstring; every OTHER robot in a multi-robot robot_ids list falls
         # through to sortbots_rtabmap_robot.launch.py's own per-robot default
-        # (~/.ros/sortbots_<rid>.db, mapping mode, delete_db_on_start=true),
-        # which is already correct and collision-free without any override.
+        # for THOSE.
+        #
+        # database_path is different and must be set EXPLICITLY for every
+        # robot, never omitted: IncludeLaunchDescription does not isolate a
+        # launch-configuration name the PARENT already declared, and this
+        # file's own top-level `database_path` argument (for the primary
+        # robot) already occupies that name in the shared launch context by
+        # the time a secondary robot's Include runs — so
+        # sortbots_rtabmap_robot.launch.py's `DeclareLaunchArgument` sees it
+        # as already-set and silently reuses the PRIMARY robot's resolved
+        # path instead of recomputing its own default. Verified live: with
+        # this omitted, robot_1's rtabmap opened robot_0's sqlite database
+        # ("Deleted database ...sortbots_robot_0.db"), collided with robot_0
+        # actually writing it, and crashed FATAL ("attempt to write a
+        # readonly database") — which then meant robot_1 never published its
+        # map -> odom TF, so its whole tree was disconnected from `map`.
         if rid == primary_robot_id:
             rtabmap_args["localization"] = localization
             rtabmap_args["delete_db_on_start"] = delete_db_on_start
             rtabmap_args["database_path"] = database_path
+        else:
+            rtabmap_args["database_path"] = ["~/.ros/sortbots_", rid, ".db"]
         actions.append(IncludeLaunchDescription(
             _include("sortbots_rtabmap_robot.launch.py"),
             launch_arguments=rtabmap_args.items(),
@@ -138,31 +201,51 @@ def _make_per_robot_actions(
                 condition=IfCondition(scripted_pick),
             ))
 
-        if rid == primary_robot_id:
-            actions.append(GroupAction(
-                condition=IfCondition(explore),
-                actions=[
-                    ExecuteProcess(
-                        cmd=[
-                            "python3",
-                            os.path.join(REPO_ROOT, "nodes", "explorer.py"),
-                            "--robot-id", rid,
-                            "--autostart",
-                        ],
-                        output="screen",
-                        condition=IfCondition(explore_autostart),
-                    ),
-                    ExecuteProcess(
-                        cmd=[
-                            "python3",
-                            os.path.join(REPO_ROOT, "nodes", "explorer.py"),
-                            "--robot-id", rid,
-                        ],
-                        output="screen",
-                        condition=UnlessCondition(explore_autostart),
-                    ),
-                ],
-            ))
+        # Every robot in robot_ids explores, not just the primary — with
+        # /map fused across robots (nodes/map_merge.py) and frontier claims
+        # shared over /explore/claims (nodes/explorer.py), this is what makes
+        # a multi-robot run collaborative instead of N independent demos.
+        actions.append(GroupAction(
+            condition=IfCondition(explore),
+            actions=[
+                ExecuteProcess(
+                    cmd=[
+                        "python3",
+                        os.path.join(REPO_ROOT, "nodes", "explorer.py"),
+                        "--robot-id", rid,
+                        "--autostart",
+                    ],
+                    output="screen",
+                    condition=IfCondition(explore_autostart),
+                ),
+                ExecuteProcess(
+                    cmd=[
+                        "python3",
+                        os.path.join(REPO_ROOT, "nodes", "explorer.py"),
+                        "--robot-id", rid,
+                    ],
+                    output="screen",
+                    condition=UnlessCondition(explore_autostart),
+                ),
+            ],
+        ))
+
+    # Fuses every robot's own /<rid>/map into the world-anchored /map (see
+    # that node's docstring). Once per bringup, not per robot — it needs the
+    # full roster to fuse anything.
+    actions.append(ExecuteProcess(
+        cmd=[
+            "python3",
+            os.path.join(REPO_ROOT, "nodes", "map_merge.py"),
+            "--robot-ids", ",".join(robot_ids),
+            # Required, not cosmetic: this node rebroadcasts a TF edge onto
+            # /tf (see its own _tick()), so its clock must agree with the
+            # rest of the sim-time-stamped tree — see nodes/map_merge.py's
+            # main() for what broke without this.
+            "--ros-args", "-p", ["use_sim_time:=", use_sim_time],
+        ],
+        output="screen",
+    ))
     return actions
 
 
@@ -181,6 +264,7 @@ def generate_launch_description():
     delete_db_on_start = LaunchConfiguration("delete_db_on_start")
     explore = LaunchConfiguration("explore")
     explore_autostart = LaunchConfiguration("explore_autostart")
+    scene = LaunchConfiguration("scene")
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -199,6 +283,18 @@ def generate_launch_description():
                 "Comma-separated robot ids to bring up, e.g. 'robot_0,robot_1'. "
                 "Empty (default) means just [robot_id] — the original "
                 "single-robot behavior, unchanged."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "scene",
+            default_value="nvidia",
+            description=(
+                "Which warehouse scene each robot spawned in — must match "
+                "scripts/spawn_warehouse.py --scene. Selects the spawn pose "
+                "(configs/robots.yaml) used to anchor each robot's SLAM frame "
+                "into the shared `map` frame; wrong value here misaligns the "
+                "fused /map (nodes/map_merge.py) even though each robot's own "
+                "SLAM still works fine."
             ),
         ),
         DeclareLaunchArgument(
@@ -307,7 +403,7 @@ def generate_launch_description():
             args=[
                 use_sim_time, rviz, nav2, task_manager, scripted_pick,
                 localization, database_path, delete_db_on_start,
-                explore, explore_autostart, robot_id, robot_ids,
+                explore, explore_autostart, robot_id, robot_ids, scene,
             ],
         ),
     ])

@@ -15,12 +15,20 @@ launch/sortbots_rtabmap_robot.launch.py's GRID_ARGS (Grid/RayTracing) and
 docs/running.md's "Occupancy-grid tuning" section. Without it `/map` stays
 almost entirely unknown and this node has nothing real to chase.
 
-Multi-robot: explorers additionally publish/subscribe a SHARED (not
-namespaced) `/explore/claims` topic so two robots don't both repeatedly send
-goals into the same frontier cluster. This is deliberately NOT map fusion —
-each robot still builds and owns its own RTAB-Map database; claim-sharing is
-only a coordination signal for where NOT to plan next. True collaborative
-SLAM (shared map, shared pose graph) is future work — see the plan.
+Multi-robot: by default this node plans against /map — nodes/map_merge.py's
+fused, world-anchored grid, not this robot's own /{robot_id}/map — so a
+robot's frontier search already sees space ANY robot has mapped (see that
+node's docstring for how the fusion works; each robot still owns its own
+RTAB-Map database, this is NOT a shared pose graph / true collaborative SLAM,
+which stays future work). On top of that, explorers publish/subscribe a
+SHARED (not namespaced) `/explore/claims` topic so two robots sharing a
+fused map don't both repeatedly send goals into the same frontier cluster:
+each claim is refreshed every tick a goal stays healthy, released explicitly
+the moment that goal ends (success, failure, or preemption) rather than left
+to expire, and TRANSIENT_LOCAL so a robot that starts exploring after its
+peers still sees their current claims immediately. A peer's live TF pose
+(not just its claimed goal) is also kept clear of, since a claim marks where
+a peer is headed, not the path it's driving to get there.
 
 No custom .msg/.srv package (see task_manager.py's docstring for why):
 explore_status/explore_cmd/claims are all std_msgs/String carrying JSON,
@@ -77,6 +85,17 @@ MAP_QOS = QoSProfile(
     reliability=QoSReliabilityPolicy.RELIABLE,
 )
 
+# TRANSIENT_LOCAL (not the plain volatile default) so a robot that starts
+# exploring after its peers already have sees their current claims
+# immediately, not just whatever they happen to publish next — each robot's
+# claim_pub retains its own last message, so a late joiner gets one sample
+# per currently-connected peer.
+CLAIM_QOS = QoSProfile(
+    depth=1,
+    durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+    reliability=QoSReliabilityPolicy.RELIABLE,
+)
+
 DEFAULTS = {
     "min_frontier_cells": 8,       # discard frontier clusters smaller than this
     "alpha": 1.5,                  # score = size / distance**alpha; higher = prefer nearby
@@ -90,6 +109,9 @@ DEFAULTS = {
     "occupied_thresh": 65,         # cell value >= this counts as an obstacle
     "claim_radius_m": 1.0,         # exclude frontiers this close to another robot's active claim
     "claim_ttl_s": 90.0,           # forget another robot's claim after this long
+    "peer_avoid_radius_m": 0.8,    # exclude frontier goals this close to another robot's CURRENT pose
+                                    # (claims mark the GOAL, not the path there — this catches
+                                    # head-on aisle encounters claims alone don't prevent)
     "goal_standoff_max_m": 1.5,    # search radius for a pulled-back goal around a frontier cell
     "goal_clearance_m": 0.45,      # goal min distance from occupied cells (> inflation 0.4)
     "goal_unknown_clearance_m": 0.2,  # goal min distance from unknown cells
@@ -226,7 +248,7 @@ def cell_to_world(iy: float, ix: float, info) -> tuple[float, float]:
 
 
 class ExplorerNode(Node):
-    def __init__(self, robot_id: str, cfg: dict, autostart: bool):
+    def __init__(self, robot_id: str, cfg: dict, autostart: bool, map_topic: str):
         super().__init__(f"{robot_id}_explorer")
         self.robot_id = robot_id
         self.cfg = cfg
@@ -312,16 +334,22 @@ class ExplorerNode(Node):
         # goals — see _on_hint.
         self._steer_queue: list[list] = []
 
-        self.create_subscription(OccupancyGrid, f"/{robot_id}/map", self._on_map, MAP_QOS)
+        # Default /map: the fused, world-anchored grid nodes/map_merge.py
+        # publishes (frame "map"), matching the frame_id="map" this node
+        # already stamps on every goal/marker — so this robot plans against
+        # BOTH robots' discovered free space, not just its own. Overridable
+        # (e.g. back to /{robot_id}/map) for single-robot debugging without
+        # map_merge running.
+        self.create_subscription(OccupancyGrid, map_topic, self._on_map, MAP_QOS)
         self.create_subscription(String, f"/{robot_id}/explore_cmd", self._on_cmd, 10)
         self.create_subscription(String, f"/{robot_id}/explore_hint", self._on_hint, 10)
         # Deliberately global, not /{robot_id}/-namespaced: every robot's
         # explorer needs to see every OTHER robot's claims.
-        self.create_subscription(String, "/explore/claims", self._on_claim, 10)
+        self.create_subscription(String, "/explore/claims", self._on_claim, CLAIM_QOS)
 
         self.status_pub = self.create_publisher(String, f"/{robot_id}/explore_status", 10)
         self.frontier_pub = self.create_publisher(MarkerArray, f"/{robot_id}/frontiers", 10)
-        self.claim_pub = self.create_publisher(String, "/explore/claims", 10)
+        self.claim_pub = self.create_publisher(String, "/explore/claims", CLAIM_QOS)
 
         self.create_timer(cfg["replan_period_s"], self._tick)
         self.get_logger().info(
@@ -554,6 +582,14 @@ class ExplorerNode(Node):
         # about to preempt it.
         if cancel_on_server and self._goal_handle is not None:
             self._goal_handle.cancel_goal_async()
+        # Explicit release rather than waiting out claim_ttl_s — frees the
+        # frontier for a peer immediately, whether this goal succeeded,
+        # failed, was superseded by a hint, or explore_cmd=stop fired. The
+        # "consumed" replan path calls this with a new goal about to go out
+        # in the SAME tick, which re-claims via _send_goal right after — no
+        # window where the frontier looks unclaimed to a peer mid-replan.
+        if self._goal_target is not None:
+            self._publish_claim(*self._goal_target, released=True)
         self._goal_handle = None
         self._goal_target = None
         self._goal_frontier = None
@@ -570,19 +606,46 @@ class ExplorerNode(Node):
             rid = c["robot_id"]
             if rid == self.robot_id:
                 return
+            if c.get("released"):
+                self._other_claims.pop(rid, None)
+                return
             self._other_claims[rid] = (float(c["x"]), float(c["y"]), time.monotonic())
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
             pass
 
-    def _publish_claim(self, x: float, y: float):
+    def _publish_claim(self, x: float, y: float, released: bool = False):
         msg = String()
-        msg.data = json.dumps({"robot_id": self.robot_id, "x": x, "y": y})
+        data = {"robot_id": self.robot_id, "x": x, "y": y}
+        if released:
+            data["released"] = True
+        msg.data = json.dumps(data)
         self.claim_pub.publish(msg)
 
     def _active_claims(self) -> list[tuple[float, float]]:
+        # ttl is a backstop for a peer that stops publishing without a clean
+        # release (crash, network drop) — the normal end-of-goal path always
+        # releases explicitly (_cancel_active_goal) and the in-flight path
+        # refreshes every tick (_tick's heartbeat branch), so this rarely
+        # needs to fire on a healthy peer.
         ttl = self.cfg["claim_ttl_s"]
         now = time.monotonic()
         return [(x, y) for (x, y, ts) in self._other_claims.values() if now - ts < ttl]
+
+    def _peer_positions(self) -> list[tuple[float, float]]:
+        """Current map-frame position of every robot we've heard a claim
+        from. Distinct from _active_claims: a claim marks where a peer is
+        HEADED, this is where it physically IS right now — used to avoid
+        planning a goal into a peer's current path, not just its target.
+        """
+        positions = []
+        for rid in self._other_claims:
+            try:
+                tr = self.tf_buffer.lookup_transform("map", f"{rid}/base_link", rclpy.time.Time())
+            except Exception:
+                continue
+            t = tr.transform.translation
+            positions.append((t.x, t.y))
+        return positions
 
     # -- blacklist ---------------------------------------------------------
 
@@ -695,6 +758,12 @@ class ExplorerNode(Node):
             if reason is None and self._frontier_consumed():
                 reason = "consumed"
             if reason is None:
+                # Refresh the claim every tick a goal stays healthy — without
+                # this, claim_ttl_s (a backstop for a peer that vanished
+                # uncleanly) could otherwise lapse mid-drive on a goal that's
+                # simply taking a while, since it was only ever published
+                # once at _send_goal time.
+                self._publish_claim(*self._goal_target)
                 self._publish_status()  # heartbeat while a goal is in flight
                 return
 
@@ -1060,6 +1129,7 @@ class ExplorerNode(Node):
 
         blacklist = self._active_blacklist()
         claims = self._active_claims()
+        peers = self._peer_positions()
         hint = self._active_hint()
         open_cells = max(1, round(self.cfg["openness_radius_m"] / res))
         h, w = free.shape
@@ -1071,6 +1141,8 @@ class ExplorerNode(Node):
             if self._blacklisted(gx, gy, blacklist):
                 continue
             if self._too_close(gx, gy, claims, self.cfg["claim_radius_m"]):
+                continue
+            if self._too_close(gx, gy, peers, self.cfg["peer_avoid_radius_m"]):
                 continue
             escape_pool.append((dist, gx, gy, fx, fy))
             # A hinted frontier ignores the distance cap. Without this,
@@ -1208,7 +1280,8 @@ class ExplorerNode(Node):
             self.get_logger().info(
                 f"no valid frontiers "
                 f"({self._empty_cycles}/{self.cfg['done_after_empty_cycles']} empty cycles, "
-                f"{len(frontiers)} raw clusters, {len(blacklist)} blacklisted, {len(claims)} claimed)"
+                f"{len(frontiers)} raw clusters, {len(blacklist)} blacklisted, "
+                f"{len(claims)} claimed, {len(peers)} peers nearby)"
             )
             if self._empty_cycles >= self.cfg["done_after_empty_cycles"]:
                 self._finish()
@@ -1532,12 +1605,19 @@ def main() -> None:
         action="store_true",
         help="Start exploring immediately instead of waiting for explore_cmd=start.",
     )
+    parser.add_argument(
+        "--map-topic",
+        default="/map",
+        help="Occupancy grid to plan against (default /map, the fused grid "
+        "nodes/map_merge.py publishes). Set to /<robot-id>/map to plan "
+        "against only this robot's own SLAM output.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
 
     rclpy.init()
-    node = ExplorerNode(args.robot_id, cfg, args.autostart)
+    node = ExplorerNode(args.robot_id, cfg, args.autostart, args.map_topic)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
