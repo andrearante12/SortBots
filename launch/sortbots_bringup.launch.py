@@ -266,6 +266,17 @@ def _make_per_robot_actions(
         ],
         output="screen",
     ))
+    # Same anchors, 3D: fuse /<rid>/recon_cloud -> /fleet/recon_cloud for the
+    # dashboard (collaborative fusion, not collaborative SLAM).
+    actions.append(ExecuteProcess(
+        cmd=[
+            "python3",
+            os.path.join(REPO_ROOT, "nodes", "recon_cloud_merge.py"),
+            "--robot-ids", ",".join(robot_ids),
+            "--ros-args", "-p", ["use_sim_time:=", use_sim_time],
+        ],
+        output="screen",
+    ))
     return actions
 
 

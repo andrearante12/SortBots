@@ -1648,12 +1648,16 @@ window.addEventListener("mouseup", (ev) => {
 // The whole thing is wrapped so a missing/broken three.js can never take down
 // the rest of the dashboard.
 //
-// Note we subscribe to recon_cloud, NOT cloud_map: nodes/recon_cloud_relay.py
-// enforces a hard point budget and strips pcl::PointXYZRGB's padding, because
-// cloud_map itself grows without bound and the vendored roslib can't reassemble
-// fragments once it passes rosbridge's max_message_size.
+// Note we subscribe to /fleet/recon_cloud (nodes/recon_cloud_merge.py), NOT
+// per-robot cloud_map: merge transforms each /<id>/recon_cloud into world
+// `map` via the same spawn anchors as map_merge, then re-budgets. Per-robot
+// recon_cloud still exists for debugging; the panel shows the fused fleet
+// cloud so peer markers and voxels share one frame.
+//
+// Budget note: recon_cloud_relay already caps each robot; merge re-caps the
+// union so rosbridge/base64 stay under max_message_size.
 
-const POINTCLOUD_TOPIC = `/${ROBOT_ID}/recon_cloud`;
+const POINTCLOUD_TOPIC = "/fleet/recon_cloud";
 const POINTCLOUD_THROTTLE_MS = 3000; // the relay only emits when the pump fires (3s)
 const MAX_RENDER_POINTS = 400000;    // decimate above this to keep the browser snappy
 // Above this, fall back to plain points — cubes cost 12 triangles each. Set
@@ -2025,11 +2029,10 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
 
     const { n, total, stride, min, max } = lastCloud;
     const capped = reconMode === "voxels" && !useVoxels ? " — over cap, points" : "";
-    // Prefix with ROBOT_ID so a fleet tab isn't misread as a stale fused
-    // view: the 2D stage is /map (all robots), this panel is only
-    // /<ROBOT_ID>/recon_cloud — usually a much smaller footprint.
+    // Fused fleet cloud in `map` (nodes/recon_cloud_merge.py) — not one
+    // robot's private recon. Peer pose markers use the same frame.
     infoEl.textContent =
-      `${ROBOT_ID} · ${n.toLocaleString()} ${useVoxels ? "vox" : "pts"} · ` +
+      `fleet · ${n.toLocaleString()} ${useVoxels ? "vox" : "pts"} · ` +
       `z ${min[2].toFixed(1)}–${max[2].toFixed(1)} m` +
       (stride > 1 ? ` (of ${total.toLocaleString()}, 1/${stride})` : "") + capped;
     needsRender = true;

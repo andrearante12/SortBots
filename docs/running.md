@@ -714,6 +714,12 @@ not permanently painted into SLAM. Nav2 also runs `collision_monitor` as a
 last-resort stop on forward depth. Local avoidance is still per-robot MPPI +
 reactive BT — not joint trajectory optimization.
 
+**Fused 3D recon:** `nodes/recon_cloud_merge.py` transforms each
+`/<id>/recon_cloud` (`{id}/map` frame) into world `map` with the same spawn
+anchors as `map_merge`, concatenates, and re-budgets onto `/fleet/recon_cloud`.
+The dashboard 3D panel subscribes there (collaborative fusion, not
+collaborative SLAM). Per-robot `recon_cloud` topics remain for debugging.
+
 **Live check (aisle crossing):** teleop robot_B across robot_A's view — A's
 `/robot_A/map` free/occupied footprint should not grow a lasting peer-shaped
 blob; A's local costmap should show a moving mark that clears after B leaves;
