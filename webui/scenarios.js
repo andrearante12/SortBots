@@ -24,8 +24,9 @@
     document.getElementById("right-col"),
   ];
   const viewScenarios = document.getElementById("view-scenarios");
+  const viewFleet = document.getElementById("view-fleet");
   // Live-only header chrome: the stage switcher and the SLAM badge are about
-  // the robot, not about which sim to launch.
+  // the robot, not about which sim to launch or the fleet radio monitor.
   const liveChrome = [
     document.getElementById("stage-mode"),
     document.getElementById("slam-badge"),
@@ -66,7 +67,8 @@
     currentView = view;
     for (const el of viewLive) el.hidden = view !== "live";
     for (const el of liveChrome) el.hidden = view !== "live";
-    viewScenarios.hidden = view !== "scenarios";
+    if (viewScenarios) viewScenarios.hidden = view !== "scenarios";
+    if (viewFleet) viewFleet.hidden = view !== "fleet";
     for (const btn of document.querySelectorAll("#view-mode button")) {
       btn.classList.toggle("active", btn.dataset.view === view);
     }

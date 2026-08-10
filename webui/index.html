@@ -266,12 +266,12 @@
   }
 
   /* -- scenarios view (webui/scenarios.js) -------------------------------- */
-  /* A sibling grid item spanning both columns rather than a wrapper around the
+  /* Sibling grid items spanning both columns rather than a wrapper around the
      live view: wrapping #stage-panel and #right-col in a container would make
      them children of that container instead of the body grid, and the whole
      1.7fr/1fr layout above would collapse. Switching views just toggles
-     [hidden] on the three top-level items. */
-  #view-scenarios { grid-column: 1 / -1; min-height: 0; }
+     [hidden] on the top-level items (live pair, scenarios, fleet). */
+  #view-scenarios, #view-fleet { grid-column: 1 / -1; min-height: 0; }
   #scenario-head { display: flex; align-items: center; gap: 10px; flex: none; flex-wrap: wrap; margin-bottom: 8px; }
   #scenario-head h2 { margin: 0; flex: none; }
   #scenario-hint { font-size: 0.75rem; color: #9aa; }
@@ -334,6 +334,68 @@
   }
   #console-warning code { color: #fd9; }
 
+  /* -- fleet mesh radio view (webui/fleet_comms.js) ---------------------- */
+  #fleet-head { display: flex; align-items: center; gap: 10px; flex: none; flex-wrap: wrap; margin-bottom: 8px; }
+  #fleet-head h2 { margin: 0; flex: none; }
+  #fleet-hint { font-size: 0.75rem; color: #9aa; }
+  #fleet-conn {
+    margin-left: auto; font-family: monospace; font-size: 0.75rem; color: #7bf;
+  }
+  #fleet-conn.stale { color: #fb7; }
+  #fleet-conn.dead { color: #f77; }
+  #fleet-body {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+    flex: 1 1 auto; min-height: 0;
+  }
+  #fleet-status-col, #fleet-intent-col {
+    display: flex; flex-direction: column; min-height: 0; gap: 6px;
+  }
+  #fleet-status-col h3, #fleet-intent-col h3 {
+    margin: 0; font-size: 0.8rem; color: #9aa; font-weight: 600; flex: none;
+  }
+  #fleet-status-list, #fleet-intent-list {
+    display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; flex: 1 1 auto;
+  }
+  .fleet-card {
+    background: #14161a; border: 1px solid #2a2e35; border-radius: 6px;
+    padding: 10px; flex: none;
+  }
+  .fleet-card.fresh { border-color: #2d5; }
+  .fleet-card.aging { border-color: #b80; }
+  .fleet-card.stale { border-color: #622; opacity: 0.7; }
+  .fleet-card h4 {
+    margin: 0 0 6px; font-size: 0.88rem; font-weight: 600;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .fleet-card dl {
+    margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 2px 10px;
+    font-family: monospace; font-size: 0.74rem;
+  }
+  .fleet-card dt { color: #778; }
+  .fleet-card dd { margin: 0; color: #cde; }
+  .fleet-mode {
+    padding: 1px 6px; border-radius: 3px; font-size: 0.7rem; font-family: monospace;
+    background: #234; color: #7bf;
+  }
+  .fleet-mode.explore { background: #043; color: #2d5; }
+  .fleet-mode.stuck { background: #400; color: #f77; }
+  .fleet-mode.nav { background: #224; color: #c9f; }
+  #fleet-log-wrap { grid-column: 1 / -1; display: flex; flex-direction: column; min-height: 0; flex: 0 0 28%; }
+  #fleet-log-wrap h3 { margin: 0 0 4px; font-size: 0.8rem; color: #9aa; font-weight: 600; }
+  #fleet-log {
+    flex: 1 1 auto; min-height: 100px; overflow: auto; margin: 0;
+    background: #000; border: 1px solid #2a2e35; border-radius: 4px; padding: 8px;
+    font-family: monospace; font-size: 0.7rem; line-height: 1.4; color: #9c9;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  #fleet-log:empty::before {
+    content: "Waiting for /fleet/status and /fleet/intent… Start explore_fleet (or any multi-robot run) so fleet_radio + explorers are up.";
+    color: #556;
+  }
+  #fleet-empty-status, #fleet-empty-intent {
+    font-size: 0.78rem; color: #667; padding: 12px; text-align: center;
+  }
+
   /* -- phone / narrow viewport ------------------------------------------- */
   /* The dashboard is driven from a phone over the tailnet (see docs/running.md).
      Stack the stage above the right column and grow the pad hit targets. */
@@ -352,7 +414,8 @@
     /* The scenario list and its log won't both fit across a phone; stack them
        and give the log a fixed slice so the cards stay reachable. */
     #scenario-body { grid-template-columns: 1fr; grid-auto-rows: auto; }
-    #view-scenarios { min-height: 70vh; }
+    #view-scenarios, #view-fleet { min-height: 70vh; }
+    #fleet-body { grid-template-columns: 1fr; }
     #session-log { min-height: 140px; }
     #drive-pad { grid-template-columns: repeat(3, 48px); grid-template-rows: repeat(3, 48px); }
     #aim-pad { grid-template-columns: repeat(3, 40px); grid-template-rows: repeat(3, 40px); }
@@ -379,6 +442,8 @@
     <div id="view-mode" class="segmented">
       <button type="button" data-view="live" class="active"
               title="The running robot: cameras, map, drive pad, dispatch">live</button>
+      <button type="button" data-view="fleet"
+              title="Monitor /fleet/status and /fleet/intent mesh radio (no TF oracle)">fleet</button>
       <button type="button" data-view="scenarios"
               title="Pick a scenario and start or stop the simulation itself">scenarios</button>
     </div>
@@ -520,6 +585,37 @@
     </div>
   </div>
 
+  <!-- Fleet mesh radio monitor: /fleet/status + /fleet/intent (webui/fleet_comms.js).
+       Uses rosbridge — needs a live bringup with nodes/fleet_radio.py. -->
+  <div class="panel" id="view-fleet" hidden>
+    <div id="fleet-head">
+      <h2>Fleet mesh</h2>
+      <span id="fleet-hint"
+            title="Self-reported status and intent broadcasts. Autonomy does not look up peer poses on /tf — this tab shows the same radio channel explorers use.">
+        /fleet/status · /fleet/intent — mesh stand-in (no TF oracle)
+      </span>
+      <span id="fleet-conn" class="dead">rosbridge: disconnected</span>
+    </div>
+    <div id="fleet-body">
+      <div id="fleet-status-col">
+        <h3>Status (self-reported pose)</h3>
+        <div id="fleet-status-list">
+          <div id="fleet-empty-status">No status yet.</div>
+        </div>
+      </div>
+      <div id="fleet-intent-col">
+        <h3>Intent (goals / corridors)</h3>
+        <div id="fleet-intent-list">
+          <div id="fleet-empty-intent">No intents yet.</div>
+        </div>
+      </div>
+      <div id="fleet-log-wrap">
+        <h3>Radio log</h3>
+        <pre id="fleet-log" title="Recent /fleet/* messages (newest at the bottom)."></pre>
+      </div>
+    </div>
+  </div>
+
 <!-- Vendored (webui/vendor/roslib.min.js) rather than a CDN so the dashboard is
      fully self-contained over the tailnet — no public-internet dependency to
      load the page. Refresh with:
@@ -540,6 +636,9 @@
      only to webui/serve.py's control API, so it still works (and can start the
      sim) when rosbridge has nothing to say. -->
 <script src="scenarios.js"></script>
+<!-- Fleet mesh radio monitor tab. Own rosbridge connection (like arm.js) so
+     it stays independent of app.js subscriptions. -->
+<script src="fleet_comms.js"></script>
 <!-- Manual arm teleop pad + pose capture. Self-mounting and independent of
      app.js (own rosbridge connection, own injected CSS) so it stayed a
      one-line diff here while other branches were editing this file. -->

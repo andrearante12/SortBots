@@ -129,6 +129,7 @@ const VIEWPORTS = [
 ];
 
 const SHOW_SCENARIOS = `document.querySelector('#view-mode button[data-view="scenarios"]').click()`;
+const SHOW_FLEET = `document.querySelector('#view-mode button[data-view="fleet"]').click()`;
 const SHOW_LIVE = `document.querySelector('#view-mode button[data-view="live"]').click()`;
 const VISIBLE = `(id) => {
   const el = document.getElementById(id);
@@ -231,6 +232,25 @@ async function main() {
     })()`);
     check(`${vp.label}: live view is the default`,
           initial.stage && initial.right && !initial.scenarios);
+
+    await page.eval(SHOW_FLEET);
+    await sleep(400);
+    const fleet = await page.eval(`(() => {
+      const vis = ${VISIBLE};
+      return {
+        stage: vis('stage-panel'), right: vis('right-col'),
+        fleet: vis('view-fleet'), scenarios: vis('view-scenarios'),
+        stageMode: vis('stage-mode'),
+        hasStatusCol: !!document.getElementById('fleet-status-list'),
+        hasIntentCol: !!document.getElementById('fleet-intent-list'),
+        hasLog: !!document.getElementById('fleet-log'),
+      };
+    })()`);
+    check(`${vp.label}: fleet tab hides live and scenarios`,
+          !fleet.stage && !fleet.right && fleet.fleet && !fleet.scenarios);
+    check(`${vp.label}: fleet tab has status/intent/log panels`,
+          fleet.hasStatusCol && fleet.hasIntentCol && fleet.hasLog);
+    check(`${vp.label}: fleet tab hides live-only chrome`, !fleet.stageMode);
 
     await page.eval(SHOW_SCENARIOS);
     await sleep(600);
