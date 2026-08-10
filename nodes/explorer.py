@@ -20,18 +20,14 @@ fused, world-anchored grid, not this robot's own /{robot_id}/map — so a
 robot's frontier search already sees space ANY robot has mapped (see that
 node's docstring for how the fusion works; each robot still owns its own
 RTAB-Map database, this is NOT a shared pose graph / true collaborative SLAM,
-which stays future work). On top of that, explorers publish/subscribe a
-SHARED (not namespaced) `/explore/claims` topic so two robots sharing a
-fused map don't both repeatedly send goals into the same frontier cluster:
-each claim is refreshed every tick a goal stays healthy, released explicitly
-the moment that goal ends (success, failure, or preemption) rather than left
-to expire, and TRANSIENT_LOCAL so a robot that starts exploring after its
-peers still sees their current claims immediately. A peer's live TF pose
-(not just its claimed goal) is also kept clear of, since a claim marks where
-a peer is headed, not the path it's driving to get there.
+which stays future work). Coordination is intentional mesh radio
+(nodes/fleet_radio.py), NOT silent TF eavesdropping:
+  /fleet/intent  — goal + optional corridor polyline (replaces /explore/claims)
+  /fleet/status  — self-reported peer pose for soft keepouts
+Autonomy must never look up map -> <peer>/base_link on shared /tf.
 
 No custom .msg/.srv package (see task_manager.py's docstring for why):
-explore_status/explore_cmd/claims are all std_msgs/String carrying JSON,
+explore_status/explore_cmd/fleet topics are all std_msgs/String carrying JSON,
 matching the existing task_status/dispatch_task convention.
 
 Run (system ROS 2 Jazzy sourced, NOT the Isaac venv or conda):
@@ -53,6 +49,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -74,6 +71,12 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "explorer.yaml"
+FLEET_RADIO_CONFIG = REPO_ROOT / "configs" / "fleet_radio.yaml"
+
+# Allow `python3 nodes/explorer.py` without installing a package: nodes/ is
+# on sys.path when run by path (bringup ExecuteProcess cwd is repo root).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fleet_radio as fleet_radio_mod  # noqa: E402
 
 # RTAB-Map's /map is published latched (see sortbots_rtabmap_robot.launch.py /
 # nav2_params.yaml's static_layer note) — match that QoS so a late-starting
@@ -85,15 +88,18 @@ MAP_QOS = QoSProfile(
     reliability=QoSReliabilityPolicy.RELIABLE,
 )
 
-# TRANSIENT_LOCAL (not the plain volatile default) so a robot that starts
-# exploring after its peers already have sees their current claims
-# immediately, not just whatever they happen to publish next — each robot's
-# claim_pub retains its own last message, so a late joiner gets one sample
-# per currently-connected peer.
-CLAIM_QOS = QoSProfile(
+# TRANSIENT_LOCAL so a late-joining explorer sees current /fleet/intent
+# (mesh broadcast stand-in). Status is BEST_EFFORT + volatile — stale pose
+# is worse than none.
+INTENT_QOS = QoSProfile(
     depth=1,
     durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
     reliability=QoSReliabilityPolicy.RELIABLE,
+)
+STATUS_QOS = QoSProfile(
+    depth=10,
+    durability=QoSDurabilityPolicy.VOLATILE,
+    reliability=QoSReliabilityPolicy.BEST_EFFORT,
 )
 
 DEFAULTS = {
@@ -107,11 +113,12 @@ DEFAULTS = {
     "done_after_empty_cycles": 5,  # consecutive empty replans before declaring exploration done
     "max_goal_distance_m": 8.0,    # ignore frontiers farther than this (bounds planning time)
     "occupied_thresh": 65,         # cell value >= this counts as an obstacle
-    "claim_radius_m": 1.0,         # exclude frontiers this close to another robot's active claim
-    "claim_ttl_s": 90.0,           # forget another robot's claim after this long
-    "peer_avoid_radius_m": 0.8,    # exclude frontier goals this close to another robot's CURRENT pose
-                                    # (claims mark the GOAL, not the path there — this catches
-                                    # head-on aisle encounters claims alone don't prevent)
+    "claim_radius_m": 1.0,         # exclude frontiers this close to another robot's intent goal
+    "claim_ttl_s": 90.0,           # forget another robot's intent after this long (backstop)
+    "peer_avoid_radius_m": 0.8,    # exclude frontiers this close to a peer's /fleet/status pose
+    "corridor_radius_m": 0.6,      # exclude frontiers near peer intent corridor vertices
+    "yield_enabled": True,
+    "yield_wait_s": 3.0,
     "goal_standoff_max_m": 1.5,    # search radius for a pulled-back goal around a frontier cell
     "goal_clearance_m": 0.45,      # goal min distance from occupied cells (> inflation 0.4)
     "goal_unknown_clearance_m": 0.2,  # goal min distance from unknown cells
@@ -144,6 +151,21 @@ DEFAULTS = {
 
 def load_config(path: Path | None) -> dict:
     cfg = dict(DEFAULTS)
+    cfg.setdefault("status_ttl_s", 1.0)
+    # Fleet mesh knobs live in fleet_radio.yaml so radio + explorer stay in
+    # lockstep; explorer.yaml may still override any of these keys.
+    if FLEET_RADIO_CONFIG.exists():
+        with open(FLEET_RADIO_CONFIG) as f:
+            raw = yaml.safe_load(f) or {}
+        if isinstance(raw, dict):
+            if "intent_ttl_s" in raw:
+                cfg["claim_ttl_s"] = raw["intent_ttl_s"]
+            for k in (
+                "claim_radius_m", "peer_avoid_radius_m", "corridor_radius_m",
+                "yield_enabled", "yield_wait_s", "status_ttl_s",
+            ):
+                if k in raw:
+                    cfg[k] = raw[k]
     if path and path.exists():
         with open(path) as f:
             raw = yaml.safe_load(f) or {}
@@ -260,7 +282,12 @@ class ExplorerNode(Node):
         # [x, y, monotonic_ts, strikes, radius] — see _blacklist_point for why
         # entries escalate instead of accumulating as independent neighbours.
         self._blacklist: list[list[float]] = []
-        self._other_claims: dict[str, tuple[float, float, float]] = {}  # robot_id -> (x, y, ts)
+        # Peer mesh state: robot_id -> (parsed_dict, monotonic_recv_ts).
+        # Never filled from TF — only /fleet/intent and /fleet/status.
+        self._peer_intents: dict[str, tuple[dict, float]] = {}
+        self._peer_status: dict[str, tuple[dict, float]] = {}
+        self._yield_until: float | None = None
+        self._priority = fleet_radio_mod.priority_for_robot_id(robot_id)
         # Bumped on every /map message. _frontier_consumed() compares it
         # against the seq a goal was chosen on, so a goal can never be
         # abandoned on the same grid that produced it.
@@ -343,13 +370,19 @@ class ExplorerNode(Node):
         self.create_subscription(OccupancyGrid, map_topic, self._on_map, MAP_QOS)
         self.create_subscription(String, f"/{robot_id}/explore_cmd", self._on_cmd, 10)
         self.create_subscription(String, f"/{robot_id}/explore_hint", self._on_hint, 10)
-        # Deliberately global, not /{robot_id}/-namespaced: every robot's
-        # explorer needs to see every OTHER robot's claims.
-        self.create_subscription(String, "/explore/claims", self._on_claim, CLAIM_QOS)
+        # Mesh broadcasts (sim: shared ROS topics). Not /{robot_id}/-namespaced.
+        self.create_subscription(
+            String, fleet_radio_mod.INTENT_TOPIC, self._on_intent, INTENT_QOS
+        )
+        self.create_subscription(
+            String, fleet_radio_mod.STATUS_TOPIC, self._on_status, STATUS_QOS
+        )
 
         self.status_pub = self.create_publisher(String, f"/{robot_id}/explore_status", 10)
         self.frontier_pub = self.create_publisher(MarkerArray, f"/{robot_id}/frontiers", 10)
-        self.claim_pub = self.create_publisher(String, "/explore/claims", CLAIM_QOS)
+        self.intent_pub = self.create_publisher(
+            String, fleet_radio_mod.INTENT_TOPIC, INTENT_QOS
+        )
 
         self.create_timer(cfg["replan_period_s"], self._tick)
         self.get_logger().info(
@@ -589,7 +622,7 @@ class ExplorerNode(Node):
         # in the SAME tick, which re-claims via _send_goal right after — no
         # window where the frontier looks unclaimed to a peer mid-replan.
         if self._goal_target is not None:
-            self._publish_claim(*self._goal_target, released=True)
+            self._publish_intent(*self._goal_target, released=True)
         self._goal_handle = None
         self._goal_target = None
         self._goal_frontier = None
@@ -597,55 +630,105 @@ class ExplorerNode(Node):
         self._goal_start_pose = None
         self._goal_sent_at = None
 
-    # -- frontier-claim sharing (the concrete slice of collaborative
-    #    exploration this repo builds today — see module docstring) --------
+    # -- fleet mesh intent / status (no peer TF lookups) -------------------
 
-    def _on_claim(self, msg: String):
-        try:
-            c = json.loads(msg.data)
-            rid = c["robot_id"]
-            if rid == self.robot_id:
-                return
-            if c.get("released"):
-                self._other_claims.pop(rid, None)
-                return
-            self._other_claims[rid] = (float(c["x"]), float(c["y"]), time.monotonic())
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            pass
+    def _on_intent(self, msg: String):
+        it = fleet_radio_mod.parse_intent(msg.data)
+        if it is None:
+            return
+        rid = it["robot_id"]
+        if rid == self.robot_id:
+            return
+        if it.get("released"):
+            self._peer_intents.pop(rid, None)
+            return
+        self._peer_intents[rid] = (it, time.monotonic())
 
-    def _publish_claim(self, x: float, y: float, released: bool = False):
+    def _on_status(self, msg: String):
+        st = fleet_radio_mod.parse_status(msg.data)
+        if st is None or st["robot_id"] == self.robot_id:
+            return
+        self._peer_status[st["robot_id"]] = (st, time.monotonic())
+
+    def _publish_intent(
+        self,
+        x: float,
+        y: float,
+        released: bool = False,
+        corridor: list[list[float]] | None = None,
+    ):
         msg = String()
-        data = {"robot_id": self.robot_id, "x": x, "y": y}
-        if released:
-            data["released"] = True
-        msg.data = json.dumps(data)
-        self.claim_pub.publish(msg)
+        msg.data = fleet_radio_mod.encode_intent(
+            self.robot_id,
+            x,
+            y,
+            corridor=corridor,
+            priority=self._priority,
+            released=released,
+            intent_ttl_s=self.cfg["claim_ttl_s"],
+        )
+        self.intent_pub.publish(msg)
 
     def _active_claims(self) -> list[tuple[float, float]]:
-        # ttl is a backstop for a peer that stops publishing without a clean
-        # release (crash, network drop) — the normal end-of-goal path always
-        # releases explicitly (_cancel_active_goal) and the in-flight path
-        # refreshes every tick (_tick's heartbeat branch), so this rarely
-        # needs to fire on a healthy peer.
-        ttl = self.cfg["claim_ttl_s"]
-        now = time.monotonic()
-        return [(x, y) for (x, y, ts) in self._other_claims.values() if now - ts < ttl]
+        intents = fleet_radio_mod.active_peer_intents(
+            self._peer_intents,
+            now_wall=time.time(),
+            now_mono=time.monotonic(),
+            ttl_s=self.cfg["claim_ttl_s"],
+            self_id=self.robot_id,
+        )
+        return [(it["x"], it["y"]) for it in intents]
 
     def _peer_positions(self) -> list[tuple[float, float]]:
-        """Current map-frame position of every robot we've heard a claim
-        from. Distinct from _active_claims: a claim marks where a peer is
-        HEADED, this is where it physically IS right now — used to avoid
-        planning a goal into a peer's current path, not just its target.
-        """
-        positions = []
-        for rid in self._other_claims:
-            try:
-                tr = self.tf_buffer.lookup_transform("map", f"{rid}/base_link", rclpy.time.Time())
-            except Exception:
-                continue
-            t = tr.transform.translation
-            positions.append((t.x, t.y))
-        return positions
+        """Peer poses from /fleet/status only — never TF."""
+        return fleet_radio_mod.active_peer_poses(
+            self._peer_status,
+            now=time.monotonic(),
+            ttl_s=float(self.cfg.get("status_ttl_s", 1.0)),
+            self_id=self.robot_id,
+        )
+
+    def _peer_intent_list(self) -> list[dict]:
+        return fleet_radio_mod.active_peer_intents(
+            self._peer_intents,
+            now_wall=time.time(),
+            now_mono=time.monotonic(),
+            ttl_s=self.cfg["claim_ttl_s"],
+            self_id=self.robot_id,
+        )
+
+    def _corridor_keepouts(self) -> list[tuple[float, float]]:
+        return fleet_radio_mod.corridor_points(self._peer_intent_list())
+
+    def _own_corridor(self, gx: float, gy: float) -> list[list[float]]:
+        """Polyline from current pose to goal for intent broadcast."""
+        pose = self._robot_pose()
+        if pose is None:
+            return []
+        return [[pose[0], pose[1]], [gx, gy]]
+
+    def _should_yield_for(self, gx: float, gy: float) -> bool:
+        if not self.cfg.get("yield_enabled", True):
+            return False
+        pose = self._robot_pose()
+        if pose is None:
+            return False
+        blocker = fleet_radio_mod.should_yield(
+            self._priority,
+            pose,
+            (gx, gy),
+            self._peer_intent_list(),
+            pad_m=float(self.cfg.get("corridor_radius_m", 0.6)),
+        )
+        if blocker is None:
+            return False
+        self._yield_until = time.monotonic() + float(self.cfg.get("yield_wait_s", 3.0))
+        self.get_logger().info(
+            f"yielding to {blocker['robot_id']} "
+            f"(peer priority {blocker['priority']} <= ours {self._priority}) "
+            f"for {self.cfg.get('yield_wait_s', 3.0):.1f}s"
+        )
+        return True
 
     # -- blacklist ---------------------------------------------------------
 
@@ -749,6 +832,19 @@ class ExplorerNode(Node):
             self._publish_status()
             return
 
+        if self._yield_until is not None and time.monotonic() < self._yield_until:
+            # Courtesy yield to a higher-priority peer corridor — don't
+            # preempt an active Nav2 goal mid-flight, only delay new sends
+            # (handled in _plan_and_send). Heartbeat intent while waiting.
+            if self._goal_handle is not None and self._goal_target is not None:
+                self._publish_intent(
+                    *self._goal_target, corridor=self._own_corridor(*self._goal_target)
+                )
+            self._publish_status()
+            # Fall through only if we already have a live goal; otherwise wait.
+            if self._goal_handle is None:
+                return
+
         superseded = None
         if self._goal_handle is not None:
             # Order is load-bearing: a wedged robot must trip the stuck
@@ -763,7 +859,9 @@ class ExplorerNode(Node):
                 # uncleanly) could otherwise lapse mid-drive on a goal that's
                 # simply taking a while, since it was only ever published
                 # once at _send_goal time.
-                self._publish_claim(*self._goal_target)
+                self._publish_intent(
+                    *self._goal_target, corridor=self._own_corridor(*self._goal_target)
+                )
                 self._publish_status()  # heartbeat while a goal is in flight
                 return
 
@@ -1130,6 +1228,7 @@ class ExplorerNode(Node):
         blacklist = self._active_blacklist()
         claims = self._active_claims()
         peers = self._peer_positions()
+        corridors = self._corridor_keepouts()
         hint = self._active_hint()
         open_cells = max(1, round(self.cfg["openness_radius_m"] / res))
         h, w = free.shape
@@ -1143,6 +1242,10 @@ class ExplorerNode(Node):
             if self._too_close(gx, gy, claims, self.cfg["claim_radius_m"]):
                 continue
             if self._too_close(gx, gy, peers, self.cfg["peer_avoid_radius_m"]):
+                continue
+            if self._too_close(
+                gx, gy, corridors, float(self.cfg.get("corridor_radius_m", 0.6))
+            ):
                 continue
             escape_pool.append((dist, gx, gy, fx, fy))
             # A hinted frontier ignores the distance cap. Without this,
@@ -1291,6 +1394,12 @@ class ExplorerNode(Node):
 
         self._empty_cycles = 0
         _score, gx, gy, fx, fy = candidates[0]
+        if self._yield_until is not None and time.monotonic() < self._yield_until:
+            self._publish_status()
+            return False
+        if self._should_yield_for(gx, gy):
+            self._publish_status()
+            return False
         return self._send_goal(gx, gy, fx, fy, rx, ry)
 
     def _goal_point(
@@ -1369,7 +1478,7 @@ class ExplorerNode(Node):
         self._goal_sent_at = time.monotonic()
         self._goals_sent += 1
         self._pose_history.clear()  # fresh stuck window for the new goal
-        self._publish_claim(gx, gy)
+        self._publish_intent(gx, gy, corridor=self._own_corridor(gx, gy))
         self.get_logger().info(f"exploring -> ({gx:.2f}, {gy:.2f})")
 
         send_future = self.nav_client.send_goal_async(goal)

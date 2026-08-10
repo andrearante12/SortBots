@@ -8,11 +8,13 @@ title: Frontier exploration — fleet (2 robots)
 description: >
   Two robots, spawned at their configs/robots.yaml positions in the NVIDIA
   warehouse, exploring collaboratively from empty maps. Each robot's own
-  RTAB-Map grid is fused into one world-anchored /map (nodes/map_merge.py) via
+  RTAB-Map grid is   fused into one world-anchored /map (nodes/map_merge.py) via
   static map -> <robot_id>/map anchors, so both explorers plan frontiers
   against space EITHER robot has mapped — not two independent single-robot
-  runs sharing a warehouse. Frontier claims (see nodes/explorer.py) keep them
-  from repeatedly targeting the same cluster. Only robot_0 gets a chase cam
+  runs sharing a warehouse. Fleet mesh radio (/fleet/intent + /fleet/status)
+  deconflicts goals/corridors without TF pose oracle; dynamic_obstacle_filter
+  keeps movers out of SLAM while Nav2 still sees them ephemerally.
+  Only robot_0 gets a chase cam
   (dashboard shows that feed); robot_1 skips the cosmetic render product so
   the GPU isn't saturated by a second 3rd-person view nobody is watching.
   Override chase_cam_robots=2 if you need both, or =0 / chase_cam:false to

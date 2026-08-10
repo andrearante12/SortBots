@@ -71,7 +71,8 @@ TOPICS=(
     "/${ROBOT_ID}/odom"
     "/${ROBOT_ID}/cmd_vel"
     "/${ROBOT_ID}/camera/camera_info"
-    "/explore/claims"
+    "/fleet/intent"
+    "/fleet/status"
     "/tf"
     "/tf_static"
 )

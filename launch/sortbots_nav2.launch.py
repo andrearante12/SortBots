@@ -100,9 +100,9 @@ def _make_nav2_group(context, use_sim_time, params_file):
     return [GroupAction([
             PushRosNamespace(robot_id),
 
-            # Isaac only publishes a raw depth Image; obstacle_layer needs a
-            # PointCloud2. Converts /camera/depth -> /camera/depth/points
-            # (namespaced automatically by PushRosNamespace above).
+            # Isaac publishes raw depth Image; Nav2 needs PointCloud2.
+            # depth_static (movers stripped by dynamic_obstacle_filter) feeds
+            # the static obstacle source; dynamic_obstacles is a separate cloud.
             ComposableNodeContainer(
                 name="depth_to_cloud_container",
                 namespace="",
@@ -112,11 +112,11 @@ def _make_nav2_group(context, use_sim_time, params_file):
                     ComposableNode(
                         package="depth_image_proc",
                         plugin="depth_image_proc::PointCloudXyzNode",
-                        name="depth_to_cloud",
+                        name="depth_static_to_cloud",
                         remappings=[
-                            ("image_rect", "camera/depth"),
+                            ("image_rect", "camera/depth_static"),
                             ("camera_info", "camera/camera_info"),
-                            ("points", "camera/depth/points"),
+                            ("points", "camera/depth_static/points"),
                         ],
                         parameters=[{"use_sim_time": use_sim_time}],
                     ),
@@ -176,7 +176,18 @@ def _make_nav2_group(context, use_sim_time, params_file):
                 name="velocity_smoother",
                 output="screen",
                 parameters=[rewritten_params],
-                remappings=[("cmd_vel", "cmd_vel_nav"), ("cmd_vel_smoothed", "cmd_vel")],
+                # Smoother -> collision_monitor -> robot cmd_vel.
+                remappings=[
+                    ("cmd_vel", "cmd_vel_nav"),
+                    ("cmd_vel_smoothed", "cmd_vel_smoothed"),
+                ],
+            ),
+            Node(
+                package="nav2_collision_monitor",
+                executable="collision_monitor",
+                name="collision_monitor",
+                output="screen",
+                parameters=[rewritten_params],
             ),
             Node(
                 package="nav2_lifecycle_manager",

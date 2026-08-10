@@ -330,7 +330,7 @@ free beats unknown where two robots' grids disagree about a cell. Nav2's
 `global_frame: map` and every explorer's default `--map-topic /map` both
 point at this fused grid, so a robot plans and picks frontiers using space
 ANY robot has mapped. See "Autonomous exploration" below for the
-frontier-claim-sharing layer on top of that.
+fleet mesh intent/status layer on top of that.
 
 ### What the dashboard shows
 
@@ -693,19 +693,31 @@ exactly as predicted:
   whatever the two Nav2-level settings above don't catch; with the tolerance
   fix it should now fire rarely.
 
-**Multi-robot claim sharing:** every explorer also publishes/subscribes a
-global (not robot-namespaced) `/explore/claims` topic — "I'm heading here,
-don't also send your robot to this frontier." Each robot still builds and
-owns its own RTAB-Map database independently (not a shared pose graph — see
-"Multi-robot" above for how `nodes/map_merge.py` fuses the resulting grids
-into one `/map` instead); claim-sharing is the coordination layer on top of
-that shared grid. A claim is refreshed every replan tick its goal stays
-healthy, released explicitly the moment that goal ends (success, failure, or
-preemption — not left to expire), and published `TRANSIENT_LOCAL` so a robot
-that starts exploring after its peers still sees their current claims
-immediately. Frontier candidates near another robot's current TF pose are
-also excluded, not just near its claimed goal — a claim marks where a peer
-is headed, not the path it's driving to get there.
+**Fleet mesh radio + dynamic obstacles (not centralized MAPF):** coordination
+is intentional broadcast over shared ROS topics that stand in for a WiFi mesh
+(`nodes/fleet_radio.py`, `configs/fleet_radio.yaml`):
+
+| Topic | Role |
+|---|---|
+| `/fleet/status` | Self-reported pose/twist/mode at ~5 Hz (BEST_EFFORT). Peers must **not** look up `map → <other>/base_link` on shared `/tf` — that is an oracle. |
+| `/fleet/intent` | Goal + optional corridor polyline + priority (TRANSIENT_LOCAL). Replaces `/explore/claims`. |
+
+Explorers soft-exclude frontiers near peer intent goals, corridor vertices, and
+last-heard status poses; lower `priority` (robot_0 = 0) wins courtesy yield
+when corridors conflict. Each robot still owns its own RTAB-Map DB;
+`map_merge.py` fuses grids into `/map`.
+
+**Perception of movers:** `nodes/dynamic_obstacle_filter.py` publishes
+`/<id>/camera/depth_static` (movers → NaN) for RTAB-Map and
+`/<id>/dynamic_obstacles` for Nav2's ephemeral costmap source, so peers are
+not permanently painted into SLAM. Nav2 also runs `collision_monitor` as a
+last-resort stop on forward depth. Local avoidance is still per-robot MPPI +
+reactive BT — not joint trajectory optimization.
+
+**Live check (aisle crossing):** teleop robot_B across robot_A's view — A's
+`/robot_A/map` free/occupied footprint should not grow a lasting peer-shaped
+blob; A's local costmap should show a moving mark that clears after B leaves;
+`/fleet/status` should keep updating for both.
 
 ### The two action-server races this was built against
 

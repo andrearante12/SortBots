@@ -297,8 +297,12 @@ steer_lock: true
 # 0 = never expire.
 steer_ttl_s: 300.0
 
-# Multi-robot frontier-claim sharing (see explorer.py's module docstring —
-# this is NOT map fusion, just a "don't plan here, someone's already going"
-# signal over the shared /explore/claims topic).
+# Multi-robot mesh coordination (see nodes/fleet_radio.py + explorer).
+# Soft keepouts use /fleet/intent goals and /fleet/status poses — never peer TF.
 claim_radius_m: 1.0
 claim_ttl_s: 90.0
+peer_avoid_radius_m: 0.8
+corridor_radius_m: 0.6
+yield_enabled: true
+yield_wait_s: 3.0
+status_ttl_s: 1.0

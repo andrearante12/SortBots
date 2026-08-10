@@ -1093,6 +1093,9 @@ const PEER_COLORS = [
   { pose: "#ff5da2", trail: "rgba(255,93,162,0.85)", plan: "#7ee787" },
 ];
 const peerRobots = new Map(); // robot_id -> {trail, lastPose, plan, frontierMarkers, steerQueue, blacklistPoints, color}
+// Peer poses come from /fleet/status (self-reported mesh radio), matching
+// autonomy — not silent TF eavesdropping on map -> <peer>/base_link.
+const FLEET_STATUS_TTL_MS = 1500;
 
 function setupPeer(id) {
   if (id === ROBOT_ID || peerRobots.has(id)) return;
@@ -1100,7 +1103,7 @@ function setupPeer(id) {
   const state = {
     id, trail: [], lastPose: null, plan: [],
     frontierMarkers: [], steerQueue: [], blacklistPoints: [],
-    color,
+    color, statusAt: 0,
   };
   peerRobots.set(id, state);
 
@@ -1139,18 +1142,37 @@ function setupPeer(id) {
   });
 }
 
-function updatePeerPose(id, state) {
-  const pose = lookupPose(`${id}/base_link`);
-  if (!pose) return;
-  const { x, y } = pose.t;
-  const yaw = yawFromQuat(pose.q.z, pose.q.w);
+// One shared subscription — mesh broadcast, all peers.
+new ROSLIB.Topic({
+  ros,
+  name: "/fleet/status",
+  messageType: "std_msgs/String",
+  reconnect_on_close: true,
+}).subscribe((msg) => {
+  let s;
+  try {
+    s = JSON.parse(msg.data);
+  } catch (e) {
+    return;
+  }
+  const id = s.robot_id;
+  if (!id || id === ROBOT_ID) return;
+  // Peers may appear on radio before /api/robots finishes setupPeer.
+  if (!peerRobots.has(id)) setupPeer(id);
+  const state = peerRobots.get(id);
+  if (!state) return;
+  const pose = s.pose || {};
+  const x = pose.x, y = pose.y;
+  if (typeof x !== "number" || typeof y !== "number") return;
+  const yaw = typeof pose.yaw === "number" ? pose.yaw : 0;
   state.lastPose = { x, y, yaw };
+  state.statusAt = Date.now();
   const last = state.trail[state.trail.length - 1];
   if (!last || Math.hypot(x - last[0], y - last[1]) > 0.02) {
     state.trail.push([x, y]);
     if (state.trail.length > MAX_TRAIL_POINTS) state.trail.shift();
   }
-}
+});
 
 function onTfMessage(msg) {
   for (const tr of msg.transforms || []) {
@@ -1174,7 +1196,13 @@ function onTfMessage(msg) {
       if (trail.length > MAX_TRAIL_POINTS) trail.shift();
     }
   }
-  for (const [id, state] of peerRobots) updatePeerPose(id, state);
+  // Drop stale peer status so markers vanish if radio goes quiet.
+  const now = Date.now();
+  for (const state of peerRobots.values()) {
+    if (state.lastPose && state.statusAt && now - state.statusAt > FLEET_STATUS_TTL_MS) {
+      state.lastPose = null;
+    }
+  }
 }
 
 new ROSLIB.Topic({

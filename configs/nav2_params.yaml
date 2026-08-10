@@ -225,27 +225,33 @@
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: depth_scan
+        # depth_scan = static world (movers stripped); dynamic_scan = ephemeral
+        # peer/person blobs from nodes/dynamic_obstacle_filter.py. Splitting
+        # them keeps SLAM from painting robots into /map while Nav2 still
+        # sees movers with aggressive clearing on the dynamic source.
+        observation_sources: depth_scan dynamic_scan
         depth_scan:
-          topic: /robot_0/camera/depth/points
+          topic: /robot_0/camera/depth_static/points
           data_type: "PointCloud2"
           marking: true
           clearing: true
-          # Isaac only publishes a raw depth Image; the nav2 launch file
-          # runs a depth_image_proc::PointCloudXyzNode to produce this
-          # PointCloud2 topic for obstacle marking.
           max_obstacle_height: 1.5
           min_obstacle_height: 0.05
-          # Defaults are 2.5/3.0 m — far short of what the depth camera sees.
-          # 4.0 m marking gives ~8 s of warning at the 0.5 m/s top speed and
-          # is inside the D435's reliable depth band; raytrace 5.0 > 4.0 so a
-          # clear re-observation erases stale marks anywhere in the marking
-          # band (in-frustum only — no rear sensing, ghosts behind the robot
-          # persist by design). Same values on both costmaps: one number,
-          # one mental model (the 6x6 rolling window clips beyond ~3 m ahead
-          # anyway, but the diagonal corners reach ~4.2 m).
           obstacle_max_range: 4.0
           raytrace_max_range: 5.0
+        dynamic_scan:
+          topic: /robot_0/dynamic_obstacles
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          max_obstacle_height: 1.5
+          min_obstacle_height: 0.05
+          obstacle_max_range: 4.0
+          raytrace_max_range: 5.0
+          # Shorter persistence than static: once the peer leaves the frustum
+          # raytrace clears marks quickly on the next empty/clearing cloud.
+          observation_persistence: 0.0
+          expected_update_rate: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         # Was 3.0 / 0.4. The old pair gave the robot almost no room: the
@@ -308,9 +314,9 @@
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: true
-        observation_sources: depth_scan
+        observation_sources: depth_scan dynamic_scan
         depth_scan:
-          topic: /robot_0/camera/depth/points
+          topic: /robot_0/camera/depth_static/points
           data_type: "PointCloud2"
           marking: true
           clearing: true
@@ -322,6 +328,17 @@
           # see a live obstacle until the robot was ~5 s from hitting it.
           obstacle_max_range: 4.0
           raytrace_max_range: 5.0
+        dynamic_scan:
+          topic: /robot_0/dynamic_obstacles
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          max_obstacle_height: 1.5
+          min_obstacle_height: 0.05
+          obstacle_max_range: 4.0
+          raytrace_max_range: 5.0
+          observation_persistence: 0.0
+          expected_update_rate: 0.0
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: true
@@ -504,4 +521,31 @@
 /**/collision_monitor:
   ros__parameters:
     use_sim_time: true
-    enabled: false
+    base_frame_id: robot_0/base_link
+    odom_frame_id: robot_0/odom
+    cmd_vel_in_topic: "cmd_vel_smoothed"
+    cmd_vel_out_topic: "cmd_vel"
+    state_topic: "collision_monitor_state"
+    transform_tolerance: 0.3
+    source_timeout: 1.0
+    base_shift_correction: true
+    stop_pub_timeout: 0.5
+    # Last-resort stop from forward depth (static+dynamic already in costmap;
+    # this catches MPPI rollouts that still commit into a near obstacle).
+    observation_sources: ["depth_points"]
+    depth_points:
+      type: "pointcloud"
+      topic: "/robot_0/camera/depth_static/points"
+      min_height: 0.05
+      max_height: 1.5
+      enabled: true
+    polygons: ["FootprintApproach"]
+    FootprintApproach:
+      type: "polygon"
+      action_type: "stop"
+      footprint_topic: "local_costmap/published_footprint"
+      time_before_collision: 1.0
+      simulation_time_step: 0.05
+      max_points: 2
+      visualize: false
+      enabled: true

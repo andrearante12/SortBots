@@ -137,6 +137,16 @@ def _make_per_robot_actions(
             parameters=[{"use_sim_time": use_sim_time}],
         ))
 
+        # Before RTAB-Map: strip movers from depth so SLAM never sees them.
+        actions.append(ExecuteProcess(
+            cmd=[
+                "python3",
+                os.path.join(REPO_ROOT, "nodes", "dynamic_obstacle_filter.py"),
+                "--robot-id", rid,
+            ],
+            output="screen",
+        ))
+
         rtabmap_args = {"robot_id": rid, "use_sim_time": use_sim_time, "rviz": rviz}
         # Map-lifecycle overrides (localization / an explicit --map path /
         # delete_db_on_start) are a single-robot concept today — see module
@@ -175,6 +185,16 @@ def _make_per_robot_actions(
             condition=IfCondition(nav2),
         ))
 
+        # Mesh status broadcaster (self-reported pose — peers must not TF-eavesdrop).
+        actions.append(ExecuteProcess(
+            cmd=[
+                "python3",
+                os.path.join(REPO_ROOT, "nodes", "fleet_radio.py"),
+                "--robot-id", rid,
+            ],
+            output="screen",
+        ))
+
         actions.append(ExecuteProcess(
             cmd=[
                 "python3",
@@ -202,9 +222,9 @@ def _make_per_robot_actions(
             ))
 
         # Every robot in robot_ids explores, not just the primary — with
-        # /map fused across robots (nodes/map_merge.py) and frontier claims
-        # shared over /explore/claims (nodes/explorer.py), this is what makes
-        # a multi-robot run collaborative instead of N independent demos.
+        # /map fused across robots (nodes/map_merge.py) and fleet mesh
+        # intent/status (nodes/fleet_radio.py + explorer /fleet/intent),
+        # this is what makes a multi-robot run collaborative.
         actions.append(GroupAction(
             condition=IfCondition(explore),
             actions=[

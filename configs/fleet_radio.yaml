@@ -1,0 +1,29 @@
+# Mesh-shaped fleet radio (sim: ROS 2 topics; later: WiFi mesh transport).
+# Consumed by nodes/fleet_radio.py (status broadcaster) and nodes/explorer.py
+# (intent + peer keepouts). Autonomy nodes must NOT look up peer poses on
+# shared /tf — status is self-reported over this channel instead.
+
+status_hz: 5.0
+# Drop a peer's last status if older than this (wall/monotonic in the
+# receiver). Stale pose is worse than no pose for keepouts.
+status_ttl_s: 1.0
+
+# Intent keepalive while a goal is live (explorer also republishes on every
+# replan tick). Late joiners use TRANSIENT_LOCAL on /fleet/intent.
+intent_keepalive_s: 2.0
+# Backstop if a peer vanishes without released:true.
+intent_ttl_s: 90.0
+
+# Soft exclusion radii (explorer). claim_radius applies to peer goal;
+# peer_avoid_radius to last-heard status pose; corridor_radius to each
+# polyline vertex on a peer's reserved corridor.
+claim_radius_m: 1.0
+peer_avoid_radius_m: 0.8
+corridor_radius_m: 0.6
+
+# Courtesy yield: if a peer's corridor intersects ours and their priority
+# is >= ours, pause sending a new Nav2 goal for yield_wait_s (or until the
+# peer releases). priority is robot index by default (robot_0 = 0 wins ties
+# when equal — lower number = higher priority).
+yield_enabled: true
+yield_wait_s: 3.0
