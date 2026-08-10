@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SortBots Dashboard</title>
+<style>
+  :root { color-scheme: dark; }
+  /* The whole dashboard is sized to fit one viewport — nothing scrolls except
+     the task queue. Every flex/grid descendant that holds a stretchy child
+     carries `min-height: 0` so it can actually shrink below its content size
+     (without it, flex items refuse to shrink and the page overflows again). */
+  html, body { height: 100%; }
+  /* The [hidden] attribute is how the view switcher hides the live view and
+     the scenarios view. It only works because of this rule: the UA stylesheet
+     gives [hidden] display:none, but any author `display` declaration beats
+     it — and .panel/#right-col/.segmented all set display:flex. Without the
+     !important, "hiding" the live view would do nothing at all. */
+  [hidden] { display: none !important; }
+  body {
+    margin: 0;
+    font-family: system-ui, sans-serif;
+    background: #14161a;
+    color: #e6e6e6;
+    display: grid;
+    grid-template-columns: 1.7fr 1fr;
+    grid-template-rows: auto 1fr;
+    gap: 10px;
+    padding: 10px;
+    box-sizing: border-box;
+    overflow: hidden;
+  }
+  header { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
+  h1 { font-size: 1.05rem; margin: 0; }
+  #conn-dot { width: 10px; height: 10px; border-radius: 50%; background: #a33; }
+  #conn-dot.connected { background: #3a3; }
+  #conn-label { font-size: 0.8rem; color: #9aa; }
+  #robot-select {
+    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 3px 6px; font-size: 0.8rem;
+  }
+  .panel {
+    background: #1c1f24;
+    border: 1px solid #2a2e35;
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+  }
+  .panel h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: #9aa; margin: 0 0 8px; }
+
+  /* -- header: segmented controls ---------------------------------------- */
+  /* Two of these now: the top-level view switcher (live / scenarios) and the
+     stage mode (camera / map). Same treatment, so the header reads as one
+     control vocabulary rather than two invented ones. */
+  .segmented { display: flex; gap: 0; margin-left: 12px; }
+  .segmented button {
+    background: #14161a; color: #9aa; border: 1px solid #2a2e35;
+    padding: 4px 12px; font-size: 0.78rem; cursor: pointer;
+  }
+  .segmented button:first-child { border-radius: 5px 0 0 5px; }
+  .segmented button:last-child { border-radius: 0 5px 5px 0; border-left: none; }
+  .segmented button.active { background: #2d5; color: #111; font-weight: 600; }
+  #view-mode { margin-left: 4px; }
+  #slam-badge {
+    padding: 1px 8px; border-radius: 3px; font-size: 0.75rem; font-family: monospace;
+    background: #234; color: #7bf; margin-left: auto;
+  }
+  #slam-badge.loop-closed { background: #043; color: #2d5; }
+  #slam-badge.stale { background: #400; color: #f77; }
+
+  /* -- the stage --------------------------------------------------------- */
+  /* One box holding chase cam, head cam (hidden by default), and map, plus
+     the two control pads as translucent overlays. Exactly one view carries
+     .stage-main at a time; at most one other carries .stage-pip (map mode
+     keeps chase as the inset). Everything inside is absolutely positioned
+     against this box. */
+  #stage-panel { padding: 0; position: relative; background: #000; }
+  /* A dead feed renders its alt text (web_video_server down, or not up yet) —
+     keep that diagnostic visible but small and muted so it doesn't shout over
+     the layout the way default 16px black-on-black alt text does. */
+  img.stage-view { font-size: 0.72rem; color: #667; }
+  .stage-view { display: none; }
+  .stage-view.stage-main {
+    display: block;
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    /* cover, not contain: the feed is 16:9 but the stage box is closer to
+       square, so "contain" letterboxed it with huge black bars top/bottom —
+       leaving the label/PiP/pads stranded in dead space instead of actually
+       overlaid on the picture. cover crops the sides instead, filling the
+       box edge-to-edge. */
+    object-fit: cover;
+  }
+  .stage-view.stage-pip {
+    display: block;
+    position: absolute; top: 10px; right: 10px;
+    width: 22%; height: auto;
+    object-fit: contain;
+    border: 1px solid #3a4048; border-radius: 6px;
+    background: #000; cursor: pointer; z-index: 5;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.6);
+  }
+  .stage-view.stage-pip:hover { border-color: #2d5; }
+  #stage-label {
+    position: absolute; top: 10px; left: 12px; z-index: 6;
+    font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;
+    color: #cdd; background: rgba(20,22,26,0.55); padding: 3px 8px;
+    border-radius: 4px; pointer-events: none;
+  }
+  #pip-hint {
+    position: absolute; top: 10px; right: 10px; z-index: 6;
+    font-size: 0.68rem; color: #9aa; background: rgba(20,22,26,0.7);
+    padding: 2px 6px; border-radius: 4px; pointer-events: none;
+    transform: translateY(-120%); opacity: 0; transition: opacity 0.15s;
+  }
+  #stage-panel:hover #pip-hint { opacity: 1; }
+
+  /* -- map view (inside the stage) --------------------------------------- */
+  /* The canvas backing store is a FIXED square (app.js's MAP_CANVAS_PX) and
+     the aspect-ratio below is set once, not per-message — earlier both were
+     driven straight from the incoming OccupancyGrid's own width/height, so
+     the box visibly resized on nearly every /map update once a fleet's fused
+     grid started growing every second or so (read as the map continuously
+     zooming). A fixed backing store still keeps the element's bounding rect
+     equal to the drawn image, which eventToCanvasPixel() in app.js relies on
+     to invert clicks back to world coordinates — do NOT switch this to
+     object-fit: the resulting letterbox inside the element would silently
+     offset every nav goal. */
+  /* Top padding clears the absolutely-positioned #stage-label; the bar's right
+     padding clears the PiP inset. Both overlays sit above this view, so the
+     map's own chrome has to be inset out from under them. */
+  #map-view.stage-main {
+    display: flex; flex-direction: column;
+    padding: 38px 12px 12px; box-sizing: border-box;
+  }
+  /* width:100% + the fixed 1/1 aspect-ratio (set once by app.js) sizes the
+     box, max-height caps it to the stage — a replaced element preserves its
+     aspect ratio under a max-* constraint, so the canvas letterboxes itself
+     and the bounding rect stays equal to the drawn image. Deliberately NOT
+     flex:1 1 auto: flex stretch would override the aspect ratio and distort
+     the map. */
+  #map-canvas {
+    flex: 0 1 auto; min-height: 0;
+    width: 100%; height: auto; max-height: 100%;
+    margin: auto;
+    background: #000; border-radius: 4px;
+    image-rendering: pixelated; cursor: crosshair;
+  }
+  #map-bar {
+    display: flex; align-items: center; gap: 12px; flex: none;
+    padding-right: 24%;  /* stay clear of the PiP inset */
+    margin-bottom: 6px; font-size: 0.72rem; color: #9aa;
+  }
+  #map-bar label { display: flex; align-items: center; gap: 4px; cursor: pointer; flex: none; }
+  #map-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Bottom-RIGHT: the drive pad owns bottom-left, and the aim pad (bottom-right)
+     is hidden in map mode, so this corner is free. */
+  #goal-status {
+    position: absolute; right: 12px; bottom: 12px; z-index: 10;
+    font-family: monospace; font-size: 0.75rem; color: #fb7;
+    background: rgba(20,22,26,0.6); padding: 3px 8px; border-radius: 4px;
+  }
+  #goal-status:empty { display: none; }
+
+  /* -- overlay control pads ---------------------------------------------- */
+  /* Translucent, sitting on top of whatever the stage is showing. Idle at low
+     opacity so they never fight the video for attention; full strength on
+     hover/focus/touch (.pad-active is set by app.js on touchstart). */
+  .pad-overlay {
+    position: absolute; bottom: 12px; z-index: 10;
+    background: rgba(20,22,26,0.55);
+    backdrop-filter: blur(4px);
+    border: 1px solid rgba(120,130,145,0.25);
+    border-radius: 10px; padding: 8px;
+    opacity: 0.4; transition: opacity 0.15s;
+  }
+  .pad-overlay:hover, .pad-overlay:focus-within, .pad-overlay.pad-active { opacity: 1; }
+  #drive-overlay { left: 12px; }
+  #aim-overlay { right: 12px; }
+  .pad-overlay h3 {
+    font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.05em;
+    color: #9aa; margin: 0 0 6px; font-weight: 600;
+  }
+  #drive-pad, #aim-pad {
+    display: grid; gap: 5px; outline: none;
+  }
+  #drive-pad { grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 44px); }
+  #aim-pad { grid-template-columns: repeat(3, 34px); grid-template-rows: repeat(3, 34px); }
+  #drive-pad button, #aim-pad button {
+    background: rgba(20,22,26,0.75); color: #e6e6e6;
+    border: 1px solid rgba(120,130,145,0.3);
+    border-radius: 6px; font-size: 1rem; cursor: pointer; user-select: none;
+  }
+  #drive-pad button:active, #drive-pad button.held,
+  #aim-pad button:active, #aim-pad button.held { background: #2d5; color: #111; }
+  #drive-pad .empty, #aim-pad .empty { visibility: hidden; }
+  #drive-stop { grid-column: 2; grid-row: 2; color: #f77 !important; }
+  #aim-center { grid-column: 2; grid-row: 2; color: #f77 !important; }
+  #drive-status, #aim-status {
+    font-size: 0.7rem; font-family: monospace; margin-top: 5px; color: #7bf;
+    white-space: nowrap;
+  }
+  /* Keyboard focus ring, mirroring the old #drive-pad:focus affordance. */
+  #drive-pad:focus-visible { box-shadow: 0 0 0 2px #2d5; border-radius: 6px; }
+
+  /* -- right column ------------------------------------------------------ */
+  #right-col { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+  /* 3D reconstruction — RTAB-Map's assembled point cloud (cloud_map) rendered
+     with three.js. The renderer injects its own <canvas> into #recon-canvas,
+     which flexes to fill the panel below the controls row. No fixed height:
+     it takes whatever the column gives it (see the ResizeObserver in app.js). */
+  #recon-panel { flex: 1 1 60%; min-height: 0; }
+  /* flex-wrap matters: h2 + info + 2 selects + button overflow the narrow
+     right column on smaller viewports otherwise. */
+  #recon-controls { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; flex: none; flex-wrap: wrap; }
+  #recon-controls h2 { margin: 0; flex: none; }
+  #recon-info { font-size: 0.75rem; font-family: monospace; color: #7bf; }
+  #recon-controls select {
+    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 3px 6px; font-size: 0.75rem;
+  }
+  #recon-controls button {
+    margin-left: auto; background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 4px 8px; font-size: 0.75rem; cursor: pointer;
+  }
+  #recon-controls button:hover { background: #222831; }
+  #recon-canvas { flex: 1 1 auto; min-height: 0; position: relative; background: #000; border-radius: 4px; overflow: hidden; }
+  #recon-canvas canvas { display: block; width: 100% !important; height: 100% !important; }
+
+  /* Dispatch + task queue, merged into one panel. */
+  #ops-panel { flex: 1 1 40%; min-height: 0; }
+  #dispatch-form { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; flex: none; margin-bottom: 8px; }
+  #dispatch-form select, #dispatch-form button {
+    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 5px 7px; font-size: 0.85rem;
+  }
+  #dispatch-form button { background: #2d5; color: #111; border: none; font-weight: 600; cursor: pointer; }
+  #dispatch-form button:hover { background: #3e6; }
+  #queue-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+  #queue-list li {
+    display: flex; justify-content: space-between; padding: 5px 8px; margin-bottom: 4px;
+    background: #14161a; border-radius: 4px; font-size: 0.82rem; font-family: monospace;
+  }
+  .state-badge { padding: 1px 6px; border-radius: 3px; font-size: 0.75rem; }
+  .state-IDLE, .state-DONE { background: #234; color: #7bf; }
+  .state-NAV_TO_PICKUP, .state-NAV_TO_DROPOFF { background: #430; color: #fb7; }
+  .state-PICKING, .state-PLACING { background: #043; color: #7fb; }
+  .state-FAILED { background: #400; color: #f77; }
+
+  /* -- autonomous exploration bar (nodes/explorer.py) --------------------- */
+  #explore-bar {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: none;
+    margin-bottom: 8px; font-size: 0.78rem; color: #9aa;
+  }
+  #explore-bar button {
+    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 4px 8px; font-size: 0.78rem; cursor: pointer;
+  }
+  #explore-bar button:hover { background: #222831; }
+  #explore-status {
+    font-family: monospace; color: #7bf; margin-left: auto;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* -- scenarios view (webui/scenarios.js) -------------------------------- */
+  /* A sibling grid item spanning both columns rather than a wrapper around the
+     live view: wrapping #stage-panel and #right-col in a container would make
+     them children of that container instead of the body grid, and the whole
+     1.7fr/1fr layout above would collapse. Switching views just toggles
+     [hidden] on the three top-level items. */
+  #view-scenarios { grid-column: 1 / -1; min-height: 0; }
+  #scenario-head { display: flex; align-items: center; gap: 10px; flex: none; flex-wrap: wrap; margin-bottom: 8px; }
+  #scenario-head h2 { margin: 0; flex: none; }
+  #scenario-hint { font-size: 0.75rem; color: #9aa; }
+  /* Scenario list left, the running session's status + log right. */
+  #scenario-body { display: grid; grid-template-columns: 1.1fr 1fr; gap: 10px; flex: 1 1 auto; min-height: 0; }
+  #scenario-list { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; }
+
+  .scenario-card {
+    background: #14161a; border: 1px solid #2a2e35; border-radius: 6px;
+    padding: 10px; flex: none;
+  }
+  .scenario-card.selected { border-color: #2d5; }
+  .scenario-card.disabled { opacity: 0.55; }
+  .scenario-card h3 { margin: 0 0 5px; font-size: 0.9rem; font-weight: 600; }
+  .scenario-card p { margin: 0; font-size: 0.78rem; line-height: 1.4; color: #9aa; }
+  .scenario-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .scenario-row label { display: flex; align-items: center; gap: 4px; font-size: 0.76rem; color: #9aa; cursor: pointer; }
+  .scenario-row input[type="number"] {
+    width: 46px; background: #14161a; color: #e6e6e6;
+    border: 1px solid #2a2e35; border-radius: 4px; padding: 2px 4px; font-size: 0.76rem;
+  }
+  .scenario-row button {
+    margin-left: auto; background: #2d5; color: #111; border: none; font-weight: 600;
+    border-radius: 4px; padding: 5px 12px; font-size: 0.8rem; cursor: pointer;
+  }
+  .scenario-row button:hover:not(:disabled) { background: #3e6; }
+  .scenario-row button:disabled { background: #2a2e35; color: #778; cursor: not-allowed; }
+  /* Same class-per-state chip pattern as the task queue's .state-* badges. */
+  .sc-badge { padding: 1px 6px; border-radius: 3px; font-size: 0.7rem; font-family: monospace; }
+  .sc-ready { background: #043; color: #2d5; }
+  .sc-planned { background: #234; color: #7bf; }
+  .sc-invalid { background: #400; color: #f77; }
+
+  #session-pane { display: flex; flex-direction: column; min-height: 0; }
+  #session-strip {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: none;
+    margin-bottom: 6px; font-family: monospace; font-size: 0.76rem; color: #7bf;
+  }
+  #session-stop {
+    margin-left: auto; background: #14161a; color: #f77; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 4px 10px; font-size: 0.78rem; cursor: pointer;
+  }
+  #session-stop:hover:not(:disabled) { background: #222831; }
+  #session-stop:disabled { color: #667; cursor: not-allowed; }
+  #session-log {
+    flex: 1 1 auto; min-height: 0; overflow: auto; margin: 0;
+    background: #000; border: 1px solid #2a2e35; border-radius: 4px; padding: 8px;
+    font-family: monospace; font-size: 0.7rem; line-height: 1.4; color: #9c9;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  /* Before anything is running this pane is most of the panel; without this it
+     reads as a rendering failure rather than as "nothing to show yet". */
+  #session-log:empty::before {
+    content: "No session output yet. Start a scenario and scripts/run_demo.sh's output appears here.";
+    color: #556;
+  }
+  #console-warning {
+    flex: none; margin-bottom: 8px; padding: 8px 10px; border-radius: 6px;
+    background: #221a10; border: 1px solid #4a3a1a; color: #fb7; font-size: 0.78rem;
+  }
+  #console-warning code { color: #fd9; }
+
+  /* -- phone / narrow viewport ------------------------------------------- */
+  /* The dashboard is driven from a phone over the tailnet (see docs/running.md).
+     Stack the stage above the right column and grow the pad hit targets. */
+  @media (max-width: 900px) {
+    /* Vertical scrolling is fine here — the point of the no-scroll rule is the
+       desktop dashboard. Horizontal scrolling never is, hence the min-width: 0
+       on every flex child below: without it they refuse to shrink past their
+       content and quietly push the header badge and dispatch form off-screen. */
+    body { grid-template-columns: 1fr; grid-template-rows: auto auto auto; overflow: visible; height: auto; }
+    header { flex-wrap: wrap; }
+    #slam-badge { margin-left: 0; }
+    #stage-panel { min-height: 52vh; }
+    #right-col { flex-direction: row; }
+    #recon-panel, #ops-panel { flex: 1 1 50%; min-width: 0; }
+    #dispatch-form select { min-width: 0; flex: 1 1 auto; max-width: 100%; }
+    /* The scenario list and its log won't both fit across a phone; stack them
+       and give the log a fixed slice so the cards stay reachable. */
+    #scenario-body { grid-template-columns: 1fr; grid-auto-rows: auto; }
+    #view-scenarios { min-height: 70vh; }
+    #session-log { min-height: 140px; }
+    #drive-pad { grid-template-columns: repeat(3, 48px); grid-template-rows: repeat(3, 48px); }
+    #aim-pad { grid-template-columns: repeat(3, 40px); grid-template-rows: repeat(3, 40px); }
+    .pad-overlay { opacity: 0.85; }  /* no hover on touch — keep them legible */
+  }
+  /* Phones proper: one column throughout, and the pads shrink again so the two
+     of them plus their margins still fit across a 360px-wide screen. */
+  @media (max-width: 560px) {
+    #right-col { flex-direction: column; }
+    #drive-pad { grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 44px); }
+    #aim-pad { grid-template-columns: repeat(3, 36px); grid-template-rows: repeat(3, 36px); }
+    #recon-panel { min-height: 220px; }
+    #map-bar { padding-right: 26%; }
+    #map-hint { display: none; }  /* the title tooltip still has the full text */
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1 id="page-title">SortBots</h1>
+    <select id="robot-select" title="Switch which robot the dashboard shows (reloads the page)"></select>
+    <span id="conn-dot"></span>
+    <span id="conn-label">connecting…</span>
+    <div id="view-mode" class="segmented">
+      <button type="button" data-view="live" class="active"
+              title="The running robot: cameras, map, drive pad, dispatch">live</button>
+      <button type="button" data-view="scenarios"
+              title="Pick a scenario and start or stop the simulation itself">scenarios</button>
+    </div>
+    <div id="stage-mode" class="segmented">
+      <button type="button" data-stage="camera" class="active">camera</button>
+      <button type="button" data-stage="map">map</button>
+    </div>
+    <span id="slam-badge" title="RTAB-Map SLAM status (from the active robot's /info)">SLAM: waiting…</span>
+  </header>
+
+  <div class="panel" id="stage-panel">
+    <span id="stage-label">3rd person (chase cam)</span>
+    <span id="pip-hint">click to swap</span>
+
+    <img id="chase-stream" class="stage-view stage-main"
+         alt="chase camera stream (waiting for web_video_server)" />
+    <img id="camera-stream" class="stage-view stage-pip"
+         alt="head camera stream (waiting for web_video_server)" />
+
+    <div id="map-view" class="stage-view">
+      <div id="map-bar">
+        <label><input type="checkbox" id="costmap-toggle" checked /> costmap</label>
+        <label title="Show where the explorer has written territory off after failed goals. Dashed = will expire; solid = permanent (hit blacklist_permanent_strikes). The number is the strike count."><input
+              type="checkbox" id="blacklist-toggle" /> blacklist</label>
+        <!-- What a map click MEANS. "nav goal" is the original behaviour: a
+             direct navigate_to_pose, which the explorer preempts within a
+             second while it's running. "steer" publishes an explore_hint
+             instead, biasing frontier scoring toward the click without ever
+             pausing exploration — see nodes/explorer.py's _on_hint. -->
+        <div id="map-mode" class="segmented">
+          <button type="button" data-mapmode="goal" class="active"
+                  title="Drag sets a Nav2 goal directly (press = position, drag = heading). Overrides any active task — but while the explorer is running it will preempt this goal within about a second.">nav goal</button>
+          <button type="button" data-mapmode="steer"
+                  title="Click to send exploration to that area — it preempts the current goal and works that region until it's mapped. Shift-click to QUEUE an area instead, to be visited after the current one. Not a goal: the explorer still picks its own frontiers, so an unreachable click can't strand it.">steer</button>
+        </div>
+        <span id="map-hint"
+              title="Drag on the map to set a Nav2 goal: press sets the position, drag sets the heading. This overrides any task the task_manager is currently navigating — Nav2 always takes the newest goal.">
+          Drag to set a Nav2 goal (press = position, drag = heading) — overrides any active task.
+        </span>
+      </div>
+      <canvas id="map-canvas"></canvas>
+      <span id="goal-status"></span>
+    </div>
+
+    <div class="pad-overlay" id="drive-overlay">
+      <h3>Drive</h3>
+      <div id="drive-pad" tabindex="0"
+           title="W/A/S/D to move, Q/E to rotate, Space to stop. Buttons also work by holding the mouse down. Publishes directly to cmd_vel — don't drive while a task is active, Nav2 will fight you for it.">
+        <span class="empty"></span>
+        <button type="button" data-cmd="fwd" title="Forward (W)">&#9650;</button>
+        <span class="empty"></span>
+        <button type="button" data-cmd="left" title="Strafe left (A)">&#9664;</button>
+        <button type="button" id="drive-stop" data-cmd="stop" title="Stop (Space)">&#9632;</button>
+        <button type="button" data-cmd="right" title="Strafe right (D)">&#9654;</button>
+        <button type="button" data-cmd="rot-left" title="Rotate left (Q)">&#8634;</button>
+        <button type="button" data-cmd="back" title="Backward (S)">&#9660;</button>
+        <button type="button" data-cmd="rot-right" title="Rotate right (E)">&#8635;</button>
+      </div>
+      <div id="drive-status">stopped</div>
+    </div>
+
+    <div class="pad-overlay" id="aim-overlay">
+      <h3>Head aim</h3>
+      <div id="aim-pad">
+        <span class="empty"></span>
+        <button type="button" data-aim="tilt-up" title="Tilt up">&#9650;</button>
+        <span class="empty"></span>
+        <button type="button" data-aim="pan-left" title="Pan left">&#9664;</button>
+        <button type="button" id="aim-center" data-aim="center" title="Center">&#8853;</button>
+        <button type="button" data-aim="pan-right" title="Pan right">&#9654;</button>
+        <span class="empty"></span>
+        <button type="button" data-aim="tilt-down" title="Tilt down">&#9660;</button>
+        <span class="empty"></span>
+      </div>
+      <div id="aim-status">pan=0.00 tilt=0.00</div>
+    </div>
+  </div>
+
+  <div id="right-col">
+    <div class="panel" id="recon-panel">
+      <div id="recon-controls">
+        <h2>3D reconstruction</h2>
+        <span id="recon-info" title="Per active robot (/&lt;id&gt;/recon_cloud), not the fused 2D /map">waiting for cloud…</span>
+        <select id="recon-mode" title="Voxel cubes are shaded, so vertical structure reads; points are cheaper">
+          <option value="voxels">voxels</option>
+          <option value="points">points</option>
+        </select>
+        <select id="recon-color" title="Photo uses the cloud's own colour; height ramps blue (floor) to red (shelf top)">
+          <option value="photo">photo</option>
+          <option value="height">height</option>
+        </select>
+        <button type="button" id="recon-reset" title="Recenter the camera on the cloud">reset view</button>
+      </div>
+      <div id="recon-canvas"
+           title="This robot's RTAB-Map cloud only (not fleet-fused) — budgeted by recon_cloud_relay.py. Drag to orbit, scroll to zoom, right-drag to pan. Grows as THIS robot explores; the 2D stage is the fused /map."></div>
+    </div>
+    <div class="panel" id="ops-panel">
+      <h2>Dispatch &amp; task queue</h2>
+      <form id="dispatch-form">
+        <select id="pickup-select"></select>
+        <span>&rarr;</span>
+        <select id="dropoff-select"></select>
+        <button type="submit">Dispatch</button>
+      </form>
+      <div id="explore-bar">
+        <span>Explore:</span>
+        <button type="button" id="explore-start" title="Start autonomous frontier exploration (nodes/explorer.py)">Start</button>
+        <button type="button" id="explore-stop" title="Stop exploring">Stop</button>
+        <button type="button" id="explore-save" title="Snapshot the current RTAB-Map database via its backup service">Save map</button>
+        <span id="explore-status">explorer: not running</span>
+      </div>
+      <ul id="queue-list"></ul>
+    </div>
+  </div>
+
+  <!-- Scenarios: start and stop the simulation itself. Served by webui/serve.py
+       over plain HTTP, NOT rosbridge — deliberately, since the whole point is
+       to work when nothing is running (rosbridge included). See
+       webui/scenarios.js and webui/session.py. -->
+  <div class="panel" id="view-scenarios" hidden>
+    <div id="scenario-head">
+      <h2>Scenarios</h2>
+      <span id="scenario-hint"
+            title="Each card is a preset for scripts/run_demo.sh, defined in configs/scenarios/*.yaml. Starting one launches Isaac Sim plus the whole ROS 2 stack; this dashboard stays up throughout.">
+        Presets from configs/scenarios/ — starting one launches Isaac Sim and the ROS 2 stack.
+      </span>
+    </div>
+    <div id="console-warning" hidden></div>
+    <div id="scenario-body">
+      <div id="scenario-list"></div>
+      <div id="session-pane">
+        <div id="session-strip">
+          <span id="session-state">no session</span>
+          <button type="button" id="session-stop" disabled
+                  title="Tear down Isaac Sim and the ROS 2 stack. The dashboard console stays up.">Stop</button>
+        </div>
+        <pre id="session-log" title="Live output from scripts/run_demo.sh for this session (also saved to data/sessions/&lt;id&gt;/console.log)."></pre>
+      </div>
+    </div>
+  </div>
+
+<!-- Vendored (webui/vendor/roslib.min.js) rather than a CDN so the dashboard is
+     fully self-contained over the tailnet — no public-internet dependency to
+     load the page. Refresh with:
+       curl -sSL -o webui/vendor/roslib.min.js \
+         https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js -->
+<script src="vendor/roslib.min.js"></script>
+<!-- three.js (UMD global THREE) + OrbitControls for the 3D reconstruction panel.
+     Vendored like roslib so the dashboard stays self-contained over the tailnet.
+     Refresh (must match versions) with:
+       curl -sSL -o webui/vendor/three.min.js \
+         https://cdn.jsdelivr.net/npm/three@0.137.5/build/three.min.js
+       curl -sSL -o webui/vendor/OrbitControls.js \
+         https://cdn.jsdelivr.net/npm/three@0.137.5/examples/js/controls/OrbitControls.js -->
+<script src="vendor/three.min.js"></script>
+<script src="vendor/OrbitControls.js"></script>
+<script src="app.js"></script>
+<!-- The scenarios tab. Independent of app.js and of ROS entirely: it talks
+     only to webui/serve.py's control API, so it still works (and can start the
+     sim) when rosbridge has nothing to say. -->
+<script src="scenarios.js"></script>
+<!-- Manual arm teleop pad + pose capture. Self-mounting and independent of
+     app.js (own rosbridge connection, own injected CSS) so it stayed a
+     one-line diff here while other branches were editing this file. -->
+<script src="arm.js"></script>
+</body>
+</html>

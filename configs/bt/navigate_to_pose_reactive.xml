@@ -1,0 +1,74 @@
+<!--
+  SortBots reactive-replanning tree. A verbatim copy of Jazzy's stock
+  /opt/ros/jazzy/share/nav2_bt_navigator/behavior_trees/
+  nav_to_pose_with_consistent_replanning_and_if_path_becomes_invalid.xml
+  with exactly two constants changed (they're XML literals upstream, not
+  ROS parameters, which is the whole reason this file exists):
+
+    RateController 2.0 -> 4.0 Hz
+        IsPathValid is a service round-trip to planner_server; checking it
+        faster than the global costmap updates (4 Hz, nav2_params.yaml) is
+        pure overhead, checking slower throws away reaction time. Worst-case
+        blocked-path reaction: ~250 ms costmap update + ~250 ms check +
+        ms-scale NavFn replan (~0.5 s), vs ~2 s with the old 1 Hz costmap +
+        1 Hz unconditional-replan stock tree.
+
+    PathExpiringTimer 10 -> 3 s
+        Periodic refresh so paths stay current while RTAB-Map grows the map
+        mid-exploration. The previous default tree replanned at 1 Hz
+        unconditionally; 3 s keeps paths nearly as fresh at a fraction of
+        the planner calls, and a blocked path never waits on it —
+        IsPathValid triggers an immediate replan on the next 4 Hz tick.
+
+  Everything else is stock: replan on new goal (GlobalUpdatedGoal), the
+  contextual clear-costmap retries, and the recovery branch (6 retries,
+  clear-costmaps / spin / wait / backup). Topic/service names are relative
+  and resolve under each robot's namespace, so one file serves all robots
+  (sortbots_nav2.launch.py injects this path as a bt_navigator parameter
+  override). Note: unknown cells do NOT invalidate a path in Jazzy's
+  /is_path_valid (lethal-only in footprint mode), so NavFn paths through
+  unexplored space don't thrash against the explorer's frontier goals.
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+        <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+        <RateController hz="4.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <Fallback>
+              <ReactiveSequence>
+                <Inverter>
+                  <PathExpiringTimer seconds="3" path="{path}"/>
+                </Inverter>
+                <Inverter>
+                  <GlobalUpdatedGoal/>
+                </Inverter>
+                <IsPathValid path="{path}"/>
+              </ReactiveSequence>
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+            </Fallback>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Spin spin_dist="1.57"/>
+          <Wait wait_duration="5.0"/>
+          <BackUp backup_dist="0.30" backup_speed="0.15"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

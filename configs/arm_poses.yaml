@@ -1,0 +1,86 @@
+# Joint-space arm sequences for the hardcoded pick/place demo.
+#
+# ============================ READ THIS FIRST ============================
+# Every `q` below is a PLACEHOLDER. They are within the URDF limits and the
+# file loads and plays, but they were reasoned about, not measured, so the
+# gripper will not land on the package until they are re-captured.
+#
+# HOW TO CAPTURE THE REAL NUMBERS:
+#   1. scripts/run_demo.sh                      (sim + dashboard)
+#   2. open the dashboard, switch the corner pad from `head` to `arm`
+#   3. drive to the shelf with the drive pad
+#   4. jog the arm until the gripper is where you want it
+#   5. name the pose, hit `cap`, repeat for each waypoint
+#   6. hit `copy` and paste the block under the matching `sequences:` key here
+#   7. iterate:  python3 nodes/scripted_pick.py --play pick
+#
+# These angles are only valid for the geometry they were captured against.
+# If deck_height_m or dock_offset_m in configs/waypoints.yaml changes, or the
+# robot's spawn pose moves, RE-CAPTURE — do not try to fix them by hand.
+#
+# CAPTURED AGAINST: nothing yet (placeholders).
+#   scene:        --scene nvidia
+#   spawn:        robot_0 (-4.5, 4.5, 0.05)
+#   deck_height:  0.68 m
+#   dock_offset:  0.30 m
+#
+# Geometry note for whoever captures these: the arm is on a MAST. Its shoulder
+# sits ~0.83 m above the floor (urdf arm_base_joint 0.7600 + Rotation 0.0165 +
+# spawn 0.05), and the deck is at 0.68 — only ~0.15 m BELOW the shoulder. So
+# the real pick pose reaches roughly HORIZONTALLY, tilted slightly down. The
+# placeholder angles below still describe a big reach-down motion from when
+# the deck was (wrongly) at 0.30 m, so expect them to look distinctly off
+# before you re-capture. That is the known state, not a new bug.
+# =========================================================================
+#
+# Consumed by nodes/arm_poses.py (loader + validator) and played back by
+# nodes/scripted_pick.py. Order is fixed and must match
+# spawn_warehouse.ARM_JOINT_NAMES exactly — the Isaac side looks joints up by
+# name but applies them positionally.
+#
+# Step schema: each entry needs at least one of `q` (exactly 6 floats, radians)
+# or `grip` (attach|detach -> /<robot>/pick_cmd). Optional `name` (log label),
+# `move_sec` (ramp time from the previous pose), `settle_sec` (dwell after).
+#
+# Total per sequence must stay under task_manager's PICK_TIMEOUT_SEC (30 s).
+# scripted_pick.py logs the budget at startup and warns past 25 s.
+
+joint_names: [Rotation, Pitch, Elbow, Wrist_Pitch, Wrist_Roll, Jaw]
+
+# From third_party/XLeRobot/.../xlerobot.urdf. Duplicated here so a bad capture
+# is rejected offline, with no URDF parse and no ROS.
+limits:
+  Rotation:    [-2.1,     2.1]
+  Pitch:       [-0.1,     3.45]
+  Elbow:       [-0.2,     3.14159]
+  Wrist_Pitch: [-1.8,     1.8]
+  Wrist_Roll:  [-3.14159, 3.14159]
+  Jaw:         [ 0.0,     1.7]
+
+defaults:
+  move_sec:   1.2   # ramp time from the previous q to this one
+  settle_sec: 0.4   # dwell after arriving (no /joint_states, so it's a guess)
+
+# Jaw convention is ALSO a guess: the URDF limit is [0, 1.7] and states no
+# open/closed convention. Resolve it in five seconds with the arm pad — jog Jaw
+# to 0, look; jog to 1.7, look — then fix these and this comment.
+#   assumed: 0.0 = open, 1.2 = closed
+
+sequences:
+  pick:
+    - {name: stow,     q: [0.00, 0.00, 0.00, 0.00, 0.00, 0.00]}
+    - {name: ready,    q: [0.00, 0.60, 0.90, 0.30, 0.00, 0.00]}
+    - {name: approach, q: [0.00, 0.90, 1.10, 0.40, 0.00, 0.00]}
+    - {name: descend,  q: [0.00, 1.05, 1.25, 0.45, 0.00, 0.00], move_sec: 0.8}
+    - {name: close,    q: [0.00, 1.05, 1.25, 0.45, 0.00, 1.20], move_sec: 0.6, settle_sec: 0.6}
+    - {name: weld,     grip: attach, settle_sec: 0.5}
+    - {name: lift,     q: [0.00, 0.70, 1.00, 0.35, 0.00, 1.20]}
+    - {name: carry,    q: [0.00, 0.30, 0.60, 0.20, 0.00, 1.20]}
+
+  place:
+    - {name: approach, q: [0.00, 0.90, 1.10, 0.40, 0.00, 1.20]}
+    - {name: lower,    q: [0.00, 1.05, 1.25, 0.45, 0.00, 1.20], move_sec: 0.8}
+    - {name: release,  grip: detach, settle_sec: 0.5}
+    - {name: open,     q: [0.00, 1.05, 1.25, 0.45, 0.00, 0.00], move_sec: 0.6}
+    - {name: retreat,  q: [0.00, 0.70, 1.00, 0.35, 0.00, 0.00]}
+    - {name: stow,     q: [0.00, 0.00, 0.00, 0.00, 0.00, 0.00]}

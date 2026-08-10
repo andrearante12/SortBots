@@ -5,22 +5,25 @@
       "drive_type": "velocity",
       "target_value": 0.0,
       "stiffness": 0.0,
-      "damping": 100000.0,
-      "max_force": 1000000.0
+      "damping": 1000000.0,
+      "max_force": 10000000.0,
+      "friction": 0.0
     },
     "root_y_axis_joint": {
       "drive_type": "velocity",
       "target_value": 0.0,
       "stiffness": 0.0,
-      "damping": 100000.0,
-      "max_force": 1000000.0
+      "damping": 1000000.0,
+      "max_force": 10000000.0,
+      "friction": 0.0
     },
     "root_z_rotation_joint": {
       "drive_type": "velocity",
       "target_value": 0.0,
       "stiffness": 0.0,
-      "damping": 100000.0,
-      "max_force": 1000000.0
+      "damping": 1000000.0,
+      "max_force": 10000000.0,
+      "friction": 0.0
     },
     "Rotation*": {
       "drive_type": "position",

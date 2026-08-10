@@ -1,0 +1,49 @@
+# Scenario definition for the dashboard's Scenarios tab (webui/scenarios.js).
+#
+# A scenario is a named, reviewable preset for scripts/run_demo.sh — nothing
+# more. webui/session.py loads this file, validates it against a fixed
+# allowlist (session.py's RUN_FLAGS), and turns `run:` into an argv list.
+# Keys not in that allowlist are REJECTED, not passed through: this file is
+# reachable-adjacent to a control API that serve.py exposes on 0.0.0.0, so
+# "config key" must never mean "arbitrary shell argument".
+#
+# See docs/running.md ("Scenarios tab") for the full schema and for how to
+# add a new scenario.
+
+# Must equal the filename stem — the UI addresses scenarios by this name.
+name: explore_fresh
+
+title: Frontier exploration — fresh map
+description: >
+  Single robot in the NVIDIA warehouse starting from an empty map.
+  nodes/explorer.py drives frontier exploration with no human input: it heads
+  for the nearest unexplored opening until none remain. This is the baseline
+  exploration run — every launch wipes the database first, so results are
+  comparable between runs.
+
+# ready   = runnable now
+# planned = listed in the UI but disabled, for scenarios whose environment
+#           doesn't exist yet (see `blocked_by` below)
+status: ready
+
+run:
+  scene: nvidia          # nvidia | primitive
+  robots: 1
+  robot_id: robot_0
+  headless: false        # true drops the Isaac window (the dashboard still works)
+  chase_cam: true        # false = --no-chase-cam, one less render product
+  explore: true
+  resume: false          # false = wipe the map database and start clean
+  localize: false
+  teleop: false
+  map: null              # null = run_demo.sh's default ~/.ros/sortbots_<robot_id>.db
+
+# Which `run:` keys the scenario card exposes as controls. Everything else is
+# fixed by this file — keeping the launch-time surface small and reviewable.
+overrides: [headless, robots, resume]
+
+capture:
+  # true also runs scripts/record_explore_bag.sh into the session directory for
+  # the life of the run. Off by default: an exploration run is minutes to tens
+  # of minutes, and the bag is only worth its disk if you plan to replay it.
+  bag: false
