@@ -542,10 +542,24 @@
     polygons: ["FootprintApproach"]
     FootprintApproach:
       type: "polygon"
-      action_type: "stop"
+      # MUST be "approach", even though the intent reads as "stop before
+      # hitting something": nav2_collision_monitor only reads footprint_topic
+      # when action_type is APPROACH. Under "stop" it instead wants a STATIC
+      # `points` list or a `polygon_sub_topic`, finds neither, and fails to
+      # configure — which takes the WHOLE navigation lifecycle down with it,
+      # because lifecycle_manager aborts the bringup at the first node that
+      # won't transition. Diagnosed live 2026-08-09: "Error while getting
+      # polygon parameters: static points and sub topic both not defined",
+      # then no "Managed nodes are active", bt_navigator never activated, and
+      # every explorer goal answered "rejected (Nav2 not ready?)".
+      # time_before_collision and simulation_time_step below are APPROACH-only
+      # knobs too, so they were dead settings under "stop".
+      action_type: "approach"
       footprint_topic: "local_costmap/published_footprint"
       time_before_collision: 1.0
       simulation_time_step: 0.05
-      max_points: 2
+      # min_points, not the deprecated max_points — nav2 translates the old
+      # name as min_points = max_points + 1, so the previous `2` meant 3.
+      min_points: 3
       visualize: false
       enabled: true

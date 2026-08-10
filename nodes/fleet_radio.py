@@ -42,6 +42,8 @@ DEFAULTS = {
     "corridor_radius_m": 0.6,
     "yield_enabled": True,
     "yield_wait_s": 3.0,
+    "yield_horizon_m": 3.0,
+    "yield_max_total_s": 12.0,
 }
 
 
@@ -252,8 +254,30 @@ def should_yield(
     peer_intents: list[dict],
     *,
     pad_m: float = 0.6,
+    horizon_m: float | None = None,
 ) -> dict | None:
-    """Return the blocking peer intent if we should yield, else None."""
+    """Return the blocking peer intent if we should yield, else None.
+
+    `horizon_m` limits the conflict test to the leading stretch of our own
+    route rather than its whole length. Only the part we are about to drive
+    can actually conflict with anyone: both robots replan continuously, so a
+    crossing 10 m ahead says nothing about where either will be by the time
+    it's reached. Without the limit, an exploration goal is routinely 10-12 m
+    out (configs/explorer.yaml max_goal_distance_m, and escape mode ignores
+    even that), and a straight line that long crosses most of the warehouse —
+    so it intersects SOME peer corridor almost always and yielding becomes
+    the steady state instead of the exception. Observed live 2026-08-09:
+    robot_1 yielded 38 consecutive times and never sent a single goal while
+    robot_0 held one long corridor.
+    """
+    own_leg_end = own_goal
+    if horizon_m is not None and horizon_m > 0.0:
+        dx, dy = own_goal[0] - own_start[0], own_goal[1] - own_start[1]
+        length = math.hypot(dx, dy)
+        if length > horizon_m:
+            frac = horizon_m / length
+            own_leg_end = (own_start[0] + dx * frac, own_start[1] + dy * frac)
+
     for it in peer_intents:
         if it["priority"] > own_priority:
             continue  # lower number = higher priority; we outrank them
@@ -263,7 +287,11 @@ def should_yield(
         prev = peer_pts[0]
         conflict = False
         for p in peer_pts[1:]:
-            if segments_intersect(own_start, own_goal, tuple(prev), tuple(p), pad_m=pad_m):
+            # own_leg_end, not own_goal: crossing test is over the stretch we
+            # are about to drive. The endpoint-proximity checks below stay on
+            # the TRUE goal, since two robots wanting the same spot is a real
+            # conflict at any range.
+            if segments_intersect(own_start, own_leg_end, tuple(prev), tuple(p), pad_m=pad_m):
                 conflict = True
                 break
             prev = p

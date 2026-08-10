@@ -64,8 +64,10 @@ from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose, Spin
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+from rclpy.utilities import remove_ros_args
 from std_msgs.msg import ColorRGBA, String
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -119,6 +121,8 @@ DEFAULTS = {
     "corridor_radius_m": 0.6,      # exclude frontiers near peer intent corridor vertices
     "yield_enabled": True,
     "yield_wait_s": 3.0,
+    "yield_horizon_m": 3.0,        # only the leading leg of our route can conflict
+    "yield_max_total_s": 12.0,     # stop deferring to one peer intent after this
     "goal_standoff_max_m": 1.5,    # search radius for a pulled-back goal around a frontier cell
     "goal_clearance_m": 0.45,      # goal min distance from occupied cells (> inflation 0.4)
     "goal_unknown_clearance_m": 0.2,  # goal min distance from unknown cells
@@ -163,6 +167,7 @@ def load_config(path: Path | None) -> dict:
             for k in (
                 "claim_radius_m", "peer_avoid_radius_m", "corridor_radius_m",
                 "yield_enabled", "yield_wait_s", "status_ttl_s",
+                "yield_horizon_m", "yield_max_total_s",
             ):
                 if k in raw:
                     cfg[k] = raw[k]
@@ -287,6 +292,10 @@ class ExplorerNode(Node):
         self._peer_intents: dict[str, tuple[dict, float]] = {}
         self._peer_status: dict[str, tuple[dict, float]] = {}
         self._yield_until: float | None = None
+        # Bounded-yield bookkeeping — see _should_yield_for.
+        self._yield_blocker_key: tuple | None = None
+        self._yield_run_started_at: float = 0.0
+        self._yield_waived_key: tuple | None = None
         self._priority = fleet_radio_mod.priority_for_robot_id(robot_id)
         # Bumped on every /map message. _frontier_consumed() compares it
         # against the seq a goal was chosen on, so a goal can never be
@@ -331,7 +340,10 @@ class ExplorerNode(Node):
 
         # Run statistics, all published in _publish_status() and summarized by
         # _finish(). Reset together on explore_cmd=start.
-        self._started_at = time.monotonic()
+        # None until the first tick with a live /clock — see _now(): arming it
+        # at construction would anchor the run to sim-time 0 and make
+        # max_run_time_s fire the instant the clock jumps to its real value.
+        self._started_at: float | None = None
         self._goals_sent = 0
         self._goals_succeeded = 0
         self._goals_failed = 0
@@ -384,7 +396,21 @@ class ExplorerNode(Node):
             String, fleet_radio_mod.INTENT_TOPIC, INTENT_QOS
         )
 
-        self.create_timer(cfg["replan_period_s"], self._tick)
+        # WALL-clock timer, deliberately, even though every deadline inside
+        # _tick is sim time (see _now()). The tick rate is about how responsive
+        # this node is — how fast a fault is noticed, how fast an operator hint
+        # is acted on, and how often _publish_status feeds the dashboard — none
+        # of which are distances. A plain create_timer() uses the node clock,
+        # so with use_sim_time it silently stretches by the sim's real-time
+        # factor: measured 0.18x live 2026-08-09, which turned this 2 s period
+        # into 11 s of wall clock and made a perfectly healthy run look frozen
+        # from the browser (frontier markers and explorer stats updating about
+        # once every 11 s). Sampling faster than the sim advances is harmless —
+        # the deadlines simply haven't moved yet.
+        self.create_timer(
+            cfg["replan_period_s"], self._tick,
+            clock=Clock(clock_type=ClockType.STEADY_TIME),
+        )
         self.get_logger().info(
             f"explorer up for {robot_id} (autostart={autostart}); "
             f"min_frontier_cells={cfg['min_frontier_cells']} alpha={cfg['alpha']}"
@@ -419,7 +445,9 @@ class ExplorerNode(Node):
                 self._consec_failures = 0
                 self._no_tf_ticks = 0
                 self._rejections = 0
-                self._started_at = time.monotonic()
+                # Re-armed by _tick on its next pass, so the run clock starts
+                # from live sim time even if this command lands before /clock.
+                self._started_at = None
                 # Spin on a manual start too, but only if we've never sent a
                 # goal — a stop/start in the middle of a run shouldn't cost
                 # another full rotation.
@@ -493,7 +521,7 @@ class ExplorerNode(Node):
             self._publish_status()
             return
 
-        self._steer_queue = [[x, y, time.monotonic()]]
+        self._steer_queue = [[x, y, self._now()]]
         self.get_logger().info(
             f"explore_hint: steering toward ({x:.2f}, {y:.2f}) "
             f"for {self.cfg['steer_ttl_s']:.0f}s — retargeting now"
@@ -532,8 +560,8 @@ class ExplorerNode(Node):
                 # when it was clicked — otherwise everything behind a
                 # long-running region would quietly expire while waiting its
                 # turn, and a queue you have to re-enter isn't a queue.
-                head[2] = time.monotonic()
-            if ttl > 0 and time.monotonic() - head[2] >= ttl:
+                head[2] = self._now()
+            if ttl > 0 and self._now() - head[2] >= ttl:
                 self.get_logger().info(
                     f"explore_hint: ({head[0]:.2f}, {head[1]:.2f}) expired after "
                     f"{ttl:.0f}s"
@@ -550,7 +578,7 @@ class ExplorerNode(Node):
         self._steer_queue.pop(0)
         if self._steer_queue:
             nxt = self._steer_queue[0]
-            nxt[2] = time.monotonic()
+            nxt[2] = self._now()
             self.get_logger().info(
                 f"explore_hint: moving on to ({nxt[0]:.2f}, {nxt[1]:.2f}) — "
                 f"{len(self._steer_queue) - 1} more queued after it"
@@ -642,13 +670,17 @@ class ExplorerNode(Node):
         if it.get("released"):
             self._peer_intents.pop(rid, None)
             return
+        # Receive timestamps stay on the WALL monotonic clock: these model
+        # "did the radio hear from them recently", a property of the comms
+        # channel, not of robot motion or map progress. Everything that is
+        # measured against metres travelled uses _now() (sim time) instead.
         self._peer_intents[rid] = (it, time.monotonic())
 
     def _on_status(self, msg: String):
         st = fleet_radio_mod.parse_status(msg.data)
         if st is None or st["robot_id"] == self.robot_id:
             return
-        self._peer_status[st["robot_id"]] = (st, time.monotonic())
+        self._peer_status[st["robot_id"]] = (st, time.monotonic())  # wall: radio liveness
 
     def _publish_intent(
         self,
@@ -673,7 +705,7 @@ class ExplorerNode(Node):
         intents = fleet_radio_mod.active_peer_intents(
             self._peer_intents,
             now_wall=time.time(),
-            now_mono=time.monotonic(),
+            now_mono=time.monotonic(),  # wall: matches the receive stamps above
             ttl_s=self.cfg["claim_ttl_s"],
             self_id=self.robot_id,
         )
@@ -683,7 +715,7 @@ class ExplorerNode(Node):
         """Peer poses from /fleet/status only — never TF."""
         return fleet_radio_mod.active_peer_poses(
             self._peer_status,
-            now=time.monotonic(),
+            now=time.monotonic(),  # wall: matches the receive stamps in _on_status
             ttl_s=float(self.cfg.get("status_ttl_s", 1.0)),
             self_id=self.robot_id,
         )
@@ -692,7 +724,7 @@ class ExplorerNode(Node):
         return fleet_radio_mod.active_peer_intents(
             self._peer_intents,
             now_wall=time.time(),
-            now_mono=time.monotonic(),
+            now_mono=time.monotonic(),  # wall: matches the receive stamps above
             ttl_s=self.cfg["claim_ttl_s"],
             self_id=self.robot_id,
         )
@@ -708,6 +740,20 @@ class ExplorerNode(Node):
         return [[pose[0], pose[1]], [gx, gy]]
 
     def _should_yield_for(self, gx: float, gy: float) -> bool:
+        """True if we should hold off sending this goal for a peer's corridor.
+
+        Yielding is BOUNDED, per peer intent. Priority here is static (robot
+        index), so the lower-priority robot loses every single evaluation of
+        the same conflict — and since _tick re-runs the check the moment
+        yield_wait_s lapses, "wait 3 s for them to pass" silently became "wait
+        forever". Live 2026-08-09: robot_1 logged 38 consecutive yields to
+        robot_0 and never sent a goal, while robot_0 held one 12 m corridor
+        across the warehouse for its whole 75 s goal. Once we've waited
+        yield_max_total_s for a given peer goal, we proceed and stop yielding
+        to THAT goal; a new peer goal starts a fresh budget. Physical
+        separation is Nav2's job (local costmap, collision_monitor) — this
+        channel only exists to stop two robots claiming overlapping work.
+        """
         if not self.cfg.get("yield_enabled", True):
             return False
         pose = self._robot_pose()
@@ -719,14 +765,38 @@ class ExplorerNode(Node):
             (gx, gy),
             self._peer_intent_list(),
             pad_m=float(self.cfg.get("corridor_radius_m", 0.6)),
+            horizon_m=float(self.cfg.get("yield_horizon_m", 3.0)),
         )
         if blocker is None:
+            self._yield_blocker_key = None
             return False
-        self._yield_until = time.monotonic() + float(self.cfg.get("yield_wait_s", 3.0))
+
+        # Keyed on the peer's GOAL, not just its id: that is what makes the
+        # budget restart when the peer moves on to different work, rather
+        # than permanently waiving yields to a given robot.
+        key = (blocker["robot_id"], round(blocker["x"], 2), round(blocker["y"], 2))
+        if key == self._yield_waived_key:
+            return False
+        now = self._now()
+        if key != self._yield_blocker_key:
+            self._yield_blocker_key = key
+            self._yield_run_started_at = now
+        budget = float(self.cfg.get("yield_max_total_s", 12.0))
+        if budget > 0 and now - self._yield_run_started_at >= budget:
+            self._yield_waived_key = key
+            self.get_logger().warn(
+                f"waited {budget:.0f}s for {blocker['robot_id']}'s corridor to "
+                f"({blocker['x']:.2f}, {blocker['y']:.2f}) — proceeding anyway "
+                f"rather than starve; Nav2 handles the actual separation"
+            )
+            return False
+
+        self._yield_until = now + float(self.cfg.get("yield_wait_s", 3.0))
         self.get_logger().info(
             f"yielding to {blocker['robot_id']} "
             f"(peer priority {blocker['priority']} <= ours {self._priority}) "
-            f"for {self.cfg.get('yield_wait_s', 3.0):.1f}s"
+            f"for {self.cfg.get('yield_wait_s', 3.0):.1f}s",
+            throttle_duration_sec=5.0,
         )
         return True
 
@@ -754,7 +824,7 @@ class ExplorerNode(Node):
         merge = self.cfg["blacklist_merge_radius_m"]
         for b in self._blacklist:
             if math.hypot(x - b[0], y - b[1]) < merge:
-                b[2] = time.monotonic()
+                b[2] = self._now()
                 b[3] += 1
                 b[4] = min(
                     self.cfg["blacklist_radius_max_m"],
@@ -769,7 +839,7 @@ class ExplorerNode(Node):
                 )
                 return
         self._blacklist.append([
-            x, y, time.monotonic(), 1,
+            x, y, self._now(), 1,
             self.cfg["blacklist_radius_m"] if radius is None else radius,
         ])
 
@@ -781,7 +851,7 @@ class ExplorerNode(Node):
 
     def _active_blacklist(self) -> list[tuple[float, float, float]]:
         """Live entries as (x, y, radius). Sole owner of the expiry pruning."""
-        now = time.monotonic()
+        now = self._now()
         self._blacklist = [b for b in self._blacklist if now - b[2] < self._blacklist_ttl(b)]
         return [(b[0], b[1], b[4]) for b in self._blacklist]
 
@@ -793,6 +863,38 @@ class ExplorerNode(Node):
     @staticmethod
     def _too_close(x: float, y: float, points: list[tuple[float, float]], radius: float) -> bool:
         return any(math.hypot(x - px, y - py) < radius for px, py in points)
+
+    # -- clock ---------------------------------------------------------------
+
+    def _now(self) -> float:
+        """Seconds on the SIM clock — every budget here is compared to motion.
+
+        This node's timeouts are all implicitly distances: goal_timeout_s is
+        "long enough to drive max_goal_distance_m", stuck_window_s is "long
+        enough to cover stuck_min_displacement_m". The robot covers those
+        metres in SIM time, but these were all measured with
+        time.monotonic() — wall clock — and the sim runs at roughly 0.45x real
+        time (CLAUDE.md's "measure robot speed in sim time, not wall clock").
+        So every budget was silently worth ~45% of its configured value: the
+        75 s goal_timeout_s bought about 34 s of sim time, ~7 m at the
+        measured 0.21 m/s, against goals up to 12 m out and escape-mode goals
+        with no cap at all. Diagnosed live 2026-08-09, where it showed up as
+        chronic "timed out after 75s" on goals the robot was still actively
+        driving toward — and because every timeout increments
+        _consec_failures, escape mode latched on permanently and started
+        choosing even FARTHER goals, which timed out even more reliably.
+
+        Requires use_sim_time (launch/sortbots_bringup.launch.py passes it, as
+        it already did for nodes/map_merge.py). Returns 0.0 until the first
+        /clock arrives, which _tick treats as "not started yet" rather than
+        arming any deadline against a zero epoch.
+
+        Note the trade-off this accepts: if the sim clock STOPS (Isaac paused
+        or dead), sim-time deadlines never expire and the watchdogs go quiet
+        instead of firing. That is the right call for a paused sim, and a dead
+        one is already visible as the run going to `exited`.
+        """
+        return self.get_clock().now().nanoseconds * 1e-9
 
     # -- robot pose ----------------------------------------------------------
 
@@ -812,9 +914,23 @@ class ExplorerNode(Node):
         if self.state != "exploring":
             return
 
+        # Nothing here may be measured before the sim clock is live: every
+        # deadline below is sim-time (see _now()), and arming one against a
+        # 0.0 epoch would make it expire the moment /clock reports real time.
+        now = self._now()
+        if now <= 0.0:
+            self.get_logger().warn(
+                "waiting for /clock — no sim time yet, so no goal timing is armed "
+                "(is use_sim_time set on this node?)",
+                throttle_duration_sec=10.0,
+            )
+            return
+        if self._started_at is None:
+            self._started_at = now
+
         budget = self.cfg["max_run_time_s"]
-        if budget > 0 and time.monotonic() - self._started_at > budget:
-            # Wall-clock backstop. Everything else that ends a run depends on
+        if budget > 0 and now - self._started_at > budget:
+            # Sim-time backstop. Everything else that ends a run depends on
             # the frontier set going empty, which a stalled perception stack
             # or a genuinely unreachable remainder can prevent indefinitely.
             # This guarantees the run terminates and the final map gets saved.
@@ -832,7 +948,7 @@ class ExplorerNode(Node):
             self._publish_status()
             return
 
-        if self._yield_until is not None and time.monotonic() < self._yield_until:
+        if self._yield_until is not None and self._now() < self._yield_until:
             # Courtesy yield to a higher-priority peer corridor — don't
             # preempt an active Nav2 goal mid-flight, only delay new sends
             # (handled in _plan_and_send). Heartbeat intent while waiting.
@@ -942,7 +1058,7 @@ class ExplorerNode(Node):
             return "stuck"
         if (
             self._goal_sent_at is not None
-            and time.monotonic() - self._goal_sent_at > self.cfg["goal_timeout_s"]
+            and self._now() - self._goal_sent_at > self.cfg["goal_timeout_s"]
         ):
             return "timeout"
         return None
@@ -971,7 +1087,7 @@ class ExplorerNode(Node):
             return False
         if (
             self._goal_sent_at is None
-            or time.monotonic() - self._goal_sent_at < self.cfg["goal_min_age_s"]
+            or self._now() - self._goal_sent_at < self.cfg["goal_min_age_s"]
         ):
             return False
         # The real anti-thrash guard, and it's exact rather than tuned: the
@@ -1023,8 +1139,8 @@ class ExplorerNode(Node):
         instantly on every attempt.
         """
         if self._spin_deadline is None:
-            self._spin_deadline = time.monotonic() + self.cfg["startup_spin_timeout_s"]
-        if time.monotonic() > self._spin_deadline:
+            self._spin_deadline = self._now() + self.cfg["startup_spin_timeout_s"]
+        if self._now() > self._spin_deadline:
             self.get_logger().warn("startup spin: /spin server never appeared — skipping")
             self._spin_state = "done"
             return
@@ -1047,7 +1163,7 @@ class ExplorerNode(Node):
         )
 
     def _check_startup_spin(self):
-        if self._spin_deadline is not None and time.monotonic() > self._spin_deadline:
+        if self._spin_deadline is not None and self._now() > self._spin_deadline:
             self.get_logger().warn("startup spin: deadline passed — carrying on without it")
             self._spin_state = "done"
 
@@ -1105,7 +1221,7 @@ class ExplorerNode(Node):
         pose = self._robot_pose()
         if pose is None:
             return False
-        now = time.monotonic()
+        now = self._now()
         self._pose_history.append((now, pose[0], pose[1]))
         window = self.cfg["stuck_window_s"]
         # Prune, but always keep one sample at age >= window as the anchor:
@@ -1145,7 +1261,7 @@ class ExplorerNode(Node):
         # stuck high, this became an 8-second spin/complete/spin loop that ran
         # until the run was killed. One spin per cooldown window is plenty —
         # the point is to re-observe once, then go try a goal.
-        now = time.monotonic()
+        now = self._now()
         if self._last_hard_escape_at is not None and \
                 now - self._last_hard_escape_at < self.cfg["hard_escape_cooldown_s"]:
             return False
@@ -1159,7 +1275,7 @@ class ExplorerNode(Node):
         )
         self._spin_state = "running"
         self._spin_reason = "hard escape"
-        self._spin_deadline = time.monotonic() + self.cfg["startup_spin_timeout_s"]
+        self._spin_deadline = self._now() + self.cfg["startup_spin_timeout_s"]
         # retry=False: a rejection here means Nav2 is unhealthy, and unlike at
         # bringup there's no reason to expect that to resolve on its own —
         # fall through to the escape goal rather than spin-retrying forever.
@@ -1394,7 +1510,7 @@ class ExplorerNode(Node):
 
         self._empty_cycles = 0
         _score, gx, gy, fx, fy = candidates[0]
-        if self._yield_until is not None and time.monotonic() < self._yield_until:
+        if self._yield_until is not None and self._now() < self._yield_until:
             self._publish_status()
             return False
         if self._should_yield_for(gx, gy):
@@ -1475,7 +1591,7 @@ class ExplorerNode(Node):
         self._goal_frontier = (fx, fy)
         self._goal_map_seq = self._map_seq
         self._goal_start_pose = (rx, ry)
-        self._goal_sent_at = time.monotonic()
+        self._goal_sent_at = self._now()
         self._goals_sent += 1
         self._pose_history.clear()  # fresh stuck window for the new goal
         self._publish_intent(gx, gy, corridor=self._own_corridor(gx, gy))
@@ -1567,7 +1683,7 @@ class ExplorerNode(Node):
 
     def _finish(self):
         self.state = "done"
-        elapsed = time.monotonic() - self._started_at
+        elapsed = 0.0 if self._started_at is None else self._now() - self._started_at
         free_m2, occ_m2, known_m2 = self._area_stats()
         ref = self.cfg["reference_free_area_m2"]
         permanent = sum(
@@ -1578,7 +1694,8 @@ class ExplorerNode(Node):
         self.get_logger().info(
             "exploration done — no reachable frontiers left\n"
             "  ==== run summary ====\n"
-            f"  elapsed    : {elapsed:.0f} s wall (~{elapsed / 60:.1f} min; sim runs ~0.45x real time)\n"
+            f"  elapsed    : {elapsed:.0f} s sim (~{elapsed / 60:.1f} min sim; the sim runs "
+            f"~0.45x real time, so expect roughly {elapsed / 0.45 / 60:.1f} min on a wall clock)\n"
             f"  grid       : {shape} @ {res:.3f} m\n"
             f"  known area : {known_m2:.1f} m2 (free {free_m2:.1f}, occupied {occ_m2:.1f})\n"
             + (f"  coverage   : {100.0 * free_m2 / ref:.1f}% of the {ref:.1f} m2 reference free floor\n"
@@ -1682,7 +1799,12 @@ class ExplorerNode(Node):
             "goals_consumed": self._goals_consumed,
             "goal_rejections": self._rejections,
             "no_tf_ticks": self._no_tf_ticks,
-            "elapsed_s": round(time.monotonic() - self._started_at, 1),
+            # Sim-time seconds since the run armed (see _now()), 0.0 before
+            # /clock — never None, since webui/app.js formats this directly.
+            "elapsed_s": (
+                0.0 if self._started_at is None
+                else round(self._now() - self._started_at, 1)
+            ),
             # via _active_hint() so an expired hint stops being advertised
             # even while a goal is in flight and _plan_and_send isn't running.
             "steer_hint": ({"x": hint[0], "y": hint[1]} if hint else None),
@@ -1704,6 +1826,10 @@ class ExplorerNode(Node):
 
 
 def main() -> None:
+    # This node's deadlines are all sim-time (see ExplorerNode._now), so it
+    # needs `--ros-args -p use_sim_time:=true` from the bringup. rclpy.init()
+    # reads that from sys.argv directly; remove_ros_args strips it before OUR
+    # argparse sees it, exactly as nodes/map_merge.py does.
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -1721,11 +1847,11 @@ def main() -> None:
         "nodes/map_merge.py publishes). Set to /<robot-id>/map to plan "
         "against only this robot's own SLAM output.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(remove_ros_args(args=sys.argv)[1:])
 
     cfg = load_config(args.config)
 
-    rclpy.init()
+    rclpy.init(args=sys.argv)
     node = ExplorerNode(args.robot_id, cfg, args.autostart, args.map_topic)
     try:
         rclpy.spin(node)

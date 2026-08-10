@@ -79,12 +79,24 @@ DASHBOARD_PORT=8081
 # killing the page it's served from. --keep-console spares them.
 CONSOLE_PATTERNS=(rosbridge_websocket web_video_server "webui/serve.py" \
                   webui_url.py web_video_watchdog.sh)
+# EVERY process the bringup starts must appear here. This list is not just
+# belt-and-braces over the SIGINT above: `ros2 launch` waits for all of its
+# ExecuteProcess children before exiting, so ONE unlisted node keeps the whole
+# launch parent alive, and the entire subtree survives into the next run. The
+# next run then brings up a SECOND copy of every node under the same node
+# names, and duplicate lifecycle node names in particular make
+# /<robot>/<node>/change_state ambiguous. Found 2026-08-09 with two full
+# generations of bringup live at once (fleet_radio, dynamic_obstacle_filter and
+# collision_monitor x2 per robot) after several "stopped" runs — the four
+# newest nodes at the time had never been added here.
 PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz2 \
                    controller_server planner_server smoother_server behavior_server \
                    bt_navigator waypoint_follower velocity_smoother lifecycle_manager \
+                   collision_monitor \
                    component_container task_manager.py scripted_pick.py explorer.py \
                    rtabmap_cloud_pump.py recon_cloud_relay.py wasd_teleop \
                    map_merge.py static_transform_publisher \
+                   fleet_radio.py dynamic_obstacle_filter.py recon_cloud_merge.py \
                    "spawn_warehouse.py")
 # Note scripts/save_map.sh --watch is deliberately absent from that list. Its
 # checkpoint loop has to OUTLIVE teardown: rtabmap gets pkill -9'd only 2 s

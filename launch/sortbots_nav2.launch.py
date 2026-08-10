@@ -35,6 +35,20 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import ComposableNodeContainer, Node, PushRosNamespace
 from launch_ros.descriptions import ComposableNode
 
+# Order is activation order. collision_monitor MUST be listed (and listed
+# last, downstream of velocity_smoother): it is the final hop of the velocity
+# chain, cmd_vel_smoothed -> cmd_vel, and an unmanaged nav2 lifecycle node
+# stays in the UNCONFIGURED state forever — publishing nothing. Omitting it
+# does not fail loudly; it silently severs Nav2 from the robot, because
+# controller_server/velocity_smoother keep running and the only log line is
+# collision_monitor's own "Waiting on external lifecycle transitions to
+# activate" at startup. Diagnosed live 2026-08-09 on explore_fleet: both
+# robots sent frontier goals, MPPI logged "Passing new path to controller" at
+# 4 Hz for the whole run, and every goal still died in the explorer's stuck
+# watchdog at <0.15 m in 15 s. What made it look like a frontier-selection
+# bug instead of a plumbing one: behavior_server publishes cmd_vel DIRECTLY,
+# unremapped, so recovery spins reached Isaac normally — the robots visibly
+# rotated on the spot and never drove anywhere.
 LIFECYCLE_NODES = [
     "controller_server",
     "planner_server",
@@ -43,6 +57,7 @@ LIFECYCLE_NODES = [
     "bt_navigator",
     "waypoint_follower",
     "velocity_smoother",
+    "collision_monitor",
 ]
 
 

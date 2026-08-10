@@ -122,6 +122,57 @@ def test_should_yield_higher_priority_peer_blocks():
     ) is None
 
 
+def _peer_intent(corridor, goal, priority=0, robot_id="robot_0"):
+    return {
+        "robot_id": robot_id,
+        "x": goal[0],
+        "y": goal[1],
+        "corridor": corridor,
+        "priority": priority,
+        "expires_at": time.time() + 60,
+        "released": False,
+    }
+
+
+def test_should_yield_horizon_ignores_distant_crossing():
+    # Peer corridor crosses ours 10 m ahead. Without a horizon that's a
+    # conflict; with a 3 m one it isn't, because both robots replan long
+    # before either gets there. This is what stopped robot_1 from ever
+    # sending a goal — see should_yield's docstring.
+    far_crossing = [_peer_intent([[10.0, -5.0], [10.0, 5.0]], (10.0, 5.0))]
+    assert fr.should_yield(
+        own_priority=1,
+        own_start=(0.0, 0.0),
+        own_goal=(20.0, 0.0),
+        peer_intents=far_crossing,
+        pad_m=0.6,
+    ) is not None
+    assert fr.should_yield(
+        own_priority=1,
+        own_start=(0.0, 0.0),
+        own_goal=(20.0, 0.0),
+        peer_intents=far_crossing,
+        pad_m=0.6,
+        horizon_m=3.0,
+    ) is None
+
+
+def test_should_yield_horizon_still_blocks_imminent_crossing():
+    # A crossing 2 m ahead is inside the horizon and must still yield —
+    # the horizon must not disable the mechanism outright.
+    near_crossing = [_peer_intent([[2.0, -5.0], [2.0, 5.0]], (2.0, 5.0))]
+    blocker = fr.should_yield(
+        own_priority=1,
+        own_start=(0.0, 0.0),
+        own_goal=(20.0, 0.0),
+        peer_intents=near_crossing,
+        pad_m=0.6,
+        horizon_m=3.0,
+    )
+    assert blocker is not None
+    assert blocker["robot_id"] == "robot_0"
+
+
 def test_priority_for_robot_id():
     assert fr.priority_for_robot_id("robot_0") == 0
     assert fr.priority_for_robot_id("robot_3") == 3

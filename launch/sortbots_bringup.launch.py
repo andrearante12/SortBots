@@ -228,12 +228,19 @@ def _make_per_robot_actions(
         actions.append(GroupAction(
             condition=IfCondition(explore),
             actions=[
+                # use_sim_time is REQUIRED, not cosmetic: every timeout in
+                # configs/explorer.yaml (goal_timeout_s, stuck_window_s,
+                # blacklist TTLs) is really a distance budget, and the robot
+                # covers those metres in SIM time. On the wall clock they are
+                # worth ~45% of their configured value — see nodes/explorer.py's
+                # _now() for the live failure that caused.
                 ExecuteProcess(
                     cmd=[
                         "python3",
                         os.path.join(REPO_ROOT, "nodes", "explorer.py"),
                         "--robot-id", rid,
                         "--autostart",
+                        "--ros-args", "-p", ["use_sim_time:=", use_sim_time],
                     ],
                     output="screen",
                     condition=IfCondition(explore_autostart),
@@ -243,6 +250,7 @@ def _make_per_robot_actions(
                         "python3",
                         os.path.join(REPO_ROOT, "nodes", "explorer.py"),
                         "--robot-id", rid,
+                        "--ros-args", "-p", ["use_sim_time:=", use_sim_time],
                     ],
                     output="screen",
                     condition=UnlessCondition(explore_autostart),

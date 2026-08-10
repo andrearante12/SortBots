@@ -99,30 +99,95 @@ def _morph_close(mask: np.ndarray, iterations: int) -> np.ndarray:
 
 def label_blobs(mask: np.ndarray) -> tuple[np.ndarray, list[int]]:
     """4-connected component labels; returns (labels HxW int32, list of sizes).
-    Label 0 is background."""
+    Label 0 is background.
+
+    Row-run + union-find, NOT a per-pixel flood fill. The obvious per-pixel
+    version is O(h*w) in interpreted Python, which at the D435's 848x480
+    (configs/sensors/d435.json) is 407k iterations plus a DFS per blob, every
+    frame, against a 30 Hz camera. Diagnosed live 2026-08-09: it throttled
+    /<id>/camera/depth_static to ~0.3 Hz, and because that topic is the ONLY
+    depth source for RTAB-Map, both costmaps' obstacle_layer and
+    collision_monitor, the knock-on was severe — depth_image_proc's
+    PointCloudXyzNode never synced a pair (its camera_info queue is 5 deep and
+    had long discarded the matching stamp), so depth_static/points went nearly
+    silent and the costmaps went blind.
+
+    Here the interpreted loop runs once per RUN of set pixels rather than once
+    per pixel, so cost tracks blob perimeter complexity (tens to hundreds of
+    runs) instead of resolution. Labels are renumbered in row-major order of
+    first appearance, so ids match what the per-pixel scan produced.
+    """
     h, w = mask.shape
     labels = np.zeros((h, w), dtype=np.int32)
-    sizes: list[int] = [0]
-    current = 0
-    for y in range(h):
-        for x in range(w):
-            if not mask[y, x] or labels[y, x]:
-                continue
-            current += 1
-            stack = [(y, x)]
-            labels[y, x] = current
-            count = 0
-            while stack:
-                cy, cx = stack.pop()
-                count += 1
-                for ny, nx in (
-                    (cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)
-                ):
-                    if 0 <= ny < h and 0 <= nx < w and mask[ny, nx] and labels[ny, nx] == 0:
-                        labels[ny, nx] = current
-                        stack.append((ny, nx))
-            sizes.append(count)
-    return labels, sizes
+    if not mask.any():
+        return labels, [0]
+
+    # A run starts where the column-padded diff is +1 and ends (exclusive)
+    # where it is -1. np.nonzero returns row-major order and each row has as
+    # many starts as ends, so the two results pair up elementwise.
+    padded = np.zeros((h, w + 2), dtype=np.int8)
+    padded[:, 1:-1] = mask
+    steps = np.diff(padded, axis=1)
+    run_y, run_start = np.nonzero(steps == 1)
+    _, run_end = np.nonzero(steps == -1)
+    n_runs = run_y.size
+
+    parent = list(range(n_runs))
+
+    def find(i: int) -> int:
+        root = i
+        while parent[root] != root:
+            root = parent[root]
+        while parent[i] != root:
+            parent[i], i = root, parent[i]
+        return root
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            # Keep the LOWER index as root so a component's root is its
+            # first-appearing run — that's what makes the renumbering below
+            # come out in scan order.
+            parent[max(ra, rb)] = min(ra, rb)
+
+    # Merge-walk each adjacent row pair: both run sequences are sorted by
+    # column, so advancing whichever run ends first visits each one once.
+    rows = np.arange(h)
+    row_begin = np.searchsorted(run_y, rows, side="left")
+    row_end = np.searchsorted(run_y, rows, side="right")
+    starts = run_start.tolist()
+    ends = run_end.tolist()
+    for y in range(1, h):
+        i, i_stop = int(row_begin[y - 1]), int(row_end[y - 1])
+        j, j_stop = int(row_begin[y]), int(row_end[y])
+        while i < i_stop and j < j_stop:
+            if starts[i] < ends[j] and starts[j] < ends[i]:
+                union(i, j)
+            if ends[i] < ends[j]:
+                i += 1
+            else:
+                j += 1
+
+    remap: dict[int, int] = {}
+    run_labels = np.zeros(n_runs, dtype=np.int32)
+    for i in range(n_runs):
+        root = find(i)
+        lab = remap.get(root)
+        if lab is None:
+            lab = len(remap) + 1
+            remap[root] = lab
+        run_labels[i] = lab
+
+    ys = run_y.tolist()
+    label_ids = run_labels.tolist()
+    for i in range(n_runs):
+        labels[ys[i], starts[i]:ends[i]] = label_ids[i]
+
+    # Sum run lengths per label instead of counting pixels over the full
+    # image — same answer, and it stays proportional to the run count.
+    lengths = (run_end - run_start).astype(np.int64)
+    sizes = np.bincount(run_labels, weights=lengths, minlength=len(remap) + 1)
+    return labels, [int(s) for s in sizes]
 
 
 def select_dynamic_mask(
@@ -143,14 +208,14 @@ def select_dynamic_mask(
     )
     closed = _morph_close(raw, int(c["morph_close"]))
     labels, sizes = label_blobs(closed)
-    keep = np.zeros(closed.shape, dtype=bool)
     lo, hi = int(c["min_blob_px"]), int(c["max_blob_px"])
-    for lab, sz in enumerate(sizes):
-        if lab == 0:
-            continue
-        if lo <= sz <= hi:
-            keep |= labels == lab
-    return keep
+    # One lookup-table index rather than a `keep |= labels == lab` pass per
+    # label: that loop walked the whole 848x480 image once per blob, so a
+    # speckly frame (which is the common case, and the reason min_blob_px
+    # exists) cost hundreds of full-image comparisons.
+    size_ok = (np.asarray(sizes) >= lo) & (np.asarray(sizes) <= hi)
+    size_ok[0] = False  # label 0 is background
+    return size_ok[labels]
 
 
 def apply_static_depth(depth: np.ndarray, dynamic_mask: np.ndarray) -> np.ndarray:

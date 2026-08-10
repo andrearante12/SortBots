@@ -27,3 +27,19 @@ corridor_radius_m: 0.6
 # when equal — lower number = higher priority).
 yield_enabled: true
 yield_wait_s: 3.0
+
+# Only test the leading yield_horizon_m of our own route for conflicts, not
+# its whole length. Exploration goals are 10-12 m out, and a line that long
+# crosses most of the warehouse, so it conflicts with SOME peer corridor
+# almost always — see nodes/fleet_radio.py's should_yield() for the live
+# failure this prevents.
+yield_horizon_m: 3.0
+# Hard cap on how long we defer to ONE peer intent. A yield is a courtesy for
+# a crossing that clears in seconds; priority here is STATIC (robot index), so
+# without a cap the lower-priority robot re-loses the same check every time
+# yield_wait_s lapses and never explores at all. After this long we proceed
+# and stop yielding to that same peer goal — Nav2's local costmap and
+# collision_monitor are what actually keep the robots off each other; this
+# channel only exists to stop them choosing overlapping work. Budget restarts
+# when the peer picks a different goal. 0 disables the cap (not recommended).
+yield_max_total_s: 12.0
