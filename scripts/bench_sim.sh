@@ -30,8 +30,16 @@
 #     render product on top of the two head cams and costs ~30% of real time
 #     all by itself, which is the whole gap between the documented figure and
 #     what a fleet run actually does.
-# The full stack (Isaac + 2x RTAB-Map + Nav2 + explorers) then runs ~0.25x,
-# i.e. the ROS side costs far less than any of the above.
+# What this script CANNOT tell you, and the trap that follows from it: every
+# row above is Isaac with the machine to itself, and none of it transfers to a
+# full run. Measured 2026-08-13, turning the chase cam off moved a full
+# explore_fleet run 0.25x -> 0.19x — i.e. not at all, inside the noise. A full
+# stack is CPU-oversubscribed long before Isaac's renderer is the constraint
+# (load ~34 on 16 cores: Chrome rendering the dashboard ~3 cores, two
+# collision_monitors ~1.7, two controller_servers ~1.2, Isaac itself only
+# ~2.2). So use this to tune ISAAC, and measure /clock against wall time on a
+# real run to tune anything else — including before believing that a win here
+# is a win there.
 #
 #   scripts/bench_sim.sh                                  # current defaults
 #   scripts/bench_sim.sh --robots 1 --chase-cam-robots 0  # isolate camera cost
