@@ -21,19 +21,17 @@ We currently have a working simulation of our intended robot imported into an re
 - **ManiSkill (arm-manipulation sim):** XLeRobot's original sim env with extensive support for training manipulation tasks
 
 ### Perception & mapping
-- **Per-robot ROS 2 sensor suite** 
-  - Intel RealSense D435 RGB-Depth Camera
-  - MPU 6050 IMU
-  - Optical Tracking Odometry Sensor - PAA5160E1
-
-- **RGB-D SLAM working end-to-end:** 
-  - RTAB-Map is the current SLAM algorithm of choice
-
+- **Per-robot ROS 2 sensor suite** (Isaac): RGB-D head cam, IMU, odom/TF
+- **RGB-D SLAM:** RTAB-Map per robot; dynamic depth filter keeps movers out of the permanent grid
+- **Fleet fusion (not collab SLAM):** fused 2D `/map` + fused 3D `/fleet/recon_cloud` via spawn anchors
+- **Exploration:** frontier explorer on the fused map; mesh intent/status radio (no peer TF oracle)
+- **Dashboard:** live view, fleet radio monitor tab, scenarios console
 
 ## Docs
 
 - [`docs/setup.md`](docs/setup.md) — full setup: Isaac Sim + ROS 2 + RTAB-Map (optional ManiSkill at the end)
 - [`docs/running.md`](docs/running.md) — running everything: the demo, console mode and scenarios, autonomous exploration, map lifecycle, remote access, dashboard tests
+- [`docs/perception_exploration.md`](docs/perception_exploration.md) — perception, exploration, fleet mesh radio, and map/recon fusion architecture
 
 
 ## Run commands

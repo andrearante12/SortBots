@@ -318,14 +318,18 @@ hardcodes a few frame ids/one topic to `robot_0`; `sortbots_nav2.launch.py`
 rewrites them per-robot at launch time (see that file's docstring for why
 it's plain string substitution, not `nav2_common.RewrittenYaml`).
 
+Architecture for perception, exploration, mesh radio, and 2D/3D fusion is in
+[`docs/perception_exploration.md`](perception_exploration.md).
+
 Each robot's RTAB-Map owns its own SLAM grid, in its own `<robot_id>/map`
 frame (see `sortbots_rtabmap_robot.launch.py`'s `map_frame_id`) — this is
 still NOT collaborative SLAM (no shared pose graph, no inter-robot loop
-closure). What ties the fleet together is `nodes/map_merge.py`: the bringup
+closure). What ties the fleet together is `nodes/map_merge.py` (2D `/map`)
+and `nodes/recon_cloud_merge.py` (3D `/fleet/recon_cloud`): the bringup
 publishes a static `map -> <robot_id>/map` transform per robot from its known
 spawn pose (`configs/robots.yaml`, keyed by the `scene` launch arg — must
-match `spawn_warehouse.py --scene`), and `map_merge.py` uses those anchors to
-resample every robot's grid into one world-anchored `/map` — occupied beats
+match `spawn_warehouse.py --scene`), and the merge nodes use those anchors to
+resample every robot's grid/cloud into one world-anchored frame — occupied beats
 free beats unknown where two robots' grids disagree about a cell. Nav2's
 `global_frame: map` and every explorer's default `--map-topic /map` both
 point at this fused grid, so a robot plans and picks frontiers using space
@@ -417,6 +421,9 @@ queued pickup→dropoff workflow instead.
 
 ## Autonomous exploration
 
+Module overview (frontiers, mesh intent/status, Nav2 handoff):
+[`docs/perception_exploration.md`](perception_exploration.md).
+
 ```bash
 scripts/run_demo.sh --explore              # hands-off: starts exploring immediately
 scripts/run_demo.sh --explore --resume     # EXTEND an existing map instead of starting fresh
@@ -427,9 +434,11 @@ map, so exploring against it just re-walks what was already known. See
 "Resuming exploration into an existing map" below.)
 
 `nodes/explorer.py` finds frontiers (free cells bordering unknown space) in
-`/robot_0/map`, drives `navigate_to_pose` toward the best-scored one, and
-repeats until none remain reachable — then reports "exploration done" and
-stops. No waypoints, no human input.
+the fused `/map` by default (or `/{id}/map` if overridden), drives
+`navigate_to_pose` toward the best-scored one, and repeats until none remain
+reachable — then reports "exploration done" and stops. No waypoints, no
+human input. Multi-robot runs coordinate via `/fleet/intent` + `/fleet/status`
+(not peer TF).
 
 **Motion is deliberately diff-drive, not holonomic.** The sim base can
 physically strafe, but Nav2 now runs MPPI with `motion_model: DiffDrive`
