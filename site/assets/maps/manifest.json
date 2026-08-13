@@ -1,0 +1,51 @@
+{
+  "resolution": 0.05,
+  "canvas": [
+    359,
+    652
+  ],
+  "frames": [
+    {
+      "src": "assets/maps/checkpoint_001.png",
+      "label": "checkpoint 001",
+      "free_m2": 213.0,
+      "occupied_cells": 7361
+    },
+    {
+      "src": "assets/maps/checkpoint_002.png",
+      "label": "checkpoint 002",
+      "free_m2": 220.8,
+      "occupied_cells": 8018
+    },
+    {
+      "src": "assets/maps/checkpoint_004.png",
+      "label": "checkpoint 004",
+      "free_m2": 223.4,
+      "occupied_cells": 8255
+    },
+    {
+      "src": "assets/maps/checkpoint_005.png",
+      "label": "checkpoint 005",
+      "free_m2": 224.3,
+      "occupied_cells": 8212
+    },
+    {
+      "src": "assets/maps/checkpoint_006.png",
+      "label": "checkpoint 006",
+      "free_m2": 245.5,
+      "occupied_cells": 9376
+    },
+    {
+      "src": "assets/maps/checkpoint_007.png",
+      "label": "checkpoint 007",
+      "free_m2": 255.1,
+      "occupied_cells": 9873
+    },
+    {
+      "src": "assets/maps/final.png",
+      "label": "final",
+      "free_m2": 255.1,
+      "occupied_cells": 9873
+    }
+  ]
+}
