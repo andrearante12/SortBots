@@ -31,7 +31,9 @@ run:
   robots: 1
   robot_id: robot_0
   headless: false        # true drops the Isaac window (the dashboard still works)
-  chase_cam: true        # false = --no-chase-cam, one less render product
+  chase_cam: false       # cosmetic 3rd-person view; off by default because the
+                         # render product costs ~30% of real-time factor (see
+                         # scripts/bench_sim.sh). Tick it in the UI to watch.
   explore: true
   resume: false          # false = wipe the map database and start clean
   localize: false
@@ -40,7 +42,7 @@ run:
 
 # Which `run:` keys the scenario card exposes as controls. Everything else is
 # fixed by this file — keeping the launch-time surface small and reviewable.
-overrides: [headless, robots, resume]
+overrides: [headless, robots, resume, chase_cam]
 
 capture:
   # true also runs scripts/record_explore_bag.sh into the session directory for

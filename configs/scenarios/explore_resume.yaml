@@ -20,7 +20,7 @@ run:
   robots: 1
   robot_id: robot_0
   headless: false
-  chase_cam: true
+  chase_cam: false       # off by default for speed — see explore_fresh.yaml
   explore: true
   resume: true
   localize: false        # mutually exclusive with resume (read-only vs. keep-mapping)
@@ -29,7 +29,7 @@ run:
 
 # `resume` is deliberately NOT overridable here — turning it off would silently
 # wipe the map this scenario exists to extend. Use explore_fresh for that.
-overrides: [headless, robots]
+overrides: [headless, robots, chase_cam]
 
 capture:
   bag: false

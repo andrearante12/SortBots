@@ -219,6 +219,16 @@ RUN_DEFAULTS = {
 
 def build_argv(run: dict) -> list[str]:
     """Turn a validated `run:` mapping into run_demo.sh arguments."""
+    run = dict(run)
+    # chase_cam and chase_cam_robots both resolve to run_demo.sh's single
+    # CHASE_CAM_ARGS variable, where the LAST flag on the line wins. RUN_FLAGS
+    # order emits --no-chase-cam first, so a scenario carrying chase_cam:false
+    # AND a chase_cam_robots count silently got its chase cams back — the
+    # count overwrote the "off". Let the boolean be authoritative instead:
+    # off means off, whatever the count says. This is what lets a scenario
+    # keep "how many when enabled" alongside an off-by-default toggle.
+    if run.get("chase_cam") is False:
+        run.pop("chase_cam_robots", None)
     argv: list[str] = []
     for key, builder in RUN_FLAGS.items():
         if key in run:

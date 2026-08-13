@@ -306,10 +306,35 @@ def parse_args() -> argparse.Namespace:
             "Default: every spawned robot (matches --robots)."
         ),
     )
+    p.add_argument(
+        "--render-every",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Render (and therefore evaluate every OnPlaybackTick OmniGraph) "
+            "only on every Nth physics step; physics always steps at 60 Hz "
+            "regardless. Diagnostic knob, NOT a speedup — see the measured "
+            "numbers in scripts/bench_sim.sh's header. Default 1 (render "
+            "every step) because decimating buys almost nothing: N=2 moved "
+            "real-time factor 0.33x -> 0.36x, because the per-render cost "
+            "roughly doubles when you halve the rate, while it does halve "
+            "/clock, odom, TF and cmd_vel, which all ride OnPlaybackTick. A "
+            "huge N (600) renders essentially never and isolates physics "
+            "from rendering, which is what it's genuinely useful for."
+        ),
+    )
     return p.parse_args()
 
 
 args = parse_args()
+
+# 0 would render nothing at all (and divide the modulo by zero); negatives are
+# meaningless. Clamp rather than exit — this is a perf knob, not a correctness
+# one, and a typo here shouldn't cost a 60 s Isaac startup to find out.
+if args.render_every < 1:
+    print(f"--render-every {args.render_every} is invalid; using 1", flush=True)
+    args.render_every = 1
 
 # SimulationApp MUST be constructed before any other isaacsim / omni / pxr imports.
 from isaacsim import SimulationApp  # noqa: E402
@@ -1013,6 +1038,8 @@ def main() -> int:
     emit(f"  scene={args.scene}  robots={args.robots}")
     emit(f"  headless={args.headless}  drive={args.drive}")
     emit(f"  duration={'forever' if args.forever else args.duration}")
+    emit(f"  render_every={args.render_every} (physics 60Hz -> "
+         f"{60.0 / args.render_every:.0f}Hz render/OnPlaybackTick)")
 
     d435, mpu = _load_sensor_configs()
     emit(f"  d435: {d435['width']}x{d435['height']}@{d435['fps']}Hz")
@@ -1349,7 +1376,15 @@ def main() -> int:
                 _place_package_on_surface(stage, package_prim_path, decks)
                 emit("  package released")
             last_pick_seq = pick_cmd_state["seq"]
-        world.step(render=True)
+        # Physics every step, pixels only every --render-every steps (default
+        # 1 = every step, the original behaviour). Rendering is ~85% of the
+        # per-step cost here — physics alone benches at 1.20x real time versus
+        # 0.33x with the cameras on — but decimating it is NOT the way to buy
+        # that back; see --render-every's help. What this gates that isn't
+        # obvious: the OnPlaybackTick graphs (/clock, odom, TF, cmd_vel)
+        # evaluate on app update, not on the physics step, so a large N stops
+        # publishing time itself.
+        world.step(render=(step % args.render_every == 0))
         step += 1
         if step % 60 == 0:
             elapsed = step * dt

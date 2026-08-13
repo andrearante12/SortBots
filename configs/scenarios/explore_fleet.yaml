@@ -14,11 +14,11 @@ description: >
   runs sharing a warehouse. Fleet mesh radio (/fleet/intent + /fleet/status)
   deconflicts goals/corridors without TF pose oracle; dynamic_obstacle_filter
   keeps movers out of SLAM while Nav2 still sees them ephemerally.
-  Only robot_0 gets a chase cam
-  (dashboard shows that feed); robot_1 skips the cosmetic render product so
-  the GPU isn't saturated by a second 3rd-person view nobody is watching.
-  Override chase_cam_robots=2 if you need both, or =0 / chase_cam:false to
-  drop them entirely.
+  Chase cams are OFF by default here: the cosmetic 3rd-person render product
+  costs about 30% of real-time factor (0.47x -> 0.33x, measured with
+  scripts/bench_sim.sh), and this run is long enough that speed beats scenery.
+  Tick chase_cam to get robot_0's view back — the dashboard falls back to the
+  head cam meanwhile, and nothing else changes.
 
 status: ready
 
@@ -27,8 +27,9 @@ run:
   robots: 2              # robot_ids derives from this, in configs/robots.yaml order
   robot_id: robot_0      # which robot --localize/--resume/--map/--teleop would apply to
   headless: false
-  chase_cam: true
-  chase_cam_robots: 1    # only robot_0 — saves one render product vs both
+  chase_cam: false       # the toggle; false wins over chase_cam_robots below
+  chase_cam_robots: 1    # how many robots get one WHEN enabled — robot_0 only,
+                         # since the dashboard never shows robot_1's chase feed
   explore: true
   resume: false
   localize: false
@@ -39,7 +40,7 @@ run:
 # with robot_ids (left unset above so run_demo.sh derives it FROM robots), and
 # a scenario named "fleet" that silently ran as 1 robot would be confusing.
 # Use explore_fresh for the single-robot case.
-overrides: [headless, resume, chase_cam_robots]
+overrides: [headless, resume, chase_cam, chase_cam_robots]
 
 capture:
   bag: false

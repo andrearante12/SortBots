@@ -51,8 +51,18 @@ Node tuning is plain YAML loaded by the node itself, not ROS params. Nodes take
 - **Every `/snapshot` request needs `qos_profile=sensor_data`**, including
   ad-hoc `curl`. A RELIABLE image subscriber kills Isaac's image writers at
   around sim-t=100–140 s.
-- **Measure robot speed in sim time, not wall clock** — the sim runs at roughly
-  0.45× real time.
+- **Measure robot speed in sim time, not wall clock** — and don't trust one
+  real-time factor. It depends almost entirely on how many camera render
+  products are in the scene: ~0.47× for a 2-robot run, ~0.33× once a chase cam
+  is added, ~0.25× with the full ROS stack alongside. `scripts/bench_sim.sh`
+  measures it, and its header carries the table. Rendering is ~85% of the cost
+  but rendering LESS OFTEN doesn't help — only fewer render products do.
+- **A ROS timer follows `use_sim_time`.** `create_timer` runs off the node
+  clock, so enabling sim time silently stretches every control period by the
+  real-time factor — a 2 s explorer tick became 11 s of wall clock and looked
+  like a hang. Deadlines that stand for distance belong on sim time; the tick
+  rate that keeps a node responsive does not (pass an explicit `STEADY_TIME`
+  clock, as `nodes/explorer.py` does).
 - **Nav2 costmap `map_topic` must be absolute.** A relative one resolves into
   the costmap sub-namespace and silently gets no map.
 - **In params YAML under a namespace, use `/**/<node_name>:`** — a bare

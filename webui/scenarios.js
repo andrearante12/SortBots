@@ -88,10 +88,24 @@
     return s && ACTIVE_STATES.includes(s.state);
   }
 
+  // Extra tooltip text for keys whose name can't answer "what does this cost
+  // me". Only worth adding where the honest answer is surprising.
+  const OVERRIDE_HINTS = {
+    chase_cam:
+      "Cosmetic 3rd-person view. Off by default because that render product " +
+      "costs about 30% of real-time factor (0.47x -> 0.33x, scripts/bench_sim.sh); " +
+      "the stage falls back to the head cam without it.",
+    chase_cam_robots:
+      "How many robots get a chase cam WHEN chase_cam is ticked. Only " +
+      "robot_0's feed is ever displayed, so 1 is normally right — each extra " +
+      "one is another render product.",
+  };
+
   function overrideControl(scenario, key) {
     const value = scenario.run[key];
     const label = document.createElement("label");
     label.title = `Override ${key} for this run only (configs/scenarios/${scenario.name}.yaml sets ${value}).`;
+    if (OVERRIDE_HINTS[key]) label.title += `\n\n${OVERRIDE_HINTS[key]}`;
     const input = document.createElement("input");
     input.dataset.key = key;
     if (typeof value === "boolean") {
