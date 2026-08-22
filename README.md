@@ -1,5 +1,7 @@
 # SortBots
 
+![Warehouse simulation environment](docs/media/warehouse_hero.png)
+
 Fully autonomous mobile robots performing collaborative
 indoor logistics, built on
 [XLeRobot](https://github.com/Vector-Wangel/XLeRobot).
@@ -12,20 +14,13 @@ mechanism for both efficiency and resilience. Robots divide work via decentraliz
 coordinate passage through shared spaces, and dynamically
 re-allocate tasks when one is blocked or delayed. Applications to autonomous delivery logistics in dynamic enviornemnts, such as warehouses, shelf restocking, or serving foods in restaurants.
 
-## Already Completed
+## Exploration Demo
 
-We currently have a working simulation of our intended robot imported into an realistic test enviornment. As we design our custom additions to the robot we can update the URDF/sim enviornment accordingly. The intention is to use this repo to experiment with the software without needing to wait for the physical build of the robot.
+Fleet exploration mapping timelapse - understanding a fresh warehouse enviornment. 
 
-### Simulation infrastructure
-- **Isaac Sim** Isaac Sim 5.1 supporting SLAM pipelines and integrating with Nvidia packages such as Nvblox
-- **ManiSkill (arm-manipulation sim):** XLeRobot's original sim env with extensive support for training manipulation tasks
+<video src="docs/media/fleet_explore_timelapse.mp4" controls width="1000"></video>
 
-### Perception & mapping
-- **Per-robot ROS 2 sensor suite** (Isaac): RGB-D head cam, IMU, odom/TF
-- **RGB-D SLAM:** RTAB-Map per robot; dynamic depth filter keeps movers out of the permanent grid
-- **Fleet fusion (not collab SLAM):** fused 2D `/map` + fused 3D `/fleet/recon_cloud` via spawn anchors
-- **Exploration:** frontier explorer on the fused map; mesh intent/status radio (no peer TF oracle)
-- **Dashboard:** live view, fleet radio monitor tab, scenarios console
+
 
 ## Docs
 
