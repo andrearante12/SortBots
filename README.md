@@ -20,6 +20,19 @@ Fleet exploration mapping timelapse - understanding a fresh warehouse enviornmen
 
 <video src="docs/media/fleet_explore_timelapse.mp4" controls width="1000"></video>
 
+### Simulation infrastructure
+- **Isaac Sim** Isaac Sim 5.1 supporting SLAM pipelines and integrating with Nvidia packages such as Nvblox
+- **ManiSkill (arm-manipulation sim):** XLeRobot's original sim env with extensive support for training manipulation tasks
+
+### Perception & mapping
+- **Intended sensor suite**
+  - Intel RealSense D435 RGB-Depth Camera
+  - MPU 6050 IMU
+  - Optical Tracking Odometry Sensor - PAA5160E1
+- **RGB-D SLAM:** RTAB-Map per robot; dynamic depth filter keeps movers out of the permanent grid
+- **Fleet fusion (not collab SLAM):** fused 2D `/map` + fused 3D `/fleet/recon_cloud` via spawn anchors
+- **Exploration:** frontier explorer on the fused map; mesh intent/status radio (no peer TF oracle)
+- **Dashboard:** live view, fleet radio monitor tab, scenarios console
 
 
 ## Docs

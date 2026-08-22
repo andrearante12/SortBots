@@ -233,6 +233,26 @@ def generate_launch_description():
                 # SLAM grid. Raw /camera/depth still feeds Nav2 via the filter's
                 # dynamic_obstacles cloud (+ depth_static points for static).
                 "depth_topic":        ["/", robot_id, "/camera/depth_static"],
+                # Upstream rtabmap.launch.py does NOT remap rgb/image from
+                # rgb_topic directly — it bakes rgb_topic_relay /
+                # depth_topic_relay inside an OpaqueFunction via
+                # LaunchConfiguration('rgb_topic').perform(context) and then
+                # DeclareLaunchArgument's the result. IncludeLaunchDescription
+                # shares the parent launch context across every robot we
+                # spawn, so the SECOND robot's Include sees those relay
+                # names already set by the first and silently keeps
+                # robot_0's topics. Verified live 2026-08-09 on
+                # explore_fleet: robot_1's rtabmap cmdline had
+                #   -r rgb/image:=/robot_0/camera/rgb
+                #   -r depth/image:=/robot_0/camera/depth_static
+                #   -r rgb/camera_info:=/robot_1/camera/camera_info
+                # (camera_info is a lazy LaunchConfiguration, not a baked
+                # relay, so it alone resolved correctly). robot_1 was
+                # therefore building its cloud from robot_0's cameras —
+                # 3D recon froze on the dashboard for robot_1 while the
+                # bots kept moving. compressed:=false (our default) means
+                # relay == topic, so pass both explicitly per robot the
+                # same way bringup already forces per-robot database_path.
                 "rgb_topic_relay":    ["/", robot_id, "/camera/rgb"],
                 "depth_topic_relay":  ["/", robot_id, "/camera/depth_static"],
                 "camera_info_topic":  ["/", robot_id, "/camera/camera_info"],
