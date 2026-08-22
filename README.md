@@ -18,7 +18,9 @@ re-allocate tasks when one is blocked or delayed. Applications to autonomous del
 
 Fleet exploration mapping timelapse - understanding a fresh warehouse enviornment.
 
-[**Watch the timelapse**](docs/media/fleet_explore_timelapse.mp4) — GitHub plays it inline once you click through (raw `<video>` tags get stripped from rendered READMEs, so a link is the reliable way to embed video there).
+![Fleet exploration mapping timelapse](docs/media/fleet_explore_timelapse.gif)
+
+Full-quality version: [`docs/media/fleet_explore_timelapse.mp4`](docs/media/fleet_explore_timelapse.mp4).
 
 ### Simulation infrastructure
 - **Isaac Sim** Isaac Sim 5.1 supporting SLAM pipelines and integrating with Nvidia packages such as Nvblox
