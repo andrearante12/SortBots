@@ -199,6 +199,7 @@ RUN_FLAGS = {
     "resume": _switch("--resume", when=True),
     "explore": _switch("--explore", when=True),
     "map": _map_path("--map"),
+    "mesh": _switch("--mesh", when=True),
 }
 
 RUN_DEFAULTS = {
@@ -214,6 +215,7 @@ RUN_DEFAULTS = {
     "resume": False,
     "explore": False,
     "map": None,
+    "mesh": False,
 }
 
 

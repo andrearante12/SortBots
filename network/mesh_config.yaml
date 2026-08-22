@@ -1,0 +1,20 @@
+# Default 802.11s mesh configuration for ns3_mesh_bridge.
+# Positions are in metres, matching the NVIDIA scene scale.
+# robot_0 is at (-7.15, 11.62) and robot_1 at (1.23, 13.69) per configs/robots.yaml;
+# ns-3 uses non-negative coordinates, so we offset by (8, 0) to put both in positive space.
+
+mesh:
+  path_loss_exp: 3.0      # LogDistancePropagationLossModel exponent (free-space=2, indoor=3-4)
+  loss_ref_db: 46.6777    # reference loss at 1 m for 802.11a 5 GHz
+  tx_power_dbm: 16.0      # per-node transmit power (dBm)
+  hwmp_root: "ff:ff:ff:ff:ff:ff"   # broadcast = no forced root, HWMP elects proactively
+
+robots:
+  - id: robot_0
+    tap: tap-robot_0
+    x: 0.85     # offset from (-7.15, 11.62) -> (0.85, 11.62)
+    y: 11.62
+  - id: robot_1
+    tap: tap-robot_1
+    x: 9.23     # offset from (1.23, 13.69) -> (9.23, 13.69)
+    y: 13.69

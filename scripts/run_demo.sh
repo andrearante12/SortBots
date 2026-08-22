@@ -85,7 +85,8 @@ PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz
                    component_container task_manager.py scripted_pick.py explorer.py \
                    rtabmap_cloud_pump.py recon_cloud_relay.py wasd_teleop \
                    map_merge.py static_transform_publisher \
-                   "spawn_warehouse.py")
+                   "spawn_warehouse.py" \
+                   ns3_mesh_bridge fastdds)
 # Note scripts/save_map.sh --watch is deliberately absent from that list. Its
 # checkpoint loop has to OUTLIVE teardown: rtabmap gets pkill -9'd only 2 s
 # after SIGINT below, and the last checkpoint is exactly the one worth
@@ -109,6 +110,11 @@ stop_pipeline() {
     pkill -9 -f "$p" 2>/dev/null || true
   done
   sleep 1
+  # Tear down mesh netns/taps if they exist (idempotent, no-op otherwise)
+  if sudo -n true 2>/dev/null && [[ -f "$REPO_ROOT/scripts/mesh_netns_teardown.sh" ]]; then
+    sudo "$REPO_ROOT/scripts/mesh_netns_teardown.sh" \
+      --robots "${ROBOTS:-1}" --robot-ids "${ROBOT_IDS:-}" 2>/dev/null || true
+  fi
 }
 
 if [[ "${1:-}" == "stop" ]]; then
@@ -120,7 +126,8 @@ fi
 
 # ---- args ----
 # Teleop defaults OFF — the dashboard drive pad replaces the WASD window.
-ROBOT_ID=robot_0; ROBOTS=1; ROBOT_IDS=""; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=0
+ROBOT_ID=robot_0; ROBOTS=1; ROBOT_IDS=""; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=0; MESH=0
+NS3_HOME="${NS3_HOME:-$HOME/ns-3-dev}"
 # Cosmetic 3rd-person cam = a second render product per robot. --no-chase-cam
 # drops all of them; --chase-cam-robots N keeps them on the first N robots
 # only (dashboard only shows robot_id's feed, so fleet runs usually want 1).
@@ -141,6 +148,7 @@ while [[ $# -gt 0 ]]; do
     --resume)   RESUME=true; shift;;
     --map)      MAP_DB="$2";  shift 2;;
     --explore)  EXPLORE=true; shift;;
+    --mesh)     MESH=1; shift;;
     # Set by webui/session.py when the Scenarios tab launches a run: the
     # dashboard console is already up and owns rosbridge/web_video_server, so
     # don't kill it on teardown and don't start a second copy in the bringup.
@@ -203,10 +211,47 @@ stop_pipeline
 # (PHASE_PATTERNS) to drive the Scenarios tab's phase readout. Reword them
 # freely, but update that table in the same commit.
 
+# ---- 0. 802.11s mesh bridge (optional) ----
+DDS_PROFILE_DIR="/tmp/sortbots_dds"
+if [[ $MESH -eq 1 ]]; then
+  echo "[run_demo] --mesh: setting up 802.11s mesh (ns-3 + Linux netns)"
+
+  # netns, veth, tap — requires sudo
+  sudo "$REPO_ROOT/scripts/mesh_netns_setup.sh" \
+    --robots "$ROBOTS" --robot-ids "$ROBOT_IDS"
+
+  # Render FastDDS XML profiles (no sudo needed)
+  python3 "$REPO_ROOT/network/render_dds_profile.py" \
+    --output-dir "$DDS_PROFILE_DIR" \
+    --ds-host "127.0.0.1" --ds-port 11811 \
+    --robot-ids "$ROBOT_IDS" --robots "$ROBOTS"
+
+  # FastDDS Discovery Server in the root netns (background)
+  # fastdds CLI is provided by ros-jazzy-fastrtps; source ROS inside subshell
+  # so we don't pollute this clean shell with AMENT_PREFIX_PATH.
+  setsid bash -c "source '$ROS_SETUP'; \
+    export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
+    exec fastdds discovery -i 0 -l 127.0.0.1 -p 11811" \
+    >"/tmp/sortbots_fastdds.log" 2>&1 &
+  sleep 1
+  echo "[run_demo] FastDDS Discovery Server started (log: /tmp/sortbots_fastdds.log)"
+
+  # ns-3 mesh bridge — waits for all TapBridge attachments before returning
+  "$REPO_ROOT/scripts/run_mesh.sh" \
+    --robots "$ROBOTS" --robot-ids "$ROBOT_IDS" \
+    --config "$REPO_ROOT/network/mesh_config.yaml"
+  echo "[run_demo] ns-3 mesh bridge up (log: /tmp/sortbots_ns3_mesh.log)"
+fi
+
 # ---- 1. Isaac Sim ----
 echo "[run_demo] launching Isaac Sim ($SCENE, $ROBOTS robot(s), $HEADLESS)..."
 rm -f "$SIM_RESULT"
-setsid bash -c "source '$REPO_ROOT/scripts/activate_isaac.sh' >/dev/null 2>&1; \
+ISAAC_EXTRA_ENV=""
+if [[ $MESH -eq 1 ]]; then
+  ISAAC_EXTRA_ENV="export FASTRTPS_DEFAULT_PROFILES_FILE='$DDS_PROFILE_DIR/profile_root.xml'; \
+    export ROS_DISCOVERY_SERVER='127.0.0.1:11811'; "
+fi
+setsid bash -c "$ISAAC_EXTRA_ENV source '$REPO_ROOT/scripts/activate_isaac.sh' >/dev/null 2>&1; \
   exec python '$REPO_ROOT/scripts/spawn_warehouse.py' $HEADLESS --forever \
        --robots $ROBOTS --scene $SCENE --drive cmd_vel $CHASE_CAM_ARGS" \
   >"$SIM_LOG" 2>&1 &
@@ -246,17 +291,61 @@ echo "[run_demo] launching RTAB-Map + Nav2 + web dashboard + task manager..."
 # so the bringup must NOT start a second one — two rosbridges would fight over
 # port 9090 and the loser dies silently.
 WEBUI=true; [[ "$KEEP_CONSOLE" == "true" ]] && WEBUI=false
-setsid bash -c "source '$ROS_SETUP'; \
-  export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
-  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
-  exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
-       robot_id:=$ROBOT_ID robot_ids:=$ROBOT_IDS scene:=$SCENE \
-       use_sim_time:=true rviz:=false \
-       webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
-       localization:=$LOCALIZE database_path:='$MAP_DB' \
-       delete_db_on_start:=$DELETE_DB_ON_START \
-       explore:=$EXPLORE" \
-  >"$BRINGUP_LOG" 2>&1 &
+
+if [[ $MESH -eq 1 ]]; then
+  # Mesh mode: all processes stay in the root namespace (taps are in root ns
+  # so ns-3 can access them). Isolation is via FastDDS interface whitelisting:
+  # each robot's DDS binds only to its tap (10.66.0.x for inter-robot traffic)
+  # plus loopback (for per-robot topics with Isaac and the Discovery Server).
+  # One bringup per robot with its own profile; DS + map_merge + dashboard share
+  # the root profile on loopback.
+  IFS=',' read -ra _MESH_IDS <<< "$ROBOT_IDS"
+  for _rid in "${_MESH_IDS[@]}"; do
+    _PROFILE="$DDS_PROFILE_DIR/profile_${_rid}.xml"
+    _LOG="/tmp/sortbots_bringup_${_rid}.log"
+    setsid bash -c "source '$ROS_SETUP'; \
+      export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
+      export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
+      export FASTRTPS_DEFAULT_PROFILES_FILE='$_PROFILE'; \
+      export ROS_DISCOVERY_SERVER='127.0.0.1:11811'; \
+      exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
+           robot_id:=${_rid} robot_ids:=${_rid} scene:=$SCENE \
+           use_sim_time:=true rviz:=false webui:=false \
+           localization:=$LOCALIZE database_path:='$MAP_DB' \
+           delete_db_on_start:=$DELETE_DB_ON_START \
+           explore:=$EXPLORE" \
+      >"$_LOG" 2>&1 &
+    echo "[run_demo] launched mesh bringup for $_rid (log: $_LOG)"
+  done
+
+  # map_merge + dashboard: root profile (loopback only, sees all robots via DS)
+  setsid bash -c "source '$ROS_SETUP'; \
+    export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
+    export FASTRTPS_DEFAULT_PROFILES_FILE='$DDS_PROFILE_DIR/profile_root.xml'; \
+    export ROS_DISCOVERY_SERVER='127.0.0.1:11811'; \
+    exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
+         robot_id:=$ROBOT_ID robot_ids:=$ROBOT_IDS scene:=$SCENE \
+         use_sim_time:=true rviz:=false \
+         webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
+         localization:=$LOCALIZE database_path:='$MAP_DB' \
+         delete_db_on_start:=$DELETE_DB_ON_START \
+         explore:=false" \
+    >"$BRINGUP_LOG" 2>&1 &
+else
+  # Standard (no mesh): single bringup for all robots on the host netns
+  setsid bash -c "source '$ROS_SETUP'; \
+    export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
+    exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
+         robot_id:=$ROBOT_ID robot_ids:=$ROBOT_IDS scene:=$SCENE \
+         use_sim_time:=true rviz:=false \
+         webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
+         localization:=$LOCALIZE database_path:='$MAP_DB' \
+         delete_db_on_start:=$DELETE_DB_ON_START \
+         explore:=$EXPLORE" \
+    >"$BRINGUP_LOG" 2>&1 &
+fi
 sleep 12
 echo "[run_demo] ROS 2 stack up (see $BRINGUP_LOG)."
 

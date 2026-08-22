@@ -1,0 +1,38 @@
+# Frontier exploration — 2 robots, 802.11s mesh (ns-3 simulated).
+# Same as explore_fleet but forces inter-robot DDS through a simulated
+# 802.11s mesh (TapBridge + Linux network namespaces + ns-3).
+# Requires: scripts/install_ns3.sh --setup-privileged (one-time setuid).
+# See docs/mesh.md for the full bring-up guide.
+
+name: explore_fleet_mesh
+
+title: Frontier exploration — fleet (2 robots, 802.11s mesh)
+description: >
+  Two robots exploring collaboratively, with inter-robot ROS 2 traffic
+  (frontier claims, map fusion, TF) routed through an ns-3-simulated
+  IEEE 802.11s WiFi mesh. Each robot's ROS 2 stack runs in its own Linux
+  network namespace; packets between robots traverse the simulated PHY/MAC,
+  incurring realistic latency and packet loss. Useful for testing how the
+  decentralised coordination degrades under mesh conditions vs. the flat
+  loopback of explore_fleet.
+
+status: ready
+
+run:
+  scene: nvidia
+  robots: 2
+  robot_id: robot_0
+  headless: false
+  chase_cam: true
+  chase_cam_robots: 1
+  explore: true
+  resume: false
+  localize: false
+  teleop: false
+  map: null
+  mesh: true
+
+overrides: [headless, resume, chase_cam_robots]
+
+capture:
+  bag: false
