@@ -39,7 +39,11 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ROS_SETUP="/opt/ros/jazzy/setup.bash"
+ROS2_HOME="${ROS2_HOME:-$HOME/ros2_jazzy}"
+ROS_SETUP="${ROS2_HOME}/install/setup.bash"
+if [[ ! -f "$ROS_SETUP" ]]; then
+  ROS_SETUP="/opt/ros/jazzy/setup.bash"  # fallback for binary install
+fi
 CONSOLE_LOG="/tmp/sortbots_console.log"
 PORT=8081
 
