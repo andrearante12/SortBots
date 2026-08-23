@@ -220,6 +220,14 @@ DDS_PROFILE_DIR="/tmp/sortbots_dds"
 if [[ $MESH -eq 1 ]]; then
   echo "[run_demo] --mesh: setting up 802.11s mesh (ns-3 + Linux netns)"
 
+  # Authenticate sudo once upfront — sudo-rs does not cache between calls, so
+  # a single explicit -v here primes credentials for all subsequent mesh sudo
+  # calls (netns setup, MAC alignment, tap-to-netns, netns exec bringup).
+  if ! sudo -v; then
+    echo "[run_demo] ERROR: sudo authentication required for mesh setup. Run 'sudo -v' first." >&2
+    exit 1
+  fi
+
   # netns, veth, tap — requires sudo
   sudo "$REPO_ROOT/scripts/mesh_netns_setup.sh" \
     --robots "$ROBOTS" --robot-ids "$ROBOT_IDS"
