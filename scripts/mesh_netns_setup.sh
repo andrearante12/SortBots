@@ -64,6 +64,7 @@ fi
 
 IFS=',' read -ra IDS <<< "$ROBOT_IDS"
 
+_IDX=0
 for rid in "${IDS[@]}"; do
   TAP="tap-${rid}"
   NETNS="ns-${rid}"
@@ -91,6 +92,63 @@ for rid in "${IDS[@]}"; do
     ip netns exec "$NETNS" ip link set lo up
     echo "[mesh_setup] created netns $NETNS"
   fi
+
+  # Create veth pair: veth${_IDX}-h stays in root ns (host end for DS/Isaac
+  # reach), veth${_IDX} moves into the robot's netns. This gives robot_i a
+  # path to the FastDDS Discovery Server (bound 0.0.0.0:11811 in root ns)
+  # without touching the simulated mesh tap.
+  # 10.77.${_IDX}.0/30: .1 = host end, .2 = robot end.
+  VETH_H="veth${_IDX}-h"
+  VETH_NS="veth${_IDX}"
+  VETH_H_IP="10.77.${_IDX}.1/30"
+  VETH_NS_IP="10.77.${_IDX}.2/30"
+  VETH_GW="10.77.${_IDX}.1"
+
+  if ip link show "$VETH_H" >/dev/null 2>&1; then
+    echo "[mesh_setup] veth pair $VETH_H/$VETH_NS already exists — skipping"
+  else
+    ip link add "$VETH_H" type veth peer name "$VETH_NS"
+    ip addr add "$VETH_H_IP" dev "$VETH_H"
+    ip link set "$VETH_H" up
+    ip link set "$VETH_NS" netns "$NETNS"
+    ip netns exec "$NETNS" ip addr add "$VETH_NS_IP" dev "$VETH_NS"
+    ip netns exec "$NETNS" ip link set "$VETH_NS" up
+    # Default route in netns via host veth — reaches DS + Isaac in root ns
+    ip netns exec "$NETNS" ip route replace default via "$VETH_GW" dev "$VETH_NS" 2>/dev/null || \
+      ip netns exec "$NETNS" ip route add default via "$VETH_GW" dev "$VETH_NS"
+    # rp_filter=0 inside netns so asymmetric mesh routes are not dropped
+    ip netns exec "$NETNS" sysctl -qw net.ipv4.conf.all.rp_filter=0
+    ip netns exec "$NETNS" sysctl -qw "net.ipv4.conf.${VETH_NS}.rp_filter=0"
+    echo "[mesh_setup] created veth pair $VETH_H ($VETH_H_IP root) ↔ $NETNS:$VETH_NS ($VETH_NS_IP)"
+  fi
+
+  _IDX=$((_IDX + 1))
 done
 
-echo "[mesh_setup] done. ${#IDS[@]} tap(s) + netns ready (Phase A). Run mesh_tap_to_netns.sh after ns-3 attaches."
+# Enable ip_forward on host so veth return routing works (root ns → netns → back)
+sysctl -qw net.ipv4.ip_forward=1
+
+# ── iptables REJECT rules inside each netns ───────────────────────────────
+# For each robot_i, block OUTPUT toward the other robots' veth IPs
+# (10.77.j.2 for j≠i). This forces inter-robot DDS traffic onto the mesh
+# tap (10.66.0.x) instead of bypassing it through the veth shortcuts.
+# Phase 3 proved that without this, DDS discovers peers via the veth path
+# and never uses the simulated mesh at all.
+_IDX=0
+for rid in "${IDS[@]}"; do
+  NETNS="ns-${rid}"
+  _J=0
+  for rid2 in "${IDS[@]}"; do
+    if [[ "$rid" != "$rid2" ]]; then
+      PEER_VETH_IP="10.77.${_J}.2"
+      # Idempotent: delete first, then add (avoid duplicate rules on re-run)
+      ip netns exec "$NETNS" iptables -D OUTPUT -d "$PEER_VETH_IP" -j REJECT 2>/dev/null || true
+      ip netns exec "$NETNS" iptables -A OUTPUT -d "$PEER_VETH_IP" -j REJECT
+      echo "[mesh_setup] $NETNS: REJECT OUTPUT → $PEER_VETH_IP (force mesh for robot-robot traffic)"
+    fi
+    _J=$((_J + 1))
+  done
+  _IDX=$((_IDX + 1))
+done
+
+echo "[mesh_setup] done. ${#IDS[@]} tap(s) + netns + veth pairs ready (Phase A). Run mesh_tap_to_netns.sh after ns-3 attaches."

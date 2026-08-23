@@ -66,7 +66,11 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ROS_SETUP="/opt/ros/jazzy/setup.bash"
+ROS2_HOME="${ROS2_HOME:-$HOME/ros2_jazzy}"
+ROS_SETUP="${ROS2_HOME}/install/setup.bash"
+if [[ ! -f "$ROS_SETUP" ]]; then
+  ROS_SETUP="/opt/ros/jazzy/setup.bash"  # fallback for binary install
+fi
 SIM_LOG="/tmp/sortbots_demo_sim.log"
 SIM_RESULT="/tmp/isaac_spawn_warehouse_result.txt"
 BRINGUP_LOG="/tmp/sortbots_demo_bringup.log"
@@ -231,7 +235,7 @@ if [[ $MESH -eq 1 ]]; then
   # so we don't pollute this clean shell with AMENT_PREFIX_PATH.
   setsid bash -c "source '$ROS_SETUP'; \
     export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
-    exec fastdds discovery -i 0 -l 127.0.0.1 -p 11811" \
+    exec fastdds discovery -i 0 -l 0.0.0.0 -p 11811" \
     >"/tmp/sortbots_fastdds.log" 2>&1 &
   sleep 1
   echo "[run_demo] FastDDS Discovery Server started (log: /tmp/sortbots_fastdds.log)"
@@ -241,6 +245,57 @@ if [[ $MESH -eq 1 ]]; then
     --robots "$ROBOTS" --robot-ids "$ROBOT_IDS" \
     --config "$REPO_ROOT/network/mesh_config.yaml"
   echo "[run_demo] ns-3 mesh bridge up (log: /tmp/sortbots_ns3_mesh.log)"
+
+  # --- MAC alignment ---
+  # ns-3 TapBridge assigns its own MAC to the taps. The Linux TAP driver's
+  # default MAC may differ, causing the kernel to drop inbound frames as
+  # PACKET_OTHERHOST (Phase 1 lesson). Read the MACs ns-3 chose from its log
+  # and apply them to the tap devices before moving them to the netns.
+  echo "[run_demo] aligning tap MACs to ns-3 mesh MACs..."
+  _MESH_LOG="/tmp/sortbots_ns3_mesh.log"
+  IFS=',' read -ra _TAP_IDS <<< "$ROBOT_IDS"
+  declare -a _MESH_MACS=()
+  for _tid in "${_TAP_IDS[@]}"; do
+    _TAP="tap-${_tid}"
+    _M=$(grep "node-mac ${_TAP}" "$_MESH_LOG" 2>/dev/null | awk '{print $4}')
+    if [[ -z "$_M" ]]; then
+      echo "[run_demo] WARNING: could not read ns-3 MAC for ${_TAP} — skipping MAC alignment"
+      _M=""
+    else
+      sudo ip link set "$_TAP" down
+      sudo ip link set "$_TAP" address "$_M"
+      sudo ip link set "$_TAP" up
+      echo "[run_demo]   ${_TAP} MAC → $_M"
+    fi
+    _MESH_MACS+=("$_M")
+  done
+
+  # --- Move taps to netns and assign mesh IPs ---
+  sudo "$REPO_ROOT/scripts/mesh_tap_to_netns.sh" \
+    --robots "$ROBOTS" --robot-ids "$ROBOT_IDS"
+
+  # --- Static ARP inside each netns (bypass HWMP ARP timing) ---
+  # HWMP peer tables take time to converge. Pre-populating ARP entries lets
+  # DDS send the very first SPDP frame without waiting for ARP resolution,
+  # which would time out before HWMP has a path (Phase 1 lesson).
+  _I=0
+  for _rid in "${_TAP_IDS[@]}"; do
+    _NETNS="ns-${_rid}"
+    _J=0
+    for _rid2 in "${_TAP_IDS[@]}"; do
+      if [[ "$_rid" != "$_rid2" ]]; then
+        _PEER_IP="10.66.0.$((_J + 1))"
+        _PEER_MAC="${_MESH_MACS[$_J]}"
+        _TAP="tap-${_rid}"
+        [[ -n "$_PEER_MAC" ]] && \
+          sudo ip netns exec "$_NETNS" ip neigh replace "$_PEER_IP" lladdr "$_PEER_MAC" dev "$_TAP" 2>/dev/null || true
+      fi
+      _J=$((_J + 1))
+    done
+    _I=$((_I + 1))
+  done
+  echo "[run_demo] waiting 15s for HWMP mesh routes to converge..."
+  sleep 15
 fi
 
 # ---- 1. Isaac Sim ----
@@ -293,29 +348,42 @@ echo "[run_demo] launching RTAB-Map + Nav2 + web dashboard + task manager..."
 WEBUI=true; [[ "$KEEP_CONSOLE" == "true" ]] && WEBUI=false
 
 if [[ $MESH -eq 1 ]]; then
-  # Mesh mode: all processes stay in the root namespace (taps are in root ns
-  # so ns-3 can access them). Isolation is via FastDDS interface whitelisting:
-  # each robot's DDS binds only to its tap (10.66.0.x for inter-robot traffic)
-  # plus loopback (for per-robot topics with Isaac and the Discovery Server).
-  # One bringup per robot with its own profile; DS + map_merge + dashboard share
-  # the root profile on loopback.
+  # Mesh mode (Phase 4): each robot stack runs inside its own network namespace
+  # (ns-robot_i). Isolation is REAL: the robot process can only reach the mesh
+  # tap (10.66.0.x, for inter-robot DDS) and its own veth (10.77.i.2 → DS/Isaac
+  # in root ns). iptables REJECT rules block the cross-robot veth shortcuts,
+  # forcing all inter-robot DDS traffic through the ns-3 simulated mesh tap.
+  # DS + map_merge + dashboard stay in root ns with the root profile.
   IFS=',' read -ra _MESH_IDS <<< "$ROBOT_IDS"
+  _RID_IDX=0
   for _rid in "${_MESH_IDS[@]}"; do
     _PROFILE="$DDS_PROFILE_DIR/profile_${_rid}.xml"
     _LOG="/tmp/sortbots_bringup_${_rid}.log"
-    setsid bash -c "source '$ROS_SETUP'; \
-      export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
-      export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
-      export FASTRTPS_DEFAULT_PROFILES_FILE='$_PROFILE'; \
-      export ROS_DISCOVERY_SERVER='127.0.0.1:11811'; \
-      exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
-           robot_id:=${_rid} robot_ids:=${_rid} scene:=$SCENE \
-           use_sim_time:=true rviz:=false webui:=false \
-           localization:=$LOCALIZE database_path:='$MAP_DB' \
-           delete_db_on_start:=$DELETE_DB_ON_START \
-           explore:=$EXPLORE" \
-      >"$_LOG" 2>&1 &
-    echo "[run_demo] launched mesh bringup for $_rid (log: $_LOG)"
+    # DS is reachable via the veth host end (10.77.{i}.1) in the robot's netns.
+    _DS_ADDR="10.77.${_RID_IDX}.1:11811"
+    # Write launch script to /tmp to avoid bash quoting issues across ip-netns-exec
+    # (Phase 3 lesson: heredoc quoting with nested quotes inside a setsid/bash -c
+    # string causes subtle eval errors that are hard to spot in logs).
+    _LAUNCH_SH="/tmp/sortbots_mesh_launch_${_rid}.sh"
+    cat >"$_LAUNCH_SH" <<LAUNCHEOF
+#!/bin/bash
+source '$ROS_SETUP' 2>/dev/null
+export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\$PATH
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_DOMAIN_ID=0
+export FASTRTPS_DEFAULT_PROFILES_FILE='${_PROFILE}'
+export ROS_DISCOVERY_SERVER='${_DS_ADDR}'
+exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
+     robot_id:=${_rid} robot_ids:=${_rid} scene:=$SCENE \
+     use_sim_time:=true rviz:=false webui:=false \
+     localization:=$LOCALIZE database_path:='$MAP_DB' \
+     delete_db_on_start:=$DELETE_DB_ON_START \
+     explore:=$EXPLORE
+LAUNCHEOF
+    chmod +x "$_LAUNCH_SH"
+    setsid sudo ip netns exec "ns-${_rid}" bash "$_LAUNCH_SH" >"$_LOG" 2>&1 &
+    echo "[run_demo] launched mesh bringup for $_rid in ns-${_rid} (log: $_LOG)"
+    _RID_IDX=$((_RID_IDX + 1))
   done
 
   # map_merge + dashboard: root profile (loopback only, sees all robots via DS)

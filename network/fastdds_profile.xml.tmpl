@@ -1,24 +1,26 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- FastDDS XML profile — rendered by network/render_dds_profile.py.
-     Placeholders: {{INTERFACES}} (comma-sep), {{DS_HOST}}:{{DS_PORT}}.
-     Forces UDPv4-only (no SHM, no multicast) so inter-robot DDS packets
-     cannot bypass the tap device and the ns-3 simulated mesh. -->
+     Transport only: SHM disabled, UDPv4 whitelisted to specific interfaces.
+     Discovery Server is configured via ROS_DISCOVERY_SERVER env var (rmw layer).
+     Removing <builtin>/<discovery_config> here is intentional: FastRTPS rmw
+     reads ROS_DISCOVERY_SERVER and sets up the DS client internally. Having
+     both the env var AND <discoveryProtocol>CLIENT</discoveryProtocol> in XML
+     causes a conflict (Phase 3 lesson: rmw ignores the XML DS list, so the
+     XML-only config silently finds no server and falls back to multicast). -->
 <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
-
-  <!-- ── Transport ── -->
   <transport_descriptors>
     <transport_descriptor>
       <transport_id>udpv4_only</transport_id>
       <type>UDPv4</type>
       <!-- Whitelist: only the interfaces this participant is allowed to use.
-           Rendered as a space-separated or comma-separated list. -->
+           Use IP addresses, NOT interface names — names fail as root in netns
+           (Phase 3 lesson: interface name resolution breaks inside ip netns exec). -->
       <interfaceWhiteList>
         {{INTERFACES}}
       </interfaceWhiteList>
     </transport_descriptor>
   </transport_descriptors>
 
-  <!-- ── Participant ── -->
   <participant profile_name="sortbots_mesh" is_default_profile="true">
     <rtps>
       <!-- Use only our explicit UDPv4 transport — disables SHM completely.
@@ -28,26 +30,6 @@
       <userTransports>
         <transport_id>udpv4_only</transport_id>
       </userTransports>
-
-      <!-- Discovery Server (unicast) — eliminates multicast SPDP, which
-           does not propagate cleanly through tap devices. -->
-      <builtin>
-        <discovery_config>
-          <discoveryProtocol>CLIENT</discoveryProtocol>
-          <discoveryServersList>
-            <RemoteServer prefix="44.53.00.5f.45.50.52.4f.53.49.4d.41">
-              <metatrafficUnicastLocatorList>
-                <locator>
-                  <udpv4>
-                    <address>{{DS_HOST}}</address>
-                    <port>{{DS_PORT}}</port>
-                  </udpv4>
-                </locator>
-              </metatrafficUnicastLocatorList>
-            </RemoteServer>
-          </discoveryServersList>
-        </discovery_config>
-      </builtin>
     </rtps>
   </participant>
 

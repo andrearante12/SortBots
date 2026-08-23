@@ -11,9 +11,20 @@ Writes:
     <output-dir>/profile_robot_0.xml       for robot_0's ROS 2 stack
     <output-dir>/profile_robot_1.xml       for robot_1's ROS 2 stack
 
-All processes run in the root network namespace. Isolation is enforced by
-whitelisting each robot's DDS to its own tap device only (for inter-robot
-traffic on 10.66.0.x) plus loopback (for per-robot topics with Isaac).
+Architecture (Phase 4):
+  Root ns: Isaac + DS + map_merge + dashboard.
+    profile_root.xml whitelists 127.0.0.1 + 10.77.{i}.1 for each robot i.
+    DS is bound 0.0.0.0:11811 (root ns); ROS_DISCOVERY_SERVER=127.0.0.1:11811.
+
+  Robot_i ns: tap mesh IP 10.66.0.{i+1} (inter-robot) + veth IP 10.77.{i}.2 (→DS/Isaac).
+    profile_robot_i.xml whitelists these two IPs.
+    ROS_DISCOVERY_SERVER=10.77.{i}.1:11811 (host end of veth).
+
+  Note: interfaceWhiteList uses IP addresses, NOT interface names. Interface
+  names fail as root inside ip-netns (Phase 3 lesson). DS client config is
+  handled by ROS_DISCOVERY_SERVER env var (rmw layer) — NOT in this XML.
+  Having both <discoveryProtocol>CLIENT</discoveryProtocol> in XML AND the env
+  var causes a conflict where rmw ignores the XML DS list (Phase 3 lesson).
 """
 from __future__ import annotations
 
@@ -24,17 +35,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TMPL = REPO_ROOT / "network" / "fastdds_profile.xml.tmpl"
 
 
-def render(tmpl: str, interfaces: list[str], ds_host: str, ds_port: int) -> str:
+def render(tmpl: str, interfaces: list[str]) -> str:
+    """Render template with the given IP interface list.
+
+    ds_host / ds_port are no longer embedded in the XML — the rmw layer reads
+    ROS_DISCOVERY_SERVER directly. We keep the args for backward compat but
+    do not pass them through to the template (template no longer has {{DS_HOST}}
+    or {{DS_PORT}} placeholders).
+    """
     iface_xml = "\n        ".join(f"<address>{iface}</address>" for iface in interfaces)
     out = tmpl.replace("{{INTERFACES}}", iface_xml)
-    out = out.replace("{{DS_HOST}}", ds_host)
-    out = out.replace("{{DS_PORT}}", str(ds_port))
     return out
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--output-dir", default="/tmp/sortbots_dds")
+    # --ds-host / --ds-port kept for backward compatibility (callers may pass them)
+    # but are no longer embedded in the rendered XML. DS is configured via
+    # ROS_DISCOVERY_SERVER env var set in run_demo.sh per-process.
     parser.add_argument("--ds-host", default="127.0.0.1")
     parser.add_argument("--ds-port", type=int, default=11811)
     parser.add_argument("--robot-ids", default="robot_0,robot_1")
@@ -49,25 +68,24 @@ def main() -> None:
     if args.robots is not None:
         robot_ids = robot_ids[:args.robots]
 
-    ds_host = args.ds_host
-    ds_port = args.ds_port
-
-    # Root profile: Isaac, map_merge, dashboard — loopback only.
-    # All per-robot topics (cmd_vel, camera, odom) travel over lo since Isaac
-    # and the robot stacks are on the same host. DS is on 127.0.0.1 (lo).
-    root_profile = render(tmpl, ["lo"], ds_host, ds_port)
+    # Root profile: Isaac, map_merge, dashboard in root ns.
+    # Whitelist: loopback (127.0.0.1) for intra-host topics + the host end of
+    # each robot's veth (10.77.{i}.1) so per-robot topics reach Isaac.
+    root_ifaces = ["127.0.0.1"] + [f"10.77.{i}.1" for i in range(len(robot_ids))]
+    root_profile = render(tmpl, root_ifaces)
     (out_dir / "profile_root.xml").write_text(root_profile)
-    print(f"[render_dds_profile] wrote profile_root.xml (ifaces: lo, DS: {ds_host}:{ds_port})")
+    print(f"[render_dds_profile] wrote profile_root.xml (ifaces: {', '.join(root_ifaces)})")
 
-    # Per-robot profiles: tap-robot_X (for inter-robot mesh traffic 10.66.0.x)
-    # plus loopback (to reach the DS and Isaac's per-robot topics).
-    for rid in robot_ids:
-        ifaces = [f"tap-{rid}", "lo"]
-        profile = render(tmpl, ifaces, ds_host, ds_port)
+    # Per-robot profiles (Phase 4: processes run inside network namespaces).
+    # Whitelist: mesh tap IP (10.66.0.{i+1}) for inter-robot DDS over the
+    # simulated 802.11s mesh + veth netns IP (10.77.{i}.2) to reach the DS
+    # and Isaac in the root ns. Use IPs not interface names (Phase 3 lesson).
+    for i, rid in enumerate(robot_ids):
+        ifaces = [f"10.66.0.{i + 1}", f"10.77.{i}.2"]
+        profile = render(tmpl, ifaces)
         path = out_dir / f"profile_{rid}.xml"
         path.write_text(profile)
-        print(f"[render_dds_profile] wrote profile_{rid}.xml "
-              f"(ifaces: {', '.join(ifaces)}, DS: {ds_host}:{ds_port})")
+        print(f"[render_dds_profile] wrote profile_{rid}.xml (ifaces: {', '.join(ifaces)})")
 
 
 if __name__ == "__main__":
