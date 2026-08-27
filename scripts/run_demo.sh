@@ -274,33 +274,41 @@ if [[ $MESH -eq 1 ]]; then
     --config "$REPO_ROOT/network/mesh_config.yaml"
   echo "[run_demo] ns-3 mesh bridge up (log: /tmp/sortbots_ns3_mesh.log)"
 
-  # --- MAC alignment ---
+  # --- Move taps to netns and assign mesh IPs ---
+  # Must happen BEFORE MAC alignment below. Doing the down/address/up cycle
+  # on a tap still in the root ns and then immediately netns-moving it stacks
+  # two live-FD state transitions back to back — a combination test_mesh_phase1.sh
+  # never exercises and which left taps NO-CARRIER in practice (diagnosed live,
+  # 2026-08-27). test_mesh_phase1.sh's proven-safe order is: move to netns
+  # first (mesh_tap_to_netns.sh's own FD-survives-the-move guarantee), then
+  # align the MAC inside the netns as its own, single down/up cycle.
+  sudo "$REPO_ROOT/scripts/mesh_tap_to_netns.sh" \
+    --robots "$ROBOTS" --robot-ids "$ROBOT_IDS"
+
+  # --- MAC alignment (inside each netns, after the move) ---
   # ns-3 TapBridge assigns its own MAC to the taps. The Linux TAP driver's
   # default MAC may differ, causing the kernel to drop inbound frames as
   # PACKET_OTHERHOST (Phase 1 lesson). Read the MACs ns-3 chose from its log
-  # and apply them to the tap devices before moving them to the netns.
+  # and apply them to the tap devices, now that they're in their final netns.
   echo "[run_demo] aligning tap MACs to ns-3 mesh MACs..."
   _MESH_LOG="/tmp/sortbots_ns3_mesh.log"
   IFS=',' read -ra _TAP_IDS <<< "$ROBOT_IDS"
   declare -a _MESH_MACS=()
   for _tid in "${_TAP_IDS[@]}"; do
     _TAP="tap-${_tid}"
+    _NETNS="ns-${_tid}"
     _M=$(grep "node-mac ${_TAP}" "$_MESH_LOG" 2>/dev/null | awk '{print $4}')
     if [[ -z "$_M" ]]; then
       echo "[run_demo] WARNING: could not read ns-3 MAC for ${_TAP} — skipping MAC alignment"
       _M=""
     else
-      sudo ip link set "$_TAP" down
-      sudo ip link set "$_TAP" address "$_M"
-      sudo ip link set "$_TAP" up
+      sudo ip netns exec "$_NETNS" ip link set "$_TAP" down
+      sudo ip netns exec "$_NETNS" ip link set "$_TAP" address "$_M"
+      sudo ip netns exec "$_NETNS" ip link set "$_TAP" up
       echo "[run_demo]   ${_TAP} MAC → $_M"
     fi
     _MESH_MACS+=("$_M")
   done
-
-  # --- Move taps to netns and assign mesh IPs ---
-  sudo "$REPO_ROOT/scripts/mesh_tap_to_netns.sh" \
-    --robots "$ROBOTS" --robot-ids "$ROBOT_IDS"
 
   # --- Static ARP inside each netns (bypass HWMP ARP timing) ---
   # HWMP peer tables take time to converge. Pre-populating ARP entries lets
