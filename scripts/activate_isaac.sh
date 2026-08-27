@@ -34,6 +34,21 @@ if [[ ! -d "$ISAACSIM_HOME/venv" ]]; then
     return 1
 fi
 
+# Ubuntu 25.10 ("questing") ships only libxml2-16 (soname libxml2.so.16);
+# the pip-installed Isaac Sim's URDF importer plugin is linked against the
+# older libxml2.so.2 and there is no apt package that provides it here
+# (diagnosed 2026-08-27 — spawn_warehouse's XLeRobot import failed with
+# "Failed to acquire interface: ...urdf::Urdf" because the plugin's native
+# lib silently no-op'd on the missing dependency). compat-libs/ holds a real
+# libxml2.so.2 (+ its libicuuc.so.70/libicudata.so.70 deps) lifted from the
+# gnome-42-2204 snap's jammy base — an actual matching build, not a symlink
+# to the newer major version. Scoped to this venv's launches only.
+_ISAAC_COMPAT_LIBS="$ISAACSIM_HOME/compat-libs"
+if [[ -d "$_ISAAC_COMPAT_LIBS" ]]; then
+    export LD_LIBRARY_PATH="$_ISAAC_COMPAT_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+unset _ISAAC_COMPAT_LIBS
+
 # Hints for hybrid-graphics laptops so Kit picks the NVIDIA dGPU, not iGPU/llvmpipe.
 export __NV_PRIME_RENDER_OFFLOAD=1
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
