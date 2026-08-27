@@ -54,8 +54,12 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo "ERROR: python3 not found." >&2; exit 1
 fi
 
+# wireshark is not needed to build or run the mesh, only to look at it —
+# scripts/capture_mesh_traffic.sh and the Wireshark section of docs/mesh.md both
+# need the dumpcap that ships inside it. Kept in the same soft-warn list rather
+# than made a hard requirement, so a headless host can still install ns-3.
 MISSING_PKGS=()
-for pkg in build-essential g++ libxml2-dev libyaml-cpp-dev ninja-build; do
+for pkg in build-essential g++ libxml2-dev libyaml-cpp-dev ninja-build wireshark; do
   dpkg -s "$pkg" >/dev/null 2>&1 || MISSING_PKGS+=("$pkg")
 done
 if [[ ${#MISSING_PKGS[@]} -gt 0 ]]; then
