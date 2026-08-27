@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+build/
+dist/
+
+# Virtualenvs (in case any get created in-repo; the lerobot conda env lives in ~/miniconda3)
+.venv/
+venv/
+env/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Claude Code. Agent-facing project config is shared like any other source —
+# the sim runbook shouldn't have to be rediscovered on every clone or machine.
+# Per-user state (settings.local.json, scheduled task locks) stays out.
+# Note: negating a path under an ignored DIRECTORY doesn't work, so the ignore
+# has to be `.claude/*` (contents), not `.claude/` (the directory itself).
+.claude/*
+!.claude/settings.json
+!.claude/skills/
+
+# Local install/run artifacts
+*.bak
+*.log
+scripts/.cache/
+
+# Large data shouldn't live in the repo (ReplicaCAD lives in ~/.maniskill/data/)
+data/
+
+# Isaac Sim install lives at ~/isaacsim/ (out of repo). Defensive ignores in
+# case anyone deviates from that layout.
+.venv-isaac/
+isaacsim/
+
+# Phase 2: generated USDs from scripts/import_urdf.py
+assets/generated/
+
+# Phase 3: generated warehouse USDs from scripts/build_warehouse.py
+scenes/*.usd
+scenes/*.usda
+
+# Phase 1+: result files from verify / import / drive tests
+/tmp/isaac_*
+
+# Reference papers — kept local, not redistributed
+literature_review/

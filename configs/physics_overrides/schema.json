@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sortbots.local/schemas/physics-overrides-v1.json",
+  "title": "Isaac Sim physics override (v1)",
+  "description": "Per-joint and articulation overrides applied by scripts/import_urdf.py after URDF import. Joint matchers use fnmatch globs (first match wins).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "joints": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "drive_type": {"enum": ["velocity", "position", "none"]},
+          "target_value": {
+            "type": "number",
+            "description": "USD-native units: degrees (and deg/s) for angular drives, meters (and m/s) for linear."
+          },
+          "stiffness": {"type": "number", "minimum": 0.0},
+          "damping": {"type": "number", "minimum": 0.0},
+          "max_force": {"type": "number", "minimum": 0.0},
+          "friction": {"type": "number", "minimum": 0.0}
+        }
+      }
+    },
+    "articulation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "solver_position_iteration_count": {"type": "integer", "minimum": 1},
+        "solver_velocity_iteration_count": {"type": "integer", "minimum": 0},
+        "sleep_threshold": {"type": "number", "minimum": 0.0},
+        "stabilization_threshold": {"type": "number", "minimum": 0.0},
+        "enabled_self_collisions": {"type": "boolean"}
+      }
+    }
+  }
+}

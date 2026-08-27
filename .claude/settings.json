@@ -1,0 +1,59 @@
+{
+  "$comment": [
+    "Project-level Claude Code settings, COMMITTED (see .gitignore's negations).",
+    "Per-user preferences belong in .claude/settings.local.json, which stays ignored.",
+    "",
+    "The allowlist below covers the read-only and idempotent commands an agent",
+    "needs to work in this repo, so sessions stop re-asking for the same ones.",
+    "Deliberately NOT allowlisted, because they cost GPU/disk or are destructive:",
+    "  sim_ctl.sh start/stop/console, run_demo.sh, run_console.sh, spawn_warehouse.py,",
+    "  git commit/push, rm. Those should stay a conscious decision each time."
+  ],
+  "permissions": {
+    "allow": [
+      "Bash(scripts/sim_ctl.sh status)",
+      "Bash(scripts/sim_ctl.sh list)",
+      "Bash(scripts/sim_ctl.sh dry-run *)",
+      "Bash(scripts/sim_ctl.sh log *)",
+      "Bash(scripts/sim_ctl.sh --help)",
+      "Bash(./scripts/sim_ctl.sh status)",
+      "Bash(./scripts/sim_ctl.sh list)",
+      "Bash(./scripts/sim_ctl.sh dry-run *)",
+      "Bash(./scripts/sim_ctl.sh log *)",
+
+      "Bash(python3 webui/session.py --list)",
+      "Bash(python3 webui/session.py --print-argv *)",
+      "Bash(python3 -m py_compile *)",
+      "Bash(node --check *)",
+      "Bash(bash -n *)",
+
+      "Bash(node webui/tests/scenarios_test.mjs*)",
+      "Bash(node webui/tests/dashboard_test.mjs*)",
+
+      "Bash(curl -s http://127.0.0.1:8081/api/*)",
+      "Bash(curl -s http://localhost:8081/api/*)",
+
+      "Bash(pgrep *)",
+      "Bash(pkill -INT -f sortbots*)",
+      "Bash(ps -o *)",
+      "Bash(ps -eo *)",
+      "Bash(ss -ltn*)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git check-ignore *)",
+
+      "WebFetch(domain:docs.isaacsim.omniverse.nvidia.com)",
+      "WebFetch(domain:isaac-sim.github.io)",
+      "WebFetch(domain:nvidia-isaac-ros.github.io)",
+      "WebFetch(domain:xlerobot.readthedocs.io)",
+      "WebFetch(domain:maniskill.readthedocs.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebSearch"
+    ]
+  }
+}

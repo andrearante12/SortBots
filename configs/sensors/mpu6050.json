@@ -1,0 +1,18 @@
+{
+  "model": "InvenSense MPU 6050 (6-DOF accel + gyro)",
+  "publish_rate_hz": 60,
+  "internal_rate_hz": 200,
+  "accel_range_g": 4,
+  "gyro_range_dps": 500,
+  "accel_noise_density_g_per_sqrt_hz": 0.0040,
+  "gyro_noise_density_dps_per_sqrt_hz": 0.0050,
+  "accel_bias_stability_mg": 80,
+  "gyro_bias_stability_dps": 0.05,
+  "linear_acceleration_filter_size": 1,
+  "angular_velocity_filter_size": 1,
+  "orientation_filter_size": 1,
+  "mount_offset_m": [0.0, 0.0, 0.1],
+  "mount_rotation_wxyz": [1.0, 0.0, 0.0, 0.0],
+  "publish_orientation": true,
+  "notes": "Values from PS-MPU-6000A-00 rev 3.4. mount_offset_m / mount_rotation_wxyz are placeholders until CAD pins the IMU board location. publish_orientation=true is convenient for RTAB-Map; toggle to false in Phase 5 for stricter sim-to-real (the real chip only outputs raw accel + gyro). Filter sizes are Isaac Sim's IMU sensor smoothing windows (1 = no smoothing, matches the i2c raw stream)."
+}

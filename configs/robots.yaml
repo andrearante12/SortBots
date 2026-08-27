@@ -1,0 +1,37 @@
+# Fleet roster: robot ids and their per-scene spawn poses. This is the one
+# source of truth for "how many robots and where do they start" — read by
+# scripts/spawn_warehouse.py and scripts/build_warehouse.py (to place robots
+# in Isaac) and by launch/sortbots_bringup.launch.py (to publish each robot's
+# map -> <id>/map static anchor, since the anchor must match the spawn pose
+# for RTAB-Map's per-robot map frame to align with the merged /map). Also
+# serves the web dashboard's robot switcher via GET /api/robots
+# (webui/serve.py), which reduces this to just the id list — that response
+# shape is unchanged by this file growing spawn poses.
+#
+# spawn poses are [x, y, z] in the named scene's world frame (no yaw — every
+# entry today spawns facing the USD's default +X, and adding a rotation knob
+# nothing uses yet isn't worth the risk of an untested Xform rotation op).
+# Keep entries in sync by hand with what's actually brought up:
+# scripts/spawn_warehouse.py --robots N and
+# launch/sortbots_bringup.launch.py robot_ids:=... .
+
+default: robot_0
+robots:
+  - id: robot_0
+    spawn:
+      # Deep in the western rack aisle (dashboard click ~(-7.15, 11.62) on
+      # an explored free cell). Racks run along +y with x-centers ~5 m
+      # apart and span y~8.8..24.8 — this is inside that band, not on the
+      # open Carter-side apron. robot_1 stays one aisle east at the mouth.
+      nvidia: [-7.15, 11.62, 0.05]
+      # Primitive scene: west of the hand-built shelf cluster.
+      primitive: [-3.0, -1.0, 0.05]
+  - id: robot_1
+    spawn:
+      # Deep in the eastern rack aisle (dashboard click ~(1.23, 13.69)).
+      # Paired with robot_0 at (-7.15, 11.62) — different corridors, similar
+      # depth into the y~8.8..24.8 rack band, well outside each other's
+      # Grid/RangeMax cone so they don't paint each other into /map at t=0.
+      nvidia: [1.23, 13.69, 0.05]
+      # Primitive scene: east side, clear of shelf_1/shelf_3.
+      primitive: [3.0, 1.0, 0.05]

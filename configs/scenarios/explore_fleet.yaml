@@ -1,0 +1,46 @@
+# Scenario definition for the dashboard's Scenarios tab — see the header of
+# configs/scenarios/explore_fresh.yaml for the schema and the rationale behind
+# the `run:` allowlist.
+
+name: explore_fleet
+
+title: Frontier exploration — fleet (2 robots)
+description: >
+  Two robots, spawned at their configs/robots.yaml positions in the NVIDIA
+  warehouse, exploring collaboratively from empty maps. Each robot's own
+  RTAB-Map grid is   fused into one world-anchored /map (nodes/map_merge.py) via
+  static map -> <robot_id>/map anchors, so both explorers plan frontiers
+  against space EITHER robot has mapped — not two independent single-robot
+  runs sharing a warehouse. Fleet mesh radio (/fleet/intent + /fleet/status)
+  deconflicts goals/corridors without TF pose oracle; dynamic_obstacle_filter
+  keeps movers out of SLAM while Nav2 still sees them ephemerally.
+  Chase cams are OFF by default here: the cosmetic 3rd-person render product
+  costs about 30% of real-time factor (0.47x -> 0.33x, measured with
+  scripts/bench_sim.sh), and this run is long enough that speed beats scenery.
+  Tick chase_cam to get robot_0's view back — the dashboard falls back to the
+  head cam meanwhile, and nothing else changes.
+
+status: ready
+
+run:
+  scene: nvidia
+  robots: 2              # robot_ids derives from this, in configs/robots.yaml order
+  robot_id: robot_0      # which robot --localize/--resume/--map/--teleop would apply to
+  headless: false
+  chase_cam: false       # the toggle; false wins over chase_cam_robots below
+  chase_cam_robots: 1    # how many robots get one WHEN enabled — robot_0 only,
+                         # since the dashboard never shows robot_1's chase feed
+  explore: true
+  resume: false
+  localize: false
+  teleop: false
+  map: null
+
+# `robots` is deliberately NOT overridable here — it must stay in lockstep
+# with robot_ids (left unset above so run_demo.sh derives it FROM robots), and
+# a scenario named "fleet" that silently ran as 1 robot would be confusing.
+# Use explore_fresh for the single-robot case.
+overrides: [headless, resume, chase_cam, chase_cam_robots]
+
+capture:
+  bag: false

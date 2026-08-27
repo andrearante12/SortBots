@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "joints": {
+    "root_x_axis_joint": {
+      "drive_type": "velocity",
+      "target_value": 0.0,
+      "stiffness": 0.0,
+      "damping": 1000000.0,
+      "max_force": 10000000.0,
+      "friction": 0.0
+    },
+    "root_y_axis_joint": {
+      "drive_type": "velocity",
+      "target_value": 0.0,
+      "stiffness": 0.0,
+      "damping": 1000000.0,
+      "max_force": 10000000.0,
+      "friction": 0.0
+    },
+    "root_z_rotation_joint": {
+      "drive_type": "velocity",
+      "target_value": 0.0,
+      "stiffness": 0.0,
+      "damping": 1000000.0,
+      "max_force": 10000000.0,
+      "friction": 0.0
+    },
+    "Rotation*": {
+      "drive_type": "position",
+      "target_value": 0.0,
+      "stiffness": 1000.0,
+      "damping": 100.0,
+      "max_force": 1000.0
+    },
+    "Pitch*": {
+      "drive_type": "position",
+      "target_value": 0.0,
+      "stiffness": 1000.0,
+      "damping": 100.0,
+      "max_force": 1000.0
+    },
+    "Elbow*": {
+      "drive_type": "position",
+      "target_value": 0.0,
+      "stiffness": 1000.0,
+      "damping": 100.0,
+      "max_force": 1000.0
+    },
+    "Wrist*": {
+      "drive_type": "position",
+      "target_value": 0.0,
+      "stiffness": 1000.0,
+      "damping": 100.0,
+      "max_force": 1000.0
+    },
+    "Jaw*": {
+      "drive_type": "position",
+      "target_value": 0.0,
+      "stiffness": 100.0,
+      "damping": 10.0,
+      "max_force": 100.0
+    },
+    "head_pan_joint": {
+      "drive_type": "position",
+      "target_value": 0.0,
+      "stiffness": 1000.0,
+      "damping": 100.0,
+      "max_force": 1000.0
+    },
+    "head_tilt_joint": {
+      "drive_type": "position",
+      "target_value": 0.0,
+      "stiffness": 1000.0,
+      "damping": 100.0,
+      "max_force": 1000.0
+    }
+  },
+  "articulation": {
+    "solver_position_iteration_count": 32,
+    "solver_velocity_iteration_count": 4,
+    "sleep_threshold": 0.005,
+    "stabilization_threshold": 0.001,
+    "enabled_self_collisions": false
+  }
+}

@@ -1,0 +1,565 @@
+# Nav2 params for the SortBots warehouse demo.
+#
+# Frame ids and one absolute topic below are written as `robot_0/base_link`,
+# `robot_0/odom`, `/robot_0/camera/depth/points` — this file on disk IS the
+# robot_0 params. For any other robot, `launch/sortbots_nav2.launch.py`
+# rewrites every "robot_0" substring in a string value to the actual
+# `robot_id` at launch time (see that file's `_rewrite_robot_0()` — a
+# value-substring replace, not RewrittenYaml, because `global_frame` appears
+# 4 times below wanting 3 different outcomes). You will not see robot_1
+# anywhere in THIS file; it only ever exists in the rewritten temp copy.
+#
+# No map_server / amcl: RTAB-Map (already running, see
+# sortbots_rtabmap_robot.launch.py) owns SLAM, publishing each robot's own
+# grid to /<robot_id>/map in that robot's own <robot_id>/map SLAM frame (not
+# the bare `map` frame — see that launch file's map_frame_id). The bare
+# `map` frame and the `/map` topic below belong to nodes/map_merge.py, which
+# fuses every robot's grid (transformed via the static map -> <robot_id>/map
+# anchors published in sortbots_bringup.launch.py) into one world-anchored
+# grid. Nav2's global_frame is that merged `map`; only static_layer's
+# map_topic below needs to point at it explicitly.
+#
+# The XLeRobot sim base is PHYSICALLY holonomic (root_x/root_y/root_z
+# joints, cmd_vel consumes linear.x AND linear.y — see
+# spawn_warehouse.py:_drive_velocities, and wasd_teleop.py still strafes with
+# q/e), but Nav2 deliberately drives it as a differential-drive robot: MPPI
+# with motion_model DiffDrive below, plus zeroed y-limits in
+# velocity_smoother. An earlier revision used DWB with y-velocity sampling
+# ("don't throw away half the robot's mobility") — in practice autonomous
+# strafing looked unnatural (the robot glides sideways) and pointed the
+# single forward-facing depth camera — the ONLY obstacle sensor — away from
+# the direction of travel. Diff-drive keeps the camera facing where the
+# robot is going. Brief reverse (vx_min -0.15) is retained for corner
+# escapes and the stock BackUp recovery (0.30 m @ 0.15 m/s).
+#
+# Top-level keys are `/**/<node_name>:`, not bare `<node_name>:`. Verified
+# live (ros-jazzy-navigation2 1.3.12): rcl_yaml_param_parser's bare-name
+# matching does NOT apply under a namespaced node (ours run under
+# `PushRosNamespace(robot_id)` in sortbots_nav2.launch.py, so the node's
+# real name is `/robot_0/controller_server` etc). With a bare key every
+# parameter here silently fails to apply — including `FollowPath.critics`,
+# which fails LOUD ("No critics defined for FollowPath", DWB has no
+# default critics) while everything else fails silently. The standard
+# `/**/` node-name wildcard (matches the name in any namespace) fixes it
+# without hardcoding `robot_0` into every key, so multi-robot params files
+# stay copy-pasteable.
+
+/**/controller_server:
+  ros__parameters:
+    use_sim_time: true
+    controller_frequency: 20.0
+    failure_tolerance: 0.3
+    min_x_velocity_threshold: 0.001
+    # 0.5, not 0.001: upstream Jazzy diff-drive convention — any odom y
+    # component is noise on a base Nav2 treats as non-holonomic, so filter
+    # it out of the controller's state estimate entirely.
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.001
+    progress_checker_plugins: ["progress_checker"]
+    goal_checker_plugins: ["goal_checker"]
+    controller_plugins: ["FollowPath"]
+
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.5
+      # Was 10.0. Loosened after live exploration testing: multi-meter
+      # frontier goals routinely need a brief rotate-in-place before the
+      # holonomic base commits to a heading, which the tight original window
+      # was reading as "no progress" and aborting — "Failed to make
+      # progress" in controller_server's log — well before the robot had
+      # actually stalled. This was a pre-flagged risk (SimpleProgressChecker
+      # aborting frontier goals too aggressively), not a new regression.
+      movement_time_allowance: 20.0
+
+    goal_checker:
+      plugin: "nav2_controller::SimpleGoalChecker"
+      # Was 0.15. Measured live during frontier exploration: the robot
+      # routinely settles ~0.2-0.25 m from a frontier goal (e.g. one capture
+      # mid-run: goal (6.50, 3.65), robot at (6.31, 3.79) = 0.234 m) and then
+      # times out never satisfying 0.15 m — not because it's stuck, but
+      # because a frontier goal sits right at the edge of currently-known
+      # space, which is an inherently harder final-approach target than an
+      # interior waypoint. 0.25 m still leaves plenty of margin for
+      # task_manager's dispatched pick/place docking (dock_offset_m in
+      # configs/waypoints.yaml is a 0.5 m standoff already).
+      xy_goal_tolerance: 0.25
+      # Was 0.15. Under DiffDrive the final heading requires a rotate-in-place
+      # (no strafing/crabbing into alignment), and the explorer only needs the
+      # camera roughly facing the frontier — 8.6 degrees of precision bought
+      # nothing but extra settling time.
+      yaw_goal_tolerance: 0.25
+      stateful: true
+
+    FollowPath:
+      # MPPI with a DiffDrive motion model — replaces the earlier holonomic
+      # DWB config (see file header for why). Values start from Jazzy's
+      # reference config (/opt/ros/jazzy/share/nav2_bringup/params/
+      # nav2_params.yaml) with velocity/accel limits matched to this robot
+      # and transform_tolerance to the repo-wide 0.3.
+      plugin: "nav2_mppi_controller::MPPIController"
+      time_steps: 56          # 56 * model_dt = 2.8 s rollout horizon
+      model_dt: 0.05          # = 1 / controller_frequency (20 Hz)
+      batch_size: 2000
+      iteration_count: 1
+      motion_model: "DiffDrive"
+      vx_max: 0.5             # the base's tuned top speed (see docs on RTF)
+      # Brief reverse only — enough for backing out of a corner, and matches
+      # the stock BT BackUp recovery speed (0.15 m/s). Forward preference
+      # comes from this asymmetry plus PreferForwardCritic; if runs show
+      # reverse-creep, raise PreferForwardCritic.cost_weight to 10.0.
+      vx_min: -0.15
+      vy_max: 0.0             # ignored under DiffDrive; set for documentation
+      wz_max: 1.0
+      ax_max: 1.0             # match velocity_smoother accel limits so
+      ax_min: -1.0            # rollouts predict what the base actually does
+      ay_max: 0.0
+      az_max: 2.0
+      vx_std: 0.2
+      vy_std: 0.0             # unused for non-holonomic models
+      wz_std: 0.4
+      prune_distance: 1.7
+      transform_tolerance: 0.3
+      temperature: 0.3
+      gamma: 0.015
+      regenerate_noises: true
+      visualize: false        # true publishes /trajectories for debugging
+      TrajectoryVisualizer:
+        trajectory_step: 5
+        time_step: 3
+      # Block-list style, not a flow-sequence: ROS 2's rcl_yaml_param_parser
+      # (not plain pyyaml) failed to load a multi-line bracketed list with a
+      # trailing comma here — controller_server errored "No critics defined
+      # for FollowPath" even though the file parses fine under Python's
+      # yaml.safe_load. Verified live against ros-jazzy-navigation2 1.3.12.
+      critics:
+        - "ConstraintCritic"
+        - "CostCritic"
+        - "GoalCritic"
+        - "GoalAngleCritic"
+        - "PathAlignCritic"
+        - "PathFollowCritic"
+        - "PathAngleCritic"
+        - "PreferForwardCritic"
+      ConstraintCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 4.0
+      GoalCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 1.4
+      GoalAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.0
+        threshold_to_consider: 0.5
+      PreferForwardCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        threshold_to_consider: 0.5
+      # CostCritic (Jazzy's default obstacle critic, not the older
+      # ObstaclesCritic): scores rollouts against the local costmap directly,
+      # so obstacle avoidance actually competes with path-following — under
+      # DWB, BaseObstacle.scale 0.02 vs PathDist 32.0 meant it barely did.
+      CostCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 3.81
+        critical_cost: 300.0
+        # false = score each rollout at the robot's CENTRE and let the
+        # inflation layer stand in for its extent. That is only sound if
+        # inflation_radius genuinely exceeds the footprint's corner reach
+        # (0.320 m for this 0.5 x 0.4 m base) by a real margin — it did not
+        # at the old 0.4 m, which is why the robot cornered tight and scraped
+        # shelves. With inflation_radius now 0.65 the assumption holds with
+        # 0.33 m to spare. Turning this true would check the actual rectangle
+        # instead, but costs a footprint collision test per rollout per step
+        # (2000 x 56) and the control loop already reports missed 20 Hz
+        # deadlines, so fix the clearance in the costmap rather than here.
+        consider_footprint: false
+        collision_cost: 1000000.0
+        near_collision_cost: 253
+        near_goal_distance: 1.0
+        trajectory_point_step: 2
+      PathAlignCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 14.0
+        max_path_occupancy_ratio: 0.05
+        trajectory_point_step: 4
+        threshold_to_consider: 0.5
+        offset_from_furthest: 20
+        use_path_orientations: false
+      PathFollowCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 5.0
+        offset_from_furthest: 5
+        threshold_to_consider: 1.4
+      PathAngleCritic:
+        enabled: true
+        cost_power: 1
+        cost_weight: 2.0
+        offset_from_furthest: 4
+        threshold_to_consider: 0.5
+        max_angle_to_furthest: 1.0
+        mode: 0
+
+/**/local_costmap:
+  local_costmap:
+    ros__parameters:
+      use_sim_time: true
+      global_frame: robot_0/odom
+      robot_base_frame: robot_0/base_link
+      transform_tolerance: 0.3
+      update_frequency: 10.0
+      publish_frequency: 5.0
+      rolling_window: true
+      width: 6
+      height: 6
+      resolution: 0.05
+      footprint: "[[0.25, 0.2], [0.25, -0.2], [-0.25, -0.2], [-0.25, 0.2]]"
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        # depth_scan = static world (movers stripped); dynamic_scan = ephemeral
+        # peer/person blobs from nodes/dynamic_obstacle_filter.py. Splitting
+        # them keeps SLAM from painting robots into /map while Nav2 still
+        # sees movers with aggressive clearing on the dynamic source.
+        observation_sources: depth_scan dynamic_scan
+        depth_scan:
+          topic: /robot_0/camera/depth_static/points
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          max_obstacle_height: 1.5
+          min_obstacle_height: 0.05
+          obstacle_max_range: 4.0
+          raytrace_max_range: 5.0
+        dynamic_scan:
+          topic: /robot_0/dynamic_obstacles
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          max_obstacle_height: 1.5
+          min_obstacle_height: 0.05
+          obstacle_max_range: 4.0
+          raytrace_max_range: 5.0
+          # Shorter persistence than static: once the peer leaves the frustum
+          # raytrace clears marks quickly on the next empty/clearing cloud.
+          observation_persistence: 0.0
+          expected_update_rate: 0.0
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # Was 3.0 / 0.4. The old pair gave the robot almost no room: the
+        # footprint below is 0.5 x 0.4 m, so its CORNER reaches 0.320 m from
+        # centre, and a 0.4 m inflation radius left just 0.08 m of clearance
+        # beyond that — which a turn (corners sweeping out to 0.320 m), a
+        # little pose error, or one late costmap update eats entirely. Live
+        # symptom: tight cornering, scraping the shelves, and wedging.
+        #
+        # It also starved MPPI. CostCritic runs with consider_footprint:
+        # false, i.e. the robot is scored as a POINT and inflation is the ONLY
+        # thing keeping it off obstacles — and with the whole cost gradient
+        # compressed into 0.08 m there was nothing to descend, just uniformly
+        # high cost nearby. That is a plausible cause of the rotate-in-place
+        # dithering seen in open space.
+        #
+        # 0.65 gives 0.33 m of clearance beyond the corner, and the lower
+        # scaling factor spreads the gradient out (0.33 vs 0.26 of peak at
+        # 0.65 m) so there is a smooth slope to follow rather than a wall.
+        # This does NOT block narrow gaps: only cells inside the INSCRIBED
+        # radius (0.20 m, the half-width) become 253/lethal-equivalent, and
+        # that is set by the footprint, not by this. Everything out to
+        # inflation_radius is merely expensive, so a doorway stays passable —
+        # it just stops being the cheapest line.
+        cost_scaling_factor: 2.5
+        inflation_radius: 0.65
+      always_send_full_costmap: true
+
+/**/global_costmap:
+  global_costmap:
+    ros__parameters:
+      use_sim_time: true
+      global_frame: map
+      robot_base_frame: robot_0/base_link
+      transform_tolerance: 0.3
+      # Was 1.0/1.0. 4 Hz updates cut worst-case obstacle->global-costmap
+      # latency from 1 s to 250 ms — this is what the reactive BT's 4 Hz
+      # IsPathValid check (configs/bt/navigate_to_pose_reactive.xml) is
+      # paced against. If logs show persistent "Map update loop missed its
+      # desired rate of 4.0000Hz", drop this to 2.0 first — the rate, not
+      # the sensing ranges, is the tuning knob. publish at 2 Hz for
+      # dashboard-overlay freshness (~240x240 grid, trivial bandwidth).
+      update_frequency: 4.0
+      publish_frequency: 2.0
+      resolution: 0.05
+      footprint: "[[0.25, 0.2], [0.25, -0.2], [-0.25, -0.2], [-0.25, 0.2]]"
+      track_unknown_space: true
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      # Without this the global costmap only ever sees RTAB-Map's projected
+      # SLAM map (static_layer) — a coarse, ~1 Hz-updated grid. Live obstacles
+      # that haven't made it into that grid yet are invisible to the GLOBAL
+      # planner, so it can route a long-distance frontier goal straight
+      # through them; the LOCAL costmap's own obstacle_layer (below) then
+      # fights the plan every replan cycle, and the robot can stall against
+      # geometry it's already staring at. Same depth_scan source as
+      # local_costmap's obstacle_layer — this was flagged as a known risk
+      # ("one-line change if it bites") and it bit on the first live
+      # exploration run: robot wedged against geometry, 45s goal timeouts,
+      # constant "Passing new path to controller" replans with zero progress.
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        enabled: true
+        observation_sources: depth_scan dynamic_scan
+        depth_scan:
+          topic: /robot_0/camera/depth_static/points
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          max_obstacle_height: 1.5
+          min_obstacle_height: 0.05
+          # Same 4.0/5.0 as local_costmap (rationale there). On the GLOBAL
+          # costmap this is the change that actually widens planner
+          # perception: with the 2.5 m default, the global planner couldn't
+          # see a live obstacle until the robot was ~5 s from hitting it.
+          obstacle_max_range: 4.0
+          raytrace_max_range: 5.0
+        dynamic_scan:
+          topic: /robot_0/dynamic_obstacles
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          max_obstacle_height: 1.5
+          min_obstacle_height: 0.05
+          obstacle_max_range: 4.0
+          raytrace_max_range: 5.0
+          observation_persistence: 0.0
+          expected_update_rate: 0.0
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+        # MUST be true for multi-robot (and often single-robot after a
+        # resume). RTAB-Map permanently paints whatever the depth camera
+        # saw into /map — including the OTHER robot when the two spawn
+        # in view of each other, and occasionally the robot's own body /
+        # a phantom at the spawn pose. Without footprint clearing, those
+        # occupied cells under base_link stay lethal in the global
+        # costmap, Navfn refuses every plan ("Failed to create plan with
+        # tolerance of: 0.30"), and the explorer spends the run in
+        # clear→spin→fail→blacklist→idle. Verified live 2026-08-09 on
+        # explore_fleet: start_cost=100 (lethal) with this false, plan
+        # from a free cell 1 m away succeeded; flipping this true dropped
+        # start_cost to ~87 and planning from the robot worked again.
+        # Default upstream is false.
+        footprint_clearing_enabled: true
+        # MUST be absolute. A relative `map` here does NOT resolve to /map:
+        # this costmap node lives in the `global_costmap` SUB-namespace, so a
+        # relative name resolves to /robot_0/global_costmap/map — a topic
+        # nothing publishes. The static layer then silently never receives a
+        # map ("Can't update static costmap layer, no map received"), the
+        # global costmap stays at its default 5x5 m of all-unknown, and
+        # because planner_server sets allow_unknown: true the planner still
+        # "succeeds" on short goals by planning blind through unknown space.
+        # That failure is nearly invisible from the dashboard, which is how
+        # it survived this long.
+        #
+        # /map (not /robot_0/map): nodes/map_merge.py publishes the fused,
+        # world-anchored grid there — the same topic for every robot, so
+        # unlike the depth_scan topic above this value has no "robot_0"
+        # substring and _rewrite_robot_0() leaves it alone (same as
+        # global_frame: map below).
+        map_topic: /map
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # Was 3.0 / 0.4. The old pair gave the robot almost no room: the
+        # footprint below is 0.5 x 0.4 m, so its CORNER reaches 0.320 m from
+        # centre, and a 0.4 m inflation radius left just 0.08 m of clearance
+        # beyond that — which a turn (corners sweeping out to 0.320 m), a
+        # little pose error, or one late costmap update eats entirely. Live
+        # symptom: tight cornering, scraping the shelves, and wedging.
+        #
+        # It also starved MPPI. CostCritic runs with consider_footprint:
+        # false, i.e. the robot is scored as a POINT and inflation is the ONLY
+        # thing keeping it off obstacles — and with the whole cost gradient
+        # compressed into 0.08 m there was nothing to descend, just uniformly
+        # high cost nearby. That is a plausible cause of the rotate-in-place
+        # dithering seen in open space.
+        #
+        # 0.65 gives 0.33 m of clearance beyond the corner, and the lower
+        # scaling factor spreads the gradient out (0.33 vs 0.26 of peak at
+        # 0.65 m) so there is a smooth slope to follow rather than a wall.
+        # This does NOT block narrow gaps: only cells inside the INSCRIBED
+        # radius (0.20 m, the half-width) become 253/lethal-equivalent, and
+        # that is set by the footprint, not by this. Everything out to
+        # inflation_radius is merely expensive, so a doorway stays passable —
+        # it just stops being the cheapest line.
+        cost_scaling_factor: 2.5
+        inflation_radius: 0.65
+      always_send_full_costmap: true
+
+/**/planner_server:
+  ros__parameters:
+    use_sim_time: true
+    planner_plugins: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner::NavfnPlanner"
+      tolerance: 0.3
+      use_astar: true
+      allow_unknown: true
+
+/**/smoother_server:
+  ros__parameters:
+    use_sim_time: true
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 1.0e-10
+      max_its: 1000
+      do_refinement: true
+
+/**/behavior_server:
+  ros__parameters:
+    use_sim_time: true
+    local_costmap_topic: local_costmap/costmap_raw
+    global_costmap_topic: global_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_footprint_topic: global_costmap/published_footprint
+    # Stock plugins + stock BT. Known limitation: the robot has no rear
+    # sensing (single forward depth camera), so BackUp collision-checks
+    # against possibly-stale/unknown costmap cells behind the robot —
+    # acceptable at 0.15 m/s for 0.30 m. The explorer's standoff goal
+    # placement (nodes/explorer.py) is the primary "don't get wedged in a
+    # corner" fix; these recoveries are the backstop.
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "wait", "assisted_teleop"]
+    spin:
+      plugin: "nav2_behaviors::Spin"
+    backup:
+      plugin: "nav2_behaviors::BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors::DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors::Wait"
+    assisted_teleop:
+      plugin: "nav2_behaviors::AssistedTeleop"
+    global_frame: map
+    # nav2_behaviors' TimedBehavior reads THREE frames, not two
+    # (nav2_behaviors/timed_behavior.hpp:132-134). local_frame is the
+    # odom-ish frame the RELATIVE behaviors integrate against — spin.cpp,
+    # back_up.cpp, drive_on_heading.hpp and assisted_teleop.cpp all call
+    # getCurrentPose(..., local_frame_, robot_base_frame_, ...), i.e. every
+    # plugin in behavior_plugins above. It is declared with default "odom"
+    # (confirmed in libbehavior_server_core.so), and this TF tree only has
+    # robot_0/odom, so leaving it unset makes EVERY recovery abort instantly
+    # with "No Transform available ... 'odom' does not exist" — the BT's
+    # whole recovery branch becomes a no-op. Observed live 2026-08-02: an
+    # exploration run failed 13 consecutive goals with the robot physically
+    # immobile, because nothing could ever spin or back it out of a wedge.
+    # Same class of bug as static_layer's map_topic (see global_costmap):
+    # an unqualified frame/topic default that silently no-ops under
+    # namespacing. sortbots_nav2.launch.py's _rewrite_robot_0() handles the
+    # per-robot substitution, exactly as for robot_base_frame below.
+    local_frame: robot_0/odom
+    robot_base_frame: robot_0/base_link
+    transform_tolerance: 0.3
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 3.2
+
+/**/bt_navigator:
+  ros__parameters:
+    use_sim_time: true
+    global_frame: map
+    robot_base_frame: robot_0/base_link
+    odom_topic: odom
+    transform_tolerance: 0.3
+    # default_nav_to_pose_bt_xml is deliberately NOT set here: it's injected
+    # by sortbots_nav2.launch.py as a parameter override pointing at
+    # configs/bt/navigate_to_pose_reactive.xml (repo-relative, so nothing
+    # machine-specific lands in this file, and the path has no "robot_0"
+    # substring for _rewrite_robot_0 to mangle). All other bt_navigator
+    # defaults (plugin_lib_names, bt_loop_duration, server timeouts) are
+    # stock — the default plugin set already includes every node the custom
+    # tree uses, including nav2_is_path_valid_condition_bt_node.
+
+/**/waypoint_follower:
+  ros__parameters:
+    use_sim_time: true
+    loop_rate: 20
+    stop_on_failure: false
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: true
+      waypoint_pause_duration: 0
+
+/**/velocity_smoother:
+  ros__parameters:
+    use_sim_time: true
+    smoothing_frequency: 20.0
+    scale_velocities: false
+    feedback: "OPEN_LOOP"
+    # Zeros in the y slots are the upstream Jazzy diff-drive convention: the
+    # smoother is the last hop before the sim base (cmd_vel_nav ->
+    # cmd_vel_smoothed -> cmd_vel), so it's the final guarantee no strafe
+    # command reaches the physically-holonomic base even if a controller
+    # regression reintroduces vy. min_velocity[0] must stay <= -0.15 or the
+    # stock BackUp recovery (0.30 m @ 0.15 m/s) silently stalls.
+    max_velocity: [0.5, 0.0, 1.0]
+    min_velocity: [-0.15, 0.0, -1.0]
+    max_accel: [1.0, 0.0, 2.0]
+    max_decel: [-1.0, 0.0, -2.0]
+    odom_topic: odom
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
+
+/**/collision_monitor:
+  ros__parameters:
+    use_sim_time: true
+    base_frame_id: robot_0/base_link
+    odom_frame_id: robot_0/odom
+    cmd_vel_in_topic: "cmd_vel_smoothed"
+    cmd_vel_out_topic: "cmd_vel"
+    state_topic: "collision_monitor_state"
+    transform_tolerance: 0.3
+    source_timeout: 1.0
+    base_shift_correction: true
+    stop_pub_timeout: 0.5
+    # Last-resort stop from forward depth (static+dynamic already in costmap;
+    # this catches MPPI rollouts that still commit into a near obstacle).
+    observation_sources: ["depth_points"]
+    depth_points:
+      type: "pointcloud"
+      topic: "/robot_0/camera/depth_static/points"
+      min_height: 0.05
+      max_height: 1.5
+      enabled: true
+    polygons: ["FootprintApproach"]
+    FootprintApproach:
+      type: "polygon"
+      # MUST be "approach", even though the intent reads as "stop before
+      # hitting something": nav2_collision_monitor only reads footprint_topic
+      # when action_type is APPROACH. Under "stop" it instead wants a STATIC
+      # `points` list or a `polygon_sub_topic`, finds neither, and fails to
+      # configure — which takes the WHOLE navigation lifecycle down with it,
+      # because lifecycle_manager aborts the bringup at the first node that
+      # won't transition. Diagnosed live 2026-08-09: "Error while getting
+      # polygon parameters: static points and sub topic both not defined",
+      # then no "Managed nodes are active", bt_navigator never activated, and
+      # every explorer goal answered "rejected (Nav2 not ready?)".
+      # time_before_collision and simulation_time_step below are APPROACH-only
+      # knobs too, so they were dead settings under "stop".
+      action_type: "approach"
+      footprint_topic: "local_costmap/published_footprint"
+      time_before_collision: 1.0
+      simulation_time_step: 0.05
+      # min_points, not the deprecated max_points — nav2 translates the old
+      # name as min_points = max_points + 1, so the previous `2` meant 3.
+      min_points: 3
+      visualize: false
+      enabled: true

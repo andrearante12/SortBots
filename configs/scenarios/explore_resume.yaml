@@ -1,0 +1,35 @@
+# Scenario definition for the dashboard's Scenarios tab — see the header of
+# configs/scenarios/explore_fresh.yaml for the schema and the rationale behind
+# the `run:` allowlist.
+
+name: explore_resume
+
+title: Frontier exploration — resume existing map
+description: >
+  Same as the fresh exploration run, but starts from the map database left
+  behind by a previous session instead of wiping it (run_demo.sh --resume).
+  RTAB-Map keeps growing the pose graph, so the explorer extends the existing
+  map rather than rebuilding it — this is the mode for "carry on from where
+  the last run stopped". Requires an existing database: run_demo.sh refuses
+  to start without one, and that error shows up in the session log below.
+
+status: ready
+
+run:
+  scene: nvidia
+  robots: 1
+  robot_id: robot_0
+  headless: false
+  chase_cam: false       # off by default for speed — see explore_fresh.yaml
+  explore: true
+  resume: true
+  localize: false        # mutually exclusive with resume (read-only vs. keep-mapping)
+  teleop: false
+  map: null              # null = ~/.ros/sortbots_<robot_id>.db, the same DB the fresh run built
+
+# `resume` is deliberately NOT overridable here — turning it off would silently
+# wipe the map this scenario exists to extend. Use explore_fresh for that.
+overrides: [headless, robots, chase_cam]
+
+capture:
+  bag: false

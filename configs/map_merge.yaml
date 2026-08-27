@@ -1,0 +1,16 @@
+# Tuning for nodes/map_merge.py — fuses each robot's own RTAB-Map grid
+# (/{robot_id}/map, frame {robot_id}/map) into one world-anchored grid
+# (/map, frame map) via the static map -> {robot_id}/map anchors published
+# in launch/sortbots_bringup.launch.py.
+#
+# Plain top-level keys, loaded by this node's own yaml.safe_load — matches
+# configs/explorer.yaml's convention, not ROS 2's rcl_yaml_param_parser.
+
+# How often to re-fuse and publish /map.
+publish_period_s: 1.0
+
+# Occupied/free classification threshold, matching nav2_params.yaml's
+# inflation_layer / nodes/explorer.py's occupied_thresh convention: a cell
+# value >= this counts as occupied when resolving priority ties between two
+# robots' grids that disagree about the same world cell.
+occupied_thresh: 50

@@ -1,0 +1,617 @@
+/* SortBots documentation site.
+ *
+ * Palette note: the greys are the robot's own occupancy encoding -- unknown is
+ * the page ground, occupied is the ink. The two accents each carry meaning
+ * rather than decorating: cyan marks sensing and data flow, amber marks intent
+ * and commanded motion. The diagrams and the baked occupancy maps both inherit
+ * that encoding (see build/bake_media.py), so colour is information here, not
+ * styling -- swept free space is cyan because it is what the camera sensed.
+ *
+ * Light mode only, by design brief. There is no dark palette here on purpose --
+ * see the note above #stage for why the canvas is painted explicitly.
+ */
+
+:root {
+  --ground: #f5f5f7;        /* unknown -- the page itself */
+  --surface: #ffffff;
+  --ink: #1d1d1f;           /* occupied */
+  --ink-2: #6e6e73;
+  --ink-3: #8e8e93;
+  --hairline: #d2d2d7;
+
+  --cyan: #0a84c4;          /* sensing, perception, data flow */
+  --cyan-soft: #e8f3fa;
+  --amber: #ff8c26;         /* intent, goals, commanded motion */
+  --amber-soft: #fff2e4;
+
+  --shell: min(980px, 100% - 3rem);
+  --gutter: max(1.5rem, calc((100% - 1200px) / 2 + 1.5rem));
+  --split: 52%;             /* left column; stage takes the rest. sync w/ robot.js */
+  --radius: 20px;
+  --ease: cubic-bezier(.22, .61, .36, 1);
+
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter",
+          "Segoe UI", Roboto, system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  color-scheme: light;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 17px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  /* Nothing may scroll the body sideways -- wide children get their own
+     overflow container instead (see .table-wrap, .code-block). */
+  overflow-x: hidden;
+}
+
+/* ---------------------------------------------------------------- type ---- */
+
+.display {
+  font-size: clamp(2.6rem, 7vw, 5.2rem);
+  line-height: 1.03;
+  letter-spacing: -0.035em;
+  font-weight: 600;
+  margin: 0 0 0.5em;
+  text-wrap: balance;
+}
+.display--md { font-size: clamp(1.7rem, 3.4vw, 2.6rem); letter-spacing: -0.028em; }
+
+/* The signature move: each section is headed by its real ROS namespace, set in
+   mono, above a plain-language headline. The machine name and the human name,
+   stacked -- which is exactly the translation the page exists to perform. */
+.ns {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  color: var(--cyan);
+  background: var(--cyan-soft);
+  padding: 0.32em 0.7em;
+  border-radius: 100px;
+  display: inline-block;
+  /* Sections are flex columns, so a stretch-aligned child would run the pill to
+     the full column width instead of hugging the namespace. */
+  align-self: flex-start;
+  margin: 0 0 1.1rem;
+  overflow-wrap: anywhere;
+}
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--ink-3);
+  margin: 0 0 1.1rem;
+}
+
+.lede {
+  font-size: 1.05rem;
+  line-height: 1.55;
+  color: var(--ink-2);
+  max-width: 42ch;
+  margin: 0 0 0.85em;
+  text-wrap: pretty;
+}
+.lede em { color: var(--ink); font-style: italic; }
+.lede--hero { font-size: clamp(1.15rem, 2vw, 1.5rem); color: var(--ink-2); }
+
+code {
+  font-family: var(--mono);
+  font-size: 0.87em;
+  background: rgba(0, 0, 0, 0.045);
+  padding: 0.12em 0.4em;
+  border-radius: 5px;
+  overflow-wrap: anywhere;
+}
+
+/* -------------------------------------------------------------- layout ---- */
+
+main { position: relative; z-index: 1; }
+
+.section {
+  width: var(--shell);
+  margin: 0 auto;
+  padding: clamp(4rem, 10vh, 7rem) 0;
+  scroll-margin-top: 3.25rem; /* sticky masthead -- hash / scrollIntoView land below it */
+}
+
+/* --------------------------------------------------------------- stage ---- */
+
+/* The canvas is painted explicitly rather than left transparent: the page has
+   no dark palette, so a see-through canvas would inherit whatever the browser
+   paints behind it and the robot would lose its ground shadow. */
+#stage {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: var(--ground);
+}
+#robot-canvas { width: 100%; height: 100%; display: block; }
+#robot-canvas.is-interactive { pointer-events: auto; cursor: grab; }
+#robot-canvas.is-interactive:active { cursor: grabbing; }
+
+/* Shown when WebGL is unavailable or motion is reduced. Kept in the DOM either
+   way so there is never a blank stage during GLB load. */
+#stage-poster {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.6s var(--ease);
+}
+#stage.is-fallback #stage-poster { opacity: 0.28; }
+#stage.is-fallback #robot-canvas { display: none; }
+
+#hotspot-layer { position: absolute; inset: 0; z-index: 2; }
+
+/* Projected labels that track their part as the model turns. Transform is
+   written every frame from JS, so it must not be transitioned -- a transition
+   here makes every label lag the geometry by its duration. */
+.hotspot-dot {
+  position: absolute;
+  top: 0; left: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  pointer-events: auto;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.45s var(--ease);
+  white-space: nowrap;
+  /* `translate` is a separate property from `transform`, which JS rewrites
+     every frame with the projected position -- using it here centres the dot on
+     its anchor without the two fighting over one declaration. */
+  translate: 0 -50%;
+}
+/* Opens to the left of its anchor: shift the whole row left by its own width so
+   the dot, not the label, stays on the part. */
+.hotspot-dot--left { flex-direction: row-reverse; translate: -100% -50%; }
+#stage.is-anatomy .hotspot-dot { opacity: 1; }
+.hotspot-dot::before {
+  content: "";
+  width: 13px; height: 13px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1.5px solid var(--amber);
+  box-shadow: 0 0 0 4px rgba(255, 140, 38, 0.16);
+  flex: none;
+  transition: transform 0.25s var(--ease), background 0.25s var(--ease);
+}
+.hotspot-dot__label {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.03em;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 100px;
+  padding: 0.25em 0.7em;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.07);
+}
+.hotspot-dot:hover::before,
+.hotspot-dot:focus-visible::before { transform: scale(1.35); background: var(--amber); }
+
+/* ------------------------------------------------------------ masthead ---- */
+
+#masthead {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.7rem var(--gutter);
+  background: rgba(245, 245, 247, 0.8);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.3s var(--ease);
+}
+#masthead.is-stuck { border-bottom-color: var(--hairline); }
+.wordmark { font-weight: 600; letter-spacing: -0.02em; font-size: 0.95rem; }
+
+#section-nav {
+  display: flex;
+  gap: 0.25rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+  margin-left: auto;
+  /* Load-bearing. A flex item defaults to min-width:auto, so this refuses to
+     shrink below the full width of its eight links -- which widens the masthead
+     past the viewport and scrolls the whole page sideways on a phone, despite
+     the overflow-x here. Same class of bug as the min-height:0 notes in the
+     dashboard's CSS. */
+  min-width: 0;
+}
+#section-nav::-webkit-scrollbar { display: none; }
+#section-nav a {
+  font-size: 0.78rem;
+  color: var(--ink-2);
+  text-decoration: none;
+  padding: 0.3em 0.7em;
+  border-radius: 100px;
+  white-space: nowrap;
+  transition: color 0.2s var(--ease), background 0.2s var(--ease);
+}
+#section-nav a:hover { color: var(--ink); }
+#section-nav a.is-current { color: var(--ink); background: rgba(0, 0, 0, 0.06); }
+
+/* ---------------------------------------------------------------- hero ---- */
+
+.section--hero { min-height: 92vh; display: flex; flex-direction: column; justify-content: center; }
+.section--hero .display { margin-bottom: 0.3em; }
+
+.hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.6rem 2rem;
+  margin: 2rem 0 0;
+  padding-top: 1.4rem;
+  border-top: 1px solid var(--hairline);
+  max-width: 42ch;
+}
+.hero-meta div { margin: 0; }
+.hero-meta dt {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-3);
+  margin-bottom: 0.35rem;
+}
+.hero-meta dd { margin: 0; font-size: 0.95rem; font-weight: 500; }
+
+.scroll-cue {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--ink-3);
+  margin: 3.5rem 0 0;
+  animation: drift 2.6s var(--ease) infinite;
+}
+@keyframes drift {
+  0%, 100% { opacity: 0.35; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(5px); }
+}
+
+/* ------------------------------------------------------------- anatomy ---- */
+
+.section--anatomy { min-height: 100vh; display: flex; flex-direction: column; justify-content: center; }
+
+.hotspot-list {
+  list-style: none;
+  padding: 0;
+  margin: 1.6rem 0 0;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.5rem;
+}
+.hotspot-list button {
+  width: 100%;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  padding: 0.65rem 0.95rem;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: transform 0.25s var(--ease), box-shadow 0.25s var(--ease), border-color 0.25s var(--ease);
+}
+.hotspot-list button:hover,
+.hotspot-list button.is-active {
+  transform: translateY(-2px);
+  border-color: transparent;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.09);
+}
+.hotspot-list .name { display: block; font-weight: 550; font-size: 0.92rem; }
+.hotspot-list .detail { display: none; }
+
+/* ------------------------------------------------- subsystem sections ---- */
+
+.section--subsystem { min-height: 100vh; display: flex; flex-direction: column; justify-content: center; }
+
+/* Wide view: the canvas is clipped to the right of --split so the robot can
+   never paint over the copy. Content is a left column, not a centred 980px
+   shell with the model sitting on top of it -- that is what made the arms
+   cut through headlines. Keep 1080px in sync with SPLIT_MIN_WIDTH in robot.js. */
+@media (min-width: 1080px) {
+  #stage { left: var(--split); background: transparent; }
+  .section {
+    width: min(28rem, calc(var(--split) - 5.5rem));
+    margin-left: var(--gutter);
+    margin-right: auto;
+  }
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.6rem 2rem;
+  margin: 1.4rem 0 1.6rem;
+  padding: 1.1rem 0;
+  border-top: 1px solid var(--hairline);
+  border-bottom: 1px solid var(--hairline);
+}
+.facts .v { font-size: clamp(1.5rem, 3vw, 2.1rem); font-weight: 600; letter-spacing: -0.03em; line-height: 1; }
+.facts .k {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  color: var(--ink-3);
+  margin-top: 0.5rem;
+}
+
+/* ------------------------------------------------------------ diagrams ---- */
+
+.diagram-wrap {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 1.6rem;
+  margin: 2rem 0;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 40px rgba(0, 0, 0, 0.055);
+  overflow-x: auto;
+}
+.diagram-wrap svg { display: block; width: 100%; min-width: 480px; height: auto; }
+.diagram-caption { font-size: 0.85rem; color: var(--ink-2); margin: 1.1rem 0 0; max-width: 70ch; }
+
+.dg-box { fill: var(--ground); stroke: var(--hairline); }
+.dg-box--sensor, .dg-box--topic { fill: var(--cyan-soft); stroke: #bcdcef; }
+.dg-box--consumer { fill: var(--amber-soft); stroke: #f6d8b8; }
+.dg-label { font-family: var(--font); font-size: 11.5px; font-weight: 550; fill: var(--ink); }
+.dg-sub { font-family: var(--mono); font-size: 8.6px; fill: var(--ink-3); }
+.dg-edge { fill: none; stroke: var(--cyan); stroke-width: 1.6; }
+.dg-edge--intent { stroke: var(--amber); }
+.dg-edge-label { font-family: var(--mono); font-size: 8.4px; fill: var(--ink-3); }
+
+.dg-legend { display: flex; gap: 1.4rem; flex-wrap: wrap; margin-top: 1.1rem; }
+.dg-legend span { display: inline-flex; align-items: center; gap: 0.45rem; font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.05em; color: var(--ink-3); text-transform: uppercase; }
+.dg-legend i { width: 15px; height: 2px; border-radius: 2px; }
+
+/* ------------------------------------------------------------ scrubber ---- */
+
+.scrubber {
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  margin: 2rem 0;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 40px rgba(0, 0, 0, 0.055);
+}
+.scrubber-stage {
+  /* White, not the free-space tint: the map paints its own free cells in that
+     tint, and matching the two made swept space invisible against the panel. */
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  display: flex;
+  justify-content: center;
+  padding: 1rem;
+  min-height: 260px;
+}
+.scrubber-stage img {
+  height: 220px;
+  width: auto;
+  max-width: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;  /* 5 cm cells -- show them as cells, not blur */
+}
+.scrubber-controls { display: flex; align-items: center; gap: 1rem; margin-top: 1.1rem; }
+/* Cyan, matching the data being scrubbed rather than the intent accent. */
+.scrubber input[type="range"] { flex: 1; accent-color: var(--cyan); }
+.scrubber-readout { font-family: var(--mono); font-size: 0.74rem; color: var(--ink-2); white-space: nowrap; }
+.scrubber-readout b { color: var(--ink); font-weight: 600; }
+
+/* ---------------------------------------------------------- field notes --- */
+
+/* These are the most distinctive content on the page, so they get the one
+   loud-ish treatment: an amber rule, a mono date, everything else quiet. */
+.note {
+  border-left: 2px solid var(--amber);
+  padding: 0.1rem 0 0.1rem 1.3rem;
+  margin: 1.8rem 0;
+  max-width: 68ch;
+}
+.note-date {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.09em;
+  color: var(--amber);
+  text-transform: uppercase;
+  display: block;
+  margin-bottom: 0.35rem;
+}
+.note h4 { margin: 0 0 0.4rem; font-size: 1.02rem; font-weight: 600; letter-spacing: -0.012em; }
+.note p { margin: 0; font-size: 0.93rem; line-height: 1.62; color: var(--ink-2); }
+
+.notes-head {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--ink-3);
+  margin: 2rem 0 0;
+  padding-top: 1.4rem;
+  border-top: 1px solid var(--hairline);
+}
+.deep-body .notes-head { margin-top: 1.6rem; }
+.deep-body .note { max-width: none; }
+.deep-body .diagram-wrap { margin-top: 0; }
+
+/* ----------------------------------------------------- under the hood ---- */
+
+.deep {
+  background: var(--surface);
+  border-radius: var(--radius);
+  margin: 1.2rem 0 0;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 40px rgba(0, 0, 0, 0.055);
+  overflow: hidden;
+}
+.deep > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 1.15rem 1.6rem;
+  font-weight: 550;
+  font-size: 0.95rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+.deep > summary::-webkit-details-marker { display: none; }
+.deep > summary::after {
+  content: "";
+  width: 7px; height: 7px;
+  border-right: 1.8px solid var(--ink-3);
+  border-bottom: 1.8px solid var(--ink-3);
+  transform: rotate(45deg) translate(-2px, -2px);
+  margin-left: auto;
+  transition: transform 0.25s var(--ease);
+}
+.deep[open] > summary::after { transform: rotate(225deg) translate(-2px, -2px); }
+.deep > summary:hover { background: rgba(0, 0, 0, 0.02); }
+.deep-body { padding: 0 1.6rem 1.6rem; }
+.deep-body > p:first-child { margin-top: 0; color: var(--ink-2); font-size: 0.95rem; }
+
+.table-wrap { overflow-x: auto; margin: 1.6rem 0 0; }
+.deep table { border-collapse: collapse; width: 100%; min-width: 520px; font-size: 0.85rem; }
+.deep caption {
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.13em;
+  color: var(--ink-3);
+  padding-bottom: 0.7rem;
+}
+.deep th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--hairline);
+  padding: 0 1rem 0.55rem 0;
+}
+.deep td { padding: 0.6rem 1rem 0.6rem 0; border-bottom: 1px solid #ededf0; vertical-align: top; color: var(--ink-2); }
+.deep td:first-child { color: var(--ink); font-family: var(--mono); font-size: 0.8rem; }
+.deep tr:last-child td { border-bottom: 0; }
+
+.code-block {
+  background: var(--ink);
+  color: #f5f5f7;
+  border-radius: 12px;
+  padding: 1.2rem 1.3rem;
+  margin: 1.6rem 0 0;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.65;
+}
+.code-block .cm { color: #8e8e93; }
+
+/* ------------------------------------------------------------ colophon ---- */
+
+.section--colophon { border-top: 1px solid var(--hairline); }
+.colophon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 2.2rem;
+  margin-top: 2.5rem;
+}
+.colophon-grid h3 { font-size: 0.95rem; margin: 0 0 0.5rem; font-weight: 600; }
+.colophon-grid p { margin: 0; font-size: 0.9rem; color: var(--ink-2); line-height: 1.6; }
+
+/* -------------------------------------------------------------- reveal ---- */
+
+.reveal { opacity: 0; transform: translateY(10px); transition: opacity 0.7s var(--ease), transform 0.7s var(--ease); }
+.reveal.is-in { opacity: 1; transform: none; }
+
+/* --------------------------------------------------------------- a11y ---- */
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 50;
+  background: var(--ink);
+  color: #fff;
+  padding: 0.7rem 1.1rem;
+  border-radius: 0 0 10px 0;
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+.skip-link:focus { left: 0; }
+
+:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; border-radius: 6px; }
+
+.noscript {
+  position: relative;
+  z-index: 5;
+  width: var(--shell);
+  margin: 2rem auto;
+  padding: 1.2rem;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  font-size: 0.9rem;
+}
+
+/* ------------------------------------------------------------- motion ---- */
+
+/* Reduced motion kills the camera choreography (main.js also checks this and
+   stops driving the 3D scene) and every ambient animation. The reveal
+   transitions collapse to plain visibility so nothing stays stuck at opacity 0
+   if an observer never fires. */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+  .reveal { opacity: 1; transform: none; }
+}
+
+/* --------------------------------------------------------- narrow view ---- */
+
+@media (max-width: 760px) {
+  body { font-size: 16px; }
+  :root { --shell: calc(100% - 2.5rem); }
+  .section { padding: clamp(3.5rem, 9vh, 5rem) 0; }
+  .section--hero { min-height: 88vh; }
+  /* On a phone the robot sits behind the text rather than beside it, so it is
+     pushed well back -- at 0.5 the cart's edges still cut through the running
+     copy. It comes back to full strength in the anatomy section, where it is
+     the subject and the text above it is short. */
+  #stage { opacity: 0.28; }
+  #stage.is-anatomy { opacity: 1; }
+  .facts { gap: 1.6rem 2rem; }
+  .hero-meta { gap: 1.4rem 2rem; }
+  .scrubber-stage img { height: 240px; }
+  /* The readout is nowrap so its numbers never break mid-value; at phone width
+     that plus the slider is wider than the screen, so they stack instead. */
+  .scrubber-controls { flex-direction: column; align-items: stretch; gap: 0.7rem; }
+  .scrubber-readout { white-space: normal; }
+  .diagram-wrap, .scrubber, .deep-body { padding-left: 1.1rem; padding-right: 1.1rem; }
+  .deep > summary { padding: 1rem 1.1rem; }
+}

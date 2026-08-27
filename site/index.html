@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SortBots — how it works</title>
+<meta name="description" content="How a fleet of warehouse robots maps a building it has never seen, agrees on what it found, and stays out of its own way." />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231d1d1f'/><circle cx='16' cy='13' r='4.5' fill='%230a84c4'/><rect x='8' y='21' width='16' height='3.5' rx='1.75' fill='%23ff8c26'/></svg>" />
+<link rel="stylesheet" href="styles.css" />
+
+<!-- Native import map: no bundler, no CDN, matching the repo's no-build-step
+     convention for web code. Everything under vendor/ is committed. -->
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.js",
+    "three/addons/": "./vendor/three/"
+  }
+}
+</script>
+</head>
+<body>
+
+<!-- The 3D layer is fixed behind everything and driven by scroll position.
+     aria-hidden because it is decorative-by-fallback: every part it can show is
+     also reachable through the real buttons in the anatomy section. -->
+<div id="stage" aria-hidden="true">
+  <canvas id="robot-canvas"></canvas>
+  <img id="stage-poster" src="assets/poster.jpg" alt="" />
+  <div id="hotspot-layer"></div>
+</div>
+
+<a class="skip-link" href="#anatomy">Skip to the robot</a>
+
+<header id="masthead">
+  <span class="wordmark">SortBots</span>
+  <nav id="section-nav" aria-label="Subsystems"></nav>
+</header>
+
+<main>
+  <!-- Hero -->
+  <section id="hero" class="section section--hero">
+    <p class="eyebrow">Multi-robot warehouse logistics</p>
+    <h1 class="display" id="hero-title"></h1>
+    <p class="lede lede--hero" id="hero-tagline"></p>
+    <dl class="hero-meta" id="hero-meta"></dl>
+    <p class="scroll-cue" aria-hidden="true">Scroll</p>
+  </section>
+
+  <!-- Anatomy: the interactive core -->
+  <section id="anatomy" class="section section--anatomy">
+    <p class="eyebrow">Anatomy</p>
+    <h2 class="display display--md">One camera. Click a part.</h2>
+    <p class="lede">
+      Each hotspot opens the subsystem that owns it. Same 39 parts the simulator drives.
+    </p>
+    <ul id="hotspot-list" class="hotspot-list"></ul>
+  </section>
+
+  <!-- Subsystem sections are generated from content/subsystems.js -->
+  <div id="sections"></div>
+
+  <!-- Colophon -->
+  <section id="colophon" class="section section--colophon">
+    <p class="eyebrow">Colophon</p>
+    <h2 class="display display--md">Built from the repository it documents.</h2>
+    <div class="colophon-grid">
+      <div>
+        <h3>The robot on this page</h3>
+        <p>
+          Converted from the same robot description the simulator loads, with
+          every part name preserved so the page can address them individually.
+          247&nbsp;KB compressed, 39 parts, no retouching.
+        </p>
+      </div>
+      <div>
+        <h3>The maps on this page</h3>
+        <p>
+          Real occupancy grids from a recorded exploration run, aligned onto a
+          shared world canvas and recoloured. Nothing here is mocked up.
+        </p>
+      </div>
+      <div>
+        <h3>Running it yourself</h3>
+        <p>
+          The simulation is driven through a control script with exit codes as
+          its interface. Full runbook in <code>docs/running.md</code>;
+          architecture reference in <code>docs/perception_exploration.md</code>.
+        </p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script type="module" src="js/main.js"></script>
+<noscript>
+  <div class="noscript">
+    This page renders the robot and its subsystems with JavaScript. The written
+    reference is in <code>docs/running.md</code> and
+    <code>docs/perception_exploration.md</code>.
+  </div>
+</noscript>
+</body>
+</html>
