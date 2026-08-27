@@ -33,6 +33,10 @@
 # runs sharing a warehouse. --robot-id (singular) still names which ONE
 # robot --localize/--resume/--map/--teleop apply to.
 #
+# Leaving out --robots (and --chase-cam-robots) sizes both to this machine's
+# detected VRAM/RAM instead of defaulting to 1 — see scripts/_hw_budget.py.
+# An explicit value here always wins over that auto-pick.
+#
 # --keep-console leaves the dashboard stack (rosbridge, web_video_server,
 # webui/serve.py) alone and tells the bringup not to start its own copy. It is
 # what scripts/run_console.sh + the dashboard's Scenarios tab use, so the page
@@ -90,7 +94,11 @@ PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz
                    rtabmap_cloud_pump.py recon_cloud_relay.py wasd_teleop \
                    map_merge.py static_transform_publisher \
                    "spawn_warehouse.py" \
-                   ns3_mesh_bridge fastdds)
+                   ns3_mesh_bridge fastdds \
+                   fast-discovery-server) # the "fastdds" wrapper execs this as a
+                   # grandchild whose argv never contains "fastdds" itself, so it
+                   # survived every pkill -f fastdds and kept UDP 11811 bound
+                   # across runs (diagnosed 2026-08-27, port-allocation failures).
 # Note scripts/save_map.sh --watch is deliberately absent from that list. Its
 # checkpoint loop has to OUTLIVE teardown: rtabmap gets pkill -9'd only 2 s
 # after SIGINT below, and the last checkpoint is exactly the one worth
@@ -130,7 +138,11 @@ fi
 
 # ---- args ----
 # Teleop defaults OFF — the dashboard drive pad replaces the WASD window.
-ROBOT_ID=robot_0; ROBOTS=1; ROBOT_IDS=""; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=0; MESH=0
+# ROBOTS starts unset (not "1"): that's the signal, below, that the caller
+# didn't pin a count and scripts/_hw_budget.py should size it to this
+# machine's VRAM/RAM instead. --robots on the CLI (or a scenario's pinned
+# run.robots, which arrives here the same way) always overrides it.
+ROBOT_ID=robot_0; ROBOTS=""; ROBOT_IDS=""; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=0; MESH=0
 NS3_HOME="${NS3_HOME:-$HOME/ns-3-dev}"
 # Cosmetic 3rd-person cam = a second render product per robot. --no-chase-cam
 # drops all of them; --chase-cam-robots N keeps them on the first N robots
@@ -166,6 +178,22 @@ if [[ "$LOCALIZE" == "true" && "$RESUME" == "true" ]]; then
   echo "ERROR: --localize and --resume are mutually exclusive (read-only vs. keep-mapping)."
   exit 2
 fi
+
+# No --robots on the CLI (see the ROBOTS="" comment above) -> size the run to
+# this machine's VRAM/RAM instead of always defaulting to 1. Explicit
+# --chase-cam-robots/--no-chase-cam still wins outright; only fills in the
+# count when the caller left both robots AND chase-cam-robots unset.
+if [[ -z "$ROBOTS" ]]; then
+  _HW_MAX_ROBOTS=$(python3 -c "
+import yaml
+with open('$REPO_ROOT/configs/robots.yaml') as f:
+    print(len(yaml.safe_load(f)['robots']))
+")
+  read -r ROBOTS _HW_CHASE_N _HW_NOTE < <(python3 "$SCRIPT_DIR/_hw_budget.py" --pick --max-robots "$_HW_MAX_ROBOTS")
+  [[ -z "$CHASE_CAM_ARGS" ]] && CHASE_CAM_ARGS="--chase-cam-robots $_HW_CHASE_N"
+  echo "[run_demo] hw-budget: $_HW_NOTE"
+fi
+ROBOTS="${ROBOTS:-1}"   # detection itself failed (no python3/nvidia-smi) — old default
 
 # --robot-ids threads straight through to the bringup's robot_ids:= (which
 # brings up a full RTAB-Map + Nav2 + task_manager + explorer stack per id —
@@ -310,14 +338,24 @@ setsid bash -c "$ISAAC_EXTRA_ENV source '$REPO_ROOT/scripts/activate_isaac.sh' >
   exec python '$REPO_ROOT/scripts/spawn_warehouse.py' $HEADLESS --forever \
        --robots $ROBOTS --scene $SCENE --drive cmd_vel $CHASE_CAM_ARGS" \
   >"$SIM_LOG" 2>&1 &
+SIM_PID=$!
 
 echo "[run_demo] waiting for the warehouse to load"
 echo "           (first run streams assets from NVIDIA — can take a few minutes)..."
+# Liveness, not log text, decides failure here: optional extensions
+# (asset_converter/mjcf/urdf importers) log an ERROR + Traceback on Kit
+# startup whenever the host is missing their bundled libxml2.so.2 (true on
+# Ubuntu 25.10, which only ships libxml2-16 — diagnosed 2026-08-27). Those
+# are non-fatal and were tripping this loop's old `grep -qiE "ERROR:|..."`
+# check well before the warehouse ever got a chance to load. `setsid ...
+# exec python` keeps SIM_PID valid across the setsid->bash->python chain,
+# so kill -0 is the same "is it actually still running" check CLAUDE.md
+# already prescribes (pgrep -f spawn_warehouse.py) — just PID-scoped.
 READY=0
 for _ in $(seq 1 72); do
   if grep -q "timeline.play()" "$SIM_RESULT" 2>/dev/null; then READY=1; break; fi
-  if grep -qiE "ERROR:|Traceback|RuntimeError" "$SIM_LOG" 2>/dev/null; then
-    echo "[run_demo] Isaac Sim failed to start — see $SIM_LOG"; exit 1
+  if ! kill -0 "$SIM_PID" 2>/dev/null; then
+    echo "[run_demo] Isaac Sim process exited before becoming ready — see $SIM_LOG"; exit 1
   fi
   sleep 5
 done
@@ -367,6 +405,13 @@ if [[ $MESH -eq 1 ]]; then
     _LAUNCH_SH="/tmp/sortbots_mesh_launch_${_rid}.sh"
     cat >"$_LAUNCH_SH" <<LAUNCHEOF
 #!/bin/bash
+# sudo ip netns exec runs this as root, which resets HOME to /root — Python's
+# user-site lookup then misses lark/catkin_pkg/etc., installed under this
+# user's site because pip has no permission to write system-wide (diagnosed
+# 2026-08-27: "ros2 launch" failed in-netns with "No module named 'lark'"
+# despite working fine outside the namespace). Pin HOME back explicitly
+# rather than sudo -E, to avoid pulling in the rest of the caller's env.
+export HOME='$HOME'
 source '$ROS_SETUP' 2>/dev/null
 export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\$PATH
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp

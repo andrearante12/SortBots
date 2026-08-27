@@ -43,7 +43,17 @@
 #
 #   scripts/bench_sim.sh                                  # current defaults
 #   scripts/bench_sim.sh --robots 1 --chase-cam-robots 0  # isolate camera cost
-#   scripts/bench_sim.sh --label "render every 2nd tick"  # annotate a run
+#   scripts/bench_sim.sh --label "single robot"           # annotate a run
+#
+# 2026-08-26: dropped --render-every. spawn_warehouse.py's parse_args() never
+# accepted it (a plain p.parse_args(), not parse_known_args(), so every call
+# below that passed a non-default value was erroring out silently before this
+# fix), and it isn't worth wiring up anyway — see the "what scales" note
+# above: render RATE barely moved the number, render PRODUCT count did. Use
+# --robots / --chase-cam-robots for the calibration sweep that
+# scripts/_hw_budget.py's placeholder constants need (see its TODO-calibrate
+# comment): run the four corners of {1,2} robots x {0,1} chase-cam-robots and
+# take the VRAM deltas between rows as PER_ROBOT_MIB / PER_CHASE_CAM_MIB.
 #
 # Must be run from a shell with NO ROS 2 sourced (activate_isaac.sh enforces).
 set -uo pipefail
@@ -53,7 +63,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 ROBOTS=2
 CHASE_CAM=1
-RENDER_EVERY=2
 SCENE=nvidia
 # Isaac needs to load the warehouse, import 2 URDFs and let the RTX pipeline
 # settle; the first seconds after the timeline starts are not representative.
@@ -66,7 +75,6 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --robots) ROBOTS="$2"; shift 2 ;;
     --chase-cam-robots) CHASE_CAM="$2"; shift 2 ;;
-    --render-every) RENDER_EVERY="$2"; shift 2 ;;
     --scene) SCENE="$2"; shift 2 ;;
     --warmup) WARMUP_S="$2"; shift 2 ;;
     --window) WINDOW_S="$2"; shift 2 ;;
@@ -97,15 +105,14 @@ RESULT="$(mktemp -t bench_sim_result.XXXXXX)"
 LOG="$(mktemp -t bench_sim_log.XXXXXX)"
 trap 'rm -f "$RESULT" "$LOG"' EXIT
 
-echo "[bench] ${LABEL:-baseline}: robots=$ROBOTS chase_cam=$CHASE_CAM" \
-     "render_every=$RENDER_EVERY scene=$SCENE"
+echo "[bench] ${LABEL:-baseline}: robots=$ROBOTS chase_cam=$CHASE_CAM scene=$SCENE"
 echo "[bench] starting Isaac alone (no ROS pipeline)..."
 
 ISAAC_SPAWN_WAREHOUSE_RESULT="$RESULT" setsid bash -c "
   source '$REPO_ROOT/scripts/activate_isaac.sh' >/dev/null 2>&1
   exec python '$REPO_ROOT/scripts/spawn_warehouse.py' --headless --forever \
        --robots $ROBOTS --scene $SCENE --drive cmd_vel \
-       --chase-cam-robots $CHASE_CAM --render-every $RENDER_EVERY" >"$LOG" 2>&1 &
+       --chase-cam-robots $CHASE_CAM" >"$LOG" 2>&1 &
 SESSION_PID=$!
 
 cleanup() {
@@ -150,7 +157,7 @@ read -r t1 w1 c1 <<<"$(sample)"
 echo "[bench] measuring over ${WINDOW_S}s..."
 GPU_SAMPLES="$(mktemp)"
 ( for _ in $(seq 1 $((WINDOW_S / 5))); do
-    nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null
+    nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv,noheader,nounits 2>/dev/null
     sleep 5
   done > "$GPU_SAMPLES" ) &
 sleep "$WINDOW_S"
@@ -172,9 +179,17 @@ print(f"  physics rate      {sim * 60 / wall:5.1f} steps/s  (target 60)")
 print(f"  isaac CPU         {cpu_s / wall * 100:5.0f}%  of one core"
       f"  ({cpu_s / wall:.1f} cores busy)")
 try:
-    vals = [int(x) for x in open(gpu_file).read().split() if x.strip().isdigit()]
-    if vals:
-        print(f"  GPU util          {sum(vals) / len(vals):5.0f}%  (n={len(vals)})")
+    util_vals, vram_vals = [], []
+    for line in open(gpu_file):
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) == 2 and all(p.isdigit() for p in parts):
+            util_vals.append(int(parts[0]))
+            vram_vals.append(int(parts[1]))
+    if util_vals:
+        print(f"  GPU util          {sum(util_vals) / len(util_vals):5.0f}%  (n={len(util_vals)})")
+    if vram_vals:
+        print(f"  GPU VRAM used     {sum(vram_vals) / len(vram_vals):5.0f} MiB avg,"
+              f" {max(vram_vals):5.0f} MiB max")
 except OSError:
     pass
 print()

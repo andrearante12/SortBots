@@ -238,11 +238,11 @@ description: >
 status: ready                 # ready | planned (planned lists but can't start)
 run:                          # allowlisted keys only — see RUN_FLAGS
   scene: nvidia               # nvidia | primitive
-  robots: 1                   # 1..2
+  robots: 1                   # 1..2, or "auto" (see below)
   robot_id: robot_0
   headless: false
   chase_cam: true             # false -> --no-chase-cam
-  chase_cam_robots: null      # null = every spawned robot; int = first N only
+  chase_cam_robots: null      # null = every spawned robot; int = first N only; "auto" also works
   explore: true
   resume: false               # resume and localize are mutually exclusive
   localize: false
@@ -252,6 +252,13 @@ overrides: [headless, robots] # which keys the card exposes as controls
 capture:
   bag: false                  # true also records scripts/record_explore_bag.sh
 ```
+
+`robots: auto` (also valid for `chase_cam_robots`) omits the flag from the
+`run_demo.sh` argv entirely, letting `scripts/_hw_budget.py` size it to the
+host's detected VRAM/RAM at launch time instead of pinning a number — see
+"Hardware sizing" below. `explore_fresh`/`explore_resume` use it; `explore_fleet*`
+deliberately don't, since `robots` there must stay in lockstep with
+`configs/robots.yaml`'s roster.
 
 Unknown `run:` keys are rejected, not forwarded — the card renders with status
 `invalid` and the reason, which is also what you get from the offline check:
@@ -272,6 +279,24 @@ Multi-robot coordination (`explore_fleet`, `robots: 2`) is `status: ready` —
 `configs/robots.yaml`'s order and threads it through to the bringup's
 `robot_ids:=`, which brings up a full stack (RTAB-Map + Nav2 + task_manager +
 explorer) per robot. See "Multi-robot" below.
+
+### Hardware sizing
+
+`run_demo.sh --robots`/`--chase-cam-robots`, left unset, are sized to the
+machine automatically: `scripts/_hw_budget.py` detects total GPU VRAM
+(`nvidia-smi`) and system RAM (`/proc/meminfo`), budgets 90% of each
+(`SORTBOTS_HW_BUDGET_PCT` overrides the percentage), and picks the largest
+robot/chase-cam count that fits — the same two knobs
+`scripts/bench_sim.sh` found actually move Isaac's GPU cost (render-*product*
+count, not render rate or camera resolution). The pick is logged as
+`[run_demo] hw-budget: ...` in the console log. An explicit `--robots N` /
+`--chase-cam-robots N` (or a scenario that pins a number instead of `auto`)
+always overrides the auto pick; detection failing (no `nvidia-smi`) falls back
+to the old hardcoded default of 1 robot rather than blocking the launch.
+
+This only covers hardware *within* what `scripts/install_isaac_sim.sh`
+already requires (RTX GPU, ≥8GB VRAM) — that install-time gate is unchanged
+and is still the only thing that refuses to run on unsupported hardware.
 
 ### Unified ROS-2 bringup on its own
 

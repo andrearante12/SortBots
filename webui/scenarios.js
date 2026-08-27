@@ -90,13 +90,31 @@
     const value = scenario.run[key];
     const label = document.createElement("label");
     label.title = `Override ${key} for this run only (configs/scenarios/${scenario.name}.yaml sets ${value}).`;
-    const input = document.createElement("input");
-    input.dataset.key = key;
+    let input;
     if (typeof value === "boolean") {
+      input = document.createElement("input");
       input.type = "checkbox";
       input.checked = value;
       label.append(input, document.createTextNode(key));
+    } else if (value === "auto") {
+      // robots: auto (scripts/_hw_budget.py sizes it to the host's VRAM/RAM at
+      // launch) — a <input type=number> can't hold a non-numeric value, so
+      // offer "auto" as its own option alongside the fixed counts.
+      input = document.createElement("select");
+      const autoOpt = document.createElement("option");
+      autoOpt.value = "auto";
+      autoOpt.textContent = "auto";
+      input.append(autoOpt);
+      for (let n = 1; n <= maxRobots; n++) {
+        const opt = document.createElement("option");
+        opt.value = String(n);
+        opt.textContent = String(n);
+        input.append(opt);
+      }
+      input.value = "auto";
+      label.append(document.createTextNode(key), input);
     } else {
+      input = document.createElement("input");
       input.type = "number";
       input.value = value;
       // chase_cam_robots may be 0 (no chase cams); robots stays 1..max.
@@ -104,13 +122,20 @@
       input.max = String(maxRobots);
       label.append(document.createTextNode(key), input);
     }
+    input.dataset.key = key;
     return label;
   }
 
   function readOverrides(card) {
     const out = {};
     for (const input of card.querySelectorAll("[data-key]")) {
-      out[input.dataset.key] = input.type === "checkbox" ? input.checked : Number(input.value);
+      if (input.type === "checkbox") {
+        out[input.dataset.key] = input.checked;
+      } else if (input.tagName === "SELECT") {
+        out[input.dataset.key] = input.value === "auto" ? "auto" : Number(input.value);
+      } else {
+        out[input.dataset.key] = Number(input.value);
+      }
     }
     return out;
   }

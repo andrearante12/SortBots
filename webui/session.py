@@ -101,6 +101,28 @@ def _int_range(flag: str, lo: int, hi: int):
     return build
 
 
+def _int_range_or_auto(flag: str, lo: int, hi: int):
+    """Like _int_range, but the string "auto" omits the flag entirely.
+
+    Lets scripts/run_demo.sh's own hardware-budget sizing (scripts/_hw_budget.py)
+    pick the value instead of a scenario pinning one — see
+    configs/scenarios/explore_fresh.yaml's `robots: auto`. Only a scenario that
+    writes "auto" explicitly gets this; RUN_DEFAULTS keeps a concrete int so
+    scenarios that say nothing are unaffected.
+    """
+    def build(value):
+        if isinstance(value, str) and value.lower() == "auto":
+            return []
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            raise ScenarioError(f"{flag}: expected an integer or 'auto', got {value!r}") from None
+        if not lo <= n <= hi:
+            raise ScenarioError(f"{flag}: expected {lo}..{hi} or 'auto', got {n}")
+        return [flag, str(n)]
+    return build
+
+
 def _pattern(flag: str, rx: re.Pattern):
     def build(value):
         if not isinstance(value, str) or not rx.match(value):
@@ -126,12 +148,18 @@ def _chase_cam_robots(flag: str):
     """How many robots get a cosmetic chase cam (first N in roster order).
 
     None/omitted -> run_demo.sh / spawn_warehouse default (every spawned
-    robot). 0 is valid and equivalent to chase_cam:false / --no-chase-cam,
-    but kept as its own flag so a fleet scenario can say "1" without
-    fighting the boolean. Accepts int or digit-string (CLI --set).
+    robot) or, if `robots` also came out unset, scripts/_hw_budget.py's pick.
+    "auto" (string) is accepted as a second, more explicit spelling of that
+    same omit-the-flag behavior — not a distinct behavior — for scenarios that
+    want to say so out loud (see configs/scenarios/explore_fresh.yaml). 0 is
+    valid and equivalent to chase_cam:false / --no-chase-cam, but kept as its
+    own flag so a fleet scenario can say "1" without fighting the boolean.
+    Accepts int or digit-string (CLI --set).
     """
     def build(value):
         if value is None:
+            return []
+        if isinstance(value, str) and value.lower() == "auto":
             return []
         # bool is a subclass of int; reject true/false before int().
         if isinstance(value, bool):
@@ -188,7 +216,7 @@ _MAX_ROBOTS = _roster_size()
 
 RUN_FLAGS = {
     "scene": _choice("--scene", {"nvidia", "primitive"}),
-    "robots": _int_range("--robots", 1, _MAX_ROBOTS),
+    "robots": _int_range_or_auto("--robots", 1, _MAX_ROBOTS),
     "robot_id": _pattern("--robot-id", re.compile(r"^[A-Za-z0-9_]+$")),
     "robot_ids": _robot_ids("--robot-ids"),
     "headless": _switch("--headless", when=True),
@@ -330,7 +358,11 @@ def apply_overrides(scenario: dict, overrides: dict | None) -> dict:
         # Coerce from the scenario's own typed default when present, else the
         # RUN_DEFAULTS type. chase_cam_robots defaults to None in RUN_DEFAULTS
         # but scenarios that expose it set an int — use that so CLI --set
-        # strings and form values become ints before build_argv.
+        # strings and form values become ints before build_argv. A scenario
+        # pinned to "auto" (str) falls through to the bare `else` below
+        # untouched — _int_range_or_auto's own builder does the int()/"auto"
+        # handling, so both --set robots=2 and --set robots=auto reach it as
+        # the raw string and parse correctly either way.
         default = run[key] if key in run else RUN_DEFAULTS[key]
         if isinstance(default, bool):
             if isinstance(value, str):

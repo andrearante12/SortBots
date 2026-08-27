@@ -17,7 +17,7 @@ status: ready
 
 run:
   scene: nvidia
-  robots: 1
+  robots: auto           # let scripts/_hw_budget.py size it to this machine's VRAM/RAM
   robot_id: robot_0
   headless: false
   chase_cam: true

@@ -142,9 +142,15 @@ refuse to run when ROS 2 is sourced. Source it only in its own shell — or let
   Vulkan ICD isn't picked. Reinstall `nvidia-driver-*`; confirm
   `__NV_PRIME_RENDER_OFFLOAD=1 vulkaninfo --summary` lists the dGPU; re-source
   `activate_isaac.sh` from a clean shell.
-- **GUI OOM on 8 GB:** Kit alone takes ~6 GB. Close browsers / other GPU apps,
-  run the demo with one robot, and drop the camera resolution in
-  `configs/sensors/d435.json` if Kit + rviz spike.
+- **GUI OOM on 8 GB:** Kit alone takes ~6 GB. `run_demo.sh` already sizes
+  `--robots`/`--chase-cam-robots` to detected VRAM/RAM by default (see
+  `scripts/_hw_budget.py`, budgeted at 90% — override with
+  `SORTBOTS_HW_BUDGET_PCT`), so a fresh 8 GB machine should already come up at
+  one robot with no chase cam. If Kit + rviz still spike, close browsers /
+  other GPU apps, force one robot explicitly (`--robots 1 --no-chase-cam`),
+  and drop the camera resolution in `configs/sensors/d435.json` as a last
+  resort (untested — not one of the two knobs `scripts/bench_sim.sh` has
+  actually measured).
 - **Kit aborts with a driver mismatch:** R535–R580 is the tested range for 5.1.
 - **Disk creeps up:** Kit caches in `~/.cache/ov` and `~/.nvidia-omniverse/` —
   safe to delete; regenerated on next run.
