@@ -167,6 +167,25 @@ cd "$ROS2_HOME"
 # Vendor packages that wrap libraries already in apt are skipped — colcon
 # resolves their dependents against the system libs via cmake find_package.
 # Gazebo packages are excluded entirely (SortBots uses Isaac Sim).
+# tinyxml2_vendor is NOT skipped (unlike the others here): pluginlib — a
+# transitive dep of ros2launch, added 2026-08-27 — looks for its colcon
+# env-hook package.sh at build time, not just headers/libs, so skipping the
+# vendor package breaks the dependent even though the actual symbols would
+# resolve against the system libtinyxml2-dev fine. It's a thin wrapper,
+# seconds to build.
+#
+# ros2bag was tried alongside ros2launch in the same 2026-08-27 pass but
+# dropped: it pulls in the full rosbag2_storage_{sqlite3,mcap,default_plugins}
+# stack, each hitting the same env-hook problem one level deeper, and none of
+# it is needed for the mesh scenario to run (only scripts/record_*_bag.sh use
+# ros2bag, for the offline-dashboard-fixture workflow). It was already
+# unbuilt before this pass — not a regression — just still a gap.
+# `set +e` here, not `... | grep ... || true` below: grep exiting 1 on "no
+# match" (expected on a clean build) must not be mistaken for colcon failing,
+# but `-e` has to be off for the whole pipeline or it aborts on that before
+# PIPESTATUS can even be read. Re-enabled right after, with colcon's real
+# code (PIPESTATUS[0]) checked explicitly.
+set +e
 env -i \
   HOME="$HOME" \
   PATH="$HOME/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
@@ -195,10 +214,8 @@ env -i \
       ros2topic \
       ros2run \
       ros2node \
-      ros2bag \
+      ros2launch \
     --packages-skip \
-      yaml_cpp_vendor \
-      tinyxml2_vendor \
       gz_cmake_vendor \
       gz_math_vendor \
       gz_utils_vendor \
@@ -216,7 +233,17 @@ env -i \
       -DBUILD_TESTING=OFF \
       -DFORCE_BUILD_VENDOR_PKG=OFF \
       -DTRACETOOLS_DISABLED=ON \
-    2>&1 | tee /tmp/sortbots_ros2_build.log | grep -E "^\[|^---| error: | failed" || true
+    2>&1 | tee /tmp/sortbots_ros2_build.log | grep -E "^\[|^---| error: | failed"
+COLCON_RC="${PIPESTATUS[0]}"
+set -e
+# A build interrupted mid-run (e.g. Ctrl-C) must fail loudly here, not fall
+# through to the stamp: on 2026-08-22 a SIGINT'd build left 54 packages
+# (incl. launch, ros2cli, ros2run) without a local_setup.bash, but the old
+# blanket `|| true` swallowed that and the run still stamped it as complete.
+if [[ "$COLCON_RC" -ne 0 ]]; then
+  echo "ERROR: colcon build exited $COLCON_RC — see /tmp/sortbots_ros2_build.log" >&2
+  exit 1
+fi
 
 echo ""
 # Verify key packages built
@@ -227,15 +254,27 @@ if [[ ! -f "$SETUP" ]]; then
 fi
 echo "    install/setup.bash: found"
 
-# Smoke test — source setup.bash then try ros2 CLI and rclpy import
+# Smoke test — source setup.bash then try ros2 CLI and rclpy import. These
+# must hard-fail (not just warn) so a partial build can never reach the
+# stamp below and be mistaken for done on the next run.
 env -i HOME="$HOME" PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
   bash -c "source '$SETUP' && ros2 --help >/dev/null 2>&1" \
   && echo "    ros2 CLI: OK" \
-  || echo "    WARNING: ros2 CLI not on PATH (ros2cli may not have built yet)"
+  || { echo "ERROR: ros2 CLI not on PATH after build — see /tmp/sortbots_ros2_build.log" >&2; exit 1; }
+
+# `ros2 --help` succeeds even with zero verb extensions registered — it only
+# parses the base CLI — so it didn't catch ros2launch missing from the
+# --packages-up-to list above (diagnosed 2026-08-27: the mesh bringup's
+# `ros2 launch ...` calls failed with "invalid choice: 'launch'" despite this
+# smoke test passing). Check the actual verb SortBots depends on.
+env -i HOME="$HOME" PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+  bash -c "source '$SETUP' && ros2 launch --help >/dev/null 2>&1" \
+  && echo "    ros2 launch: OK" \
+  || { echo "ERROR: 'ros2 launch' verb missing after build — see /tmp/sortbots_ros2_build.log" >&2; exit 1; }
 
 env -i HOME="$HOME" PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
   bash -c "source '$SETUP' && python3 -c 'import rclpy; print(\"    rclpy: OK\")'" \
-  || echo "    WARNING: rclpy import failed"
+  || { echo "ERROR: rclpy import failed after build" >&2; exit 1; }
 
 # ── Stamp ────────────────────────────────────────────────────────────────────
 touch "$STAMP"
