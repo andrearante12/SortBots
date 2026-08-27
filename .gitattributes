@@ -1,0 +1,17 @@
+# RTAB-Map pose graphs in the saved-map library are 150-500 MB sqlite files.
+# They are tracked deliberately (a library entry is only useful if the pose
+# graph travels with it), but they must go through git-lfs — .git is already
+# ~700 MB and each entry would otherwise be a permanent, undeltifiable blob in
+# packed history. Setup, once per machine:
+#
+#   sudo apt-get install git-lfs && git lfs install
+#
+# A clone WITHOUT git-lfs gets a ~130-byte pointer file in place of each .db.
+# It looks present and RTAB-Map fails deep inside sqlite, so scripts/maps_lib.py
+# sniffs for the pointer magic and reports db_state "pointer" instead — the
+# dashboard then disables that map with "run `git lfs pull`".
+maps/**/*.db filter=lfs diff=lfs merge=lfs -text
+
+# Occupancy grids are binary P5 PGM; small enough to track normally, but never
+# to line-diff or newline-convert.
+maps/**/*.pgm -text

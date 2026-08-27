@@ -16,6 +16,13 @@
 #   scripts/sim_ctl.sh status               # one line: state, phase, scenario, elapsed
 #   scripts/sim_ctl.sh log [--lines N]      # tail the current session's log
 #   scripts/sim_ctl.sh stop                 # tear the sim down, keep the console
+#   scripts/sim_ctl.sh stop --save-map NAME # ...saving the map into maps/ first
+#
+# Saved maps (the library at maps/, see maps/README.md) are managed by
+# scripts/maps.sh; `stop --save-map NAME` is the one-gesture wrapper, since a
+# complete entry needs the grid captured while the stack is up and the pose
+# graph copied once it's down. Load one back with:
+#   scripts/sim_ctl.sh start library_localize map=$PWD/maps/NAME/map.db
 #
 # Typical unattended run:
 #   scripts/sim_ctl.sh console start
@@ -201,16 +208,55 @@ cmd_wait() {
   die "timed out after ${timeout}s waiting for $target (last: $last)" 124
 }
 
+# scripts/maps.sh needs system ROS 2 sourced — the opposite of everything else
+# here, which must stay ROS-free for run_demo.sh's sake. Give it its own shell
+# rather than contaminating ours, and prepend the system PATH so `ros2` and
+# map_saver_cli don't pick up conda's python3.
+run_maps_sh() {
+  bash -c "source /opt/ros/jazzy/setup.bash
+           export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH
+           exec '$REPO_ROOT/scripts/maps.sh' \"\$@\"" _ "$@"
+}
+
 cmd_stop() {
+  local save_map=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --save-map) save_map="${2:-}"; shift 2;;
+      *) die "stop: unknown arg: $1" 1;;
+    esac
+  done
   require_console
+
+  # Two saves, either side of teardown, because the two artifacts have
+  # opposite requirements: the occupancy grid comes off the live /map (stack
+  # UP), and a safe copy of the sqlite pose graph needs the file closed (stack
+  # DOWN, or via the backup service the first call tries). maps.sh is
+  # idempotent, so the first call captures what it can — exit 5 meaning
+  # "pending" is expected here, not a failure — and the second completes it.
+  if [[ -n "$save_map" ]]; then
+    echo "[sim_ctl] saving map '$save_map' (grid, stack still up)"
+    run_maps_sh save "$save_map" || true
+  fi
+
   api_post session/stop >/dev/null || exit $?
   # stop is asynchronous (run_demo.sh's teardown sleeps between sweeps).
+  local stopped=false
   for _ in $(seq 1 60); do
     local state; state="$(api_get session | jq -r .state)"
-    [[ "$state" == "stopped" || "$state" == "idle" ]] && { echo "[sim_ctl] stopped"; return 0; }
+    if [[ "$state" == "stopped" || "$state" == "idle" ]]; then
+      echo "[sim_ctl] stopped"; stopped=true; break
+    fi
     sleep 2
   done
-  die "stop did not complete within 120s" 1
+  [[ "$stopped" == true ]] || die "stop did not complete within 120s" 1
+
+  if [[ -n "$save_map" ]]; then
+    echo "[sim_ctl] completing map '$save_map' (pose graph, stack down)"
+    run_maps_sh save "$save_map" --force || \
+      die "map '$save_map' did not complete — scripts/maps.sh show $save_map" 1
+  fi
+  return 0
 }
 
 case "${1:-}" in

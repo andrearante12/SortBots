@@ -1,0 +1,44 @@
+# Scenario definition for the dashboard's Scenarios tab — see the header of
+# configs/scenarios/explore_fresh.yaml for the schema and the rationale behind
+# the `run:` allowlist.
+
+name: library_localize
+
+title: Saved map — localize only (read-only)
+description: >
+  Loads a committed map from the library (maps/, see maps/README.md) and runs
+  read-only: run_demo.sh --localize sets Mem/IncrementalMemory=false, so Nav2
+  plans on the map and task_manager dispatches against it, but nothing is ever
+  added to the pose graph. This is the mode for demos and test environments —
+  the warehouse is already explored, so you can click-to-move robots the moment
+  the stack is up instead of waiting out an exploration run.
+
+  run_demo.sh copies the library entry to ~/.ros/sortbots_<robot_id>.db and runs
+  on the copy, because RTAB-Map opens its sqlite file read-write even under
+  --localize. A demo therefore cannot dirty the tracked file.
+
+  Pick an entry with the Map dropdown. Blank means the working database at
+  ~/.ros/sortbots_<robot_id>.db — whatever the last run left behind.
+
+status: ready
+
+run:
+  scene: nvidia
+  robots: 1
+  robot_id: robot_0
+  headless: false
+  chase_cam: false       # off by default for speed — see explore_fresh.yaml
+  explore: false         # localize is read-only, so exploring it would drive
+                         # the robot around without ever growing the map
+  resume: false          # mutually exclusive with localize (read-only vs. keep-mapping)
+  localize: true
+  teleop: false
+  map: null              # null = the working DB; the Map dropdown sets this
+
+# `map` is exposed because picking WHICH saved map to load is the entire point
+# of this scenario. `localize` is not: turning it off would drop into plain
+# mapping mode, which wipes the database on start.
+overrides: [map, headless, chase_cam]
+
+capture:
+  bag: false

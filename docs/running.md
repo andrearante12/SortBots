@@ -203,7 +203,13 @@ scripts/sim_ctl.sh wait running --timeout 420     # first run streams NVIDIA ass
 scripts/sim_ctl.sh status                         # state, phase, scenario, elapsed
 scripts/sim_ctl.sh log --lines 100
 scripts/sim_ctl.sh stop                           # sim down, console stays up
+scripts/sim_ctl.sh stop --save-map warehouse_full # ...saving the map into maps/ first
 ```
+
+Saved maps have their own script, `scripts/maps.sh` (`list`/`show`/`save`/
+`verify`/`rm`) — see [Saved map library](#saved-map-library). It is separate
+from `sim_ctl.sh` because it needs system ROS 2 *sourced*, which `sim_ctl.sh`
+and `run_demo.sh` must never be.
 
 Exit codes are the interface — branch on them, not on the text: `0` success,
 `1` command failure (bad scenario, rejected start, run went to `failed`), `3`
@@ -774,6 +780,17 @@ robots can't clobber each other's map. Override with `--map PATH` to keep
 several warehouses around. `--localize` refuses up front if the file doesn't
 exist, rather than coming up and silently rejecting every goal.
 
+So there are four modes, not three:
+
+| mode | flags | pose graph |
+|---|---|---|
+| fresh mapping | *(default)* | wiped on start, rebuilt |
+| resume | `--resume` | reopened and extended |
+| localize | `--localize` | reopened read-only (`Mem/IncrementalMemory=false`) |
+| **library** | `--map maps/<name>/map.db` + `--localize`/`--resume` | **copied** to the working DB; the library entry is never touched |
+
+The fourth is the [saved map library](#saved-map-library) below.
+
 In localization mode RTAB-Map sets `Mem/IncrementalMemory=false`, so the map is
 never modified — verified by checksum across a full run. `--delete_db_on_start`
 is forced off whenever `localization:=true`; deleting the map you are about to
@@ -809,6 +826,67 @@ final checkpoint lands; it ends itself once `/map` stops answering.
 `--occ`/`--free` are passed explicitly rather than left to `map_saver`'s
 defaults — unspecified thresholds are why this repo already has saved yamls
 disagreeing about `free_thresh` (0.25 vs 0.196).
+
+### Saved map library
+
+`save_map.sh` above keeps a map *by run*, under `data/runs/<name>/map/`, which
+is gitignored and addressed by timestamp. The **library** at `maps/` keeps a
+map *by name*, committed, with a manifest tying the grid and the pose graph
+together — so a demo or test environment can start from an already-explored
+warehouse and you can click-to-move robots straight away. See
+[`maps/README.md`](../maps/README.md) for the layout and
+`scripts/maps_lib.py` for the manifest schema.
+
+```bash
+scripts/maps.sh list                    # what's saved (no ROS needed)
+scripts/maps.sh show warehouse_full     # one entry in detail
+scripts/maps.sh verify warehouse_full   # sha + sqlite integrity + lfs pointer check
+```
+
+**Saving.** `maps.sh save` is idempotent and stack-aware — the same command,
+run whenever — because the grid needs the stack UP and a safe pose-graph copy
+needs it DOWN. A mid-run save may land as `db_state: pending` (grid in, pose
+graph not yet) and a second save after teardown promotes it to `complete`. One
+gesture does both:
+
+```bash
+scripts/sim_ctl.sh stop --save-map warehouse_full
+```
+
+Mid-run it first tries RTAB-Map's own `/<rid>/rtabmap/backup` service, which
+closes the database before copying (so the copy isn't torn) and re-inits on the
+same path — at the cost of a multi-second stall while memory reloads. Pass
+`--no-live-db` to skip that and defer the pose graph to teardown. The dashboard's
+**Save to library** button in the explore bar does the same thing over
+`POST /api/map/save`.
+
+**Loading.** Two scenarios, mirroring `explore_fresh`/`explore_resume`:
+
+```bash
+scripts/sim_ctl.sh start library_localize map=$PWD/maps/warehouse_full/map.db
+scripts/sim_ctl.sh start library_resume   map=$PWD/maps/warehouse_full/map.db
+```
+
+or pick the entry from the **Map** dropdown on either card in the Scenarios tab.
+
+**A run can't dirty a library entry.** RTAB-Map opens its sqlite file
+read-write even under `--localize` (`Mem/IncrementalMemory=false` stops it
+*learning*, not *writing*), so `run_demo.sh` copies any `--map` path under
+`maps/` to `~/.ros/sortbots_<robot_id>.db` and runs on the copy. `library_resume`
+therefore extends the copy; keeping that result is an explicit
+`maps.sh save`, ideally under a new name.
+
+**git-lfs.** `.db` files are tracked through git-lfs (root `.gitattributes`).
+Once per machine: `sudo apt-get install git-lfs && git lfs install`. A clone
+*without* it leaves a ~130-byte pointer file that looks present —
+`maps.sh list` flags those as `pointer`, the picker disables them, and
+`run_demo.sh` refuses to copy one. The fix in every case is `git lfs pull`.
+
+**Multi-robot** is save-many / load-one today: a fleet run saves one fused grid
+plus one `.db` per robot, but only the primary robot's is loadable, because
+`sortbots_bringup.launch.py` hardwires every non-primary robot's
+`database_path` to `~/.ros/sortbots_<rid>.db` to work around a launch-config
+leak (see the comment there).
 
 ### How much of the warehouse is actually mapped
 

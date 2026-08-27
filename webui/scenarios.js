@@ -3,6 +3,7 @@
 // Talks ONLY to webui/serve.py's control API over plain HTTP:
 //   GET  /api/scenarios        configs/scenarios/*.yaml, plus whether the
 //                              console is running (control: true/false)
+//   GET  /api/maps             the saved-map library, for the `map` picker
 //   GET  /api/session          current session state + phase
 //   GET  /api/session/log      incremental console log, by byte offset
 //   POST /api/session/start    {scenario, overrides, force}
@@ -43,6 +44,10 @@
   const ACTIVE_STATES = ["starting", "running", "stopping"];
 
   let scenarios = [];
+  // The saved-map library (GET /api/maps), for the `map` override picker.
+  // Readable without --control, like /api/scenarios, so the picker still shows
+  // what's saved when the console is down.
+  let maps = [];
   let hasControl = false;
   let session = null;
   let selected = null;
@@ -99,13 +104,64 @@
       "How many robots get a chase cam WHEN chase_cam is ticked. Only " +
       "robot_0's feed is ever displayed, so 1 is normally right — each extra " +
       "one is another render product.",
+    map:
+      "Which saved map to load (maps/, see maps/README.md). run_demo.sh " +
+      "copies the entry to ~/.ros/sortbots_<robot_id>.db and runs on the " +
+      "copy, so a run can never dirty the committed file — keeping what a " +
+      "resume run added takes an explicit scripts/maps.sh save. Blank means " +
+      "the working database, whatever the last run left behind.",
   };
+
+  // Why a map can't be loaded, keyed by maps_lib.py's db_state. Shown in the
+  // option's own label, because a silently-missing entry is the confusing case.
+  const DB_STATE_NOTE = {
+    pending: "pose graph not saved yet",
+    pointer: "run git lfs pull",
+    missing: "database file is gone",
+  };
+
+  function mapSelect() {
+    const select = document.createElement("select");
+    select.dataset.key = "map";
+
+    const blank = document.createElement("option");
+    blank.value = "";
+    blank.textContent = "(working DB — ~/.ros/sortbots_<id>.db)";
+    select.appendChild(blank);
+
+    for (const m of maps) {
+      const opt = document.createElement("option");
+      opt.value = m.db_path || "";
+      const loadable = m.status !== "invalid" && m.db_state === "complete";
+      const free = m.coverage ? `${Math.round(m.coverage.free_m2)} m²` : "no grid";
+      opt.textContent = loadable
+        ? `${m.title || m.name} · ${free} · ${(m.created || "").slice(0, 10)}`
+        : `${m.title || m.name} — (${m.error ? "invalid" : DB_STATE_NOTE[m.db_state] || m.db_state})`;
+      opt.disabled = !loadable;
+      select.appendChild(opt);
+    }
+
+    if (!maps.length) {
+      const none = document.createElement("option");
+      none.textContent = "(library is empty — scripts/maps.sh save NAME)";
+      none.disabled = true;
+      select.appendChild(none);
+    }
+    return select;
+  }
 
   function overrideControl(scenario, key) {
     const value = scenario.run[key];
     const label = document.createElement("label");
     label.title = `Override ${key} for this run only (configs/scenarios/${scenario.name}.yaml sets ${value}).`;
     if (OVERRIDE_HINTS[key]) label.title += `\n\n${OVERRIDE_HINTS[key]}`;
+    // `map` is a path out of the saved-map library, not a number or a flag —
+    // a picker, deliberately, so no free-text path ever reaches the control
+    // API (webui/session.py's _map_path re-validates regardless).
+    if (key === "map") {
+      label.append(document.createTextNode(key), mapSelect());
+      return label;
+    }
     const input = document.createElement("input");
     input.dataset.key = key;
     if (typeof value === "boolean") {
@@ -125,8 +181,15 @@
 
   function readOverrides(card) {
     const out = {};
-    for (const input of card.querySelectorAll("[data-key]")) {
-      out[input.dataset.key] = input.type === "checkbox" ? input.checked : Number(input.value);
+    for (const el of card.querySelectorAll("[data-key]")) {
+      // A <select> reports type "select-one", so the old two-way ternary sent
+      // Number("/path/to/map.db") — NaN — for the map picker. Branch on the
+      // tag, and keep "" meaning "leave the scenario's own default alone"
+      // (webui/session.py's _map_path maps null/"" to no --map flag at all).
+      out[el.dataset.key] =
+        el.type === "checkbox" ? el.checked
+        : el.tagName === "SELECT" ? el.value
+        : Number(el.value);
     }
     return out;
   }
@@ -249,6 +312,13 @@
       scenarios = [];
       hasControl = false;
       renderWarning(`Could not load scenarios: ${e.message}`);
+    }
+    // Never fatal: an empty library just means the picker offers the working
+    // DB, and this tab's whole point is working when things are down.
+    try {
+      maps = (await getJson("/api/maps")).maps || [];
+    } catch (e) {
+      maps = [];
     }
     if (!hasControl) {
       renderWarning(

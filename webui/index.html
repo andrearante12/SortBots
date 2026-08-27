@@ -260,6 +260,10 @@
     border-radius: 4px; padding: 4px 8px; font-size: 0.78rem; cursor: pointer;
   }
   #explore-bar button:hover { background: #222831; }
+  #map-name {
+    width: 96px; background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 4px 6px; font-size: 0.78rem;
+  }
   #explore-status {
     font-family: monospace; color: #7bf; margin-left: auto;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -291,6 +295,13 @@
   .scenario-row label { display: flex; align-items: center; gap: 4px; font-size: 0.76rem; color: #9aa; cursor: pointer; }
   .scenario-row input[type="number"] {
     width: 46px; background: #14161a; color: #e6e6e6;
+    border: 1px solid #2a2e35; border-radius: 4px; padding: 2px 4px; font-size: 0.76rem;
+  }
+  /* The saved-map picker. max-width, not a fixed width: an entry's label
+     carries its coverage and date, and letting it size the flex row would
+     push the Start button off a phone-width card. */
+  .scenario-row select {
+    max-width: 240px; background: #14161a; color: #e6e6e6;
     border: 1px solid #2a2e35; border-radius: 4px; padding: 2px 4px; font-size: 0.76rem;
   }
   .scenario-row button {
@@ -430,6 +441,11 @@
     #recon-panel { min-height: 220px; }
     #map-bar { padding-right: 26%; }
     #map-hint { display: none; }  /* the title tooltip still has the full text */
+    /* The explore bar is five controls wide on a 360px screen. Saving to the
+       library is a deliberate, named action that belongs on a real keyboard —
+       drop it here rather than let it wrap the status readout off-screen.
+       scripts/maps.sh save does the same thing from a terminal. */
+    #map-name, #explore-save-lib { display: none; }
   }
 </style>
 </head>
@@ -553,6 +569,9 @@
         <button type="button" id="explore-start" title="Start autonomous frontier exploration (nodes/explorer.py)">Start</button>
         <button type="button" id="explore-stop" title="Stop exploring">Stop</button>
         <button type="button" id="explore-save" title="Snapshot the current RTAB-Map database via its backup service">Save map</button>
+        <input id="map-name" placeholder="library name" size="12"
+               title="Name to save this map under in maps/ — lowercase letters, digits, - and _">
+        <button type="button" id="explore-save-lib" title="Save the fused /map grid and this robot's pose graph into maps/ under that name (scripts/maps.sh save). Needs the dashboard console.">Save to library</button>
         <span id="explore-status">explorer: not running</span>
       </div>
       <ul id="queue-list"></ul>

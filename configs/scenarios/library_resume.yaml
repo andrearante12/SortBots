@@ -1,0 +1,47 @@
+# Scenario definition for the dashboard's Scenarios tab — see the header of
+# configs/scenarios/explore_fresh.yaml for the schema and the rationale behind
+# the `run:` allowlist.
+
+name: library_resume
+
+title: Saved map — resume and keep exploring
+description: >
+  Loads a committed map from the library (maps/, see maps/README.md) and keeps
+  MAPPING: run_demo.sh --resume leaves the pose graph incremental, and the
+  explorer heads for whatever frontiers the saved map still has. This is the
+  mode for finishing an incomplete map across several sessions.
+
+  Like library_localize, run_demo.sh copies the entry to
+  ~/.ros/sortbots_<robot_id>.db first, so what this run extends is the COPY —
+  the tracked library file is untouched. Keeping the result is therefore an
+  explicit step:
+
+      scripts/sim_ctl.sh stop --save-map <name>
+
+  Saving under a NEW name is usually right. Each entry is a git-lfs object of
+  100+ MB and replacing one writes a whole new object rather than a delta.
+
+  Pick an entry with the Map dropdown. Blank means the working database at
+  ~/.ros/sortbots_<robot_id>.db, which makes this equivalent to explore_resume.
+
+status: ready
+
+run:
+  scene: nvidia
+  robots: 1
+  robot_id: robot_0
+  headless: false
+  chase_cam: false       # off by default for speed — see explore_fresh.yaml
+  explore: true
+  resume: true
+  localize: false        # mutually exclusive with resume (read-only vs. keep-mapping)
+  teleop: false
+  map: null              # null = the working DB; the Map dropdown sets this
+
+# `resume` is deliberately NOT overridable, for the same reason it isn't in
+# explore_resume.yaml: turning it off would silently wipe the map this scenario
+# exists to extend. Use explore_fresh for that.
+overrides: [map, headless, chase_cam]
+
+capture:
+  bag: false

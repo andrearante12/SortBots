@@ -29,6 +29,7 @@ This is **not a colcon workspace** — there is no `src/`, no `package.xml`, no
 | `webui/` | dashboard (vanilla JS, no build step) + `serve.py` + `session.py` |
 | `scripts/` | Isaac Sim entry points, `run_demo.sh`, `run_console.sh`, `sim_ctl.sh` |
 | `configs/` | tuning YAML, `scenarios/` presets |
+| `maps/` | saved map library — named, committed snapshots of explored maps |
 | `docs/running.md` | the full runbook |
 
 No custom `.msg`/`.srv`: inter-node protocol is `std_msgs/String` carrying JSON.
@@ -63,6 +64,14 @@ Node tuning is plain YAML loaded by the node itself, not ROS params. Nodes take
   like a hang. Deadlines that stand for distance belong on sim time; the tick
   rate that keeps a node responsive does not (pass an explicit `STEADY_TIME`
   clock, as `nodes/explorer.py` does).
+- **A saved map is loaded by COPY, never in place.** RTAB-Map opens its sqlite
+  file read-write even under `--localize` (`Mem/IncrementalMemory=false` stops
+  it *learning*, not *writing*), so `run_demo.sh` copies any `--map` path under
+  `maps/` to `~/.ros/sortbots_<robot_id>.db` first. Don't "simplify" that away —
+  without it every demo dirties a tracked git-lfs object. Saving is the mirror
+  problem: the grid needs the stack UP, a safe DB copy needs it DOWN, which is
+  why `scripts/maps.sh save` is idempotent and can legitimately exit 5
+  ("pending"). Use `scripts/sim_ctl.sh stop --save-map NAME` for both halves.
 - **Nav2 costmap `map_topic` must be absolute.** A relative one resolves into
   the costmap sub-namespace and silently gets no map.
 - **In params YAML under a namespace, use `/**/<node_name>:`** — a bare

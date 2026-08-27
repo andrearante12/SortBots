@@ -39,6 +39,8 @@ from urllib.parse import parse_qs, urlsplit
 import yaml
 
 import session as session_mod
+# session.py puts scripts/ on sys.path for this; both are ROS-free by design.
+import maps_lib
 
 WEBUI_DIR = Path(__file__).resolve().parent
 WAYPOINTS_CONFIG = WEBUI_DIR.parent / "configs" / "waypoints.yaml"
@@ -76,6 +78,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_robots()
         elif route == "/api/scenarios":
             self._serve_scenarios()
+        elif route == "/api/maps":
+            self._serve_maps()
         elif route == "/api/session":
             self._with_control(lambda: self._serve_json(SESSIONS.status()))
         elif route == "/api/session/log":
@@ -89,6 +93,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_control(self._start_session)
         elif route == "/api/session/stop":
             self._with_control(lambda: self._serve_json(SESSIONS.stop()))
+        elif route == "/api/map/save":
+            self._with_control(self._save_map)
         else:
             self._serve_error(404, f"no such endpoint: {route}")
 
@@ -124,6 +130,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             "scenarios": session_mod.load_scenarios(),
         })
 
+    def _serve_maps(self):
+        # Readable without --control for the same reason /api/scenarios is: the
+        # Scenarios tab's map picker should show what the library contains and
+        # explain that the console isn't running, rather than render empty.
+        self._serve_json({
+            "control": SESSIONS is not None,
+            "dir": str(maps_lib.MAPS_DIR),
+            "maps": maps_lib.list_maps(),
+        })
+
     # -- session endpoints -------------------------------------------------
 
     def _serve_log(self):
@@ -156,6 +172,37 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_error(400, str(exc))
         except OSError as exc:
             self._serve_error(500, f"failed to launch: {exc}")
+
+    def _save_map(self):
+        """Save the running session's map into the library under a name.
+
+        Blocking: map_saver_cli plus a VACUUMed multi-hundred-MB sqlite copy
+        takes tens of seconds, and the answer the dashboard needs — did the
+        pose graph make it in, or is it still pending? — isn't knowable until
+        it finishes. ThreadingHTTPServer keeps the rest of the UI responsive
+        meanwhile.
+        """
+        body = self._read_json_body()
+        if body is None:
+            return
+        name = body.get("name")
+        if not isinstance(name, str):
+            self._serve_error(400, "name must be a string")
+            return
+        try:
+            manifest = session_mod.save_map_blocking(
+                name,
+                robot_id=body.get("robot_id") or "robot_0",
+                title=body.get("title"),
+                description=body.get("description"),
+            )
+        except maps_lib.MapError as exc:
+            self._serve_error(400, str(exc))
+            return
+        except OSError as exc:
+            self._serve_error(500, f"failed to save map: {exc}")
+            return
+        self._serve_json(manifest)
 
     # -- plumbing ----------------------------------------------------------
 

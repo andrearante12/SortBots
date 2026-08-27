@@ -699,6 +699,52 @@ document.getElementById("explore-save").addEventListener("click", () => {
   );
 });
 
+// Save into the named map library (maps/, see maps/README.md) — a whole entry:
+// the fused /map grid, this robot's pose graph, and a manifest tying them
+// together, so `library_localize` can load it back on command.
+//
+// Plain same-origin fetch, NOT rosbridge: this shells out to
+// scripts/maps.sh, which needs system ROS 2 sourced, and webui/session.py is
+// the only place that knows how to build that shell. rosbridge can't run a
+// script; serve.py --control can.
+//
+// The two artifacts have opposite requirements — the grid needs the stack UP,
+// a safe pose-graph copy needs it DOWN — so a mid-run save can legitimately
+// come back "pending". That is reported, not treated as a failure; a second
+// save after teardown (or `sim_ctl.sh stop --save-map NAME`) completes it.
+document.getElementById("explore-save-lib").addEventListener("click", async () => {
+  const name = (document.getElementById("map-name").value || "").trim();
+  exploreMsgUntil = performance.now() + 3000;
+  if (!name) {
+    exploreStatusEl.textContent = "name the map first (a-z 0-9 - _)";
+    return;
+  }
+  exploreStatusEl.textContent = `saving ${name}…`;
+  try {
+    const res = await fetch("/api/map/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, robot_id: ROBOT_ID }),
+    });
+    const body = await res.json().catch(() => ({}));
+    exploreMsgUntil = performance.now() + 3000;
+    if (res.status === 503) {
+      exploreStatusEl.textContent = "console not running — scripts/maps.sh save";
+    } else if (!res.ok) {
+      exploreStatusEl.textContent = `save failed: ${body.error || res.statusText}`;
+      console.error("map save failed", body);
+    } else if (body.db_state !== "complete") {
+      exploreStatusEl.textContent = "grid saved ✓ — pose graph pending until stop";
+    } else {
+      exploreStatusEl.textContent = `saved to maps/${name} ✓`;
+    }
+  } catch (err) {
+    exploreMsgUntil = performance.now() + 3000;
+    exploreStatusEl.textContent = "save failed — see console";
+    console.error("map save failed", err);
+  }
+});
+
 // -- map + robot trail ------------------------------------------------
 
 const canvas = document.getElementById("map-canvas");

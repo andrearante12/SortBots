@@ -136,17 +136,58 @@ const VISIBLE = `(id) => {
   return el ? getComputedStyle(el).display !== 'none' : null;
 }`;
 
+// One complete library entry, written by hand rather than by scripts/maps.sh —
+// that script needs a running ROS graph, and this file runs offline. The shape
+// has to stay in step with scripts/maps_lib.py's schema; tests/maps_test.py is
+// what pins the schema itself.
+const SEEDED_MAP = 'seeded_warehouse';
+
+function seedMapLibrary() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sortbots-maps-'));
+  const entry = path.join(dir, SEEDED_MAP);
+  fs.mkdirSync(entry);
+  // A real (tiny) sqlite file: maps_lib reconciles the manifest against the
+  // disk on every read, so a zero-byte placeholder would come back as
+  // db_state "missing" and the option would render disabled.
+  fs.writeFileSync(path.join(entry, 'map.db'),
+                   Buffer.concat([Buffer.from('SQLite format 3\0'), Buffer.alloc(4080)]));
+  fs.writeFileSync(path.join(entry, 'map.json'), JSON.stringify({
+    schema: 1,
+    name: SEEDED_MAP,
+    title: 'Seeded warehouse',
+    description: 'Fixture for scenarios_test.mjs.',
+    created: '2026-08-01T12:00:00Z',
+    updated: '2026-08-01T12:00:00Z',
+    scene: 'nvidia',
+    robot_ids: ['robot_0'],
+    primary_robot_id: 'robot_0',
+    source: {},
+    grid: null,
+    coverage: { free_m2: 812.4, occupied_m2: 96.2, known_m2: 908.6, cells: {} },
+    dbs: { robot_0: { file: 'map.db', bytes: 4096, state: 'complete' } },
+    db_state: 'complete',
+    versions: {},
+  }, null, 2));
+  return dir;
+}
+
 async function main() {
   // 1. two servers: console mode and read-only mode
   // Isolated sessions dir: a stale current.json from a real console run
   // would otherwise leak in and fail the at-rest / never-launched checks.
   const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sortbots-sessions-'));
+  // Isolated maps dir for the same reason, and seeded so the `map` picker has
+  // something to render: pointing at the repo's real maps/ would make this
+  // test's assertions depend on whatever the developer happens to have saved.
+  const mapsDir = seedMapLibrary();
+  const serverEnv = { ...process.env, SORTBOTS_MAPS_DIR: mapsDir };
   spawnTracked('python3', [path.join(WEBUI_DIR, 'serve.py'), '--control',
                            '--port', String(CONTROL_PORT), '--host', '127.0.0.1'],
-               { cwd: REPO_ROOT, env: { ...process.env, SORTBOTS_SESSIONS_DIR: sessionsDir } });
+               { cwd: REPO_ROOT,
+                 env: { ...serverEnv, SORTBOTS_SESSIONS_DIR: sessionsDir } });
   spawnTracked('python3', [path.join(WEBUI_DIR, 'serve.py'),
                            '--port', String(READONLY_PORT), '--host', '127.0.0.1'],
-               { cwd: REPO_ROOT });
+               { cwd: REPO_ROOT, env: serverEnv });
   await waitFor(async () => (await fetch(`http://127.0.0.1:${CONTROL_PORT}/`)).ok,
                 { what: `webui/serve.py --control on :${CONTROL_PORT}` });
   await waitFor(async () => (await fetch(`http://127.0.0.1:${READONLY_PORT}/`)).ok,
@@ -162,6 +203,11 @@ async function main() {
   const invalid = (api.scenarios || []).filter((s) => s.status === 'invalid');
   check('no scenario file fails validation', invalid.length === 0,
         invalid.map((s) => s.error).join('; '));
+  // Scenarios that expose the saved-map picker — derived from the files rather
+  // than hardcoded, so adding a third library scenario doesn't fail the count.
+  const mapScenarios = (api.scenarios || []).filter((s) => (s.overrides || []).includes('map'));
+  check('library scenarios expose a map override', mapScenarios.length > 0,
+        mapScenarios.map((s) => s.name).join(', '));
 
   const idle = await (await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/session`)).json();
   check('no session is running at rest', idle.state === 'idle', idle.state);
@@ -169,6 +215,39 @@ async function main() {
   const ro = await fetch(`http://127.0.0.1:${READONLY_PORT}/api/session`);
   check('read-only server refuses control endpoints with 503', ro.status === 503,
         `got ${ro.status}`);
+
+  // The saved-map library. /api/maps is readable WITHOUT --control, for the
+  // same reason /api/scenarios is: the picker should show what's saved and
+  // explain the console is down, rather than render empty.
+  for (const [label, port] of [['control', CONTROL_PORT], ['read-only', READONLY_PORT]]) {
+    const res = await fetch(`http://127.0.0.1:${port}/api/maps`);
+    const body = await res.json().catch(() => ({}));
+    const seeded = (body.maps || []).find((m) => m.name === SEEDED_MAP);
+    check(`${label} server serves /api/maps without control`, res.status === 200,
+          `got ${res.status}`);
+    check(`${label} server lists the seeded map`,
+          !!seeded && seeded.db_state === 'complete',
+          seeded ? seeded.db_state : 'not listed');
+    check(`${label} server gives the seeded map an absolute db_path`,
+          !!seeded && path.isAbsolute(seeded.db_path || ''), seeded?.db_path);
+  }
+
+  // Writing a map is a control operation even though reading the list isn't.
+  const roSave = await fetch(`http://127.0.0.1:${READONLY_PORT}/api/map/save`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'should_not_happen' }),
+  });
+  check('read-only server refuses POST /api/map/save with 503', roSave.status === 503,
+        `got ${roSave.status}`);
+
+  // A name is a directory name; the server must re-validate it even though the
+  // picker can only produce paths it was given.
+  const badName = await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/map/save`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '../etc' }),
+  });
+  check('control server rejects a traversing map name with 400', badName.status === 400,
+        `got ${badName.status}`);
 
   // 2. headless chrome
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'sortbots-chrome-'));
@@ -268,6 +347,12 @@ async function main() {
         state: document.getElementById('session-state').textContent,
         stopDisabled: document.getElementById('session-stop').disabled,
         overrides: document.querySelectorAll('.scenario-card [data-key]').length,
+        mapPickers: document.querySelectorAll('.scenario-card select[data-key="map"]').length,
+        // The seeded entry must render as a SELECTABLE option — an entry whose
+        // db is missing or an unfetched git-lfs pointer renders disabled, and
+        // that difference is the whole point of maps_lib's db_state.
+        seededOption: [...document.querySelectorAll('select[data-key="map"] option')]
+                        .some((o) => !o.disabled && /Seeded warehouse/.test(o.textContent)),
       };
     })()`);
 
@@ -281,6 +366,11 @@ async function main() {
           `${shown.startable} enabled`);
     check(`${vp.label}: override controls render`, shown.overrides > 0,
           `${shown.overrides} inputs`);
+    check(`${vp.label}: a map picker renders per library scenario`,
+          shown.mapPickers === mapScenarios.length,
+          `${shown.mapPickers} pickers for ${mapScenarios.length} map scenarios`);
+    check(`${vp.label}: the seeded map is offered as a selectable option`,
+          shown.seededOption === true);
     check(`${vp.label}: no console warning in control mode`, shown.warning === false);
     check(`${vp.label}: session strip reports no session`, /no session/.test(shown.state),
           shown.state);
@@ -356,10 +446,42 @@ async function main() {
   check('read-only: session strip says the console is not running',
         /console not running/.test(degraded.state), degraded.state);
 
-  // 5. nothing we did started a sim
+  // 5. the map picker round-trips as a STRING, not NaN.
+  //
+  // Regression guard with teeth: readOverrides used to be a two-way ternary on
+  // input.type, and a <select> reports type "select-one" — so the picker's path
+  // went through Number() and arrived at the control API as NaN. Read the same
+  // override object the Start button would post, without posting it.
+  await page.eval(SHOW_SCENARIOS);
+  const picked = await page.eval(`(() => {
+    const sel = document.querySelector('select[data-key="map"]');
+    if (!sel) return { error: 'no map picker rendered' };
+    const opt = [...sel.options].find((o) => !o.disabled && o.value);
+    if (!opt) return { error: 'no selectable map option' };
+    sel.value = opt.value;
+    const card = sel.closest('.scenario-card');
+    const out = {};
+    for (const el of card.querySelectorAll('[data-key]')) {
+      out[el.dataset.key] =
+        el.type === 'checkbox' ? el.checked
+        : el.tagName === 'SELECT' ? el.value
+        : Number(el.value);
+    }
+    return { map: out.map, type: typeof out.map };
+  })()`);
+  check('map override reads back as a string path, not NaN',
+        picked.type === 'string' && /\.db$/.test(picked.map || ''),
+        picked.error || `${picked.type}: ${picked.map}`);
+
+  // 6. nothing we did started a sim
   const finalSession = await (await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/session`)).json();
   check('the test never launched a session', finalSession.state === 'idle',
         finalSession.state);
+  // The same invariant extended to the library: reading /api/maps is fine,
+  // writing one is not something this file may do.
+  const libraryAfter = await (await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/maps`)).json();
+  check('the test never wrote a map', (libraryAfter.maps || []).length === 1,
+        `${(libraryAfter.maps || []).length} entries`);
 
   check('no uncaught page errors', pageErrors.length === 0, pageErrors.join('; '));
 

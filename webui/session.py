@@ -40,6 +40,7 @@ import re
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -48,6 +49,12 @@ from pathlib import Path
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# The saved-map library's schema and listing. Deliberately ROS-free too, so
+# importing it here keeps this module runnable in the same bare environment.
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import maps_lib  # noqa: E402
+
 SCENARIO_DIR = REPO_ROOT / "configs" / "scenarios"
 # Overridable so scenarios_test.mjs can run against an empty dir instead of
 # whatever a previous real console session left in the repo's own data/.
@@ -56,6 +63,7 @@ SESSIONS_DIR = Path(os.environ["SORTBOTS_SESSIONS_DIR"]) if os.environ.get("SORT
 CURRENT_POINTER = SESSIONS_DIR / "current.json"
 RUN_DEMO = REPO_ROOT / "scripts" / "run_demo.sh"
 RECORD_BAG = REPO_ROOT / "scripts" / "record_explore_bag.sh"
+MAPS_SH = REPO_ROOT / "scripts" / "maps.sh"
 ROS_SETUP = "/opt/ros/jazzy/setup.bash"
 
 # Same prepend run_demo.sh and sortbots_webui.launch.py use: conda's init hook
@@ -153,9 +161,16 @@ def _map_path(flag: str):
         if not isinstance(value, str):
             raise ScenarioError(f"{flag}: expected a path string, got {value!r}")
         resolved = Path(os.path.expanduser(value)).resolve()
-        allowed = (Path.home().resolve(), (REPO_ROOT / "data").resolve())
+        # maps_lib.MAPS_DIR by reference, not a literal `REPO_ROOT/"maps"`: it
+        # honours SORTBOTS_MAPS_DIR, which is how scenarios_test.mjs points the
+        # whole chain at a temp dir outside the repo (and outside $HOME).
+        allowed = (Path.home().resolve(), (REPO_ROOT / "data").resolve(),
+                   maps_lib.MAPS_DIR.resolve())
         if not any(resolved == root or root in resolved.parents for root in allowed):
-            raise ScenarioError(f"{flag}: {resolved} is outside $HOME and {REPO_ROOT / 'data'}")
+            raise ScenarioError(
+                f"{flag}: {resolved} is outside $HOME, {REPO_ROOT / 'data'} "
+                f"and {maps_lib.MAPS_DIR}"
+            )
         return [flag, str(resolved)]
     return build
 
@@ -380,6 +395,66 @@ def clean_env() -> dict:
     }
     env["PATH"] = SYSTEM_PATH + ":" + env.get("PATH", "")
     return env
+
+
+def save_map_blocking(name: str, *, robot_id: str = "robot_0",
+                      title: str | None = None, description: str | None = None,
+                      timeout: float = 300.0) -> dict:
+    """Run `scripts/maps.sh save NAME` and return its resulting manifest.
+
+    Blocking on purpose: the caller is serve.py's POST handler, and the answer
+    the dashboard needs ("did the pose graph make it in, or is it pending?") is
+    only knowable once the save has finished.
+
+    maps.sh needs system ROS 2 SOURCED — the exact opposite of run_demo.sh,
+    which exits 1 when AMENT_PREFIX_PATH is set. clean_env() strips ROS for
+    run_demo.sh's sake, so re-source it inside a dedicated `bash -c`, and
+    prepend SYSTEM_PATH so `ros2` and map_saver_cli don't get conda's python3.
+
+    CONTAINMENT: same story as build_argv's. `name` and `robot_id` are matched
+    against maps_lib.NAME_RX / a fixed pattern BEFORE they are interpolated,
+    and every interpolated value is shlex.quote'd; free text (title,
+    description) never reaches the shell unquoted. SORTBOTS_MAPS_DIR passes
+    through clean_env(), which is what lets a test point this at a temp dir.
+    """
+    if not maps_lib.NAME_RX.match(str(name)):
+        raise maps_lib.MapError(
+            f"map name {name!r} does not match {maps_lib.NAME_RX.pattern}")
+    if not re.match(r"^[A-Za-z0-9_]+$", str(robot_id)):
+        raise maps_lib.MapError(f"robot_id {robot_id!r} is not a bare identifier")
+
+    extra = ""
+    if title:
+        extra += f" --title {shlex.quote(str(title))}"
+    if description:
+        extra += f" --description {shlex.quote(str(description))}"
+
+    cmd = (
+        f"source {shlex.quote(ROS_SETUP)}; "
+        f"export PATH={shlex.quote(SYSTEM_PATH)}:\"$PATH\"; "
+        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; "
+        f"exec {shlex.quote(str(MAPS_SH))} save {shlex.quote(name)} "
+        f"--robot-id {shlex.quote(robot_id)}{extra}"
+    )
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise maps_lib.MapError(f"maps.sh save timed out after {timeout:.0f}s") from e
+
+    # Exit 5 is maps.sh's "saved, but db_state is pending" — a partial success
+    # the UI reports rather than an error (see its header's exit-code table).
+    if proc.returncode not in (0, 5):
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise maps_lib.MapError(
+            f"maps.sh save exited {proc.returncode}: "
+            f"{detail[-1] if detail else 'no output'}"
+        )
+    manifest = maps_lib.read_manifest(name)
+    manifest["log"] = (proc.stdout or "") + (proc.stderr or "")
+    return manifest
 
 
 _PIPELINE_PATTERNS = ("spawn_warehouse.py", "sortbots_bringup.launch.py")

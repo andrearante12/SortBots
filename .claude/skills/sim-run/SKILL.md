@@ -37,6 +37,11 @@ scripts/sim_ctl.sh wait running --timeout 420
 scripts/sim_ctl.sh stop                   # leaves the console up for the next run
 ```
 
+Need a mapped warehouse rather than a fresh one? Skip the exploration run
+entirely — `scripts/maps.sh list`, then
+`scripts/sim_ctl.sh start library_localize map=$PWD/maps/<name>/map.db`.
+See **Saved maps** below.
+
 Branch on **exit codes**, not on the text:
 
 | code | meaning |
@@ -72,6 +77,13 @@ Presets in `configs/scenarios/*.yaml`, one file each. Today:
 - `explore_fresh` — wipe the map, autonomous frontier exploration from empty
 - `explore_resume` — extend the map a previous run built (**needs an existing
   `~/.ros/sortbots_robot_0.db`**, else the run fails immediately and says so)
+- `explore_fleet` — two robots, one fused `/map`
+- `library_localize` — load a **saved map** read-only. The fastest way to get a
+  test environment with a mapped warehouse and working click-to-nav.
+- `library_resume` — load a saved map and keep exploring it
+
+Both `library_*` take `map=<abs path>`, e.g.
+`scripts/sim_ctl.sh start library_localize map=$PWD/maps/<name>/map.db`.
 
 Per-run overrides are `key=value` and only for keys the scenario lists under
 `overrides:`:
@@ -134,6 +146,42 @@ Known failure modes, in rough order of likelihood:
   `qos_profile=sensor_data`, including ad-hoc `curl` checks — a RELIABLE
   subscriber can kill Isaac's image writers outright.
 
+## Saved maps
+
+A named library at `maps/`, so a run can start from an already-explored
+warehouse instead of re-exploring. `scripts/maps.sh` owns it and **needs system
+ROS 2 sourced** for `save` — the opposite of `sim_ctl.sh` and `run_demo.sh`,
+which refuse a ROS shell. `list`/`show`/`verify` need nothing.
+
+```bash
+scripts/maps.sh list                                  # no ROS needed
+scripts/sim_ctl.sh stop --save-map <name>             # save + tear down, one gesture
+scripts/sim_ctl.sh start library_localize map=$PWD/maps/<name>/map.db
+```
+
+To save by hand mid-run:
+
+```bash
+bash -c 'source /opt/ros/jazzy/setup.bash
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+  scripts/maps.sh save <name> --title "..."'
+```
+
+`save` is idempotent and stack-aware, because the grid needs the stack UP and a
+safe pose-graph copy needs it DOWN. **Exit 5 means "saved, but `db_state` is
+pending"** — the grid landed, the pose graph didn't. Not a failure: re-run after
+`stop`, or use `stop --save-map` which does both sides for you.
+
+A run can never dirty a library entry — `run_demo.sh` copies any `--map` under
+`maps/` to `~/.ros/sortbots_<robot_id>.db` and runs on the copy, because
+RTAB-Map opens its sqlite file read-write even under `--localize`. So
+`library_resume` extends the *copy*; keeping that takes another `maps.sh save`,
+preferably under a new name.
+
+`.db` files are git-lfs. If one reads as `pointer`, run `git lfs pull` —
+`run_demo.sh` refuses to copy an unfetched pointer rather than letting RTAB-Map
+fail deep inside sqlite.
+
 ## Testing without a sim
 
 Prefer this. It is seconds instead of minutes, and needs no GPU or display.
@@ -142,6 +190,7 @@ Prefer this. It is seconds instead of minutes, and needs no GPU or display.
 node webui/tests/scenarios_test.mjs    # scenarios tab; needs no fixture
 node webui/tests/dashboard_test.mjs    # live dashboard; needs webui/testdata/
 python3 webui/session.py --list        # scenario validation, offline
+/usr/bin/python3 -m pytest tests/      # node + map-library logic (SYSTEM python3)
 ```
 
 Never point a browser at a live sim to test the dashboard — record a bag, build
