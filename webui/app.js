@@ -1220,6 +1220,67 @@ new ROSLIB.Topic({
   }
 });
 
+// -- session-boundary reset ------------------------------------------------
+//
+// The console (rosbridge + serve.py) outlives a sim SESSION by design — only
+// Isaac/Nav2/explorer restart on `scripts/sim_ctl.sh stop`/`start`, not the
+// WebSocket this page holds open to rosbridge. So nothing here is ever told
+// "that was the last session, this is a new one": a restarted session's plan,
+// goal, and peer trails just keep whatever they last held until a fresh
+// publish overwrites them — which may be a while if the new session hasn't
+// picked a Nav2 goal yet. Seen live 2026-08-27 switching explore_fresh (1
+// robot) straight to explore_fleet (2 robots) without a reload: the old
+// robot's final plan/goal stayed drawn, trailing off toward a position from
+// the earlier run.
+//
+// Poll the same /api/session serve.py --control exposes to scenarios.js, and
+// clear everything that only makes sense within one session when its
+// session_id changes. 503 (serve.py running WITHOUT --control — the plain
+// mode launch/sortbots_webui.launch.py starts) means there's no session
+// boundary to detect at all here; leave everything alone rather than treat
+// it as an error.
+let knownSessionId; // undefined until the first successful read — the first
+                    // read must only record a baseline, never clear anything.
+
+function resetSessionOverlayState() {
+  plan = [];
+  goal = null;
+  steerHint = null;
+  steerQueue = [];
+  blacklistPoints = [];
+  trail.length = 0;
+  // Client-side counters fed by /<id>/info — RTAB-Map's own loop-closure
+  // count resets with the node, but this tally is independent of it and
+  // would otherwise keep growing across a session it no longer describes.
+  loopClosureCount = 0;
+  lastInfoAt = 0;
+  loopFlashUntil = 0;
+  for (const state of peerRobots.values()) {
+    state.trail.length = 0;
+    state.plan = [];
+    state.frontierMarkers = [];
+    state.steerQueue = [];
+    state.blacklistPoints = [];
+    state.lastPose = null;
+  }
+}
+
+async function pollSessionBoundary() {
+  try {
+    const res = await fetch("/api/session", { cache: "no-store" });
+    if (!res.ok) return; // 503 without --control, or a transient error either way
+    const data = await res.json();
+    if (knownSessionId !== undefined && data.session_id !== knownSessionId) {
+      resetSessionOverlayState();
+    }
+    knownSessionId = data.session_id;
+  } catch {
+    /* offline poll — try again next tick, same tolerance as everything else here */
+  }
+}
+pollSessionBoundary();
+setInterval(pollSessionBoundary, 4000);
+
 function onTfMessage(msg) {
   for (const tr of msg.transforms || []) {
     tfTree.set(normFrame(tr.child_frame_id), {

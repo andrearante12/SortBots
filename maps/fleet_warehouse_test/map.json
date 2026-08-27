@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "name": "fleet_warehouse_test",
+  "title": "fleet_warehouse_test",
+  "description": "",
+  "created": "2026-08-27T04:30:15Z",
+  "updated": "2026-08-27T04:30:23Z",
+  "scene": "nvidia",
+  "robot_ids": [
+    "robot_0"
+  ],
+  "primary_robot_id": "robot_0",
+  "source": {},
+  "grid": {
+    "image": "grid.pgm",
+    "yaml": "grid.yaml",
+    "resolution": 0.05,
+    "width": 471,
+    "height": 665,
+    "origin": [
+      -17.125,
+      -2.328,
+      0.0
+    ],
+    "occupied_thresh": 0.65,
+    "free_thresh": 0.196,
+    "mode": "trinary",
+    "negate": 0
+  },
+  "coverage": {
+    "free_m2": 297.37,
+    "occupied_m2": 12.88,
+    "known_m2": 310.25,
+    "extent_m2": 783.04,
+    "cells": {
+      "free": 118948,
+      "occupied": 5150,
+      "unknown": 189117,
+      "known": 124098,
+      "total": 313215
+    }
+  },
+  "dbs": {
+    "robot_0": {
+      "file": "map.db",
+      "bytes": 104849408,
+      "sha256": "51c9ac1badb9423b7a669983d828b2b146165dc5d3a8e3c8b497f52afd5c276c",
+      "vacuumed": true,
+      "state": "complete"
+    }
+  },
+  "db_state": "complete",
+  "versions": {
+    "rtabmap": "0.22",
+    "ros_distro": "jazzy",
+    "isaac": null
+  },
+  "has_grid": true
+}
