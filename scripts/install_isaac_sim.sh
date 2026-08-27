@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Idempotent install of Isaac Sim 5.1 into ~/isaacsim/, parallel to the ManiSkill conda env.
 # First run prints the install plan and exits 0; pass --accept-download to actually install.
-# See docs/isaac_sim_setup.md for the bigger picture.
+# See docs/quickstart.md for the bigger picture.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

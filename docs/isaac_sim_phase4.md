@@ -7,7 +7,7 @@ The first SLAM consumer wired up is **RTAB-Map**, running natively on
 ROS 2 Jazzy (no Docker, no Isaac ROS yet). Phase 5+ swaps in cuVSLAM
 and the Jetson-parity Docker path.
 
-This page assumes [`setup.md`](setup.md),
+This page assumes [`quickstart.md`](quickstart.md),
 [`isaac_sim_phase2.md`](isaac_sim_phase2.md), and
 [`isaac_sim_phase3.md`](isaac_sim_phase3.md) are done.
 

@@ -109,10 +109,11 @@ scripts/sim_ctl.sh dry-run <name>
 ```
 
 Use `status: planned` for a scenario whose environment doesn't exist yet: it
-lists in the dashboard, greyed out, instead of failing at launch. Two known
-gaps — a person-avoidance scene needs a new `--scene` with an animated actor in
-`scripts/spawn_warehouse.py`, and multi-robot coordination needs `run_demo.sh`
-to thread `robot_ids` through to the bringup (it only passes `robot_id` today).
+lists in the dashboard, greyed out, instead of failing at launch. One known
+gap — a person-avoidance scene needs a new `--scene` with an animated actor in
+`scripts/spawn_warehouse.py`. Multi-robot is fully wired: `run_demo.sh` derives
+`--robot-ids` from `--robots` (default 2) and threads `robot_ids:=` through to
+the bringup, one full stack per robot; `explore_fleet` is the default scenario.
 
 ## When something goes wrong
 

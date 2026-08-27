@@ -41,7 +41,7 @@ Full-quality version: [`docs/media/fleet_explore_timelapse.mp4`](docs/media/flee
 
 ## Docs
 
-- [`docs/setup.md`](docs/setup.md) — full setup: Isaac Sim + ROS 2 + RTAB-Map (optional ManiSkill at the end)
+- [`docs/quickstart.md`](docs/quickstart.md) — fresh device to a live fleet in one pass; **start here** (install + first run)
 - [`docs/running.md`](docs/running.md) — running everything: the demo, console mode and scenarios, autonomous exploration, map lifecycle, remote access, dashboard tests
 - [`docs/perception_exploration.md`](docs/perception_exploration.md) — perception, exploration, fleet mesh radio, and map/recon fusion architecture
 
@@ -65,9 +65,17 @@ header to **scenarios**, pick one and hit **Start**. That launches Isaac Sim +
 RTAB-Map + Nav2 + the task manager for you and streams the launcher's output
 into the tab; **Stop** tears the run down and leaves the dashboard up, ready
 for the next one. Scenarios are presets in
-[`configs/scenarios/`](configs/scenarios/) — today `explore_fresh` (map from
-scratch, autonomous frontier exploration) and `explore_resume` (extend the map
-a previous run built). Adding one is a YAML file; see
+[`configs/scenarios/`](configs/scenarios/):
+
+| scenario | what it does |
+|---|---|
+| `explore_fleet` | **the default** — two robots exploring collaboratively from empty maps, grids fused into one `/map` |
+| `explore_fresh` | single robot, fresh map, autonomous frontier exploration |
+| `explore_resume` | extend the map a previous run built |
+| `library_localize` | load a committed map from `maps/` and run read-only (demos, click-to-move) |
+| `library_resume` | load a committed map and keep exploring it |
+
+Adding one is a YAML file; see
 [`docs/running.md`](docs/running.md#adding-a-scenario).
 
 ```bash
@@ -80,7 +88,7 @@ with exit codes as the interface:
 
 ```bash
 ./scripts/sim_ctl.sh console start
-./scripts/sim_ctl.sh start explore_fresh headless=true
+./scripts/sim_ctl.sh start explore_fleet headless=true
 ./scripts/sim_ctl.sh wait running --timeout 420
 ./scripts/sim_ctl.sh stop
 ```
@@ -88,12 +96,16 @@ with exit codes as the interface:
 **Or drive it from the CLI**, unchanged:
 
 ```bash
-./scripts/run_demo.sh          # launch the whole demo
-./scripts/run_demo.sh --explore  # ...and explore autonomously
-./scripts/run_demo.sh stop     # shut it all down
+./scripts/run_demo.sh             # 2-robot fleet + dashboard
+./scripts/run_demo.sh --explore   # ...and explore autonomously
+./scripts/run_demo.sh --robots 1  # single robot instead
+./scripts/run_demo.sh stop        # shut it all down
 ```
 
-`run_demo.sh` brings up the entire pipeline in one command. Drive the robot around and the map fills in live. Re-running it resets the environment. The first run auto-builds the robot USD and streams the NVIDIA warehouse (a few minutes; cached after).
+`run_demo.sh` brings up the entire pipeline in one command and defaults to the
+two-robot fleet. The map fills in live as the robots explore. Re-running it
+resets the environment. The first run auto-builds the robot USD and streams the
+NVIDIA warehouse (a few minutes; cached after).
 
 Without a console running, the scenarios tab is read-only: it lists what exists
 and says how to start the console, rather than offering buttons that can't work.

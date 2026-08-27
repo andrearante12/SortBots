@@ -16,7 +16,7 @@
 # CLEAN terminal — do NOT `source /opt/ros/...` or activate Isaac first.
 #
 # Usage:
-#   scripts/run_demo.sh [--robot-id robot_0] [--robots 1] [--robot-ids IDS]
+#   scripts/run_demo.sh [--robot-id robot_0] [--robots 2] [--robot-ids IDS]
 #                       [--scene nvidia]
 #                       [--headless] [--teleop] [--localize | --resume]
 #                       [--no-chase-cam | --chase-cam-robots N]
@@ -32,6 +32,10 @@
 # so robots explore collaboratively rather than as independent single-robot
 # runs sharing a warehouse. --robot-id (singular) still names which ONE
 # robot --localize/--resume/--map/--teleop apply to.
+#
+# Default is --robots 2: SortBots is a fleet project, so the plain demo comes
+# up as a collaborative fleet. Pass --robots 1 for the single-robot case
+# (map-lifecycle / teleop work below is written that way).
 #
 # --keep-console leaves the dashboard stack (rosbridge, web_video_server,
 # webui/serve.py) alone and tells the bringup not to start its own copy. It is
@@ -52,10 +56,10 @@
 #
 # Map lifecycle — three modes, build once and reuse:
 #
-#   scripts/run_demo.sh --teleop              # drive around; map builds from scratch
-#   scripts/run_demo.sh stop                  # map persists in ~/.ros/sortbots_<id>.db
-#   scripts/run_demo.sh --localize            # read-only: reopen that map, send nav goals
-#   scripts/run_demo.sh --resume --explore    # keep MAPPING: extend that map, autonomously
+#   scripts/run_demo.sh --robots 1 --teleop            # drive around; map builds from scratch
+#   scripts/run_demo.sh stop                           # map persists in ~/.ros/sortbots_<id>.db
+#   scripts/run_demo.sh --robots 1 --localize          # read-only: reopen that map, send nav goals
+#   scripts/run_demo.sh --robots 1 --resume --explore  # keep MAPPING: extend that map, autonomously
 #
 # Default (neither flag) starts every run from an empty database, so a plain
 # mapping run always means what it says. --localize never modifies the map at
@@ -132,7 +136,9 @@ fi
 
 # ---- args ----
 # Teleop defaults OFF — the dashboard drive pad replaces the WASD window.
-ROBOT_ID=robot_0; ROBOTS=1; ROBOT_IDS=""; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=0
+# ROBOTS defaults to 2 — SortBots is a fleet project, so the bare demo comes up
+# as a collaborative fleet (fused /map, mesh radio). --robots 1 for single-robot.
+ROBOT_ID=robot_0; ROBOTS=2; ROBOT_IDS=""; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=0
 # Cosmetic 3rd-person cam = a second render product per robot. --no-chase-cam
 # drops all of them; --chase-cam-robots N keeps them on the first N robots
 # only (dashboard only shows robot_id's feed, so fleet runs usually want 1).
@@ -157,7 +163,7 @@ while [[ $# -gt 0 ]]; do
     # dashboard console is already up and owns rosbridge/web_video_server, so
     # don't kill it on teardown and don't start a second copy in the bringup.
     --keep-console) KEEP_CONSOLE=true; shift;;
-    -h|--help) sed -n '2,53p' "$0"; exit 0;;
+    -h|--help) sed -n '2,57p' "$0"; exit 0;;
     *) echo "[run_demo] unknown arg: $1"; exit 2;;
   esac
 done

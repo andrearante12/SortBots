@@ -1,8 +1,16 @@
 # Running the sim
 
-All commands below assume `conda activate lerobot` and `cd ~/sortbots_ws`.
+Setup and a first run are in [`quickstart.md`](quickstart.md); this is the full
+reference for everything after that.
 
-## The verify script
+The doc covers both sim tracks and they share no shell. The **Isaac Sim** track
+(mobile / multi-robot / ROS 2 / SLAM — the active one) runs from a clean shell;
+its scripts source ROS 2 themselves. Jump to
+[The full SLAM + Nav demo](#the-full-slam--nav-demo-web-dashboard). The
+**ManiSkill** track below assumes `conda activate lerobot` and `cd ~/sortbots_ws`;
+never source ROS 2 in that shell.
+
+## The verify script (ManiSkill)
 
 ```bash
 bash scripts/verify_sim.sh
@@ -137,7 +145,8 @@ python scripts/overlay_xlerobot.py    # re-apply overlay against the new submodu
 git add third_party/XLeRobot && git commit -m "bump XLeRobot"
 ```
 
-See [`overlay.md`](overlay.md) for what the overlay step does and when it might need adjustment.
+See `scripts/overlay_xlerobot.py`'s module docstring for what the overlay step
+does and when it might need adjustment.
 
 ## The full SLAM + Nav demo (web dashboard)
 
@@ -146,13 +155,19 @@ dashboard — comes up with one command from a **clean** terminal (no ROS
 sourced, no Isaac/conda active):
 
 ```bash
-scripts/run_demo.sh
+scripts/run_demo.sh              # 2-robot collaborative fleet (the default)
+scripts/run_demo.sh --robots 1   # single robot
 ```
 
 It launches Isaac Sim in its own venv, then the whole ROS 2 side in a single
 launch (`launch/sortbots_bringup.launch.py`), and prints the dashboard URL.
-rviz is off by default (the dashboard replaces it); add `--teleop` for the old
-WASD terminal window. Tear it all down with `scripts/run_demo.sh stop`.
+**The default is a two-robot fleet** — `--robots 2` — because SortBots is a
+fleet project: each robot runs its own RTAB-Map, the grids are fused into one
+world-anchored `/map` (`nodes/map_merge.py`), and both explorers pick frontiers
+against space either robot has mapped. `--robots 1` gives the single-robot case
+that the map-lifecycle and teleop sections below are written around. rviz is
+off by default (the dashboard replaces it); add `--teleop` for the WASD
+terminal window. Tear it all down with `scripts/run_demo.sh stop`.
 
 ### Console mode: launching scenarios from the dashboard
 
@@ -273,11 +288,13 @@ card lists them greyed out with a tooltip rather than pretending they run. One
 known gap for the planned test suite: a person-avoidance scene needs a new
 `--scene` value with an animated actor in `scripts/spawn_warehouse.py`.
 
-Multi-robot coordination (`explore_fleet`, `robots: 2`) is `status: ready` —
-`run_demo.sh` derives `--robot-ids` from `--robots` against
+`explore_fleet` (`robots: 2`) is the default scenario and the mode the project
+is built around: `run_demo.sh` derives `--robot-ids` from `--robots` against
 `configs/robots.yaml`'s order and threads it through to the bringup's
 `robot_ids:=`, which brings up a full stack (RTAB-Map + Nav2 + task_manager +
-explorer) per robot. See "Multi-robot" below.
+explorer) per robot, with the per-robot grids fused into one `/map`. The
+`explore_fresh` / `explore_resume` / `library_*` scenarios are the
+single-robot variants. See "Multi-robot" below.
 
 ### Unified ROS-2 bringup on its own
 

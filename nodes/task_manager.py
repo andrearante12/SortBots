@@ -28,7 +28,7 @@ Talks to three things:
     frontier goal.
 
 No custom .msg/.srv package: the repo has no ament package scaffolding yet
-(everything runs as loose scripts — see docs/setup.md), so task dispatch and
+(everything runs as loose scripts — see docs/quickstart.md), so task dispatch and
 status both use std_msgs/String carrying JSON. Good enough for one robot;
 would become a real message package if/when multi-robot dispatch lands.
 
