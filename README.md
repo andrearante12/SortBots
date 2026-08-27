@@ -1,5 +1,7 @@
 # SortBots
 
+![Warehouse simulation environment](docs/media/warehouse_hero.png)
+
 Fully autonomous mobile robots performing collaborative
 indoor logistics, built on
 [XLeRobot](https://github.com/Vector-Wangel/XLeRobot).

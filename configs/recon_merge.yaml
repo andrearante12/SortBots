@@ -1,0 +1,6 @@
+# Fused fleet 3D recon (nodes/recon_cloud_merge.py). Collaborative fusion via
+# spawn anchors — not collaborative SLAM.
+publish_period_s: 2.0
+max_points: 200000
+voxel_size: 0.05
+keepalive_sec: 5.0
