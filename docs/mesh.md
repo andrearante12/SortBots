@@ -21,12 +21,14 @@ Discovery Server for unicast peer discovery (no multicast).
 
 ```
 root netns
-  Isaac Sim ──── veth-0-h ──── ns-robot_0 ── tap-robot_0 ──┐
-                                                             │
-  dashboard  ──── veth-1-h ──── ns-robot_1 ── tap-robot_1 ──┤
-  map_merge                                                  │
-  FastDDS DS                                          ns-3 (RealtimeSimulatorImpl)
-                                                      802.11s + HWMP mesh
+  Isaac Sim ──── veth0-h ──── veth0 (ns-robot_0) ── tap-robot_0 ──┐
+                                                                  │
+  dashboard ──── veth1-h ──── veth1 (ns-robot_1) ── tap-robot_1 ──┤
+  map_merge                                                       │
+  FastDDS DS                                                      │
+                                                                  ▼
+                                                    ns-3 (RealtimeSimulatorImpl)
+                                                         802.11s + HWMP mesh
 ```
 
 ## Prerequisites
