@@ -168,6 +168,29 @@ sudo apt-get install -y \
   libboost-dev \
   2>/dev/null || true
 
+# rtabmap (SLAM) + the Nav2 stack are the other big silent gap (diagnosed
+# 2026-08-27: both explore_fresh and explore_fleet_mesh's per-robot bringups
+# were crashing at launch-description build time — "package 'rtabmap_launch'
+# not found" — before a single node started, so NEITHER SLAM NOR Nav2 was
+# ever actually running; run_demo.sh's own "ROS 2 stack up" banner prints
+# unconditionally and never caught it). Nav2 itself (navigation2 repo) is
+# already in ros2.repos, just never built; rtabmap needs the first four
+# system libs, and Nav2's own nav2_map_server (pulled in transitively, not
+# explicitly requested below) needs GraphicsMagick++ to read map images.
+# libxsimd-dev is nav2_mppi_controller's alone: MPPI vectorises its rollouts
+# through xsimd, find_package(xsimd REQUIRED) fails the configure step without
+# it, and it is the controller plugin configs/nav2_params.yaml selects — so
+# missing it costs the whole controller_server, not just some SIMD speedup
+# (2026-08-27).
+sudo apt-get install -y \
+  libpcl-dev \
+  liboctomap-dev \
+  libtbb-dev \
+  libproj-dev \
+  libgraphicsmagick++1-dev \
+  libxsimd-dev \
+  2>/dev/null || true
+
 # ── Fetch source ─────────────────────────────────────────────────────────────
 echo ""
 echo "==> [4/5] fetch ROS 2 Jazzy source into $ROS2_HOME"
@@ -214,6 +237,81 @@ clone_if_missing "$ROS2_HOME/src/async_web_server_cpp" \
 clone_if_missing "$ROS2_HOME/src/web_video_server" \
   https://github.com/RobotWebTools/web_video_server ros2
 
+# rtabmap_ros's dependency chain: none of these are in ros2.repos either.
+# rtabmap/rtabmap_ros use their own per-distro `jazzy-devel` branch;
+# perception_pcl (pcl_conversions/pcl_ros — rtabmap_util/_odom's only
+# REQUIRED find_package, unlike the ones below) and octomap_msgs (needed for
+# the octomap_* topics nodes/rtabmap_cloud_pump.py relays) carry a single
+# branch spanning multiple ROS 2 distros, same as rosbridge_suite's siblings
+# above. Deliberately NOT cloned: grid_map_ros, apriltag_msgs, aruco_msgs,
+# aruco_opencv_msgs — all four are plain (non-REQUIRED) find_package() calls
+# in rtabmap_ros's CMakeLists, i.e. auto-detected optional marker/costmap
+# features this demo never uses; skipping them avoids grid_map_ros's own
+# rosbag2_cpp dependency (rosbag2_storage is deliberately unbuilt below,
+# same reasoning as the ros2bag drop).
+clone_if_missing "$ROS2_HOME/src/rtabmap" \
+  https://github.com/introlab/rtabmap jazzy-devel
+clone_if_missing "$ROS2_HOME/src/rtabmap_ros" \
+  https://github.com/introlab/rtabmap_ros jazzy-devel
+clone_if_missing "$ROS2_HOME/src/perception_pcl" \
+  https://github.com/ros-perception/perception_pcl jazzy
+clone_if_missing "$ROS2_HOME/src/octomap_msgs" \
+  https://github.com/OctoMap/octomap_msgs ros2
+# perception_pcl's own pcl_conversions hard-requires this (2026-08-27:
+# "Could not find a package configuration file provided by pcl_msgs") — a
+# separate tiny message-only repo, not bundled inside perception_pcl itself.
+clone_if_missing "$ROS2_HOME/src/pcl_msgs" \
+  https://github.com/ros-perception/pcl_msgs ros2
+
+# Drop Nav2's blanket -Werror (2026-08-27). nav2_package.cmake hardcodes
+# `-Werror -Wnull-dereference`, and GCC 15 — which questing ships, years newer
+# than the GCC 13 Jazzy was cut against — raises a false "potential null
+# pointer dereference" inside rosidl's *generated* Time::operator==, reached
+# by inlining Path != Path in nav2_behavior_tree. The offending code is
+# generated, not Nav2's own, so there is nothing upstream to fix locally and
+# no narrower flag wins: add_compile_options lands after CMAKE_CXX_FLAGS on
+# the command line, so a -Wno-error=... passed via --cmake-args is re-armed by
+# the -Werror that follows it. Warnings still print; they just stop being
+# fatal. sed is idempotent — a second run finds no -Werror left to strip.
+NAV2_PKG_CMAKE="$ROS2_HOME/src/navigation2/nav2_common/cmake/nav2_package.cmake"
+if [ -f "$NAV2_PKG_CMAKE" ]; then
+  sed -i 's/ -Werror//' "$NAV2_PKG_CMAKE"
+  echo "    patched out Nav2 -Werror (GCC 15 false positive)"
+fi
+
+# Drop rtabmap_util's REQUIRED dependency on RTABMap's `gui` component
+# (2026-08-27). WITH_QT=OFF below means rtabmap builds no gui library, so this
+# line fails the configure step with "Unsupported or not found required
+# component: gui" — and rtabmap_util is not optional for us: both rtabmap_slam
+# and rtabmap_launch depend on it. The requirement is spurious, not something
+# WITH_QT=OFF actually breaks: line 31 is the only mention of `gui` in the
+# whole CMakeLists, no target links a gui target, and no source under src/ or
+# include/ pulls in an rtabmap/gui or Qt header. Cheaper to delete the line
+# than to drag all of Qt5 in to satisfy a component nothing calls.
+RTABMAP_UTIL_CMAKE="$ROS2_HOME/src/rtabmap_ros/rtabmap_util/CMakeLists.txt"
+if [ -f "$RTABMAP_UTIL_CMAKE" ]; then
+  sed -i '/find_package(RTABMap COMPONENTS gui REQUIRED)/d' "$RTABMAP_UTIL_CMAKE"
+  echo "    patched out rtabmap_util's unused RTABMap gui component"
+fi
+
+# Drop rtabmap_launch's exec_depend on the two GUI packages (2026-08-27).
+# rtabmap_viz and rtabmap_rviz_plugins are in --packages-skip below, so colcon
+# refuses to build rtabmap_launch at all ("Check that the following packages
+# have been built") — it fails in 0.01s, before any compilation. These are
+# exec_depends on a runtime path this demo never takes: upstream's
+# rtabmap.launch.py gates both behind its `rviz`/`rtabmap_viz` arguments, and
+# launch/sortbots_rtabmap_robot.launch.py pins BOTH to false under the unified
+# bringup (the web dashboard replaces rviz). Consequence to know about: a
+# standalone `rviz:=true` run now fails at node-spawn time instead of at build
+# time — already true before this patch, since neither package was ever built.
+RTABMAP_LAUNCH_PKG="$ROS2_HOME/src/rtabmap_ros/rtabmap_launch/package.xml"
+if [ -f "$RTABMAP_LAUNCH_PKG" ]; then
+  sed -i -e '/<exec_depend>rtabmap_viz<\/exec_depend>/d' \
+         -e '/<exec_depend>rtabmap_rviz_plugins<\/exec_depend>/d' \
+         "$RTABMAP_LAUNCH_PKG"
+  echo "    patched out rtabmap_launch's GUI exec_depends"
+fi
+
 # ── Build ─────────────────────────────────────────────────────────────────────
 echo ""
 echo "==> [5/5] colcon build (this takes 45-90 min)"
@@ -242,6 +340,32 @@ cd "$ROS2_HOME"
 # but `-e` has to be off for the whole pipeline or it aborts on that before
 # PIPESTATUS can even be read. Re-enabled right after, with colcon's real
 # code (PIPESTATUS[0]) checked explicitly.
+#
+# The rtabmap WITH_* flags below are all auto-detect-if-found in rtabmap's
+# own CMakeLists (2026-08-27): g2o/GTSAM are large, historically finicky
+# graph-optimization backends neither of which is in ros2.repos or apt here,
+# and rtabmap falls back to its bundled TORO optimizer with both off —
+# acceptable for this demo's warehouse-scale maps. WITH_QT off +
+# BUILD_APP/TOOLS/EXAMPLES off drop rtabmap's desktop Qt GUI/CLI tools, which
+# this demo never launches (rviz:=false; the web dashboard replaces both).
+# These are colcon-global --cmake-args like FORCE_BUILD_VENDOR_PKG above —
+# harmless "not used by the project" warnings on every package that isn't
+# rtabmap itself.
+#
+# nav2_mppi_controller / nav2_navfn_planner / depth_image_proc are listed
+# explicitly because nothing pulls them in transitively (2026-08-27).
+# controller_server and planner_server are only the *servers*: the algorithms
+# they run are pluginlib plugins in separate packages, named in
+# configs/nav2_params.yaml, and a plugin package is a runtime dependency that
+# --packages-up-to on the server cannot see. Built without them, Nav2 comes up
+# and then dies in on_configure ("... does not exist. Declared types are ...")
+# — so the lifecycle manager never reaches active and no goal is ever
+# followed, which looks identical to a planning failure from the dashboard.
+# Same story for depth_image_proc, one step earlier in the pipeline:
+# sortbots_nav2.launch.py composes its PointCloudXyzNode to turn Isaac's raw
+# depth Image into the PointCloud2 obstacle_layer subscribes to, so without it
+# the local costmap stays empty and the robot drives straight through racks.
+# Keep this list in sync with the `plugin:` keys in configs/nav2_params.yaml.
 set +e
 env -i \
   HOME="$HOME" \
@@ -282,6 +406,29 @@ env -i \
       rosbridge_server \
       async_web_server_cpp \
       web_video_server \
+      pcl_msgs \
+      pcl_conversions \
+      pcl_ros \
+      octomap_msgs \
+      rtabmap \
+      rtabmap_msgs \
+      rtabmap_conversions \
+      rtabmap_sync \
+      rtabmap_util \
+      rtabmap_odom \
+      rtabmap_slam \
+      rtabmap_launch \
+      nav2_controller \
+      nav2_planner \
+      nav2_smoother \
+      nav2_behaviors \
+      nav2_bt_navigator \
+      nav2_waypoint_follower \
+      nav2_velocity_smoother \
+      nav2_lifecycle_manager \
+      nav2_mppi_controller \
+      nav2_navfn_planner \
+      depth_image_proc \
     --packages-skip \
       gz_cmake_vendor \
       gz_math_vendor \
@@ -294,11 +441,33 @@ env -i \
       rosbag2_storage \
       rosbag2_storage_default_plugins \
       rosbag2_storage_mcap \
+      rtabmap_viz \
+      rtabmap_rviz_plugins \
+      rtabmap_demos \
+      rtabmap_examples \
+      rtabmap_python \
+      rtabmap_costmap_plugins \
+      nav2_rviz_plugins \
+      nav2_simple_commander \
+      rviz_assimp_vendor \
+      rviz_default_plugins \
+      rviz_rendering_tests \
+      rviz_visual_testing_framework \
+      qt_gui \
+      qt_gui_cpp \
     --cmake-args \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_EXPORT_COMPILE_COMMANDS=OFF \
       -DBUILD_TESTING=OFF \
       -DFORCE_BUILD_VENDOR_PKG=OFF \
+      -DWITH_OCTOMAP=ON \
+      -DWITH_G2O=OFF \
+      -DWITH_GTSAM=OFF \
+      -DWITH_POINTMATCHER=OFF \
+      -DWITH_QT=OFF \
+      -DBUILD_APP=OFF \
+      -DBUILD_TOOLS=OFF \
+      -DBUILD_EXAMPLES=OFF \
       -DTRACETOOLS_DISABLED=ON \
     2>&1 | tee /tmp/sortbots_ros2_build.log | grep -E "^\[|^---| error: | failed"
 COLCON_RC="${PIPESTATUS[0]}"
@@ -353,6 +522,35 @@ env -i HOME="$HOME" PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
   bash -c "source '$SETUP' && ros2 pkg prefix rosbridge_server >/dev/null 2>&1 && ros2 pkg prefix web_video_server >/dev/null 2>&1" \
   && echo "    rosbridge_server / web_video_server: OK" \
   || { echo "ERROR: rosbridge_server or web_video_server missing after build — see /tmp/sortbots_ros2_build.log" >&2; exit 1; }
+
+# rtabmap_launch/nav2_bt_navigator missing is the same failure mode as
+# rosbridge above, one layer deeper: the per-robot bringup's launch
+# description fails to even construct ("package 'rtabmap_launch' not found"),
+# so NO node in that robot's stack ever starts — not RTAB-Map, not Nav2, not
+# the explorer/task_manager — while run_demo.sh's own "ROS 2 stack up" banner
+# prints unconditionally regardless (diagnosed 2026-08-27: this had been
+# silently true for every prior run, mesh or not).
+env -i HOME="$HOME" PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+  bash -c "source '$SETUP' && ros2 pkg prefix rtabmap_launch >/dev/null 2>&1 && ros2 pkg prefix nav2_bt_navigator >/dev/null 2>&1" \
+  && echo "    rtabmap_launch / nav2_bt_navigator: OK" \
+  || { echo "ERROR: rtabmap_launch or nav2_bt_navigator missing after build — see /tmp/sortbots_ros2_build.log" >&2; exit 1; }
+
+# The Nav2 plugin packages fail later and quieter than a missing launch
+# package: the bringup starts fine and only falls over inside on_configure, so
+# check them here rather than finding out from a robot that never moves. Each
+# name pairs with a `plugin:` entry in configs/nav2_params.yaml; depth_image_proc
+# is the composable node that feeds the local costmap (2026-08-27).
+# Check with `ros2 pkg prefix`, never `test -d install/<pkg>`: a package whose
+# configure step fails still leaves an install/<pkg>/ containing nothing but
+# colcon's own package.sh shims, so the directory exists while the package does
+# not. `ros2 pkg prefix` reads the ament index marker, which only a completed
+# install writes.
+for pkg in nav2_mppi_controller nav2_navfn_planner nav2_waypoint_follower depth_image_proc; do
+  env -i HOME="$HOME" PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    bash -c "source '$SETUP' && ros2 pkg prefix $pkg >/dev/null 2>&1" \
+    || { echo "ERROR: $pkg missing after build — see /tmp/sortbots_ros2_build.log" >&2; exit 1; }
+done
+echo "    nav2 controller/planner/waypoint plugins + depth_image_proc: OK"
 
 # ── Stamp ────────────────────────────────────────────────────────────────────
 touch "$STAMP"

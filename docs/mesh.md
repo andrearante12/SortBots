@@ -32,7 +32,11 @@ root netns
 ## Prerequisites
 
 - Ubuntu 22.04 or 24.04
-- ROS 2 Jazzy installed (`/opt/ros/jazzy/`)
+- ROS 2 Jazzy installed (`~/ros2_jazzy/install/`, via
+  `scripts/install_ros2_jazzy.sh --accept-download`). A binary install at
+  `/opt/ros/jazzy/` also works, but questing ships no Jazzy packages, so
+  from-source is the norm here — `run_demo.sh` prefers `$ROS2_HOME` and only
+  falls back to `/opt/ros`.
 - Isaac Sim 5.1 installed (`scripts/install_isaac_sim.sh --accept-download`)
 - sudo access
 
@@ -103,7 +107,7 @@ sudo ip netns exec ns-robot_0 tcpdump -ni tap-robot_0 -vv udp
 In another:
 ```bash
 sudo ip netns exec ns-robot_1 bash -c \
-  "source /opt/ros/jazzy/setup.bash && \
+  "source ${ROS2_HOME:-$HOME/ros2_jazzy}/install/setup.bash && \
    export ROS_DISCOVERY_SERVER=10.77.1.1:11811 && \
    ros2 topic pub -r 1 /explore/claims std_msgs/msg/String '{data: hello}'"
 ```

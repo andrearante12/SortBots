@@ -18,7 +18,14 @@ set -u
 PORT=8080
 TOPIC="${1:-/robot_0/camera/rgb}"
 PROBE_SEC=10
-SERVER_BIN=/opt/ros/jazzy/lib/web_video_server/web_video_server
+# Resolved via the ROS 2 environment this script inherits from `ros2 launch`
+# (sortbots_webui.launch.py), not hardcoded to /opt/ros/jazzy: that path
+# doesn't exist on a from-source install (questing has no binary Jazzy
+# packages — see scripts/install_ros2_jazzy.sh). A hardcoded path here meant
+# every restart silently failed with "No such file or directory" and the
+# watchdog looped forever instead of ever bringing the server back
+# (diagnosed 2026-08-27).
+SERVER_BIN="$(ros2 pkg prefix web_video_server)/lib/web_video_server/web_video_server"
 
 fails=0
 while true; do
