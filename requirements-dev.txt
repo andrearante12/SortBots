@@ -1,0 +1,7 @@
+# Offline test + smoke-check deps (system Python 3.12, ROS NOT sourced).
+# The sim/Isaac/ManiSkill stacks are out of scope on purpose — see CLAUDE.md.
+# station_dock_test.py does pytest.importorskip("rclpy") and skips cleanly, so
+# rclpy is deliberately absent here.
+pytest>=7.4
+numpy>=1.26
+PyYAML>=6.0

@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  offline:
+    # Fast, ROS-free, GPU-free checks only: pure-python node logic +
+    # scenario-schema validation. The sim (Isaac / ManiSkill / ROS 2 launch,
+    # tests/isaac/) needs a GPU + display and can never run on a hosted runner.
+    runs-on: ubuntu-24.04   # native Python 3.12, matches the dev machine
+    steps:
+      - uses: actions/checkout@v4
+        # XLeRobot submodule is Isaac-track only; skip it for speed.
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Guard — ROS must not be sourced
+        # session.py / run_demo.sh exit 1 when AMENT_PREFIX_PATH is set. A clean
+        # runner satisfies this for free; fail loudly if that ever changes.
+        run: test -z "$AMENT_PREFIX_PATH"
+
+      - run: make deps PYTHON=python3
+      - run: make ci PYTHON=python3

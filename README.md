@@ -1,5 +1,7 @@
 # SortBots
 
+![ci](https://github.com/andrearante12/SortBots/actions/workflows/ci.yml/badge.svg)
+
 ![Warehouse simulation environment](docs/media/warehouse_hero.png)
 
 Fully autonomous mobile robots performing collaborative
