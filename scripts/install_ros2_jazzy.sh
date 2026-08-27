@@ -69,6 +69,16 @@ if [[ -f /etc/apt/sources.list.d/ros2.list ]]; then
   sudo mv /etc/apt/sources.list.d/ros2.list /etc/apt/sources.list.d/ros2.list.disabled
   echo "    disabled /etc/apt/sources.list.d/ros2.list (no questing packages)"
 fi
+# Same deal for deadsnakes: it hasn't published a questing release either
+# (diagnosed 2026-08-27 — its 404 on `apt-get update` trips this script's
+# `set -e` before step 1 even finishes, well before anything ROS-related
+# runs). Ubuntu 25.10 already ships Python 3.13 by default, so this script
+# has no need for it regardless.
+DEADSNAKES_SRC="/etc/apt/sources.list.d/deadsnakes-ubuntu-ppa-questing.sources"
+if [[ -f "$DEADSNAKES_SRC" ]]; then
+  sudo mv "$DEADSNAKES_SRC" "${DEADSNAKES_SRC}.disabled"
+  echo "    disabled $DEADSNAKES_SRC (no questing packages)"
+fi
 sudo apt-get update -q
 sudo apt-get install -y \
   build-essential cmake git \
@@ -139,6 +149,25 @@ sudo apt-get install -y \
   swig \
   2>/dev/null || true
 
+# rosbridge_suite + web_video_server are NOT in ros2.repos (they're separate
+# RobotWebTools repos, normally pulled in as apt binaries — ros-jazzy-*-server
+# — which don't exist for questing). Their own deps, diagnosed 2026-08-27 when
+# the console's rosbridge_websocket failed to launch ("package 'rosbridge_server'
+# not found"): rosbridge_library needs bson/cbor2/pil/ujson, rosbridge_server
+# needs tornado, web_video_server needs ffmpeg's libav*/libswscale + boost.
+sudo apt-get install -y \
+  python3-tornado \
+  python3-bson \
+  python3-cbor2 \
+  python3-pil \
+  python3-ujson \
+  libavcodec-dev \
+  libavformat-dev \
+  libavutil-dev \
+  libswscale-dev \
+  libboost-dev \
+  2>/dev/null || true
+
 # ── Fetch source ─────────────────────────────────────────────────────────────
 echo ""
 echo "==> [4/5] fetch ROS 2 Jazzy source into $ROS2_HOME"
@@ -156,6 +185,34 @@ fi
 VCS="$(command -v vcs 2>/dev/null || echo "$HOME/.local/bin/vcs")"
 "$VCS" import --retry 3 src < ros2.repos
 
+# rosbridge_suite + the web_video_server chain, cloned directly since neither
+# is in ros2.repos (see the apt block above for why). `jazzy` is
+# rosbridge_suite's real per-distro branch; web_video_server and its
+# async_web_server_cpp dependency each carry a single `ros2` branch spanning
+# every ROS 2 distro. Plain `git clone` (not vcs import) since these aren't
+# listed in any .repos file — skip if already cloned, matching vcs import's
+# own idempotency.
+clone_if_missing() {
+  local dir="$1" url="$2" branch="$3"
+  if [[ -d "$dir" ]]; then
+    echo "    $dir already present — skipping clone"
+  else
+    git clone --branch "$branch" --depth 1 "$url" "$dir"
+  fi
+}
+clone_if_missing "$ROS2_HOME/src/rosbridge_suite" \
+  https://github.com/RobotWebTools/rosbridge_suite jazzy
+# GT-RAIL/async_web_server_cpp (upstream) is the ros2 branch's canonical
+# home, but it's stale and doesn't build against Boost 1.88 (questing's
+# default): boost::asio::io_service and boost::filesystem::path::leaf() were
+# both fully removed, not just deprecated, by that version (diagnosed
+# 2026-08-27 — a wall of "does not name a type" errors from http_connection.hpp
+# and http_reply.cpp). fkie's fork already modernized both call sites and was
+# last updated 2026-05.
+clone_if_missing "$ROS2_HOME/src/async_web_server_cpp" \
+  https://github.com/fkie/async_web_server_cpp ros2-releases
+clone_if_missing "$ROS2_HOME/src/web_video_server" \
+  https://github.com/RobotWebTools/web_video_server ros2
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 echo ""
@@ -215,6 +272,16 @@ env -i \
       ros2run \
       ros2node \
       ros2launch \
+      ros2interface \
+      ros2service \
+      image_transport \
+      rosbridge_msgs \
+      rosbridge_library \
+      rosapi_msgs \
+      rosapi \
+      rosbridge_server \
+      async_web_server_cpp \
+      web_video_server \
     --packages-skip \
       gz_cmake_vendor \
       gz_math_vendor \
@@ -275,6 +342,17 @@ env -i HOME="$HOME" PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
 env -i HOME="$HOME" PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
   bash -c "source '$SETUP' && python3 -c 'import rclpy; print(\"    rclpy: OK\")'" \
   || { echo "ERROR: rclpy import failed after build" >&2; exit 1; }
+
+# rosbridge_server/web_video_server going missing is exactly what silently
+# breaks the dashboard (2026-08-27: console came up, webui/serve.py answered
+# on 8081, but rosbridge never listened on 9090 and the page just spun on
+# "disconnected — retrying" with nothing in run_console.sh's own output to
+# say why — the real error was buried in run_demo.sh's/run_console.sh's own
+# log files). Catch it here instead, at build time.
+env -i HOME="$HOME" PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+  bash -c "source '$SETUP' && ros2 pkg prefix rosbridge_server >/dev/null 2>&1 && ros2 pkg prefix web_video_server >/dev/null 2>&1" \
+  && echo "    rosbridge_server / web_video_server: OK" \
+  || { echo "ERROR: rosbridge_server or web_video_server missing after build — see /tmp/sortbots_ros2_build.log" >&2; exit 1; }
 
 # ── Stamp ────────────────────────────────────────────────────────────────────
 touch "$STAMP"
