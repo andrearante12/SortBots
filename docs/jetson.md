@@ -94,6 +94,25 @@ from inside too. Use plain `http`: the page talks to rosbridge (`ws://…:9090`)
 and web_video_server (`…:8080`) on the same host, and an https origin would
 make the browser block those as mixed content.
 
+### On the Jetson's own screen: snap browsers need `SNAP_REEXEC=0`
+
+`chromium` / `firefox` on this Jetson die with "snap-confine is packaged
+without necessary permissions … cap_dac_override not found". The cause is the
+snapd **snap** (2.76.3). It re-executes its own `snap-confine`, which gets its
+privileges from file capabilities stored as squashfs xattrs, and the L4T kernel
+is built with `# CONFIG_SQUASHFS_XATTR is not set`, so the capabilities vanish.
+The Ubuntu package's copy (`/usr/lib/snapd/snap-confine`, on ext4) keeps them,
+and `SNAP_REEXEC=0` makes snap use that one (verified 2026-09-30):
+
+    SNAP_REEXEC=0 chromium --app=http://localhost:8081/
+
+To make it permanent for your account, put `SNAP_REEXEC=0` in
+`~/.config/environment.d/90-snap-reexec.conf` (desktop and terminals, after you
+log in again) and `export SNAP_REEXEC=0` in `~/.profile` (SSH). For every user on
+the machine: `echo SNAP_REEXEC=0 | sudo tee -a /etc/environment`. The snap
+browser still can't reach the Jetson's GPU (`GLDisplayEGL::Initialize failed`),
+so pages render on the CPU. Prefer viewing the 3D panel from another device.
+
 ## What differs from sim, and where it's configured
 
 | | sim | real |
