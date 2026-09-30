@@ -148,6 +148,9 @@ install_$USER` explicitly). Never use the bare `build/` or `install/` dirs.
 
 - Commit messages: short, terse, lowercase, no body. No Co-Authored-By trailer,
   no "Generated with Claude Code".
+- **Never attribute Claude anywhere**: commits, PR titles/descriptions, code
+  comments, docs. `.claude/settings.json` sets `attribution` off so the tool's
+  defaults agree; don't add it back by hand either.
 - Comments in this repo carry *rationale* — most non-obvious lines explain the
   failure mode they prevent, often with the date it was diagnosed live. Match
   that when editing; don't strip it.
