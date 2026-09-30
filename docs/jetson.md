@@ -78,6 +78,22 @@ scripts/jetson.sh logs       # console output; the bringup log is /tmp/sortbots_
 scripts/jetson.sh stop       # pipeline + console + container
 ```
 
+## Viewing it remotely
+
+Reach the dashboard over **Tailscale**, never a public tunnel. `serve.py
+--control` binds 0.0.0.0 with no authentication and can launch processes, so
+the tailnet's ACLs are its only perimeter. The Jetson is already on the tailnet
+(`jetson-orin`). From any device signed in to the same tailnet (phone, laptop,
+anywhere), open:
+
+    http://jetson-orin.tail0d28f9.ts.net:8081/     (IP fallback: http://100.123.112.59:8081/)
+
+`scripts/jetson.sh console` and `status` print this URL. The container borrows
+the host's tailscale CLI and socket read-only so `webui_url.py` can print it
+from inside too. Use plain `http`: the page talks to rosbridge (`ws://…:9090`)
+and web_video_server (`…:8080`) on the same host, and an https origin would
+make the browser block those as mixed content.
+
 ## What differs from sim, and where it's configured
 
 | | sim | real |

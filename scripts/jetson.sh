@@ -26,6 +26,27 @@ PORT="${SORTBOTS_DASHBOARD_PORT:-8081}"
 
 running() { [[ "$(docker inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" == "true" ]]; }
 
+# The dashboard URL to open from anywhere: the host's MagicDNS name on the
+# tailnet, else the LAN hostname. Plain http on purpose — see
+# scripts/webui_url.py for why the 3-port dashboard can't sit behind https.
+dashboard_url() {
+  local dns
+  dns=$(tailscale status --json 2>/dev/null | python3 -c \
+    "import json,sys; print(json.load(sys.stdin)['Self']['DNSName'].rstrip('.'))" 2>/dev/null)
+  echo "http://${dns:-$(hostname)}:$PORT/"
+}
+
+# Tailscale is the dashboard's ONLY perimeter (serve.py --control is an
+# unauthenticated process launcher bound to 0.0.0.0), so share the host's
+# tailscale CLI + daemon socket into the container read-only: that is what
+# lets scripts/webui_url.py print the tailnet URL from in there. The binary is
+# statically linked, so the host's copy runs fine on the container's 24.04.
+TAILSCALE_MOUNTS=()
+if [[ -x /usr/bin/tailscale && -S /var/run/tailscale/tailscaled.sock ]]; then
+  TAILSCALE_MOUNTS=(-v /usr/bin/tailscale:/usr/bin/tailscale:ro
+                    -v /var/run/tailscale:/var/run/tailscale:ro)
+fi
+
 preflight() {
   command -v docker >/dev/null || { echo "ERROR: docker not installed"; exit 1; }
   docker info >/dev/null 2>&1 || {
@@ -100,11 +121,13 @@ case "${1:-}" in
       -e SORTBOTS_PLATFORM=real \
       -v "$HOME/.ros:$HOME/.ros" \
       -v "$REPO_ROOT:$REPO_ROOT" \
+      "${TAILSCALE_MOUNTS[@]}" \
       -w "$REPO_ROOT" \
       "$IMAGE" \
       bash "$REPO_ROOT/scripts/run_console.sh" --port "$PORT" >/dev/null || exit 1
     echo "[jetson] console starting in container '$NAME'."
-    echo "         dashboard: http://$(hostname):$PORT/   logs: scripts/jetson.sh logs"
+    echo "         dashboard: $(dashboard_url)   logs: scripts/jetson.sh logs"
+    echo "         (from any device signed in to the same Tailscale tailnet)"
     ;;
 
   shell)
@@ -132,7 +155,7 @@ case "${1:-}" in
     if lsusb 2>/dev/null | grep -qi "8086:0b07"; then echo "camera    : D435 on USB"
     else echo "camera    : D435 NOT found on USB"; fi
     if curl -fsS -o /dev/null "http://localhost:$PORT/api/scenarios" 2>/dev/null; then
-      echo "dashboard : http://$(hostname):$PORT/"
+      echo "dashboard : $(dashboard_url)"
     else
       echo "dashboard : not answering on :$PORT"
     fi
