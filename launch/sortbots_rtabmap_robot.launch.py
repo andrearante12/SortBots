@@ -25,12 +25,14 @@ import os
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
     LaunchConfiguration,
     PathJoinSubstitution,
     PythonExpression,
 )
+from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -139,7 +141,7 @@ def generate_launch_description():
     database_path = LaunchConfiguration("database_path")
     delete_db_on_start = LaunchConfiguration("delete_db_on_start")
     rtabmap_args = LaunchConfiguration("rtabmap_args")
-    visual_odometry = LaunchConfiguration("visual_odometry")
+    camera_odometry = LaunchConfiguration("camera_odometry")
     wait_imu_to_init = LaunchConfiguration("wait_imu_to_init")
 
     # RTAB-Map takes --delete_db_on_start as a flag inside `args`, so it can't
@@ -210,12 +212,19 @@ def generate_launch_description():
                 "localization:=true."
             ),
         ),
+        # NOT named "visual_odometry": that is also an argument of upstream's
+        # rtabmap.launch.py, which the include below always sets to false,
+        # and IncludeLaunchDescription shares one launch context (see the
+        # rgb_topic_relay comment) — so a same-named arg of ours was silently
+        # overwritten and the odometry Node's condition read false. Seen live
+        # 2026-09-30: no rgbd_odometry process, no /odom publisher, no error.
         DeclareLaunchArgument(
-            "visual_odometry",
+            "camera_odometry",
             default_value="false",
             description=(
-                "Run RTAB-Map's rgbd_odometry, which then PUBLISHES "
-                "/<robot_id>/odom and <robot_id>/odom -> base_link. False in "
+                "Run rgbd_odometry on RAW depth (see the Node below), which "
+                "then PUBLISHES /<robot_id>/odom and <robot_id>/odom -> "
+                "base_link. False in "
                 "sim, where Isaac publishes perfect odom. True on the real "
                 "robot until a base driver publishes wheel/optical odom — two "
                 "odom sources would fight over the same TF edge, so flip this "
@@ -296,10 +305,17 @@ def generate_launch_description():
                 # a static map -> <robot_id>/map transform into (see
                 # nodes/map_merge.py).
                 "map_frame_id":       [robot_id, "/map"],
-                # Sim: Isaac's perfect odom is the motion prior, so no visual
-                # odometry. Real (camera-only): RTAB-Map computes it — see the
-                # launch argument's description.
-                "visual_odometry":    visual_odometry,
+                # ALWAYS false upstream. Sim: Isaac publishes perfect odom.
+                # Real: camera_odometry:=true starts OUR rgbd_odometry below
+                # instead of upstream's, because upstream feeds its odometry
+                # the same depth_topic as SLAM — the filtered depth_static —
+                # and odometry cannot track on that. Measured live 2026-09-30
+                # on the D435: every frame "Registration failed ... 0/20
+                # inliers" for 20 min straight on depth_static (7.8 Hz, ~0.5 s
+                # behind, pixels blanked frame-to-frame), while a second
+                # rgbd_odometry on raw /camera/depth tracked at once (quality
+                # ~180, 0 failures). SLAM keeps depth_static; odometry gets raw.
+                "visual_odometry":    "false",
                 "subscribe_rgbd":     "false",
                 "approx_sync":        "true",
                 "rviz":               rviz,
@@ -327,6 +343,40 @@ def generate_launch_description():
                 # which is why it can't be its own launch argument upstream.
                 "args":               [rtabmap_args, " ", delete_db_flag],
             }.items(),
+        ),
+
+        # Visual odometry on RAW depth — see the "visual_odometry" comment in
+        # the include above for why this isn't upstream's odometry node.
+        # Publishes /<id>/odom and <id>/odom -> <id>/base_link, which is
+        # exactly what Isaac publishes in sim, so RTAB-Map can't tell the two
+        # apart.
+        Node(
+            condition=IfCondition(camera_odometry),
+            package="rtabmap_odom",
+            executable="rgbd_odometry",
+            name="rgbd_odometry",
+            namespace=robot_id,
+            output="screen",
+            parameters=[{
+                "frame_id": [robot_id, "/base_link"],
+                "odom_frame_id": [robot_id, "/odom"],
+                "publish_tf": True,
+                "approx_sync": True,
+                "wait_imu_to_init": False,
+                "use_sim_time": use_sim_time,
+                # Default 0 = once lost, stay lost FOREVER: the pose freezes,
+                # RTAB-Map drops every frame, and the map and 3D view go stale
+                # while the camera feed still looks alive. 1 = reset on the
+                # next frame instead; RTAB-Map starts a new map session and
+                # re-links it to the old one on the next loop closure.
+                "Odom/ResetCountdown": "1",
+            }],
+            remappings=[
+                ("rgb/image", ["/", robot_id, "/camera/rgb"]),
+                ("depth/image", ["/", robot_id, "/camera/depth"]),
+                ("rgb/camera_info", ["/", robot_id, "/camera/camera_info"]),
+                ("odom", ["/", robot_id, "/odom"]),
+            ],
         ),
 
         # Keeps cloud_map/cloud_ground/cloud_obstacles/octomap_* flowing — see

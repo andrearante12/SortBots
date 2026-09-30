@@ -121,7 +121,7 @@ so pages render on the CPU. Prefer viewing the 3D panel from another device.
 | scenarios | `platform: sim` (default) | `platform: real`, allowlist `REAL_RUN_FLAGS` in `webui/session.py` |
 | camera | Isaac render product | `launch/sortbots_realsense.launch.py`, `configs/sensors/d435_real.yaml` |
 | depth encoding | 32FC1 m | 16UC1 mm (the depth filter converts) |
-| odometry | Isaac, perfect | RTAB-Map `visual_odometry:=true` |
+| odometry | Isaac, perfect | `rgbd_odometry` on RAW depth (`camera_odometry:=true`); SLAM maps from filtered `depth_static` |
 | IMU | sim MPU6050 | none (plain D435), `wait_imu_to_init:=false` |
 | time | `use_sim_time:=true` | `use_sim_time:=false` |
 | map anchor | `configs/robots.yaml` `spawn.nvidia` | `spawn.real` (origin) |
@@ -141,7 +141,7 @@ need to talk to each other over the LAN.
 ## Next hardware steps
 
 - **Base driver** (`nodes/base_driver.py`): `/<id>/cmd_vel` → motors, publishing
-  `/<id>/odom` + `odom → base_link`. Then set `visual_odometry` back to false for
+  `/<id>/odom` + `odom → base_link`. Then set `camera_odometry` back to false for
   real (two odom sources fight over one TF edge). After that, turn on Nav2, the
   explorer and task_manager in `run_robot.sh`, and add their keys to `REAL_RUN_FLAGS`.
 - **MPU6050:** a driver publishing raw `/<id>/imu/data_raw`, plus

@@ -174,7 +174,7 @@ def _make_per_robot_actions(
         if platform == "real":
             # Camera-only hardware: no odom publisher and no IMU yet, so
             # RTAB-Map supplies odom itself and must not wait on /imu.
-            rtabmap_args["visual_odometry"] = "true"
+            rtabmap_args["camera_odometry"] = "true"
             rtabmap_args["wait_imu_to_init"] = "false"
         # Map-lifecycle overrides (localization / an explicit --map path /
         # delete_db_on_start) are a single-robot concept today — see module
