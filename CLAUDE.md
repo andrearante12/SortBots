@@ -17,6 +17,23 @@ scripts/sim_ctl.sh start explore_fresh && scripts/sim_ctl.sh wait running --time
 scripts/sim_ctl.sh stop
 ```
 
+## The real robot (Jetson Orin Nano + RealSense D435)
+
+A third track: the same dashboard, driving hardware. It runs in a **Jazzy
+container** (`docker/jetson/`) because JetPack 6 is Ubuntu 22.04/Humble. Never
+source the Jetson host's `/opt/ros/humble` for SortBots. `scripts/jetson.sh
+console` starts `run_console.sh --platform real` in the container, and `platform:
+real` scenarios run `scripts/run_robot.sh` → `sortbots_bringup.launch.py
+platform:=real`. Runbook: `docs/jetson.md`.
+
+- The real stack uses `use_sim_time:=false`, RTAB-Map visual odometry, and no IMU
+  (a plain D435 has none, so `wait_imu_to_init` must be false). Nav2 is off until
+  a base driver exists.
+- `/etc/nv_tegra_release` isn't visible inside the container, so
+  `SORTBOTS_PLATFORM=real` has to be set there. `scripts/jetson.sh` sets it.
+- The container's DDS is localhost-only on purpose, so a desktop sim on the LAN
+  can't cross-talk with `/robot_0/*`.
+
 ## Layout
 
 This is **not a colcon workspace** — there is no `src/`, no `package.xml`, no
@@ -94,6 +111,38 @@ PATH-ordering gotcha as the rclpy one above, just for a different package.
 
 Never point a browser at a live sim to test the dashboard — record a bag, build
 a fixture, replay it offline.
+
+## Multi-user workflow (Jetson shared machine)
+
+This Jetson is shared by multiple team members (andre, gilbert, liam, natalie,
+silas). All users access the same `/home/andre/SortBots` directory via symlink.
+
+- **Never work directly on `main`.** Always create a branch:
+  `git checkout -b <username>/<feature-name>`
+- **Commit often** — uncommitted changes are invisible to git and can be
+  overwritten by another user.
+- **Pull before branching** — `git pull && git checkout -b <your-branch>`
+- **Don't leave uncommitted changes** in shared files. Stash or commit before
+  walking away.
+
+### Per-user ROS 2 build directories
+
+The `ros2_ws` workspace at `/home/andre/ros2_ws` uses per-user build artifacts
+so builds don't collide. Source `/etc/profile.d/sortbots-env.sh` or start a new
+shell — it sets `COLCON_BUILD_BASE`, `COLCON_INSTALL_BASE`, and `COLCON_LOG_BASE`
+to `build_$USER`, `install_$USER`, and `log_$USER` respectively.
+
+When building or sourcing the workspace:
+
+```bash
+cd ~/ros2_ws
+colcon build                    # uses build_$USER/ and install_$USER/ automatically
+source install_$USER/setup.bash # source YOUR install space
+```
+
+When running `colcon build` on behalf of a user, always verify that
+`COLCON_BUILD_BASE` is set (or pass `--build-base build_$USER --install-base
+install_$USER` explicitly). Never use the bare `build/` or `install/` dirs.
 
 ## Conventions
 

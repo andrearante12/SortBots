@@ -139,6 +139,8 @@ def generate_launch_description():
     database_path = LaunchConfiguration("database_path")
     delete_db_on_start = LaunchConfiguration("delete_db_on_start")
     rtabmap_args = LaunchConfiguration("rtabmap_args")
+    visual_odometry = LaunchConfiguration("visual_odometry")
+    wait_imu_to_init = LaunchConfiguration("wait_imu_to_init")
 
     # RTAB-Map takes --delete_db_on_start as a flag inside `args`, so it can't
     # just be a bool passed through. Forced OFF in localization mode: deleting
@@ -209,6 +211,28 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
+            "visual_odometry",
+            default_value="false",
+            description=(
+                "Run RTAB-Map's rgbd_odometry, which then PUBLISHES "
+                "/<robot_id>/odom and <robot_id>/odom -> base_link. False in "
+                "sim, where Isaac publishes perfect odom. True on the real "
+                "robot until a base driver publishes wheel/optical odom — two "
+                "odom sources would fight over the same TF edge, so flip this "
+                "back off the day nodes/base_driver.py exists."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "wait_imu_to_init",
+            default_value="true",
+            description=(
+                "Block RTAB-Map's init on the first /<robot_id>/imu sample. "
+                "True in sim (IMU at ~60 Hz). MUST be false on hardware with "
+                "no IMU publisher — a plain D435 has none — or RTAB-Map waits "
+                "forever and the map never starts."
+            ),
+        ),
+        DeclareLaunchArgument(
             "rtabmap_args",
             default_value=GRID_ARGS,
             description=(
@@ -260,7 +284,7 @@ def generate_launch_description():
                 # RTAB-Map waits for the first IMU sample before initializing.
                 # Useful because the sim publishes IMU at ~60 Hz; without this
                 # RTAB-Map's odom estimator can race the publish.
-                "wait_imu_to_init":   "true",
+                "wait_imu_to_init":   wait_imu_to_init,
                 "frame_id":           [robot_id, "/base_link"],
                 "odom_frame_id":      [robot_id, "/odom"],
                 "odom_topic":         ["/", robot_id, "/odom"],
@@ -272,9 +296,10 @@ def generate_launch_description():
                 # a static map -> <robot_id>/map transform into (see
                 # nodes/map_merge.py).
                 "map_frame_id":       [robot_id, "/map"],
-                # Use the sim's perfect odom as the motion prior; don't ask
-                # RTAB-Map to compute visual odometry.
-                "visual_odometry":    "false",
+                # Sim: Isaac's perfect odom is the motion prior, so no visual
+                # odometry. Real (camera-only): RTAB-Map computes it — see the
+                # launch argument's description.
+                "visual_odometry":    visual_odometry,
                 "subscribe_rgbd":     "false",
                 "approx_sync":        "true",
                 "rviz":               rviz,

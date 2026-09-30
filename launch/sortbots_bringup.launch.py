@@ -55,6 +55,14 @@ scripts/spawn_warehouse.py --scene), then runs nodes/map_merge.py once to
 fuse all the anchored grids into one world-anchored `/map`. That fused `/map`
 is what Nav2's global_frame and every explorer plan against by default — see
 nodes/map_merge.py's docstring for the full picture.
+
+Real robot: `platform:=real` (what scripts/run_robot.sh passes, inside
+docker/jetson's container) adds the RealSense driver per robot
+(sortbots_realsense.launch.py, which publishes the sim's camera topic names),
+switches RTAB-Map to visual odometry with no IMU wait, and anchors each robot
+with its `real` spawn entry in configs/robots.yaml. Everything else is the
+same graph. run_robot.sh also turns Nav2/task_manager/scripted_pick off,
+because without a base driver there is nothing for them to move.
 """
 import os
 
@@ -110,11 +118,18 @@ def _make_per_robot_actions(
     robot_id_cfg,
     robot_ids_cfg,
     scene_cfg,
+    platform_cfg,
 ):
     primary_robot_id = robot_id_cfg.perform(context)
     raw = robot_ids_cfg.perform(context).strip()
     robot_ids = [r.strip() for r in raw.split(",") if r.strip()] if raw else [primary_robot_id]
-    scene = scene_cfg.perform(context)
+    platform = platform_cfg.perform(context)
+    if platform not in ("sim", "real"):
+        raise ValueError(f"platform:={platform!r} — expected sim or real")
+    # A real robot has no warehouse scene; its anchor is the `real` spawn
+    # entry. Forced rather than trusted so a forgotten scene:= can't anchor
+    # hardware at a sim spawn pose (the fused /map would be offset by it).
+    scene = "real" if platform == "real" else scene_cfg.perform(context)
 
     actions = []
     for rid in robot_ids:
@@ -137,6 +152,14 @@ def _make_per_robot_actions(
             parameters=[{"use_sim_time": use_sim_time}],
         ))
 
+        # Real hardware: the D435 driver, publishing under the sim's topic
+        # names so nothing below needs to know which platform this is.
+        if platform == "real":
+            actions.append(IncludeLaunchDescription(
+                _include("sortbots_realsense.launch.py"),
+                launch_arguments={"robot_id": rid}.items(),
+            ))
+
         # Before RTAB-Map: strip movers from depth so SLAM never sees them.
         actions.append(ExecuteProcess(
             cmd=[
@@ -148,6 +171,11 @@ def _make_per_robot_actions(
         ))
 
         rtabmap_args = {"robot_id": rid, "use_sim_time": use_sim_time, "rviz": rviz}
+        if platform == "real":
+            # Camera-only hardware: no odom publisher and no IMU yet, so
+            # RTAB-Map supplies odom itself and must not wait on /imu.
+            rtabmap_args["visual_odometry"] = "true"
+            rtabmap_args["wait_imu_to_init"] = "false"
         # Map-lifecycle overrides (localization / an explicit --map path /
         # delete_db_on_start) are a single-robot concept today — see module
         # docstring; every OTHER robot in a multi-robot robot_ids list falls
@@ -304,8 +332,18 @@ def generate_launch_description():
     explore = LaunchConfiguration("explore")
     explore_autostart = LaunchConfiguration("explore_autostart")
     scene = LaunchConfiguration("scene")
+    platform = LaunchConfiguration("platform")
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "platform",
+            default_value="sim",
+            description=(
+                "sim (Isaac publishes sensors + odom) or real (RealSense "
+                "driver + RTAB-Map visual odometry; scene forced to 'real'). "
+                "See the module docstring."
+            ),
+        ),
         DeclareLaunchArgument(
             "robot_id",
             default_value="robot_0",
@@ -442,7 +480,7 @@ def generate_launch_description():
             args=[
                 use_sim_time, rviz, nav2, task_manager, scripted_pick,
                 localization, database_path, delete_db_on_start,
-                explore, explore_autostart, robot_id, robot_ids, scene,
+                explore, explore_autostart, robot_id, robot_ids, scene, platform,
             ],
         ),
     ])

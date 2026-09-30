@@ -51,6 +51,10 @@ MAX_BODY_BYTES = 64 * 1024
 # Set by main() when --control is given. None means "control endpoints off".
 SESSIONS: session_mod.SessionManager | None = None
 
+# sim | real — which platform's scenarios this console lists and can start.
+# Set by main() from --platform (default: session_mod.detect_platform()).
+PLATFORM = "sim"
+
 
 class DashboardHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -113,9 +117,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if ROBOTS_CONFIG.exists():
             with open(ROBOTS_CONFIG) as f:
                 raw = yaml.safe_load(f)
+            robots = raw["robots"]
+            # On the robot, only ids with a `real` spawn entry exist in
+            # hardware; listing the sim-only ones would offer a switcher
+            # entry whose topics nothing publishes.
+            if PLATFORM == "real":
+                robots = [r for r in robots if "real" in (r.get("spawn") or {})]
             data = {
                 "default": raw["default"],
-                "robots": [r["id"] for r in raw["robots"]],
+                "robots": [r["id"] for r in robots],
             }
         else:
             data = {"default": "robot_0", "robots": ["robot_0"]}
@@ -125,9 +135,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         # Readable without --control on purpose: the tab can then show what
         # the suite contains, and explain that the console isn't running,
         # instead of rendering an empty page.
+        # Only this platform's scenarios: the same dashboard is served by the
+        # desktop console (Isaac) and the robot's (Jetson), and a card that can
+        # never start here is noise. Invalid files (platform None) stay listed
+        # on both — a scenario that won't load should say why wherever you look.
+        scenarios = [s for s in session_mod.load_scenarios()
+                     if s["platform"] in (PLATFORM, None)]
         self._serve_json({
             "control": SESSIONS is not None,
-            "scenarios": session_mod.load_scenarios(),
+            "platform": PLATFORM,
+            "scenarios": scenarios,
         })
 
     def _serve_maps(self):
@@ -252,23 +269,29 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
-    global SESSIONS
+    global SESSIONS, PLATFORM
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8081)
     parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument(
+        "--platform", choices=session_mod.PLATFORMS, default=None,
+        help="sim (desktop, Isaac) or real (robot Jetson); default: "
+             "$SORTBOTS_PLATFORM, else real if /etc/nv_tegra_release exists, else sim",
+    )
     parser.add_argument(
         "--control", action="store_true",
         help="enable the Scenarios tab's start/stop API (see this file's docstring)",
     )
     args = parser.parse_args()
 
+    PLATFORM = args.platform or session_mod.detect_platform()
     if args.control:
-        SESSIONS = session_mod.SessionManager()
+        SESSIONS = session_mod.SessionManager(PLATFORM)
 
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     mode = "control" if args.control else "read-only"
-    print(f"SortBots dashboard ({mode}): http://{args.host}:{args.port}/")
+    print(f"SortBots dashboard ({mode}, {PLATFORM}): http://{args.host}:{args.port}/")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

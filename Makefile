@@ -19,5 +19,6 @@ smoke:
 	$(PYTHON) webui/session.py --list
 	$(PYTHON) webui/session.py --print-argv explore_fresh
 	$(PYTHON) webui/session.py --print-argv explore_fresh --set headless=true
+	$(PYTHON) webui/session.py --print-argv real_map_fresh --set resume=true
 
 ci: test smoke

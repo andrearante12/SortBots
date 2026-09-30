@@ -13,7 +13,8 @@ ROS-free environment, because `scripts/run_demo.sh` hard-refuses to start when
 AMENT_PREFIX_PATH is set (and Isaac's activate_isaac.sh does the same).
 
 WHAT THIS DOES NOT DO: it does not supervise ROS nodes itself. It shells out to
-`scripts/run_demo.sh`, which is already the project's process manager, and adds
+`scripts/run_demo.sh` (or, on the robot's Jetson, `scripts/run_robot.sh` — see
+PLATFORMS below), which is already the project's process manager, and adds
 exactly three things on top — a named preset (configs/scenarios/*.yaml), a
 readable phase for the UI, and a per-run directory to collect the log.
 
@@ -62,6 +63,7 @@ SESSIONS_DIR = Path(os.environ["SORTBOTS_SESSIONS_DIR"]) if os.environ.get("SORT
     else REPO_ROOT / "data" / "sessions"
 CURRENT_POINTER = SESSIONS_DIR / "current.json"
 RUN_DEMO = REPO_ROOT / "scripts" / "run_demo.sh"
+RUN_ROBOT = REPO_ROOT / "scripts" / "run_robot.sh"
 RECORD_BAG = REPO_ROOT / "scripts" / "record_explore_bag.sh"
 MAPS_SH = REPO_ROOT / "scripts" / "maps.sh"
 ROS_SETUP = "/opt/ros/jazzy/setup.bash"
@@ -73,6 +75,34 @@ ROS_SETUP = "/opt/ros/jazzy/setup.bash"
 SYSTEM_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 MAX_LOG_CHUNK = 64 * 1024
+
+
+# ---------------------------------------------------------------------------
+# Platforms. `sim` is the desktop (Isaac Sim, scripts/run_demo.sh); `real` is
+# the robot's Jetson (RealSense + RTAB-Map inside docker/jetson's container,
+# scripts/run_robot.sh). A console serves exactly one platform, and every
+# scenario names the one it belongs to — so the same dashboard runs on both,
+# and a desktop can never be asked to start a real-robot scenario or vice versa.
+# ---------------------------------------------------------------------------
+
+PLATFORMS = ("sim", "real")
+
+LAUNCHERS = {"sim": RUN_DEMO, "real": RUN_ROBOT}
+
+
+def detect_platform() -> str:
+    """SORTBOTS_PLATFORM if set, else `real` on a Jetson, else `sim`.
+
+    The env var is not optional inside docker/jetson's container:
+    /etc/nv_tegra_release lives on the L4T host and isn't visible in there,
+    which is why scripts/jetson.sh sets SORTBOTS_PLATFORM=real explicitly.
+    """
+    env = os.environ.get("SORTBOTS_PLATFORM")
+    if env:
+        if env not in PLATFORMS:
+            raise ValueError(f"SORTBOTS_PLATFORM must be one of {PLATFORMS}, got {env!r}")
+        return env
+    return "real" if Path("/etc/nv_tegra_release").exists() else "sim"
 
 
 class ScenarioError(ValueError):
@@ -232,8 +262,25 @@ RUN_DEFAULTS = {
 }
 
 
-def build_argv(run: dict) -> list[str]:
-    """Turn a validated `run:` mapping into run_demo.sh arguments."""
+# The real robot's launcher takes a much smaller surface: there is no scene to
+# pick, no fleet to spawn, no window or chase cam to render. Sim-only keys are
+# REJECTED on a `platform: real` scenario rather than ignored, for the same
+# reason unknown keys are — the file should say exactly what will run.
+REAL_RUN_FLAGS = {
+    "robot_id": RUN_FLAGS["robot_id"],
+    "localize": RUN_FLAGS["localize"],
+    "resume": RUN_FLAGS["resume"],
+    "map": RUN_FLAGS["map"],
+}
+
+REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS[key] for key in REAL_RUN_FLAGS}
+
+PLATFORM_FLAGS = {"sim": RUN_FLAGS, "real": REAL_RUN_FLAGS}
+PLATFORM_DEFAULTS = {"sim": RUN_DEFAULTS, "real": REAL_RUN_DEFAULTS}
+
+
+def build_argv(run: dict, platform: str = "sim") -> list[str]:
+    """Turn a validated `run:` mapping into the platform launcher's arguments."""
     run = dict(run)
     # chase_cam and chase_cam_robots both resolve to run_demo.sh's single
     # CHASE_CAM_ARGS variable, where the LAST flag on the line wins. RUN_FLAGS
@@ -245,10 +292,16 @@ def build_argv(run: dict) -> list[str]:
     if run.get("chase_cam") is False:
         run.pop("chase_cam_robots", None)
     argv: list[str] = []
-    for key, builder in RUN_FLAGS.items():
+    for key, builder in PLATFORM_FLAGS[platform].items():
         if key in run:
             argv.extend(builder(run[key]))
     return argv
+
+
+def launcher_argv(scenario: dict, run: dict) -> list[str]:
+    """The full command a scenario starts: launcher + flags + --keep-console."""
+    platform = scenario["platform"]
+    return [str(LAUNCHERS[platform]), *build_argv(run, platform), "--keep-console"]
 
 
 # ---------------------------------------------------------------------------
@@ -270,21 +323,27 @@ def _validate(path: Path, raw: dict) -> dict:
     if status not in VALID_STATUS:
         raise ScenarioError(f"status: expected one of {sorted(VALID_STATUS)}, got {status!r}")
 
+    platform = raw.get("platform", "sim")
+    if platform not in PLATFORMS:
+        raise ScenarioError(f"platform: expected one of {list(PLATFORMS)}, got {platform!r}")
+    flags = PLATFORM_FLAGS[platform]
+
     run = raw.get("run") or {}
     if not isinstance(run, dict):
         raise ScenarioError("run: must be a mapping")
-    unknown = sorted(set(run) - set(RUN_FLAGS))
+    unknown = sorted(set(run) - set(flags))
     if unknown:
-        raise ScenarioError(f"run: unknown key(s) {unknown} — allowed: {sorted(RUN_FLAGS)}")
-    merged = {**RUN_DEFAULTS, **run}
-    build_argv(merged)  # type/range check now, not at launch time
+        raise ScenarioError(
+            f"run: unknown key(s) {unknown} for platform {platform!r} — allowed: {sorted(flags)}")
+    merged = {**PLATFORM_DEFAULTS[platform], **run}
+    build_argv(merged, platform)  # type/range check now, not at launch time
     if merged["localize"] and merged["resume"]:
         raise ScenarioError("run: localize and resume are mutually exclusive")
 
     overrides = raw.get("overrides") or []
     if not isinstance(overrides, list):
         raise ScenarioError("overrides: must be a list of run keys")
-    bad = sorted(set(overrides) - set(RUN_FLAGS))
+    bad = sorted(set(overrides) - set(flags))
     if bad:
         raise ScenarioError(f"overrides: unknown run key(s) {bad}")
 
@@ -297,6 +356,7 @@ def _validate(path: Path, raw: dict) -> dict:
         "title": raw.get("title") or name,
         "description": (raw.get("description") or "").strip(),
         "status": status,
+        "platform": platform,
         "run": merged,
         "overrides": list(overrides),
         "capture": {"bag": bool(capture.get("bag", False))},
@@ -321,6 +381,7 @@ def load_scenarios() -> list[dict]:
                 "title": path.stem,
                 "description": "",
                 "status": "invalid",
+                "platform": None,
                 "run": {},
                 "overrides": [],
                 "capture": {"bag": False},
@@ -354,7 +415,7 @@ def apply_overrides(scenario: dict, overrides: dict | None) -> dict:
         # RUN_DEFAULTS type. chase_cam_robots defaults to None in RUN_DEFAULTS
         # but scenarios that expose it set an int — use that so CLI --set
         # strings and form values become ints before build_argv.
-        default = run[key] if key in run else RUN_DEFAULTS[key]
+        default = run[key] if key in run else PLATFORM_DEFAULTS[scenario["platform"]][key]
         if isinstance(default, bool):
             if isinstance(value, str):
                 value = value.lower() == "true"
@@ -363,7 +424,7 @@ def apply_overrides(scenario: dict, overrides: dict | None) -> dict:
             run[key] = int(value)
         else:
             run[key] = value
-    build_argv(run)  # re-validate the merged result
+    build_argv(run, scenario["platform"])  # re-validate the merged result
     if run["localize"] and run["resume"]:
         raise ScenarioError("localize and resume are mutually exclusive")
     return run
@@ -477,15 +538,17 @@ def pipeline_alive() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Phases, parsed from run_demo.sh's own console output
+# Phases, parsed from the launcher's own console output
 # ---------------------------------------------------------------------------
-# These strings live in scripts/run_demo.sh, which carries a comment pointing
-# back here. Failure patterns are checked first so an error line can't be
-# swallowed by a progress match on the same line.
+# These strings live in scripts/run_demo.sh and scripts/run_robot.sh, which
+# both carry a comment pointing back here. A real-robot run has no sim phases,
+# so it goes idle -> ros_starting -> ros_ready -> running; _advance() only
+# ever moves forward, so skipping phases is fine. Failure patterns are checked
+# first so an error line can't be swallowed by a progress match on the same line.
 
 PHASE_PATTERNS = [
     (re.compile(r"Isaac Sim failed to start|^ERROR:", re.M), "failed"),
-    (re.compile(r"demo is UP"), "running"),
+    (re.compile(r"demo is UP|robot is UP"), "running"),
     (re.compile(r"ROS 2 stack up"), "ros_ready"),
     (re.compile(r"launching RTAB-Map"), "ros_starting"),
     (re.compile(r"Isaac Sim is up and publishing|sim not confirmed ready"), "sim_ready"),
@@ -503,7 +566,7 @@ PHASE_LABELS = {
     "sim_starting": "starting Isaac Sim",
     "sim_loading": "loading the warehouse",
     "sim_ready": "sim publishing",
-    "ros_starting": "starting RTAB-Map + Nav2",
+    "ros_starting": "starting the ROS 2 stack",
     "ros_ready": "ROS 2 stack up",
     "running": "running",
     "failed": "failed",
@@ -522,9 +585,12 @@ def phase_for_line(line: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 class SessionManager:
-    """Owns at most one sim session at a time."""
+    """Owns at most one pipeline session at a time, for one platform."""
 
-    def __init__(self) -> None:
+    def __init__(self, platform: str = "sim") -> None:
+        if platform not in PLATFORMS:
+            raise ValueError(f"platform must be one of {PLATFORMS}, got {platform!r}")
+        self.platform = platform
         self._lock = threading.RLock()
         self._session: dict | None = None
         self._proc: subprocess.Popen | None = None
@@ -570,8 +636,16 @@ class SessionManager:
                 raise ScenarioError(
                     f"scenario {name!r} has status {scenario['status']!r} and cannot be started"
                 )
+            # serve.py already hides other platforms' scenarios, but the API
+            # takes a name — a desktop must never try to run_robot.sh, nor a
+            # Jetson try to boot Isaac.
+            if scenario["platform"] != self.platform:
+                raise ScenarioError(
+                    f"scenario {name!r} is for platform {scenario['platform']!r}; "
+                    f"this console runs {self.platform!r}"
+                )
             run = apply_overrides(scenario, overrides)
-            argv = [str(RUN_DEMO), *build_argv(run), "--keep-console"]
+            argv = launcher_argv(scenario, run)
 
             session_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{name}"
             session_dir = SESSIONS_DIR / session_id
@@ -585,6 +659,7 @@ class SessionManager:
                 "dir": str(session_dir),
                 "log": str(log_path),
                 "argv": argv,
+                "platform": scenario["platform"],
                 "run": run,
                 "state": "starting",
                 "phase": "idle",
@@ -737,7 +812,7 @@ class SessionManager:
                 self._session["state"] = "failed"
                 self._session["phase"] = "failed"
                 self._session["error"] = (
-                    f"run_demo.sh exited {code} — see the log above"
+                    f"{Path(self._session['argv'][0]).name} exited {code} — see the log above"
                 )
             self._persist()
 
@@ -788,6 +863,9 @@ class SessionManager:
             if self._session is None:
                 return
             session_dir = Path(self._session["dir"])
+            # A session adopted from before platforms existed has no key: it
+            # can only have been a sim run.
+            launcher = LAUNCHERS[self._session.get("platform", "sim")]
             self._session["state"] = "stopping"
             self._persist()
             self._stop_bag()
@@ -799,13 +877,13 @@ class SessionManager:
             log_fh.flush()
             try:
                 subprocess.run(
-                    [str(RUN_DEMO), "stop", "--keep-console"],
+                    [str(launcher), "stop", "--keep-console"],
                     cwd=str(REPO_ROOT), env=clean_env(),
                     stdout=log_fh, stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL, timeout=120,
                 )
             except subprocess.TimeoutExpired:
-                log_fh.write(b"[session] run_demo.sh stop timed out\n")
+                log_fh.write(f"[session] {launcher.name} stop timed out\n".encode())
 
         with self._lock:
             if self._session is not None:
@@ -860,7 +938,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--list", action="store_true", help="list scenarios and their status")
     parser.add_argument("--print-argv", metavar="SCENARIO",
-                        help="print the run_demo.sh command a scenario would run")
+                        help="print the launcher command a scenario would run")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                         help="apply an override before printing (repeatable)")
     args = parser.parse_args()
@@ -868,7 +946,8 @@ def main() -> None:
     if args.list or not args.print_argv:
         for scenario in load_scenarios():
             mark = {"ready": "•", "planned": "·", "invalid": "!"}.get(scenario["status"], "?")
-            print(f"{mark} {scenario['name']:<20} {scenario['status']:<8} {scenario['title']}")
+            print(f"{mark} {scenario['name']:<20} {scenario['status']:<8} "
+                  f"{scenario['platform'] or '-':<5} {scenario['title']}")
             if scenario.get("error"):
                 print(f"    {scenario['error']}")
         if not args.print_argv:
@@ -880,7 +959,7 @@ def main() -> None:
         key, _, value = item.partition("=")
         overrides[key] = value
     run = apply_overrides(scenario, overrides)
-    print(shlex.join([str(RUN_DEMO), *build_argv(run), "--keep-console"]))
+    print(shlex.join(launcher_argv(scenario, run)))
 
 
 if __name__ == "__main__":
