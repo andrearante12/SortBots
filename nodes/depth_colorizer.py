@@ -23,6 +23,9 @@ DEFAULTS = {
 }
 
 
+HOLD_S = 10.0  # keep the depth subscription this long after the last viewer
+
+
 def colorize_depth(depth_m: np.ndarray, *, min_m=DEFAULTS["min_m"],
                    max_m=DEFAULTS["max_m"], decimate=DEFAULTS["decimate"]):
     """float32 metres (HxW) -> uint8 BGR (H/d x W/d x 3). Invalid -> black.
@@ -72,24 +75,40 @@ def main(argv=None):
             # this is a wall-clock CPU limiter.
             self._min_period = 1.0 / max(args.rate_hz, 0.1)
             self._last = 0.0
-            self.create_subscription(
-                Image, f"/{robot_id}/camera/depth", self._on_depth,
-                qos_profile_sensor_data)
             self.pub = self.create_publisher(
                 Image, f"/{robot_id}/camera/depth_color", qos_profile_sensor_data)
+            # rclpy deserialises every 30 Hz depth frame before our rate gate
+            # runs (measured ~15% of a core on the Orin Nano), so only hold the
+            # depth subscription while the tile is being watched. web_video_
+            # server's /snapshot subscribes per request, so the subscriber
+            # count flaps between polls — keep the subscription for HOLD_S
+            # after the last time anyone was seen.
+            self._sub = None
+            self._last_demand = 0.0
+            self.create_timer(0.2, self._follow_demand)
             self.get_logger().info(
                 f"depth colorizer: /{robot_id}/camera/depth -> depth_color "
                 f"@ <= {args.rate_hz:g} Hz")
+
+        def _follow_demand(self):
+            import time
+            now = time.monotonic()
+            if self.pub.get_subscription_count() > 0:
+                self._last_demand = now
+            watched = now - self._last_demand < HOLD_S
+            if watched and self._sub is None:
+                self._sub = self.create_subscription(
+                    Image, f"/{robot_id}/camera/depth", self._on_depth,
+                    qos_profile_sensor_data)
+            elif not watched and self._sub is not None:
+                self.destroy_subscription(self._sub)
+                self._sub = None
 
         def _on_depth(self, msg):
             import time
             now = time.monotonic()
             if now - self._last < self._min_period:
                 return
-            # No "skip when nobody subscribes" gate: web_video_server's
-            # /snapshot subscribes per request, so the count is 0 between polls
-            # and a gate would starve the tile. Colouring a decimated frame at
-            # <= 5 Hz is cheap enough to run unconditionally.
             depth = depth_to_metres(msg.data, msg.encoding, msg.height, msg.width)
             if depth is None:
                 return
