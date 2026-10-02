@@ -113,6 +113,17 @@ the machine: `echo SNAP_REEXEC=0 | sudo tee -a /etc/environment`. The snap
 browser still can't reach the Jetson's GPU (`GLDisplayEGL::Initialize failed`),
 so pages render on the CPU. Prefer viewing the 3D panel from another device.
 
+**3D reconstruction tab says "needs WebGL"** — with no GPU, headed Chromium
+gives up on WebGL entirely (headless doesn't, which makes it confusing to test).
+Force software WebGL (SwiftShader); verified 2026-10-01, `NOGL` → `OK WebGL 2.0`:
+
+    SNAP_REEXEC=0 chromium --use-gl=angle --use-angle=swiftshader \
+      --enable-unsafe-swiftshader --ignore-gpu-blocklist \
+      --app=http://localhost:8081/
+
+Fully quit the old window first, or the flags are ignored by the running
+instance. Expect a slow, CPU-bound 3D view.
+
 ## What differs from sim, and where it's configured
 
 | | sim | real |
