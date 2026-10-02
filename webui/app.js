@@ -267,6 +267,7 @@ function setStageMode(mode) {
     btn.classList.toggle("active", btn.dataset.stage === want);
   }
   if (mode === "sensors") drawFeatureOverlay();
+  syncFeatureSubscription();
   onStageResize();
 }
 
@@ -300,16 +301,6 @@ for (const btn of document.querySelectorAll("#stage-mode button")) {
     setStageMode(s === "map" || s === "sensors" ? s : lastCameraMode);
   });
 }
-
-setStageMode("chase");
-
-// Start snapshot polls only after the stage classes are coherent — otherwise
-// markChaseMissing can race setStageMode's first paint, and the HTML default
-// (head as .stage-pip) would briefly poll a feed we intentionally hide.
-wireCameraStream("camera-stream", "camera/rgb");
-wireCameraStream("sensor-rgb", "camera/rgb", () => drawFeatureOverlay());
-wireCameraStream("sensor-depth", "camera/depth_color");
-wireCameraStream("chase-stream", "camera/chase/rgb");
 
 // -- feature overlay (real robot) ------------------------------------------
 // nodes/feature_overlay.py reduces RTAB-Map's odom_info to a few KB of JSON on
@@ -364,14 +355,18 @@ function drawFeatureOverlay() {
   }
 }
 
-new ROSLIB.Topic({
+// Subscribed only while the sensors view is on the stage: feature_overlay.py
+// holds its (expensive) odom_info subscription only while this topic has a
+// subscriber, so an unwatched overlay costs the Jetson nothing.
+const featuresTopic = new ROSLIB.Topic({
   ros,
   name: `/${ROBOT_ID}/odom_features`,
   messageType: "std_msgs/String",
   reconnect_on_close: true,
   throttle_rate: 250,
   queue_length: 1,
-}).subscribe((msg) => {
+});
+function onFeatures(msg) {
   try {
     lastFeatures = JSON.parse(msg.data);
     lastFeaturesAt = Date.now();
@@ -379,9 +374,27 @@ new ROSLIB.Topic({
   } catch (e) {
     console.error("bad odom_features message", e);
   }
-});
+}
+let featuresSubscribed = false;
+function syncFeatureSubscription() {
+  const want = stageMode === "sensors";
+  if (want === featuresSubscribed) return;
+  featuresSubscribed = want;
+  if (want) featuresTopic.subscribe(onFeatures);
+  else featuresTopic.unsubscribe(onFeatures);
+}
 featureToggle.addEventListener("change", drawFeatureOverlay);
 window.addEventListener("resize", drawFeatureOverlay);
+
+setStageMode("chase");
+
+// Start snapshot polls only after the stage classes are coherent — otherwise
+// markChaseMissing can race setStageMode's first paint, and the HTML default
+// (head as .stage-pip) would briefly poll a feed we intentionally hide.
+wireCameraStream("camera-stream", "camera/rgb");
+wireCameraStream("sensor-rgb", "camera/rgb", () => drawFeatureOverlay());
+wireCameraStream("sensor-depth", "camera/depth_color");
+wireCameraStream("chase-stream", "camera/chase/rgb");
 
 // -- camera aim (head pan/tilt) -------------------------------------------
 // Unlike cmd_vel, head_cmd is a POSITION target (see spawn_warehouse.py's

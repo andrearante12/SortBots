@@ -78,16 +78,32 @@ def main(argv=None):
             self._wh = (0, 0)
             # odom_info is published RELIABLE; a depth-1 queue keeps a slow
             # consumer from ever lagging behind the newest frame.
-            qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
-            self.create_subscription(
-                OdomInfo, f"/{robot_id}/odom_info", self._on_info, qos)
+            self._qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
+            self._sub = None
             self.create_subscription(
                 CameraInfo, f"/{robot_id}/camera/camera_info", self._on_cam,
                 QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT))
             self.pub = self.create_publisher(
                 String, f"/{robot_id}/odom_features", 1)
+            # rclpy deserialises the WHOLE OdomInfo (local-map points and all)
+            # before our callback runs — measured ~35% of a core on the Orin
+            # Nano at ~3 Hz, on a board whose CPU is already saturated by
+            # RTAB-Map. So only hold the odom_info subscription while someone
+            # is subscribed to odom_features (the dashboard does so only while
+            # its sensors view is on screen).
+            self.create_timer(1.0, self._follow_demand)
             self.get_logger().info(
-                f"feature overlay: /{robot_id}/odom_info -> /{robot_id}/odom_features")
+                f"feature overlay: /{robot_id}/odom_info -> /{robot_id}/odom_features "
+                f"(on demand)")
+
+        def _follow_demand(self):
+            wanted = self.pub.get_subscription_count() > 0
+            if wanted and self._sub is None:
+                self._sub = self.create_subscription(
+                    OdomInfo, f"/{robot_id}/odom_info", self._on_info, self._qos)
+            elif not wanted and self._sub is not None:
+                self.destroy_subscription(self._sub)
+                self._sub = None
 
         def _on_cam(self, msg):
             self._wh = (int(msg.width), int(msg.height))
