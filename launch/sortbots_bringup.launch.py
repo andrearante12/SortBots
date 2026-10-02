@@ -183,16 +183,23 @@ def _make_per_robot_actions(
             ))
 
         # Before RTAB-Map: strip movers from depth so SLAM never sees them.
-        actions.append(ExecuteProcess(
-            cmd=[
-                "python3",
-                os.path.join(REPO_ROOT, "nodes", "dynamic_obstacle_filter.py"),
-                "--robot-id", rid,
-            ],
-            output="screen",
-        ))
+        # Skipped on the real robot: one robot means no peer to paint into the
+        # map, Nav2 (the other consumer) is off, and on the Orin Nano the
+        # filter was ~1 core plus a 1.6 MB republish per frame (measured
+        # 2026-10-02) — SLAM reads raw camera/depth instead.
+        depth_filter = platform != "real"
+        if depth_filter:
+            actions.append(ExecuteProcess(
+                cmd=[
+                    "python3",
+                    os.path.join(REPO_ROOT, "nodes", "dynamic_obstacle_filter.py"),
+                    "--robot-id", rid,
+                ],
+                output="screen",
+            ))
 
-        rtabmap_args = {"robot_id": rid, "use_sim_time": use_sim_time, "rviz": rviz}
+        rtabmap_args = {"robot_id": rid, "use_sim_time": use_sim_time, "rviz": rviz,
+                        "depth_filter": "true" if depth_filter else "false"}
         if platform == "real":
             # Camera-only hardware: no odom publisher and no IMU yet, so
             # RTAB-Map supplies odom itself and must not wait on /imu.

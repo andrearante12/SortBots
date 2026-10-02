@@ -132,6 +132,26 @@ GRID_ARGS = (
     "--GridGlobal/ProbMiss 0.45"
 )
 
+# Appended to GRID_ARGS ONLY on the real robot (camera_odometry:=true), never in
+# sim. Measured live 2026-10-02 on the Orin Nano (load average ~16 on 6 cores):
+# the board is CPU-bound, so every default here is a trade between map density
+# and the per-node cost of building it.
+#   RGBD/LinearUpdate, RGBD/AngularUpdate  0.1 -> 0.05  a node is added every
+#       5 cm / ~3 deg instead of 10 cm / ~6 deg, so slow walks still lay down
+#       a dense cloud instead of one sparse slice per 10 cm (tasks/
+#       real_perception_plan.md L4).
+#   Rtabmap/DetectionRate  1 -> 2 Hz  the cap that otherwise throttles the
+#       node rate regardless of the two thresholds above.
+#   Grid/RangeMax  5.0 -> 4.0  D435 depth is noisy past ~4 m and Grid/3D ray
+#       tracing cost grows with the swept volume; the filter's own
+#       max_range_m was already 4.5.
+REAL_GRID_ARGS = (
+    "--RGBD/LinearUpdate 0.05 "
+    "--RGBD/AngularUpdate 0.05 "
+    "--Rtabmap/DetectionRate 2 "
+    "--Grid/RangeMax 4.0"
+)
+
 
 def generate_launch_description():
     robot_id = LaunchConfiguration("robot_id")
@@ -142,6 +162,7 @@ def generate_launch_description():
     delete_db_on_start = LaunchConfiguration("delete_db_on_start")
     rtabmap_args = LaunchConfiguration("rtabmap_args")
     camera_odometry = LaunchConfiguration("camera_odometry")
+    depth_filter = LaunchConfiguration("depth_filter")
     wait_imu_to_init = LaunchConfiguration("wait_imu_to_init")
 
     # RTAB-Map takes --delete_db_on_start as a flag inside `args`, so it can't
@@ -155,7 +176,33 @@ def generate_launch_description():
         "'.lower() not in ('true', '1') else ''",
     ])
 
+    # Real-only extras (REAL_GRID_ARGS) ride on camera_odometry, the same flag
+    # that already means "this is the real robot" in this file. Later flags
+    # win in RTAB-Map's CLI parsing, so they override GRID_ARGS' Grid/RangeMax.
+    real_extra_args = PythonExpression([
+        "'", REAL_GRID_ARGS, "' if '", camera_odometry,
+        "'.lower() in ('true', '1') else ''",
+    ])
+    # SLAM's depth: the mover-stripped depth_static, or raw camera/depth when
+    # the filter isn't running (single real robot — see sortbots_bringup).
+    depth_source = PythonExpression([
+        "'/camera/depth_static' if '", depth_filter,
+        "'.lower() in ('true', '1') else '/camera/depth'",
+    ])
+
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "depth_filter",
+            default_value="true",
+            description=(
+                "True: RTAB-Map reads camera/depth_static from "
+                "nodes/dynamic_obstacle_filter.py. False: raw camera/depth "
+                "(the filter must then not be started — sortbots_bringup "
+                "does that for platform:=real). The filter costs ~1 core and "
+                "republishes a 1.6 MB image per frame; with no peer robots "
+                "and Nav2 off there is nothing for it to protect."
+            ),
+        ),
         DeclareLaunchArgument(
             "robot_id",
             default_value="robot_0",
@@ -265,7 +312,7 @@ def generate_launch_description():
                 # so RTAB-Map does not permanently paint peer robots into the
                 # SLAM grid. Raw /camera/depth still feeds Nav2 via the filter's
                 # dynamic_obstacles cloud (+ depth_static points for static).
-                "depth_topic":        ["/", robot_id, "/camera/depth_static"],
+                "depth_topic":        ["/", robot_id, depth_source],
                 # Upstream rtabmap.launch.py does NOT remap rgb/image from
                 # rgb_topic directly — it bakes rgb_topic_relay /
                 # depth_topic_relay inside an OpaqueFunction via
@@ -287,7 +334,7 @@ def generate_launch_description():
                 # relay == topic, so pass both explicitly per robot the
                 # same way bringup already forces per-robot database_path.
                 "rgb_topic_relay":    ["/", robot_id, "/camera/rgb"],
-                "depth_topic_relay":  ["/", robot_id, "/camera/depth_static"],
+                "depth_topic_relay":  ["/", robot_id, depth_source],
                 "camera_info_topic":  ["/", robot_id, "/camera/camera_info"],
                 "imu_topic":          ["/", robot_id, "/imu"],
                 # RTAB-Map waits for the first IMU sample before initializing.
@@ -341,7 +388,7 @@ def generate_launch_description():
                 # deprecated alias (rtabmap.launch.py:47 defaults one to the
                 # other). --delete_db_on_start is a flag *inside* this string,
                 # which is why it can't be its own launch argument upstream.
-                "args":               [rtabmap_args, " ", delete_db_flag],
+                "args":               [rtabmap_args, " ", real_extra_args, " ", delete_db_flag],
             }.items(),
         ),
 
@@ -370,6 +417,14 @@ def generate_launch_description():
                 # next frame instead; RTAB-Map starts a new map session and
                 # re-links it to the old one on the next loop closure.
                 "Odom/ResetCountdown": "1",
+                # CPU cost knobs (Orin Nano, 2026-10-02: odometry ran ~3 Hz and
+                # ~60% of a core at the D435's 848x480). Half-resolution
+                # features are ~4x cheaper and plenty for a 4 m indoor scene;
+                # fewer features and a smaller local map cut matching/PnP time.
+                # Defaults were 1 / 1000 / 2000.
+                "Odom/ImageDecimation": "2",
+                "Vis/MaxFeatures": "600",
+                "OdomF2M/MaxSize": "1200",
             }],
             remappings=[
                 ("rgb/image", ["/", robot_id, "/camera/rgb"]),
@@ -386,6 +441,13 @@ def generate_launch_description():
                 "python3",
                 os.path.join(REPO_ROOT, "nodes", "rtabmap_cloud_pump.py"),
                 "--robot-id", robot_id,
+                # Each publish_map re-assembles the WHOLE global cloud; on the
+                # CPU-bound Jetson that is the periodic stall. The dashboard
+                # throttles to 3 s anyway, so a slower pump costs little.
+                "--period", PythonExpression([
+                    "'6.0' if '", camera_odometry,
+                    "'.lower() in ('true', '1') else '3.0'",
+                ]),
             ],
             output="screen",
         ),

@@ -1984,7 +1984,23 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
   const tmpColor = new THREE.Color();
 
   let lastCloud = null;                 // decoded payload, kept for re-render
-  let reconMode = RECON_MODE_INIT;      // "voxels" | "points"
+  // Software WebGL (SwiftShader / llvmpipe — what a GPU-less browser such as
+  // the Jetson's snap Chromium gets, see docs/jetson.md) has to rasterise every
+  // cube's 12 triangles on the CPU, which is the same CPU RTAB-Map is starving
+  // for. Default such a browser to plain points; an explicit ?recon= wins, and
+  // the dropdown still lets anyone switch back.
+  function isSoftwareGL() {
+    try {
+      const gl = renderer.getContext();
+      const ext = gl.getExtension("WEBGL_debug_renderer_info");
+      const name = ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : "";
+      return /swiftshader|llvmpipe|software/i.test(name);
+    } catch (e) {
+      return false;
+    }
+  }
+  const softwareGL = isSoftwareGL();
+  let reconMode = QS.has("recon") || !softwareGL ? RECON_MODE_INIT : "points"; // "voxels" | "points"
   let reconColor = RECON_COLOR_INIT;    // "photo"  | "height"
 
   // Pose markers: active robot is green (matches the 2D #2d5 marker);
@@ -2266,7 +2282,7 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
     el.value = initial;
     el.addEventListener("change", () => { apply(el.value); rebuild(); });
   }
-  wireSelect("recon-mode", RECON_MODE_INIT, (v) => { reconMode = v; });
+  wireSelect("recon-mode", reconMode, (v) => { reconMode = v; });
   wireSelect("recon-color", RECON_COLOR_INIT, (v) => { reconColor = v; });
 
   new ROSLIB.Topic({
