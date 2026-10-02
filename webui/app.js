@@ -114,7 +114,9 @@ const CAMERA_ERROR_BACKOFF_MS = 1500;
 // keep both cameras polling web_video_server at 2.5fps behind a hidden panel.
 // display:none is exactly the case offsetParent reports as null.
 function isFeedVisible(img) {
-  if (!img.classList.contains("stage-main") && !img.classList.contains("stage-pip")) return false;
+  // closest() so a feed nested inside the sensors view counts when that view
+  // is the stage's main element, same as a feed that carries the class itself.
+  if (!img.closest(".stage-main, .stage-pip")) return false;
   return img.offsetParent !== null;
 }
 
@@ -139,7 +141,7 @@ function markChaseMissing() {
   setStageMode(stageMode === "chase" ? "map" : stageMode);
 }
 
-function wireCameraStream(elId, topic) {
+function wireCameraStream(elId, topic, onFrame) {
   const img = document.getElementById(elId);
   const isChase = elId === "chase-stream";
   function tick() {
@@ -160,6 +162,7 @@ function wireCameraStream(elId, topic) {
         chaseAvailable = true;
       }
       img.src = probe.src;
+      if (onFrame) onFrame(img);
       setTimeout(tick, CAMERA_POLL_MS);
     };
     probe.onerror = () => {
@@ -203,6 +206,7 @@ const STAGE_LABELS = {
   head: "Head camera",
   // Updated live once /api/robots + /map arrive — see refreshMapStageLabel().
   map: "Map, trail & nav",
+  sensors: "Sensors · RGB + depth",
 };
 let fleetRobotIds = [ROBOT_ID]; // filled from /api/robots; drives the map label
 let mapMetaLabel = ""; // e.g. "219×326 · fused" from the /map handler
@@ -210,6 +214,7 @@ let mapMetaLabel = ""; // e.g. "219×326 · fused" from the /map handler
 const chaseEl = document.getElementById("chase-stream");
 const headEl = document.getElementById("camera-stream");
 const mapViewEl = document.getElementById("map-view");
+const sensorsViewEl = document.getElementById("sensors-view");
 const stageLabel = document.getElementById("stage-label");
 const pipHint = document.getElementById("pip-hint");
 const aimOverlay = document.getElementById("aim-overlay");
@@ -226,9 +231,11 @@ function setStageMode(mode) {
   if (!chaseAvailable && mode === "chase") mode = "head";
 
   stageMode = mode;
-  if (mode !== "map") lastCameraMode = mode;
+  // sensors, like map, is a detour: the camera button must return to the last
+  // real camera (chase/head), not to the sensors view.
+  if (mode !== "map" && mode !== "sensors") lastCameraMode = mode;
 
-  const main = { chase: chaseEl, head: headEl, map: mapViewEl }[mode];
+  const main = { chase: chaseEl, head: headEl, map: mapViewEl, sensors: sensorsViewEl }[mode];
   // Head-cam PiP intentionally removed: Isaac still renders that camera
   // regardless (RTAB-Map's actual SLAM input, not just a view — it can't be
   // turned off), so hiding it here doesn't reduce server-side load, but it
@@ -240,7 +247,7 @@ function setStageMode(mode) {
   // while picking a goal — unless this robot has no chase cam at all.
   const pip = mode === "map" && chaseAvailable ? chaseEl : null;
 
-  for (const el of [chaseEl, headEl, mapViewEl]) {
+  for (const el of [chaseEl, headEl, mapViewEl, sensorsViewEl]) {
     el.classList.toggle("stage-main", el === main);
     el.classList.toggle("stage-pip", el === pip);
   }
@@ -256,8 +263,10 @@ function setStageMode(mode) {
   aimOverlay.style.display = mode === "map" ? "none" : "";
 
   for (const btn of document.querySelectorAll("#stage-mode button")) {
-    btn.classList.toggle("active", (btn.dataset.stage === "map") === (mode === "map"));
+    const want = mode === "map" ? "map" : mode === "sensors" ? "sensors" : "camera";
+    btn.classList.toggle("active", btn.dataset.stage === want);
   }
+  if (mode === "sensors") drawFeatureOverlay();
   onStageResize();
 }
 
@@ -287,7 +296,8 @@ for (const el of [chaseEl, headEl]) {
 
 for (const btn of document.querySelectorAll("#stage-mode button")) {
   btn.addEventListener("click", () => {
-    setStageMode(btn.dataset.stage === "map" ? "map" : lastCameraMode);
+    const s = btn.dataset.stage;
+    setStageMode(s === "map" || s === "sensors" ? s : lastCameraMode);
   });
 }
 
@@ -297,7 +307,81 @@ setStageMode("chase");
 // markChaseMissing can race setStageMode's first paint, and the HTML default
 // (head as .stage-pip) would briefly poll a feed we intentionally hide.
 wireCameraStream("camera-stream", "camera/rgb");
+wireCameraStream("sensor-rgb", "camera/rgb", () => drawFeatureOverlay());
+wireCameraStream("sensor-depth", "camera/depth_color");
 wireCameraStream("chase-stream", "camera/chase/rgb");
+
+// -- feature overlay (real robot) ------------------------------------------
+// nodes/feature_overlay.py reduces RTAB-Map's odom_info to a few KB of JSON on
+// /<id>/odom_features: keypoints in rgb-image pixels, tagged detected (0),
+// matched against the local map (1) or inlier (2, what the pose is actually
+// computed from). We draw them on a canvas over the snapshot instead of asking
+// for an annotated image: that would be a second stream through
+// web_video_server, which is the component this dashboard works hardest to
+// keep from wedging. Keypoints arrive at the odometry rate (~2-4 Hz) against
+// ~2.5 fps snapshots, so the dots trail a fast pan slightly — expected.
+const FEATURE_COLORS = ["rgba(150,160,170,0.75)", "rgba(255,190,60,0.95)", "rgba(60,255,120,1)"];
+const featureCanvas = document.getElementById("feature-overlay");
+const featureTag = document.getElementById("feature-tag");
+const featureToggle = document.getElementById("feature-toggle-box");
+const sensorRgbEl = document.getElementById("sensor-rgb");
+let lastFeatures = null; // newest odom_features message
+let lastFeaturesAt = 0;
+
+function drawFeatureOverlay() {
+  const w = featureCanvas.clientWidth, h = featureCanvas.clientHeight;
+  if (!w || !h) return; // sensors view not on the stage
+  if (featureCanvas.width !== w) featureCanvas.width = w;
+  if (featureCanvas.height !== h) featureCanvas.height = h;
+  const ctx = featureCanvas.getContext("2d");
+  ctx.clearRect(0, 0, w, h);
+
+  const f = lastFeatures;
+  const fresh = f && Date.now() - lastFeaturesAt < 3000;
+  if (!f) {
+    featureTag.textContent = "RGB · no feature data (real robot only)";
+    return;
+  }
+  featureTag.textContent = !fresh
+    ? "RGB · features stale"
+    : f.lost
+      ? `RGB · odometry LOST (${f.features} features)`
+      : `RGB · ${f.features} features · ${f.inliers} inliers`;
+  if (!featureToggle.checked || !fresh) return;
+
+  // Invert object-fit: contain — the picture is centred and scaled to fit, and
+  // keypoints live in the picture's native pixel space.
+  const nw = f.w || sensorRgbEl.naturalWidth, nh = f.h || sensorRgbEl.naturalHeight;
+  if (!nw || !nh) return;
+  const k = Math.min(w / nw, h / nh);
+  const ox = (w - nw * k) / 2, oy = (h - nh * k) / 2;
+  for (const [x, y, size, state] of f.pts) {
+    ctx.strokeStyle = FEATURE_COLORS[state] || FEATURE_COLORS[0];
+    ctx.lineWidth = state === 2 ? 1.6 : 1;
+    ctx.beginPath();
+    ctx.arc(ox + x * k, oy + y * k, Math.max(2.5, Math.min(size, 24) * k * 0.5), 0, 2 * Math.PI);
+    ctx.stroke();
+  }
+}
+
+new ROSLIB.Topic({
+  ros,
+  name: `/${ROBOT_ID}/odom_features`,
+  messageType: "std_msgs/String",
+  reconnect_on_close: true,
+  throttle_rate: 250,
+  queue_length: 1,
+}).subscribe((msg) => {
+  try {
+    lastFeatures = JSON.parse(msg.data);
+    lastFeaturesAt = Date.now();
+    drawFeatureOverlay();
+  } catch (e) {
+    console.error("bad odom_features message", e);
+  }
+});
+featureToggle.addEventListener("change", drawFeatureOverlay);
+window.addEventListener("resize", drawFeatureOverlay);
 
 // -- camera aim (head pan/tilt) -------------------------------------------
 // Unlike cmd_vel, head_cmd is a POSITION target (see spawn_warehouse.py's
@@ -743,6 +827,85 @@ document.getElementById("explore-save-lib").addEventListener("click", async () =
     exploreStatusEl.textContent = "save failed — see console";
     console.error("map save failed", err);
   }
+});
+
+// -- clear / load a map ------------------------------------------------------
+// Same-origin POSTs for the same reason as save above: serve.py --control owns
+// the sourced-ROS subshell. Clear wipes the live graph; Load swaps RTAB-Map
+// onto a COPY of a library entry (the library file is never opened read-write).
+const mapLoadSelect = document.getElementById("map-load-select");
+
+async function refreshMapLibrary() {
+  try {
+    const res = await fetch("/api/maps");
+    const body = await res.json();
+    const keep = mapLoadSelect.value;
+    mapLoadSelect.innerHTML = "";
+    for (const m of body.maps || []) {
+      const o = document.createElement("option");
+      o.value = m.name;
+      // A grid-only save (db pending) can't be loaded into RTAB-Map.
+      o.textContent = m.db_state && m.db_state !== "complete" ? `${m.name} (grid only)` : m.name;
+      mapLoadSelect.appendChild(o);
+    }
+    if (!mapLoadSelect.options.length) {
+      const o = document.createElement("option");
+      o.textContent = "(no saved maps)";
+      o.value = "";
+      mapLoadSelect.appendChild(o);
+    }
+    if (keep) mapLoadSelect.value = keep;
+  } catch (err) {
+    console.error("failed to list maps", err);
+  }
+}
+refreshMapLibrary();
+mapLoadSelect.addEventListener("focus", refreshMapLibrary);
+// A save just added an entry; show it without making the user click around.
+document.getElementById("explore-save-lib").addEventListener("click", () => setTimeout(refreshMapLibrary, 4000));
+
+async function mapAction(path, payload, busyText, doneText) {
+  exploreMsgUntil = performance.now() + 60000;
+  exploreStatusEl.textContent = busyText;
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, robot_id: ROBOT_ID }),
+    });
+    const body = await res.json().catch(() => ({}));
+    exploreMsgUntil = performance.now() + 4000;
+    if (res.status === 503) exploreStatusEl.textContent = "console not running — can't reach the map services";
+    else if (!res.ok) {
+      exploreStatusEl.textContent = `failed: ${body.error || res.statusText}`;
+      console.error(path, body);
+    } else exploreStatusEl.textContent = doneText;
+    return res.ok;
+  } catch (err) {
+    exploreMsgUntil = performance.now() + 4000;
+    exploreStatusEl.textContent = "failed — see console";
+    console.error(path, err);
+    return false;
+  }
+}
+
+document.getElementById("map-clear").addEventListener("click", async () => {
+  if (!confirm("Clear the live map and restart odometry? Save it first if you want to keep it.")) return;
+  if (await mapAction("/api/map/clear", {}, "clearing map…", "map cleared ✓")) {
+    trail.length = 0;
+    lastPose = null;
+  }
+});
+
+document.getElementById("map-load").addEventListener("click", async () => {
+  const name = mapLoadSelect.value;
+  if (!name) {
+    exploreMsgUntil = performance.now() + 3000;
+    exploreStatusEl.textContent = "pick a saved map first";
+    return;
+  }
+  if (!confirm(`Load "${name}" into the running map? The current live map is replaced (save it first if needed).`)) return;
+  await mapAction("/api/map/load", { name }, `loading ${name}…`, `loaded ${name} ✓ — drive to localize`);
 });
 
 // -- map + robot trail ------------------------------------------------
