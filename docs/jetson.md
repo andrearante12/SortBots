@@ -115,14 +115,22 @@ so pages render on the CPU. Prefer viewing the 3D panel from another device.
 
 **3D reconstruction tab says "needs WebGL"** — with no GPU, headed Chromium
 gives up on WebGL entirely (headless doesn't, which makes it confusing to test).
-Force software WebGL (SwiftShader); verified 2026-10-01, `NOGL` → `OK WebGL 2.0`:
+Force software WebGL (SwiftShader) AND turn off GPU compositing; verified
+2026-10-02, `NOGL` → `OK WebGL 2.0`:
 
-    SNAP_REEXEC=0 chromium --use-gl=angle --use-angle=swiftshader \
-      --enable-unsafe-swiftshader --ignore-gpu-blocklist \
-      --app=http://localhost:8081/
+    SNAP_REEXEC=0 chromium --disable-gpu --enable-unsafe-swiftshader \
+      --ignore-gpu-blocklist --app=http://localhost:8081/
+
+`--disable-gpu` is not optional polish. With `--use-gl=angle --use-angle=
+swiftshader` instead (WebGL works, but the whole page is composited through
+SwiftShader) Chromium's GPU process ate ~175% CPU on this CPU-bound board; the
+page's main thread stalled for 2-4 s at a time and ticked ~3 times in 10 s, so
+the camera tiles ran ~1.4 fps and read as a badly lagging feed even though the
+camera, ROS and web_video_server were ~60 ms behind. With `--disable-gpu` the
+same page ticks at full rate (worst stall <60 ms) and WebGL still works.
 
 Fully quit the old window first, or the flags are ignored by the running
-instance. Expect a slow, CPU-bound 3D view.
+instance. Expect a slow, CPU-bound 3D view (it defaults to points here).
 
 ## What differs from sim, and where it's configured
 

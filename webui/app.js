@@ -96,11 +96,15 @@ ros.on("error", (e) => {
 // connections (~90% CPU spin, accepts TCP but never responds, needs SIGKILL —
 // observed on 4 instances within 3-20 min, with and without use_sim_time; see
 // nodes/web_video_watchdog.sh). Short /snapshot requests open and close
-// cleanly, sidestepping the stream-lifecycle bug entirely. ~2.5fps effective,
-// which is fine for a dashboard. Self-pacing: the next request only fires
+// cleanly, sidestepping the stream-lifecycle bug entirely. ~2.5fps effective
+// at the old 400 ms gap; 150 ms gives ~4-6fps when the browser keeps up (a
+// snapshot is ~50-200 ms server-side). That only helps a browser that isn't
+// CPU-starved — on the Jetson launch Chromium with --disable-gpu (docs/
+// jetson.md); SwiftShader-GL compositing starved it to ~1fps and multi-second
+// main-thread stalls, which looked exactly like a laggy camera. Self-pacing: the next request only fires
 // after the previous one completes, and errors just slow the loop down — so
 // this also self-heals across web_video_server restarts with no extra logic.
-const CAMERA_POLL_MS = 400;
+const CAMERA_POLL_MS = 150;
 const CAMERA_ERROR_BACKOFF_MS = 1500;
 
 // A feed that isn't on the stage (neither .stage-main nor .stage-pip) isn't
