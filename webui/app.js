@@ -228,7 +228,10 @@ let onStageResize = () => {};
 function setStageMode(mode) {
   // No chase product on this robot → never park the stage on a broken <img>.
   // Camera toggle uses head instead; map mode drops the PiP entirely.
-  if (!chaseAvailable && mode === "chase") mode = "head";
+  // On a robot with no chase cam (every real robot) the plain head view is a
+  // strict subset of the sensors view, which also carries the feature overlay
+  // and the depth tile — so the camera button lands there, not on a bare feed.
+  if (!chaseAvailable && (mode === "chase" || mode === "head")) mode = "sensors";
 
   stageMode = mode;
   // sensors, like map, is a detour: the camera button must return to the last
