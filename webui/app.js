@@ -2118,7 +2118,22 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
     return o;
   }
 
+  // An empty cloud is the "map was cleared" signal (nodes/recon_cloud_relay.py
+  // and recon_cloud_merge.py publish one on recon_reset). RTAB-Map itself
+  // publishes NOTHING for an empty map, so without this the last cloud stayed
+  // on screen forever after a clear.
+  function clearCloud() {
+    lastCloud = null;
+    if (voxelMesh) voxelMesh.visible = false;
+    if (cloudPoints) cloudPoints.visible = false;
+    didFitView = false;
+    lastFitRadius = 0;
+    infoEl.textContent = "map cleared — waiting for cloud…";
+    needsRender = true;
+  }
+
   function onCloud(msg) {
+    if (!msg.width || !msg.height) { clearCloud(); return; }
     // data may be a base64 string (default) or a plain byte array.
     const bytes = typeof msg.data === "string" ? b64ToBytes(msg.data)
                 : msg.data instanceof Uint8Array ? msg.data
@@ -2165,7 +2180,7 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
       if (z < min[2]) min[2] = z; if (z > max[2]) max[2] = z;
       k++;
     }
-    if (k === 0) { infoEl.textContent = "cloud empty"; return; }
+    if (k === 0) { clearCloud(); return; }
 
     // k may be < n if points were skipped — keep only the filled part.
     lastCloud = {

@@ -30,6 +30,8 @@ def lib(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(sm, "_ros_service_call",
                         lambda svc, typ, req, **kw: calls.append((svc, typ, req)) or "response")
+    monkeypatch.setattr(sm, "_publish_recon_reset",
+                        lambda rid: calls.append((f"/{rid}/recon_reset", "pub", "")))
     return tmp_path, calls
 
 
@@ -53,7 +55,8 @@ def test_clear_resets_graph_then_odometry(lib):
     _, calls = lib
     sm.clear_map_blocking("robot_0")
     assert [c[0] for c in calls] == ["/robot_0/rtabmap/reset",
-                                     "/robot_0/rgbd_odometry/reset_odom"]
+                                     "/robot_0/rgbd_odometry/reset_odom",
+                                     "/robot_0/recon_reset"]
 
 
 @pytest.mark.parametrize("rid", ["robot 0", "robot_0; rm -rf /", ""])
@@ -74,8 +77,9 @@ def test_load_copies_never_points_at_library_file(lib):
     assert src.read_bytes() == before
     # odometry reset strictly before the db swap, and the swap targets the copy
     assert [c[0] for c in calls] == ["/robot_0/rgbd_odometry/reset_odom",
+                                     "/robot_0/recon_reset",
                                      "/robot_0/rtabmap/load_database"]
-    assert str(dst) in calls[1][2] and "clear: false" in calls[1][2]
+    assert str(dst) in calls[2][2] and "clear: false" in calls[2][2]
 
 
 @pytest.mark.parametrize("name", ["../etc", "Bad Name", "a;b", ""])

@@ -549,6 +549,29 @@ def _ros_service_call(service: str, srv_type: str, request: str, *,
     return out
 
 
+def _publish_recon_reset(rid: str) -> None:
+    """Tell recon_cloud_relay/merge to drop their cached cloud (see their docs).
+
+    RTAB-Map publishes nothing for an emptied map, so the dashboard's 3D view
+    would otherwise keep the pre-clear cloud indefinitely.
+    """
+    cmd = (
+        f"source {shlex.quote(ROS_SETUP)}; "
+        f"export PATH={shlex.quote(SYSTEM_PATH)}:\"$PATH\"; "
+        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; "
+        f"exec ros2 topic pub --once -w 1 /{rid}/recon_reset std_msgs/msg/String "
+        f"{shlex.quote('{data: clear}')}"
+    )
+    try:
+        proc = subprocess.run(["bash", "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
+                              capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired as e:
+        raise maps_lib.MapError("recon_reset timed out (is recon_cloud_relay up?)") from e
+    if proc.returncode != 0:
+        raise maps_lib.MapError(
+            f"recon_reset failed: {(proc.stderr or proc.stdout).strip()[-120:]}")
+
+
 def _check_robot_id(robot_id) -> str:
     if not re.match(r"^[A-Za-z0-9_]+$", str(robot_id)):
         raise maps_lib.MapError(f"robot_id {robot_id!r} is not a bare identifier")
@@ -566,6 +589,7 @@ def clear_map_blocking(robot_id: str = "robot_0") -> dict:
     rid = _check_robot_id(robot_id)
     _ros_service_call(f"/{rid}/rtabmap/reset", "std_srvs/srv/Empty", "{}")
     _ros_service_call(f"/{rid}/rgbd_odometry/reset_odom", "std_srvs/srv/Empty", "{}")
+    _publish_recon_reset(rid)
     return {"cleared": True, "robot_id": rid}
 
 
@@ -596,6 +620,7 @@ def load_map_blocking(name: str, robot_id: str = "robot_0") -> dict:
     maps_lib.copy_db(src, dst, vacuum=False)
     # Odometry first, so the new graph is not seeded with a stale pose.
     _ros_service_call(f"/{rid}/rgbd_odometry/reset_odom", "std_srvs/srv/Empty", "{}")
+    _publish_recon_reset(rid)  # drop the old cloud now; the loaded map's replaces it
     _ros_service_call(
         f"/{rid}/rtabmap/load_database", "rtabmap_msgs/srv/LoadDatabase",
         f"{{database_path: '{dst}', clear: false}}", timeout=180.0)
