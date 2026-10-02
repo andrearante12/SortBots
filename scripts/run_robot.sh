@@ -48,7 +48,8 @@ PIPELINE_PATTERNS=(realsense2_camera_node rtabmap_slam rgbd_odometry rtabmap_viz
                    task_manager.py scripted_pick.py explorer.py \
                    rtabmap_cloud_pump.py recon_cloud_relay.py \
                    map_merge.py static_transform_publisher \
-                   fleet_radio.py dynamic_obstacle_filter.py recon_cloud_merge.py)
+                   fleet_radio.py dynamic_obstacle_filter.py recon_cloud_merge.py \
+                   depth_colorizer.py feature_overlay.py)
 KEEP_CONSOLE=false
 
 stop_pipeline() {

@@ -160,6 +160,28 @@ def _make_per_robot_actions(
                 launch_arguments={"robot_id": rid}.items(),
             ))
 
+        # Dashboard camera tiles: a colourised depth view (any platform, it
+        # only needs camera/depth) and, on real hardware, RTAB-Map's tracked
+        # keypoints as JSON for the canvas overlay (sim never runs
+        # rgbd_odometry, so there is no odom_info to reduce).
+        actions.append(ExecuteProcess(
+            cmd=[
+                "python3",
+                os.path.join(REPO_ROOT, "nodes", "depth_colorizer.py"),
+                "--robot-id", rid,
+            ],
+            output="screen",
+        ))
+        if platform == "real":
+            actions.append(ExecuteProcess(
+                cmd=[
+                    "python3",
+                    os.path.join(REPO_ROOT, "nodes", "feature_overlay.py"),
+                    "--robot-id", rid,
+                ],
+                output="screen",
+            ))
+
         # Before RTAB-Map: strip movers from depth so SLAM never sees them.
         actions.append(ExecuteProcess(
             cmd=[
