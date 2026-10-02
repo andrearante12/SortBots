@@ -150,3 +150,50 @@ convenient; Phase 5 waits on hardware.
 3. D435**i** swap vs MPU6050: the D435i's IMU is factory-calibrated to the camera,
    which removes a whole extrinsics problem. Is the swap an option?
 4. Where should real bags live (size: roughly 1–2 GB per minute at 848×480@30)?
+
+## 2026-10-02: speed/density tuning pass and cuVSLAM spike
+
+**Measured on the Orin Nano (15 W `nvpmodel` mode — see "Not done" below), handheld, before → after:**
+
+| | before | after |
+|---|---|---|
+| `dynamic_obstacle_filter.py` | ~70–100% of a core, `depth_static` ~8 Hz | not started on `platform: real`; SLAM reads raw `camera/depth` |
+| `/robot_0/odom` | ~3.1 Hz | ~5.2 Hz |
+| rgbd_odometry features / inliers | ~800 / ~140 | ~410 / ~80 (`Odom/ImageDecimation 2`, `Vis/MaxFeatures 600`) |
+| `rtabmap_cloud_pump` | `publish_map` every 3 s, calls could stack | every 6 s on real, one in flight at a time |
+| browser 3D view on SwiftShader | voxel cubes (12 tris each) | points by default when the renderer is software |
+
+What changed: `launch/sortbots_rtabmap_robot.launch.py` (`REAL_GRID_ARGS`, `depth_filter`, odom
+params), `launch/sortbots_bringup.launch.py` (filter skipped on real), `nodes/rtabmap_cloud_pump.py`,
+`webui/app.js`. Real-only: none of it touches the sim path.
+
+Density side (`RGBD/LinearUpdate`/`AngularUpdate` 0.05, `Rtabmap/DetectionRate` 2,
+`Grid/RangeMax` 4.0) is applied but **not yet measured**: it needs a walk with the camera. Compare
+`#recon-info` point count after the same 60 s walk against a `git stash`ed launch file.
+Keypoints from `odom_info` are still full-resolution under `Odom/ImageDecimation 2` (x reached
+808 of 848), so the overlay needs no scaling.
+
+New dashboard pieces: `nodes/depth_colorizer.py` (`camera/depth_color`) and
+`nodes/feature_overlay.py` (`odom_features` JSON) back the **sensors** stage view. Both subscribe
+to their expensive input only while watched (rclpy deserialises the whole `OdomInfo` / every
+30 Hz depth frame before any rate gate; measured 35% / 15% of a core when unconditional).
+
+**cuVSLAM go/no-go (spike, web research + this machine, no code):**
+
+- This Jetson is JetPack 6.x (L4T R36.4.7), CUDA 12.6 present, host Python 3.10; the container is
+  Jazzy / Python 3.12.
+- NVIDIA's standalone **PyCuVSLAM** (`github.com/NVlabs/pycuvslam`) lists Jetson aarch64, JetPack
+  6.1/6.2, Python 3.10, CUDA 12.6, with mono / stereo / **RGB-D** / IMU modes. That fits this board
+  but NOT the Jazzy container's Python 3.12, so it would run on the host (or its own container) and
+  hand poses to the ROS side over a local socket, not DDS — no host ROS (CLAUDE.md invariant).
+- Isaac ROS `isaac_ros_visual_slam` is Humble-based; a Jazzy build was not found.
+- **Verdict: conditional GO, as a separate follow-up** (~2–3 d): `nodes/cuvslam_bridge` on the host
+  using PyCuVSLAM RGB-D from the D435 (it can take colour + depth, so the IR/emitter interleave in
+  Phase 4 step 3 may be avoidable), publishing pose JSON to a container node that emits
+  `/<id>/odom` + TF; `odometry_source: cuvslam | rtabmap`. Go only if a recorded handheld loop
+  shows ≥ 15 Hz and fewer lost frames than the 5 Hz CPU odometry. Two cameras readers can't share
+  the D435, so the host process would own the camera and republish frames — that's the real cost.
+
+**Not done (needs sudo / a person):** `nvpmodel -q` reports **15W**; `docs/jetson.md` says
+MAXN SUPER (`sudo nvpmodel -m 2 && sudo jetson_clocks`) because this stack is CPU-bound. That is
+likely the biggest single remaining lever and was not changed (needs sudo).
