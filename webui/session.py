@@ -518,6 +518,90 @@ def save_map_blocking(name: str, *, robot_id: str = "robot_0",
     return manifest
 
 
+def _ros_service_call(service: str, srv_type: str, request: str, *,
+                      timeout: float = 60.0) -> str:
+    """`ros2 service call` in a dedicated sourced subshell; returns its stdout.
+
+    Same shape as save_map_blocking's shell (system ROS 2 re-sourced because
+    clean_env() strips it, SYSTEM_PATH prepended so ros2 doesn't get conda's
+    python3). Callers pass only strings they built from validated pieces.
+    """
+    cmd = (
+        f"source {shlex.quote(ROS_SETUP)}; "
+        f"export PATH={shlex.quote(SYSTEM_PATH)}:\"$PATH\"; "
+        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; "
+        f"exec ros2 service call {shlex.quote(service)} {shlex.quote(srv_type)} "
+        f"{shlex.quote(request)}"
+    )
+    try:
+        proc = subprocess.run(
+            ["bash", "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise maps_lib.MapError(f"{service} timed out after {timeout:.0f}s") from e
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0 or "response" not in out.lower():
+        tail = out.strip().splitlines()
+        raise maps_lib.MapError(
+            f"{service} failed: {tail[-1] if tail else 'no output'} "
+            f"(is the stack up?)")
+    return out
+
+
+def _check_robot_id(robot_id) -> str:
+    if not re.match(r"^[A-Za-z0-9_]+$", str(robot_id)):
+        raise maps_lib.MapError(f"robot_id {robot_id!r} is not a bare identifier")
+    return str(robot_id)
+
+
+def clear_map_blocking(robot_id: str = "robot_0") -> dict:
+    """Wipe the live RTAB-Map graph and restart odometry from the origin.
+
+    rtabmap/reset drops the working memory (and the on-disk db it is writing);
+    reset_odom is paired with it because visual odometry keeps its own local
+    map and would otherwise keep reporting a pose in the OLD map's frame, so
+    the fresh graph would start at wherever the robot had drifted to.
+    """
+    rid = _check_robot_id(robot_id)
+    _ros_service_call(f"/{rid}/rtabmap/reset", "std_srvs/srv/Empty", "{}")
+    _ros_service_call(f"/{rid}/rgbd_odometry/reset_odom", "std_srvs/srv/Empty", "{}")
+    return {"cleared": True, "robot_id": rid}
+
+
+def load_map_blocking(name: str, robot_id: str = "robot_0") -> dict:
+    """Swap the running RTAB-Map onto a COPY of a library entry's database.
+
+    Never the library file itself: RTAB-Map opens its sqlite read-write even
+    when it is not learning, so pointing it at maps/<name>/map.db would dirty
+    a tracked git-lfs object (the same reason run_demo.sh copies on use — see
+    scripts/_map_db.sh). The copy lands next to the live db in ~/.ros, under a
+    name no scenario run uses, and is replaced on every load.
+    """
+    if not maps_lib.NAME_RX.match(str(name)):
+        raise maps_lib.MapError(
+            f"map name {name!r} does not match {maps_lib.NAME_RX.pattern}")
+    rid = _check_robot_id(robot_id)
+    manifest = maps_lib.read_manifest(name)
+    src = maps_lib.db_path(name, manifest)
+    if not src.exists():
+        raise maps_lib.MapError(f"map {name!r} has no pose-graph db yet (grid-only save)")
+    if maps_lib.is_lfs_pointer(src):
+        raise maps_lib.MapError(
+            f"{src} is an unfetched git-lfs pointer — run `git lfs pull` first")
+    dst = Path.home() / ".ros" / f"sortbots_{rid}_loaded.db"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        dst.unlink()
+    maps_lib.copy_db(src, dst, vacuum=False)
+    # Odometry first, so the new graph is not seeded with a stale pose.
+    _ros_service_call(f"/{rid}/rgbd_odometry/reset_odom", "std_srvs/srv/Empty", "{}")
+    _ros_service_call(
+        f"/{rid}/rtabmap/load_database", "rtabmap_msgs/srv/LoadDatabase",
+        f"{{database_path: '{dst}', clear: false}}", timeout=180.0)
+    return {"loaded": name, "robot_id": rid, "db": str(dst)}
+
+
 _PIPELINE_PATTERNS = ("spawn_warehouse.py", "sortbots_bringup.launch.py")
 
 

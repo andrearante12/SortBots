@@ -99,6 +99,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_control(lambda: self._serve_json(SESSIONS.stop()))
         elif route == "/api/map/save":
             self._with_control(self._save_map)
+        elif route == "/api/map/clear":
+            self._with_control(self._clear_map)
+        elif route == "/api/map/load":
+            self._with_control(self._load_map)
         else:
             self._serve_error(404, f"no such endpoint: {route}")
 
@@ -220,6 +224,35 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_error(500, f"failed to save map: {exc}")
             return
         self._serve_json(manifest)
+
+    def _clear_map(self):
+        """Wipe the live map (RTAB-Map reset + odometry reset)."""
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            self._serve_json(session_mod.clear_map_blocking(body.get("robot_id") or "robot_0"))
+        except maps_lib.MapError as exc:
+            self._serve_error(400, str(exc))
+        except OSError as exc:
+            self._serve_error(500, f"failed to clear map: {exc}")
+
+    def _load_map(self):
+        """Load a library entry into the running RTAB-Map (from a copy)."""
+        body = self._read_json_body()
+        if body is None:
+            return
+        name = body.get("name")
+        if not isinstance(name, str):
+            self._serve_error(400, "name must be a string")
+            return
+        try:
+            self._serve_json(session_mod.load_map_blocking(
+                name, body.get("robot_id") or "robot_0"))
+        except maps_lib.MapError as exc:
+            self._serve_error(400, str(exc))
+        except OSError as exc:
+            self._serve_error(500, f"failed to load map: {exc}")
 
     # -- plumbing ----------------------------------------------------------
 
