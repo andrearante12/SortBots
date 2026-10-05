@@ -5,7 +5,7 @@
 # CI runs the exact same targets (see .github/workflows/ci.yml).
 PYTHON ?= /usr/bin/python3   # never conda's python3 — it has no pytest and leads PATH
 
-.PHONY: ci test smoke deps
+.PHONY: ci test smoke deps cad-setup cad cad-test cad-open
 
 deps:
 	$(PYTHON) -m pip install -r requirements-dev.txt
@@ -21,3 +21,19 @@ smoke:
 	$(PYTHON) webui/session.py --print-argv explore_fresh --set headless=true
 
 ci: test smoke
+
+# ---- CAD (hardware/) — its own venv; not part of `ci`, see hardware/README.md
+CAD_PY := hardware/.venv/bin/python
+CAD_DIR := hardware/magnet_effector
+
+cad-setup:
+	hardware/setup_cad.sh
+
+cad:
+	$(CAD_PY) $(CAD_DIR)/build.py
+
+cad-test:
+	$(CAD_PY) -m pytest tests/cad_test.py
+
+cad-open: cad
+	freecad $(CAD_DIR)/build/fitcheck.step >/dev/null 2>&1 &
