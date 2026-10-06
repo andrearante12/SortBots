@@ -71,6 +71,10 @@ RUN_ROBOT = REPO_ROOT / "scripts" / "run_robot.sh"
 RECORD_BAG = REPO_ROOT / "scripts" / "record_explore_bag.sh"
 MAPS_SH = REPO_ROOT / "scripts" / "maps.sh"
 ROS_SETUP = "/opt/ros/jazzy/setup.bash"
+# Stands in for `bash` wherever ROS gets sourced: plain bash with ROS on the
+# host, the same bash inside the jazzy distrobox without it (Ubuntu 26.04).
+# It relays SIGINT into the box, which _stop_bag's killpg depends on.
+ROS_BASH = str(REPO_ROOT / "scripts" / "ros_bash.sh")
 
 # Same prepend run_demo.sh and sortbots_webui.launch.py use: conda's init hook
 # puts its bin dirs at the front of PATH even after `conda deactivate`, and
@@ -817,7 +821,7 @@ def save_map_blocking(name: str, *, robot_id: str = "robot_0",
     )
     try:
         proc = subprocess.run(
-            ["bash", "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
+            [ROS_BASH, "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired as e:
@@ -1373,7 +1377,7 @@ class SessionManager:
         log_fh = open(Path(session["dir"]) / "bag.log", "wb")
         try:
             self._bag_proc = subprocess.Popen(
-                ["bash", "-c", cmd], cwd=str(REPO_ROOT), env=env,
+                [ROS_BASH, "-c", cmd], cwd=str(REPO_ROOT), env=env,
                 stdout=log_fh, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, start_new_session=True,
             )

@@ -79,6 +79,9 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROS_SETUP="/opt/ros/jazzy/setup.bash"
+# `bash`, or the same bash inside the jazzy distrobox on hosts without ROS 2
+# (Ubuntu 26.04) — see the header of scripts/ros_bash.sh.
+ROS_BASH="$SCRIPT_DIR/ros_bash.sh"
 SIM_LOG="/tmp/sortbots_demo_sim.log"
 SIM_RESULT="/tmp/isaac_spawn_warehouse_result.txt"
 BRINGUP_LOG="/tmp/sortbots_demo_bringup.log"
@@ -331,7 +334,7 @@ echo "[run_demo] launching RTAB-Map + Nav2 + web dashboard + task manager..."
 # so the bringup must NOT start a second one — two rosbridges would fight over
 # port 9090 and the loser dies silently.
 WEBUI=true; [[ "$KEEP_CONSOLE" == "true" ]] && WEBUI=false
-setsid bash -c "source '$ROS_SETUP'; \
+setsid "$ROS_BASH" -c "source '$ROS_SETUP'; \
   export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
   export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
@@ -357,12 +360,12 @@ TELEOP_CMD="source '$ROS_SETUP'; \
 if [[ $TELEOP -eq 1 ]]; then
   if command -v gnome-terminal >/dev/null 2>&1; then
     gnome-terminal --title="SortBots WASD teleop" -- \
-      bash -c "$TELEOP_CMD; echo; echo 'teleop exited — press Enter to close'; read" \
+      "$ROS_BASH" -c "$TELEOP_CMD; echo; echo 'teleop exited — press Enter to close'; read" \
       >/dev/null 2>&1 &
     echo "[run_demo] opened a WASD teleop window."
   else
     echo "[run_demo] no gnome-terminal; drive from a new terminal with:"
-    echo "    source $ROS_SETUP && python3 $REPO_ROOT/scripts/wasd_teleop.py --robot-id $ROBOT_ID"
+    echo "    $ROS_BASH -c \"source $ROS_SETUP && python3 $REPO_ROOT/scripts/wasd_teleop.py --robot-id $ROBOT_ID\""
   fi
 fi
 
