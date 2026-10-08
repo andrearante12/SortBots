@@ -599,7 +599,7 @@ def describe_config(cfg: dict, platform: str = "sim") -> str:
     bits.append(where if full["map"] == "new"
                 else f"{where} ({'read-only' if full['mode'] == 'readonly' else 'extend'})")
     if platform == "sim":
-        bits.append("explorer on" if _as_bool(full["explore"]) else "explorer off")
+        bits.append("exploring from start" if _as_bool(full["explore"]) else "explorer idle")
     bits.append({"map": "map's waypoints", "keep": "current waypoints",
                  "none": "no waypoints"}[full["waypoints"]])
     return " · ".join(bits)

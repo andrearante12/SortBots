@@ -203,7 +203,7 @@ way the console — and your open page — stays up.
 | Map | new (empty) · working map (`~/.ros`) · a saved map from `maps/` | `--map` |
 | Mode (not for a new map) | extend (keep mapping) · read-only (localize) | `--resume` / `--localize` |
 | Robots | 1..roster size | `--robots` |
-| Exploration | on/off | `--explore` |
+| Start exploring immediately | on/off — the explorer always runs; off = it waits for the Explore button / X+click | `--explore` (autostart) |
 | Waypoints | from map · keep current · start empty | session-side, see below |
 | Advanced | headless, chase cam (+count), teleop, record bag | the matching flags |
 
