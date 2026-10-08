@@ -18,6 +18,36 @@ const ROSBRIDGE_HOST = window.location.hostname || "localhost";
 const ROSBRIDGE_PORT = 9090;
 const VIDEO_PORT = 8080;
 const MAX_TRAIL_POINTS = 3000;
+// A step longer than this between consecutive pose samples is not driving
+// (0.5 m/s top speed against ~60 Hz /tf): it's a respawn or a relocalization
+// snapping map -> odom. The trail breaks there instead of joining the two
+// with a straight line — observed 2026-10-08, a tab left open across sim
+// sessions drew a "path" from the old run's last pose diagonally through a
+// rack to the new spawn, which read exactly like a stale Nav2 plan.
+const TRAIL_JUMP_M = 1.0;
+
+// Append a pose to a trail; null entries are segment breaks.
+function extendTrail(trail, x, y) {
+  const last = trail[trail.length - 1];
+  if (last && Math.hypot(x - last[0], y - last[1]) <= 0.02) return;
+  if (last && Math.hypot(x - last[0], y - last[1]) > TRAIL_JUMP_M) trail.push(null);
+  trail.push([x, y]);
+  while (trail.length > MAX_TRAIL_POINTS || trail[0] === null) trail.shift();
+}
+
+// Stroke a trail as one path, lifting the pen at each null break.
+function strokeTrail(trail) {
+  ctx.beginPath();
+  let pen = false;
+  for (const p of trail) {
+    if (!p) { pen = false; continue; }
+    const [px, py] = worldToPixel(p[0], p[1]);
+    if (pen) ctx.lineTo(px, py);
+    else ctx.moveTo(px, py);
+    pen = true;
+  }
+  ctx.stroke();
+}
 
 document.getElementById("page-title").textContent = `SortBots — ${ROBOT_ID}`;
 document.title = `SortBots — ${ROBOT_ID}`;
@@ -1420,15 +1450,21 @@ new ROSLIB.Topic({
   const yaw = typeof pose.yaw === "number" ? pose.yaw : 0;
   state.lastPose = { x, y, yaw };
   state.statusAt = Date.now();
-  const last = state.trail[state.trail.length - 1];
-  if (!last || Math.hypot(x - last[0], y - last[1]) > 0.02) {
-    state.trail.push([x, y]);
-    if (state.trail.length > MAX_TRAIL_POINTS) state.trail.shift();
-  }
+  extendTrail(state.trail, x, y);
 });
 
+let lastTfStamp = 0; // seconds; sim time in sim
 function onTfMessage(msg) {
   for (const tr of msg.transforms || []) {
+    // Time going BACKWARDS means a new sim session (sim time restarts at 0),
+    // so everything the previous run left on the map is in the past. A small
+    // tolerance absorbs out-of-order /tf between publishers.
+    const st = tr.header.stamp ? tr.header.stamp.sec + tr.header.stamp.nanosec * 1e-9 : 0;
+    if (st && st < lastTfStamp - 5) {
+      trail.length = 0;
+      for (const p of peerRobots.values()) p.trail.length = 0;
+    }
+    if (st) lastTfStamp = st < lastTfStamp - 5 ? st : Math.max(lastTfStamp, st);
     tfTree.set(normFrame(tr.child_frame_id), {
       parent: normFrame(tr.header.frame_id),
       t: tr.transform.translation,
@@ -1443,11 +1479,7 @@ function onTfMessage(msg) {
     // Only extend the trail on real movement — /tf arrives at ~60 Hz and a
     // stationary robot would otherwise burn through MAX_TRAIL_POINTS standing
     // still, silently truncating the history that's actually interesting.
-    const last = trail[trail.length - 1];
-    if (!last || Math.hypot(x - last[0], y - last[1]) > 0.02) {
-      trail.push([x, y]);
-      if (trail.length > MAX_TRAIL_POINTS) trail.shift();
-    }
+    extendTrail(trail, x, y);
   }
   // Drop stale peer status so markers vanish if radio goes quiet.
   const now = Date.now();
@@ -1552,13 +1584,7 @@ function drawFrame() {
   if (trail.length > 1) {
     ctx.strokeStyle = "#2dd4ff";
     ctx.lineWidth = Math.max(1, 0.05  * view.scale);
-    ctx.beginPath();
-    trail.forEach(([x, y], i) => {
-      const [px, py] = worldToPixel(x, y);
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    });
-    ctx.stroke();
+    strokeTrail(trail);
   }
 
   // Blacklisted areas: where the explorer has given up after failed goals.
@@ -1704,13 +1730,7 @@ function drawFrame() {
     if (state.trail.length > 1) {
       ctx.strokeStyle = state.color.trail;
       ctx.lineWidth = Math.max(1, 0.05  * view.scale);
-      ctx.beginPath();
-      state.trail.forEach(([x, y], i) => {
-        const [px, py] = worldToPixel(x, y);
-        if (i === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
-      });
-      ctx.stroke();
+      strokeTrail(state.trail);
     }
 
     if (showBlacklist) {
