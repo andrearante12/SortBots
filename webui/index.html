@@ -186,14 +186,30 @@
     margin-bottom: 6px; font-size: 0.72rem; color: #9aa;
   }
   #map-bar label { display: flex; align-items: center; gap: 4px; cursor: pointer; flex: none; }
-  #map-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #map-keys { display: flex; gap: 14px; overflow: hidden; white-space: nowrap; }
+  #map-keys > span { opacity: 0.75; transition: color 0.1s, opacity 0.1s; }
+  #map-keys > span.armed { opacity: 1; color: #2d5; }
+  #map-keys .dim { color: #667; }
+  #map-keys kbd {
+    font: 600 0.68rem ui-monospace, monospace; padding: 0 4px; border-radius: 3px;
+    border: 1px solid #3a4048; background: #14161a; color: #cdd;
+  }
+  /* Keyboard-less devices only (see #map-tool's comment in the markup). */
+  #map-tool { display: none; margin-left: 0; }
+  @media (hover: none) { #map-tool { display: flex; } #map-keys { display: none; } }
+  #map-canvas.tool-steer { cursor: cell; }
+  #map-canvas.tool-waypoint { cursor: copy; }
   /* Bottom-RIGHT: the drive pad owns bottom-left, and the aim pad (bottom-right)
      is hidden in map mode, so this corner is free. */
-  #goal-status {
-    position: absolute; right: 12px; bottom: 12px; z-index: 10;
-    font-family: monospace; font-size: 0.75rem; color: #fb7;
-    background: rgba(20,22,26,0.6); padding: 3px 8px; border-radius: 4px;
+  #map-tracker {
+    position: absolute; right: 12px; bottom: 12px; z-index: 10; max-width: 46%;
+    font-family: monospace; font-size: 0.74rem; color: #cdd; line-height: 1.5;
+    background: rgba(20,22,26,0.72); padding: 4px 9px; border-radius: 4px;
   }
+  #map-tracker > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .trk-k { display: inline-block; width: 7ch; color: #778; }
+  #trk-nav.ok { color: #2d5; } #trk-nav.bad { color: #f77; } #trk-nav.busy { color: #fb7; }
+  #goal-status { color: #9aa; }
   #goal-status:empty { display: none; }
 
   /* -- overlay control pads ---------------------------------------------- */
@@ -481,7 +497,6 @@
     #aim-pad { grid-template-columns: repeat(3, 36px); grid-template-rows: repeat(3, 36px); }
     #recon-panel { min-height: 220px; }
     #map-bar { padding-right: 26%; }
-    #map-hint { display: none; }  /* the title tooltip still has the full text */
     /* Saving to the library is a deliberate, named action that belongs on a
        real keyboard; scripts/maps.sh save does the same from a terminal. */
     #map-save-open, #map-save-row { display: none; }
@@ -546,26 +561,32 @@
         <label><input type="checkbox" id="costmap-toggle" checked /> costmap</label>
         <label title="Show where the explorer has written territory off after failed goals. Dashed = will expire; solid = permanent (hit blacklist_permanent_strikes). The number is the strike count."><input
               type="checkbox" id="blacklist-toggle" /> blacklist</label>
-        <!-- What a map click MEANS. "nav goal" is the original behaviour: a
-             direct navigate_to_pose, which the explorer preempts within a
-             second while it's running. "steer" publishes an explore_hint
-             instead, biasing frontier scoring toward the click without ever
-             pausing exploration — see nodes/explorer.py's _on_hint. -->
-        <div id="map-mode" class="segmented">
-          <button type="button" data-mapmode="goal" class="active"
-                  title="Drag sets a Nav2 goal directly (press = position, drag = heading). Overrides any active task — but while the explorer is running it will preempt this goal within about a second.">nav goal</button>
-          <button type="button" data-mapmode="steer"
-                  title="Click to send exploration to that area — it preempts the current goal and works that region until it's mapped. Shift-click to QUEUE an area instead, to be visited after the current one. Not a goal: the explorer still picks its own frontiers, so an unreachable click can't strand it.">steer</button>
-          <button type="button" data-mapmode="waypoint"
-                  title="Place a named waypoint (press = position, drag = heading). Click an existing waypoint to delete it. Waypoints show up in the Navigate panel.">waypoint</button>
-        </div>
-        <span id="map-hint"
-              title="Drag on the map to set a Nav2 goal: press sets the position, drag sets the heading. This overrides any task the task_manager is currently navigating — Nav2 always takes the newest goal.">
-          Drag to set a Nav2 goal (press = position, drag = heading) — overrides any active task.
+        <!-- What a map click MEANS is chosen per click by a held key, not a
+             persistent mode: drag = Nav2 goal, X + click = steer exploration
+             (explore_hint, never pauses the explorer — see nodes/explorer.py's
+             _on_hint), F + drag = place a waypoint. A sticky mode survived
+             reloads and silently turned steer clicks into goals that fought
+             the explorer; a held key can't outlive the click. -->
+        <span id="map-keys">
+          <span data-tool="goal"><b>drag</b> nav goal</span>
+          <span data-tool="steer"><kbd>X</kbd>+click explore here <span class="dim">(+shift: queue)</span></span>
+          <span data-tool="waypoint"><kbd>F</kbd>+drag waypoint <span class="dim">(click pin: delete)</span></span>
         </span>
+        <!-- Touch screens have no keys to hold: a one-shot tool picker that
+             drops back to "goal" after a single use. -->
+        <div id="map-tool" class="segmented">
+          <button type="button" data-tool="steer">explore</button>
+          <button type="button" data-tool="waypoint">waypoint</button>
+        </div>
       </div>
       <canvas id="map-canvas"></canvas>
-      <span id="goal-status"></span>
+      <!-- Status tracker: what the robot is doing, what exploration is doing,
+           and the last thing a map click did. -->
+      <div id="map-tracker">
+        <div><span class="trk-k">nav</span> <span id="trk-nav">idle</span></div>
+        <div><span class="trk-k">explore</span> <span id="trk-explore">not running</span></div>
+        <div id="goal-status"></div>
+      </div>
     </div>
 
     <div class="pad-overlay" id="drive-overlay">

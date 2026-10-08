@@ -798,6 +798,7 @@ new ROSLIB.Topic({
   lastExploreStatusAt = performance.now();
 });
 
+const trkExplore = document.getElementById("trk-explore");
 function updateExploreStatus() {
   const exploring = isExploring();
   exploreToggle.textContent = exploring ? "Stop exploring" : "Explore";
@@ -806,6 +807,7 @@ function updateExploreStatus() {
   const now = performance.now();
   if (!lastExploreStatus || now - lastExploreStatusAt > 6000) {
     exploreStatusEl.textContent = "explorer: not running";
+    trkExplore.textContent = "not running";
     return;
   }
   const s = lastExploreStatus;
@@ -834,6 +836,13 @@ function updateExploreStatus() {
     : "";
   exploreStatusEl.textContent =
     `explorer: ${s.state}${goal}${cov} · blacklisted ${s.blacklisted}${steer}`;
+  // The tracker's short form: state, coverage, and where it's being steered.
+  trkExplore.textContent = [
+    s.state,
+    s.coverage_pct != null ? `${s.coverage_pct}%` : null,
+    s.steer_hint ? `→ (${s.steer_hint.x.toFixed(1)}, ${s.steer_hint.y.toFixed(1)})` +
+      (queued ? ` +${queued}` : "") : null,
+  ].filter(Boolean).join(" · ");
 }
 setInterval(updateExploreStatus, 500);
 
@@ -1910,6 +1919,7 @@ function sendActionGoal(action, actionType, args, label) {
 function sendNavGoal(x, y, yaw, label) {
   sendActionGoal(`/${ROBOT_ID}/navigate_to_pose`, "nav2_msgs/action/NavigateToPose",
                  { pose: mapPose(x, y, yaw) }, label || `(${x.toFixed(1)}, ${y.toFixed(1)})`);
+  setNavStatus(`navigating ${activeNav.label}…`, "busy");
   const stoppedExplorer = stopExplorerForManualNav();
   // Stop the explorer first, exactly as task_manager.py does before it
   // dispatches (see its _on_dispatch). navigate_to_pose is a SINGLE-GOAL
@@ -1934,39 +1944,57 @@ function stopExplorerForManualNav() {
   return true;
 }
 
-// What a map click means: "goal" (direct navigate_to_pose, the original
-// behaviour) or "steer" (an explore_hint that biases the explorer's frontier
-// scoring). They are genuinely different operations, not two ways to do one
-// thing: a nav goal competes with the explorer for the single-goal action
-// server and loses within about a second, whereas a hint never interrupts
+// What a map click means: "goal" (direct navigate_to_pose), "steer" (an
+// explore_hint that biases the explorer's frontier scoring) or "waypoint".
+// Goal and steer are genuinely different operations: a nav goal competes with
+// the explorer for the single-goal action server, a hint never interrupts
 // exploration at all.
-// Persisted, because a reload silently reverting to "nav goal" is worse than
-// it sounds: the two modes look identical to click but do opposite things,
-// and a stray nav goal FIGHTS the explorer (see sendNavGoal) rather than
-// steering it. Observed live — a page refresh mid-run turned steer clicks
-// into competing Nav2 goals without anything on screen changing.
-let mapMode = localStorage.getItem("sortbots.mapMode") || "goal";
-if (!(mapMode in { goal: 1, steer: 1, waypoint: 1 })) mapMode = "goal";
-const mapModeBar = document.getElementById("map-mode");
-const mapHintEl = document.getElementById("map-hint");
-const MAP_MODE_HINTS = {
-  goal: "Drag to set a Nav2 goal (press = position, drag = heading) — stops autonomous exploration.",
-  steer: "Click to send exploration to that area now — shift-click to queue it for after.",
-  waypoint: "Drag to place a named waypoint (press = position, drag = heading). Click one to delete it.",
-};
-function applyMapMode(mode) {
-  mapMode = mode;
-  localStorage.setItem("sortbots.mapMode", mode);
-  for (const b of mapModeBar.querySelectorAll("button")) {
-    b.classList.toggle("active", b.dataset.mapmode === mode);
-  }
-  mapHintEl.textContent = MAP_MODE_HINTS[mode];
+//
+// Chosen PER CLICK by a held key (X = explore, F = flag/waypoint; plain =
+// goal), not by a persistent mode. This used to be a mode selector stored in
+// localStorage, because a reload reverting it was worse than it sounds — the
+// modes look identical to click but do opposite things, and a stray nav goal
+// FIGHTS the explorer (observed live). A held key removes that whole class of
+// bug: nothing can outlive the click. X and F are clear of the drive keys
+// (W/A/S/D/Q/E, Space), and the keydown handler above ignores them.
+const MAP_TOOL_KEYS = { x: "steer", f: "waypoint" };
+let heldMapTool = null; // from a held key
+let touchMapTool = null; // from the touch-only picker; one-shot
+const mapKeysEl = document.getElementById("map-keys");
+const mapToolBar = document.getElementById("map-tool");
+
+function currentMapTool() {
+  return heldMapTool || touchMapTool || "goal";
 }
-mapModeBar.addEventListener("click", (ev) => {
-  const btn = ev.target.closest("button[data-mapmode]");
-  if (btn) applyMapMode(btn.dataset.mapmode);
+function renderMapTool() {
+  const tool = currentMapTool();
+  for (const el of mapKeysEl.querySelectorAll("[data-tool]")) {
+    el.classList.toggle("armed", el.dataset.tool === tool);
+  }
+  for (const b of mapToolBar.querySelectorAll("button")) {
+    b.classList.toggle("active", b.dataset.tool === touchMapTool);
+  }
+  canvas.classList.toggle("tool-steer", tool === "steer");
+  canvas.classList.toggle("tool-waypoint", tool === "waypoint");
+}
+window.addEventListener("keydown", (ev) => {
+  if (isTypingTarget(ev.target) || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  const tool = MAP_TOOL_KEYS[ev.key.toLowerCase()];
+  if (tool && heldMapTool !== tool) { heldMapTool = tool; renderMapTool(); }
 });
-applyMapMode(mapMode);
+window.addEventListener("keyup", (ev) => {
+  if (MAP_TOOL_KEYS[ev.key.toLowerCase()] === heldMapTool) { heldMapTool = null; renderMapTool(); }
+});
+// Same reason as releaseAllDriveKeys: a keyup lost to alt-tab must not leave
+// the next click armed.
+window.addEventListener("blur", () => { heldMapTool = null; renderMapTool(); });
+mapToolBar.addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button[data-tool]");
+  if (!btn) return;
+  touchMapTool = touchMapTool === btn.dataset.tool ? null : btn.dataset.tool;
+  renderMapTool();
+});
+renderMapTool();
 
 const exploreHintTopic = new ROSLIB.Topic({
   ros,
@@ -1988,10 +2016,13 @@ function sendExploreHint(x, y, append) {
     : `steering exploration toward x=${x.toFixed(2)} y=${y.toFixed(2)}`;
 }
 
+let pressTool = "goal"; // the tool armed at mousedown; releasing the key mid-drag can't change it
 canvas.addEventListener("mousedown", (ev) => {
   if (!mapInfo) return; // no grid yet -> can't convert pixels to world
   ev.preventDefault();
   goalPressWorld = pixelToWorld(...eventToCanvasPixel(ev));
+  pressTool = currentMapTool();
+  if (touchMapTool) { touchMapTool = null; renderMapTool(); } // one-shot
 });
 
 // mouseup on window (not just the canvas) so a heading drag that ends just
@@ -2001,7 +2032,7 @@ window.addEventListener("mouseup", (ev) => {
   if (!mapInfo || !goalPressWorld) return;
   const [sx, sy] = goalPressWorld;
   goalPressWorld = null;
-  if (mapMode === "steer") {
+  if (pressTool === "steer") {
     // Position only — a hint has no heading to express. Shift appends to the
     // queue instead of replacing it.
     sendExploreHint(sx, sy, ev.shiftKey);
@@ -2012,7 +2043,7 @@ window.addEventListener("mouseup", (ev) => {
   const dragged = Math.hypot(dx, dy) > 0.1;
   // Near-zero drag = a plain click: keep heading 0 rather than amplify jitter.
   const yaw = dragged ? Math.atan2(dy, dx) : 0;
-  if (mapMode === "waypoint") {
+  if (pressTool === "waypoint") {
     // Let the mouseup finish before a modal prompt blocks the page.
     setTimeout(() => placeOrDeleteWaypoint(sx, sy, yaw, dragged), 0);
     return;
@@ -2031,6 +2062,13 @@ let navWaypoints = []; // [{name, x, y, yaw}]
 const navFrom = document.getElementById("nav-from");
 const navTo = document.getElementById("nav-to");
 const navStatus = document.getElementById("nav-status");
+const trkNav = document.getElementById("trk-nav");
+// One nav status, shown twice: the Navigate panel and the map's tracker.
+function setNavStatus(text, cls) {
+  navStatus.textContent = text;
+  trkNav.textContent = text;
+  trkNav.className = cls || "";
+}
 
 function renderNavWaypoints() {
   const keepFrom = navFrom.value, keepTo = navTo.value;
@@ -2125,12 +2163,12 @@ document.getElementById("nav-form").addEventListener("submit", (ev) => {
   ev.preventDefault();
   const to = navWaypoints.find((w) => w.name === navTo.value);
   if (!to) {
-    navStatus.textContent = "no destination — place waypoints in the map view";
+    setNavStatus("no destination — place waypoints in the map view");
     return;
   }
   const from = navWaypoints.find((w) => w.name === navFrom.value);
   if (from && from === to) {
-    navStatus.textContent = "start and destination are the same waypoint";
+    setNavStatus("start and destination are the same waypoint");
     return;
   }
   if (!from) {
@@ -2142,16 +2180,16 @@ document.getElementById("nav-form").addEventListener("submit", (ev) => {
     stopExplorerForManualNav();
     goal = { x: from.x, y: from.y, yaw: from.yaw };
   }
-  navStatus.textContent = `navigating ${activeNav.label}…`;
+  setNavStatus(`navigating ${activeNav.label}…`, "busy");
 });
 
 document.getElementById("nav-stop").addEventListener("click", () => {
   if (!activeNav) {
-    navStatus.textContent = "nothing to stop";
+    setNavStatus("nothing to stop");
     return;
   }
   ros.callOnConnection({ op: "cancel_action_goal", id: activeNav.id, action: activeNav.action });
-  navStatus.textContent = `cancelling ${activeNav.label}…`;
+  setNavStatus(`cancelling ${activeNav.label}…`, "busy");
 });
 
 // Progress comes from each action's GoalStatusArray: the vendored roslib
@@ -2175,7 +2213,8 @@ for (const action of ["navigate_to_pose", "follow_waypoints"]) {
     // Not newer than what we'd seen before sending = an earlier goal; wait.
     if (stamp(newest) <= activeNav.afterStamp) return;
     const st = GOAL_STATES[newest.status] || `status ${newest.status}`;
-    navStatus.textContent = `${activeNav.label}: ${st}`;
+    setNavStatus(`${activeNav.label}: ${st}`,
+                 newest.status === 4 ? "ok" : newest.status >= 5 ? "bad" : "busy");
     if (newest.status >= 4) activeNav = null;
   });
 }
