@@ -799,6 +799,28 @@ new ROSLIB.Topic({
 });
 
 const trkExplore = document.getElementById("trk-explore");
+// Whether this run can change the map at all. library_localize loads a map
+// READ-ONLY (Mem/IncrementalMemory=false), so a robot driving into unknown
+// space adds nothing — which on screen looked exactly like a broken map
+// (2026-10-08). Say so where the map is.
+const trkMap = document.getElementById("trk-map");
+async function refreshMapMode() {
+  try {
+    const s = await (await fetch("/api/session")).json();
+    if (!s.run || !["starting", "running"].includes(s.state)) {
+      trkMap.textContent = "no session"; trkMap.className = ""; return;
+    }
+    const name = s.map_name || "live map";
+    trkMap.textContent = s.read_only
+      ? `${name} · read-only (localize) — run library_resume to extend it`
+      : `${name} · mapping`;
+    trkMap.className = s.read_only ? "ro" : "";
+  } catch (e) {
+    trkMap.textContent = "unknown (console down)";
+  }
+}
+refreshMapMode();
+setInterval(refreshMapMode, 5000);
 function updateExploreStatus() {
   const exploring = isExploring();
   exploreToggle.textContent = exploring ? "Stop exploring" : "Explore";

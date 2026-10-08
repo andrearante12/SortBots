@@ -208,6 +208,7 @@
   }
   #map-tracker > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .trk-k { display: inline-block; width: 7ch; color: #778; }
+  #trk-map.ro { color: #fb7; }
   #trk-nav.ok { color: #2d5; } #trk-nav.bad { color: #f77; } #trk-nav.busy { color: #fb7; }
   #goal-status { color: #9aa; }
   #goal-status:empty { display: none; }
@@ -584,6 +585,7 @@
            and the last thing a map click did. -->
       <div id="map-tracker">
         <div><span class="trk-k">nav</span> <span id="trk-nav">idle</span></div>
+        <div><span class="trk-k">map</span> <span id="trk-map">–</span></div>
         <div><span class="trk-k">explore</span> <span id="trk-explore">not running</span></div>
         <div id="goal-status"></div>
       </div>
