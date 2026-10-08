@@ -23,29 +23,63 @@ class Horn:
     # re-measures the stock part live and fails if our holes drift from it.
     hole_square: float = 9.9
     hole_d: float = 3.2          # M3 clearance, same as stock
-    center_hole_d: float = 5.4   # access to the horn's centre screw
+    center_hole_d: float = 6.0   # horn centre screw. Stock is 5.4, but the SO-101
+                                 # assembly's own centre screw head is 5.6 and
+                                 # overlaps the stock part by 1.4 mm3 — open it up.
     pilot_d: float = 20.0        # stock recess the horn disc locates in (r=10.0)
     pilot_depth: float = 1.0     # stock: z -0.05 .. 0.95; the horn disc face
                                  # (z=18.7 in STS3215_03a.step) seats on its floor
     floor_t: float = 3.0         # stock: z 0.95 .. 3.95
     screw_head_h: float = 3.0    # M3 SHCS head; heads sit on the floor's inner face
+    head_cbore_d: float = 6.4    # head pockets through the neck, driver goes in via the cup
+    # The neck is NOT cosmetic. The Wrist_Roll_Pitch bracket that holds motor 5
+    # reaches 5.3 mm past the horn face at r >= 12.6 (measured in the SO-101
+    # assembly, see arm.py), which is why the stock part is a Ø24 boss for its
+    # first 6 mm. A full-width cup from z=0 hits that bracket at most roll
+    # angles (~500 mm3 overlap, found 2026-10-05); test_clears_wrist_bracket
+    # sweeps the full roll range.
+    neck_d: float = 24.0
+    neck_len: float = 6.5
 
 
 @dataclass(frozen=True)
 class Magnet:
-    # Generic 25 mm "holding electromagnet" (P25/20-style). VERIFY against the
-    # part you actually buy — lead position in particular varies by vendor.
+    # Adafruit 3873: 5 V DC, 0.3 A, 5 kg holding force, P25/20 body, $9.95.
+    # https://www.adafruit.com/product/3873  (also DigiKey 1528-3873-ND, The Pi
+    # Hut, Core Electronics). Body dims, pole and mass are Adafruit's published
+    # numbers. Thread and lead position are NOT published: they're from
+    # Adafruit's product photos plus the same-body JF-XP2520 spec (M4, 12 deep).
+    # VERIFY those with calipers when it arrives.
+    # Usable lift is roughly holding force / 5..10, so ~0.5-1 kg on a flat
+    # mild-steel plate.
     d: float = 25.0
     h: float = 20.0
-    tap: str = "M4"
+    pole_d: float = 12.0          # centre pole on the face ("center diameter")
+    potting_od: float = 21.5      # cosmetic: dark ring around the pole (product photo 4)
+    tap: str = "M4"               # VERIFY
+    thread_depth: float = 12.0    # VERIFY
     bolt_clear_d: float = 4.5     # M4 clearance through the plunger
-    bolt_head_d: float = 7.5      # M4 SHCS head is 7.0; +0.5 for the counterbore
-    bolt_head_h: float = 4.0
-    lead_r: float = 7.0           # radius where the leads exit the magnet's back
-    lead_angle: float = 150.0     # deg; aligned with the cable exit slot
-    lead_hole_d: float = 5.0
+    # The included screw is a pan head with a split lock washer AND a flat
+    # washer (product photo 2), so the counterbore is sized to the flat
+    # washer (M4 OD 9.0), not the head.
+    bolt_head_d: float = 9.5
+    bolt_head_h: float = 5.0      # pan head ~2.7 + split ~1.3 + flat 0.8, rounded up
+    washer_stack: float = 2.1     # split + flat washer: eats into the screw's usable length
+    # The leads leave through the SIDE, near the back, inside a stiff
+    # heat-shrink stub, not out of the back face (photos 1 and 4). A single
+    # centre screw can't hold rotation, so the plunger grows a keeper arc with
+    # a slot that captures the stub: it keys the orientation and strain-relieves
+    # the stub.
+    lead_angle: float = 150.0     # deg; a free sector between guide pins, next to the zip-tie lug
+    lead_z_from_back: float = 4.0  # VERIFY: stub centre, measured from the back face
+    lead_stub_d: float = 3.5      # VERIFY: heat-shrink OD
+    lead_stub_len: float = 8.0    # how far the stiff part sticks out radially
+    keeper_wall: float = 1.6
+    keeper_span: float = 50.0     # deg of arc; must stay clear of the guide-screw heads
     locate_depth: float = 1.0     # shallow recess in the plunger that centres the magnet
-    mass_g: float = 60.0          # VERIFY: weigh yours; used only for the printed estimate
+    mass_g: float = 55.3          # Adafruit's published weight
+    current_a: float = 0.3
+    voltage: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -113,6 +147,11 @@ class Params:
         return self.horn.pilot_depth + self.horn.floor_t
 
     @property
+    def cavity_top(self) -> float:
+        """Inner roof of the cup: neck plus a wall-thick roof over the step."""
+        return self.horn.neck_len + self.pr.wall
+
+    @property
     def pin_circle_r(self) -> float:
         # Screw heads sit under the plunger beside the magnet, so they must clear it.
         return self.magnet.d / 2 + self.comp.pin_head_d / 2 + 1.0
@@ -122,8 +161,24 @@ class Params:
         return 2 * (self.pin_circle_r + self.comp.pin_head_d / 2 + 1.0)
 
     @property
+    def plunger_floor(self) -> float:
+        """Material the magnet bolt clamps: under the counterbore, above the magnet recess."""
+        return 2.5
+
+    @property
     def plunger_t(self) -> float:
-        return self.magnet.bolt_head_h + 2.0
+        # Earlier versions had head_h + 2 and forgot the locate recess also
+        # eats from the bottom, which left a 1 mm floor (2026-10-05).
+        m = self.magnet
+        return m.bolt_head_h + self.plunger_floor + m.locate_depth
+
+    @property
+    def magnet_bolt_len(self) -> tuple:
+        """(min, max) under-head length for the magnet screw: >=5 mm of thread
+        engaged, never bottoming in the tapped hole."""
+        m = self.magnet
+        base = m.washer_stack + self.plunger_floor
+        return base + 5.0, base + m.thread_depth
 
     @property
     def bore_d(self) -> float:
@@ -146,12 +201,11 @@ class Params:
     def z_standoff(self) -> float:
         """Bottom of the standoffs = plunger top at FULL compression."""
         s, c = self.switch, self.comp
-        # The switch body must fit between the floor and the plunger with the
+        # The switch body must fit between the roof and the plunger with the
         # full upward adjust still available.
-        need_switch = self.floor_top + s.h + s.op + s.trip + s.adjust - c.travel
-        need_heads = self.floor_top + self.horn.screw_head_h + 1.0
-        need_spring = self.floor_top + self.spring_seat_standoff + 1.0
-        return max(need_switch, need_heads, need_spring)
+        need_switch = self.cavity_top + s.h + s.op + s.trip + s.adjust - c.travel
+        need_spring = self.cavity_top + self.spring_seat_standoff + 1.0
+        return max(need_switch, need_spring)
 
     @property
     def z_plunger_top(self) -> float:
@@ -163,6 +217,12 @@ class Params:
         # Cup is flush with the plunger bottom at rest, so the plunger stays
         # fully guided over its whole stroke.
         return self.z_plunger_top + self.plunger_t
+
+    @property
+    def keeper_h(self) -> float:
+        """Keeper arc height below the plunger: covers the stub plus a lip."""
+        m = self.magnet
+        return m.lead_z_from_back - m.locate_depth + m.lead_stub_d / 2 + 1.5
 
     @property
     def z_magnet_face(self) -> float:

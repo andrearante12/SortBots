@@ -8,6 +8,7 @@ From [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100) at 
 | `Wrist_Roll_Follower_SO101.step` | `STEP/SO101/Follower_Specific/` | the stock fixed jaw we replace; horn interface measured from it; `fitcheck.step` overlay |
 | `Moving_Jaw_SO101.step` | `STEP/SO101/Follower_Specific/` | removed-mass estimate only |
 | `Wrist_Roll_Pitch_SO101.step` | `STEP/SO101/` | the part that holds motor 5, for clearance checks in FreeCAD |
+| `SO101_Assembly.step` | `STEP/SO101/SO101 Assembly.step` | **gitignored, 20 MB**, fetched by `setup_cad.sh`. The whole arm for `build.py --arm` |
 | `STS3215_03a.step` | `STEP/SO100/` | motor 5 in the assembly; horn face at z=18.7, shaft at x=12.5 |
 
 Coordinates in `Wrist_Roll_Follower_SO101.step` are as follows:

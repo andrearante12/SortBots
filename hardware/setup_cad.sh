@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# One-time CAD setup: hardware/.venv with CadQuery, reference STEPs, FreeCAD check.
+# One-time CAD setup: hardware/.venv with CadQuery, reference STEPs (incl. the
+# 20 MB full-arm assembly), FreeCAD check.
 # Idempotent — safe to re-run. Exit 0 = ready, 2 = venv ok but FreeCAD missing.
 #
 # The venv is built from the SYSTEM python3 with --without-pip + get-pip.py:
@@ -34,6 +35,11 @@ for p in STEP/SO101/Follower_Specific/Wrist_Roll_Follower_SO101.step \
   [[ -s "$f" ]] || curl -sSfL -o "$f" \
     "https://raw.githubusercontent.com/TheRobotStudio/SO-ARM100/$SO_ARM_SHA/$p"
 done
+# The whole-arm assembly is 20 MB, so it's gitignored and always fetched here.
+# Only `build.py --arm` and the arm tests need it.
+f="$REF/SO101_Assembly.step"
+[[ -s "$f" ]] || curl -sSfL -o "$f" \
+  "https://raw.githubusercontent.com/TheRobotStudio/SO-ARM100/$SO_ARM_SHA/STEP/SO101/SO101%20Assembly.step"
 echo "reference STEPs: $(ls "$REF"/*.step | wc -l) present"
 
 if command -v freecad >/dev/null; then

@@ -5,7 +5,7 @@
 # CI runs the exact same targets (see .github/workflows/ci.yml).
 PYTHON ?= /usr/bin/python3   # never conda's python3 — it has no pytest and leads PATH
 
-.PHONY: ci test smoke deps cad-setup cad cad-test cad-open
+.PHONY: ci test smoke deps cad-setup cad cad-arm cad-test cad-open cad-open-arm
 
 deps:
 	$(PYTHON) -m pip install -r requirements-dev.txt
@@ -32,8 +32,14 @@ cad-setup:
 cad:
 	$(CAD_PY) $(CAD_DIR)/build.py
 
+cad-arm:
+	$(CAD_PY) $(CAD_DIR)/build.py --arm
+
 cad-test:
 	$(CAD_PY) -m pytest tests/cad_test.py
 
 cad-open: cad
 	freecad $(CAD_DIR)/build/fitcheck.step >/dev/null 2>&1 &
+
+cad-open-arm: cad-arm
+	freecad $(CAD_DIR)/build/arm_context.step >/dev/null 2>&1 &

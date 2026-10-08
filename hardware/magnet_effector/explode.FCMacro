@@ -1,0 +1,107 @@
+# Toggle an exploded view of the magnet effector in FreeCAD. Run once to fly
+# the parts apart along the wrist axis, run again to put them back.
+#
+# Works on build/assembly.step, fitcheck.step and arm_context.step as
+# imported by FreeCAD (File > Open). It relies on build.py's tree: every
+# group under `magnet_effector` has an identity placement relative to it, so
+# +Z in each part's parent frame IS the wrist axis — moving along it pulls
+# straight off the horn, whatever pose the arm is in.
+#
+# State lives on the moved objects themselves (a `SortbotsHome` property
+# holding the assembled position), so it survives saving the document and
+# re-running the macro; Ctrl+Z undoes a toggle as one step.
+import time
+
+import FreeCAD as App
+
+# (match, type, offset mm along the wrist). Order of the stack, horn outward:
+# cup + switch, then the parts that sit between cup and plunger, the plunger,
+# the guide screws whose heads sit under it, then the magnet.
+EXPLODE = [
+    ("adapter_body", "Part::Feature", 30.0),
+    ("microswitch", "Part::Feature", 30.0),
+    ("m4_magnet_screw", "Part::Feature", 45.0),
+    ("springs", "App::Part", 55.0),
+    ("plunger", "Part::Feature", 70.0),
+    ("m3x", "App::Part", 95.0),
+    ("magnet_Adafruit", "App::Part", 125.0),
+]
+FRAMES = 24
+HOME = "SortbotsHome"
+
+
+def _key(obj):
+    # FreeCAD relabels a compound's group when it splits it into children
+    # ("springs_x3" -> "springs_x003"), but keeps the internal Name; plain
+    # solids keep their Label but get generic Names. Use whichever is clean.
+    return obj.Name if obj.TypeId == "App::Part" else obj.Label
+
+
+def _walk(obj):
+    yield obj
+    for child in getattr(obj, "Group", []):
+        yield from _walk(child)
+
+
+def find_targets(doc):
+    roots = [o for o in doc.Objects if o.TypeId == "App::Part"
+             and (o.Name == "magnet_effector" or o.Label == "magnet_effector")]
+    if not roots:
+        raise RuntimeError("no 'magnet_effector' group — open a STEP from "
+                           "hardware/magnet_effector/build/ (rebuild if it's old)")
+    found = []
+    for match, typ, off in EXPLODE:
+        hit = [o for o in _walk(roots[0]) if o.TypeId == typ and _key(o).startswith(match)]
+        if hit:
+            found.append((hit[0], off))
+    return found
+
+
+def _ease(t):
+    return t * t * (3 - 2 * t)
+
+
+def toggle(doc, animate=True):
+    targets = find_targets(doc)
+    exploding = not any(hasattr(o, HOME) for o, _ in targets)
+    moves = []
+    for obj, off in targets:
+        if exploding:
+            obj.addProperty("App::PropertyVector", HOME, "Sortbots",
+                            "assembled position; remove to forget the explode")
+            setattr(obj, HOME, obj.Placement.Base)
+            start = App.Vector(obj.Placement.Base)
+            end = start + App.Vector(0, 0, off)
+        else:
+            start = App.Vector(obj.Placement.Base)
+            end = App.Vector(getattr(obj, HOME))
+        moves.append((obj, start, end))
+
+    doc.openTransaction("Explode" if exploding else "Assemble")
+    gui = None
+    if animate and App.GuiUp:
+        import FreeCADGui as gui
+    steps = range(1, FRAMES + 1) if gui else [FRAMES]
+    for i in steps:
+        t = _ease(i / FRAMES)
+        for obj, a, b in moves:
+            pl = obj.Placement
+            pl.Base = a + (b - a) * t
+            obj.Placement = pl
+        if gui:
+            gui.updateGui()
+            time.sleep(0.015)
+    if not exploding:
+        for obj, _, _ in moves:
+            obj.removeProperty(HOME)
+    doc.commitTransaction()
+    doc.recompute()
+    return "exploded" if exploding else "assembled"
+
+
+if __name__ == "__main__" or App.GuiUp:
+    _doc = App.ActiveDocument
+    if _doc is None:
+        App.Console.PrintError("explode: open an assembly STEP first\n")
+    else:
+        App.Console.PrintMessage(f"explode: {toggle(_doc)}\n")
