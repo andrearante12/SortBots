@@ -1,0 +1,24 @@
+# Real-robot scenario — see real_map_fresh.yaml for what `platform: real` means.
+name: real_localize
+
+title: Real robot — saved map, localize only
+description: >
+  Loads a saved map (or the working database) and runs RTAB-Map read-only on
+  the robot, so the camera localizes against it without adding to the pose
+  graph. Library maps are loaded by COPY, exactly as in sim, so the tracked
+  file is never touched. Pick a map the ROBOT built — a map from the Isaac
+  warehouse describes a place this camera has never been.
+
+platform: real
+status: ready
+
+run:
+  robot_id: robot_0
+  localize: true
+  resume: false
+  map: null              # null = the working DB; the Map dropdown sets this
+
+overrides: [map]
+
+capture:
+  bag: false

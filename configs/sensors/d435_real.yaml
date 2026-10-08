@@ -1,0 +1,37 @@
+# Real Intel RealSense D435 on the robot — read by
+# launch/sortbots_realsense.launch.py. The sim's counterpart is d435.json
+# (intrinsics for the Isaac camera prim); this file is the hardware side of the
+# same contract: whatever it takes to make the D435 publish what the sim does.
+#
+# Topic contract (what webui/app.js, nodes/dynamic_obstacle_filter.py and
+# RTAB-Map subscribe to, identical in sim and real):
+#   /<robot_id>/camera/rgb           sensor_msgs/Image  rgb8
+#   /<robot_id>/camera/depth         sensor_msgs/Image  (real: 16UC1 mm, aligned
+#                                    to color; sim: 32FC1 m — the depth filter
+#                                    accepts both and emits 32FC1 m)
+#   /<robot_id>/camera/camera_info   the COLOR camera's intrinsics, which the
+#                                    aligned depth shares
+
+# 848x480 @ 30 matches d435.json and is the D435's best depth resolution.
+# On USB 2 the camera refuses this pair; `lsusb -t` should show the D435 at
+# 5000M. If it shows 480M, re-seat the cable in a USB 3 port.
+profile: "848,480,30"
+
+# Physical mount: <robot_id>/base_link -> <robot_id>/camera_link, where
+# camera_link is RealSense's own body frame (x forward, y left, z up; its
+# optical frames hang off it via the driver's TF). NOT copied from the sim:
+# spawn_warehouse.py derives its value from the USD at runtime, and what
+# matters here is where the camera physically sits. MEASURE AND UPDATE —
+# base_link origin is the chassis center on the floor.
+#   xyz in metres, rpy in radians (pitch > 0 tilts the camera DOWN).
+mount:
+  xyz: [0.0, 0.0, 1.0]
+  rpy: [0.0, 0.0, 0.0]
+
+# Post-processing on the Jetson's CPU. Off by default: each one costs frames
+# on the Orin Nano, and RTAB-Map already copes with raw D435 depth. The
+# temporal filter is the first to try if the SLAM grid looks speckled.
+filters:
+  spatial: false
+  temporal: false
+  hole_filling: false

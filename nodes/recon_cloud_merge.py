@@ -144,6 +144,23 @@ class ReconCloudMergeNode(Node):
         def _cb(msg: PointCloud2):
             if msg.is_bigendian:
                 return
+            if msg.width == 0:
+                # recon_cloud_relay's "map cleared" marker: forget this robot's
+                # cloud and, once nothing is left, tell the dashboard to clear
+                # (otherwise the keepalive re-sends the old fused cloud).
+                self._clouds.pop(rid, None)
+                self._last_out = None
+                self._published_since_tick = True
+                if not self._clouds:
+                    empty = PointCloud2()
+                    empty.header.stamp = self.get_clock().now().to_msg()
+                    empty.header.frame_id = "map"
+                    empty.height = 1
+                    empty.width = 0
+                    empty.point_step = OUT_POINT_STEP
+                    self.pub.publish(empty)
+                    self.get_logger().info(f"{rid}: map cleared, sent empty fleet cloud")
+                return
             try:
                 xyz, rgb = unpack_cloud(msg)
             except (KeyError, ValueError) as exc:
