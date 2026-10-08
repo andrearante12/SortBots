@@ -1,0 +1,9 @@
+{"orig_ms": 1000, "trial": 1, "blocked": "0-1", "fwd_0_to_relay": 9.34, "rev_relay_to_0": 10.0}
+{"orig_ms": 1000, "trial": 2, "blocked": "0-1", "fwd_0_to_relay": 9.0, "rev_relay_to_0": 9.34}
+{"orig_ms": 1000, "trial": 3, "blocked": "0-1", "fwd_0_to_relay": 10.33, "rev_relay_to_0": 8.67}
+{"orig_ms": 500, "trial": 1, "blocked": "0-1", "fwd_0_to_relay": 5.33, "rev_relay_to_0": 2.67}
+{"orig_ms": 500, "trial": 2, "blocked": "0-1", "fwd_0_to_relay": 2.67, "rev_relay_to_0": 3.01}
+{"orig_ms": 500, "trial": 3, "blocked": "0-1", "fwd_0_to_relay": 5.67, "rev_relay_to_0": 2.67}
+{"orig_ms": 250, "trial": 1, "blocked": "0-1", "fwd_0_to_relay": 1.67, "rev_relay_to_0": 3.0}
+{"orig_ms": 250, "trial": 2, "blocked": "0-2", "fwd_0_to_relay": 3.0, "rev_relay_to_0": 1.67}
+{"orig_ms": 250, "trial": 3, "blocked": "0-1", "fwd_0_to_relay": 2.67, "rev_relay_to_0": 1.67}

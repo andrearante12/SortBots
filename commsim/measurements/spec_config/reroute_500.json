@@ -1,0 +1,43 @@
+{
+ "orig_interval_ms": 500,
+ "trials": [
+  {
+   "trial": 0,
+   "blocked": "n0-n1",
+   "outage_s": 1.92,
+   "received": 881
+  },
+  {
+   "trial": 1,
+   "blocked": "n0-n2",
+   "outage_s": 1.94,
+   "received": 878
+  },
+  {
+   "trial": 2,
+   "blocked": "n0-n1",
+   "outage_s": 1.98,
+   "received": 874
+  },
+  {
+   "trial": 3,
+   "blocked": "n0-n2",
+   "outage_s": 1.96,
+   "received": 875
+  },
+  {
+   "trial": 4,
+   "blocked": "n0-n1",
+   "outage_s": 1.95,
+   "received": 878
+  },
+  {
+   "trial": 5,
+   "blocked": "n0-n2",
+   "outage_s": 1.95,
+   "received": 877
+  }
+ ],
+ "outage_median_s": 1.95,
+ "outage_max_s": 1.98
+}

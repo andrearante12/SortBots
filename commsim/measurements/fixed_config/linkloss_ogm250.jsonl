@@ -1,0 +1,6 @@
+{"ogm_ms": 250, "transport": "zenoh", "trial": 1, "worst_status_gap_s": 3.52}
+{"ogm_ms": 250, "transport": "zenoh", "trial": 2, "worst_status_gap_s": 3.53}
+{"ogm_ms": 250, "transport": "zenoh", "trial": 3, "worst_status_gap_s": 3.54}
+{"ogm_ms": 250, "transport": "udp", "trial": 1, "worst_status_gap_s": 3.0}
+{"ogm_ms": 250, "transport": "udp", "trial": 2, "worst_status_gap_s": 3.0}
+{"ogm_ms": 250, "transport": "udp", "trial": 3, "worst_status_gap_s": 3.0}
