@@ -228,6 +228,24 @@ async function main() {
   check('real console reports platform: real', realApi.platform === 'real', realApi.platform);
   check('real console lists only real scenarios', realNames.length > 0 &&
         (realApi.scenarios || []).every((s) => s.platform === 'real'), realNames.join(', '));
+
+  // The launch form's contract: settings per platform, and every preset must
+  // be expressible as form settings (Quick start fills the form from them).
+  const opts = await (await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/launch/options`)).json();
+  const realOpts = await (await fetch(`http://127.0.0.1:${REAL_PORT}/api/launch/options`)).json();
+  check('launch options: sim form has scene and robots',
+        opts.fields.includes('scene') && opts.fields.includes('robots'), opts.fields.join(','));
+  check('launch options: real form has no sim-only settings',
+        !realOpts.fields.includes('scene') && !realOpts.fields.includes('robots') &&
+        realOpts.fields.includes('map'), realOpts.fields.join(','));
+  check('launch options: every preset fills the form',
+        opts.presets.every((p) => p.config), opts.presets.filter((p) => !p.config)
+          .map((p) => `${p.name}: ${p.reason}`).join('; '));
+  check('launch options: the seeded map is offered', opts.maps.some((m) => m.name === SEEDED_MAP));
+  const bad = await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/launch/preview`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config: { map: '../../etc' } }) });
+  check('launch preview rejects a path as a map', bad.status === 400);
   const realRobots = await (await fetch(`http://127.0.0.1:${REAL_PORT}/api/robots`)).json();
   check('real console lists only robots with a `real` spawn',
         JSON.stringify(realRobots.robots) === JSON.stringify(['robot_0']),
@@ -364,18 +382,18 @@ async function main() {
         stage: vis('stage-panel'), right: vis('right-col'),
         scenarios: vis('view-scenarios'),
         stageMode: vis('stage-mode'), badge: vis('slam-badge'),
-        cards: document.querySelectorAll('.scenario-card').length,
-        startable: [...document.querySelectorAll('.scenario-card button')]
-                     .filter((b) => !b.disabled).length,
+        form: vis('launch-form'),
+        presets: document.querySelectorAll('#lf-preset option').length - 1, // minus "custom"
+        startable: !document.getElementById('lf-start').disabled,
         warning: vis('console-warning'),
         state: document.getElementById('session-state').textContent,
         stopDisabled: document.getElementById('session-stop').disabled,
-        overrides: document.querySelectorAll('.scenario-card [data-key]').length,
-        mapPickers: document.querySelectorAll('.scenario-card select[data-key="map"]').length,
+        sceneRow: vis('lf-scene'),
+        summary: document.getElementById('lf-summary').textContent,
         // The seeded entry must render as a SELECTABLE option — an entry whose
         // db is missing or an unfetched git-lfs pointer renders disabled, and
         // that difference is the whole point of maps_lib's db_state.
-        seededOption: [...document.querySelectorAll('select[data-key="map"] option')]
+        seededOption: [...document.querySelectorAll('#lf-map option')]
                         .some((o) => !o.disabled && /Seeded warehouse/.test(o.textContent)),
       };
     })()`);
@@ -384,15 +402,11 @@ async function main() {
           !shown.stage && !shown.right && shown.scenarios);
     check(`${vp.label}: live-only header chrome is hidden`,
           !shown.stageMode && !shown.badge);
-    check(`${vp.label}: a card renders per scenario`, shown.cards === api.scenarios.length,
-          `${shown.cards} cards for ${api.scenarios.length} scenarios`);
-    check(`${vp.label}: ready scenarios are startable`, shown.startable === ready.length,
-          `${shown.startable} enabled`);
-    check(`${vp.label}: override controls render`, shown.overrides > 0,
-          `${shown.overrides} inputs`);
-    check(`${vp.label}: a map picker renders per library scenario`,
-          shown.mapPickers === mapScenarios.length,
-          `${shown.mapPickers} pickers for ${mapScenarios.length} map scenarios`);
+    check(`${vp.label}: the launch form renders`, shown.form && shown.sceneRow);
+    check(`${vp.label}: Quick start lists every preset`, shown.presets === api.scenarios.length,
+          `${shown.presets} presets for ${api.scenarios.length} scenarios`);
+    check(`${vp.label}: the form previews and is startable`, shown.startable && !!shown.summary,
+          shown.summary || 'no summary');
     check(`${vp.label}: the seeded map is offered as a selectable option`,
           shown.seededOption === true);
     check(`${vp.label}: no console warning in control mode`, shown.warning === false);
@@ -456,46 +470,50 @@ async function main() {
     return {
       warning: vis('console-warning'),
       text: document.getElementById('console-warning').textContent,
-      cards: document.querySelectorAll('.scenario-card').length,
-      startable: [...document.querySelectorAll('.scenario-card button')]
-                   .filter((b) => !b.disabled).length,
+      presets: document.querySelectorAll('#lf-preset option').length - 1,
+      startable: !document.getElementById('lf-start').disabled ? 1 : 0,
       state: document.getElementById('session-state').textContent,
     };
   })()`);
-  check('read-only: the tab still lists the scenarios', degraded.cards > 0,
-        `${degraded.cards} cards`);
+  check('read-only: the form still lists the presets', degraded.presets > 0,
+        `${degraded.presets} presets`);
   check('read-only: warning names run_console.sh',
         degraded.warning && /run_console\.sh/.test(degraded.text));
   check('read-only: nothing is startable', degraded.startable === 0);
   check('read-only: session strip says the console is not running',
         /console not running/.test(degraded.state), degraded.state);
 
-  // 5. the map picker round-trips as a STRING, not NaN.
+  // 5. the form drives the server's preview — without starting anything.
   //
-  // Regression guard with teeth: readOverrides used to be a two-way ternary on
-  // input.type, and a <select> reports type "select-one" — so the picker's path
-  // went through Number() and arrived at the control API as NaN. Read the same
-  // override object the Start button would post, without posting it.
+  // Quick start must FILL the form (explore_fleet -> 2 robots), and picking a
+  // saved map must turn into --resume/--map in the server's own command line.
+  // Reads the preview the Start button would launch, never posts the start.
+  await page.send('Page.navigate', { url: `http://127.0.0.1:${CONTROL_PORT}/` });
+  await sleep(1500);
   await page.eval(SHOW_SCENARIOS);
-  const picked = await page.eval(`(() => {
-    const sel = document.querySelector('select[data-key="map"]');
-    if (!sel) return { error: 'no map picker rendered' };
-    const opt = [...sel.options].find((o) => !o.disabled && o.value);
-    if (!opt) return { error: 'no selectable map option' };
-    sel.value = opt.value;
-    const card = sel.closest('.scenario-card');
-    const out = {};
-    for (const el of card.querySelectorAll('[data-key]')) {
-      out[el.dataset.key] =
-        el.type === 'checkbox' ? el.checked
-        : el.tagName === 'SELECT' ? el.value
-        : Number(el.value);
-    }
-    return { map: out.map, type: typeof out.map };
+  await sleep(600);
+  const filled = await page.eval(`(async () => {
+    const sel = document.getElementById('lf-preset');
+    sel.value = 'explore_fleet';
+    sel.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 500));
+    const robots = document.getElementById('lf-robots').value;
+    const map = document.getElementById('lf-map');
+    map.value = ${JSON.stringify(SEEDED_MAP)};
+    map.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 600));
+    return { robots, preset: sel.value,
+             command: document.getElementById('lf-command').textContent,
+             summary: document.getElementById('lf-summary').textContent,
+             modeShown: document.getElementById('lf-mode-row').offsetParent !== null,
+             error: document.getElementById('lf-error').textContent };
   })()`);
-  check('map override reads back as a string path, not NaN',
-        picked.type === 'string' && /\.db$/.test(picked.map || ''),
-        picked.error || `${picked.type}: ${picked.map}`);
+  check('Quick start fills the form', filled.robots === '2', `robots=${filled.robots}`);
+  check('editing the form drops back to custom', filled.preset === '', filled.preset);
+  check('a saved map shows the mode choice', filled.modeShown === true);
+  check('the preview launches the saved map in extend mode',
+        /--resume/.test(filled.command) && new RegExp(`--map \\S*${SEEDED_MAP}/map\\.db`).test(filled.command),
+        filled.error || filled.command);
 
   // 6. nothing we did started a sim
   const finalSession = await (await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/session`)).json();

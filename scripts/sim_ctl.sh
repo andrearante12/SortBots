@@ -12,6 +12,12 @@
 #   scripts/sim_ctl.sh list                 # scenarios and their status
 #   scripts/sim_ctl.sh dry-run NAME [k=v...]  # print the run_demo.sh command; launches nothing
 #   scripts/sim_ctl.sh start NAME [k=v...]  # start a scenario (returns immediately)
+#   scripts/sim_ctl.sh start custom map=warehouse mode=extend robots=2
+#                                         # the dashboard's launch form: settings
+#                                         # scene robots map(new|working|NAME)
+#                                         # mode(extend|readonly) explore
+#                                         # waypoints(map|keep|none) headless
+#                                         # chase_cam chase_cam_robots teleop bag
 #   scripts/sim_ctl.sh wait [PHASE] [--timeout S]   # block until PHASE (default: running)
 #   scripts/sim_ctl.sh status               # one line: state, phase, scenario, elapsed
 #   scripts/sim_ctl.sh log [--lines N]      # tail the current session's log
@@ -147,9 +153,13 @@ cmd_start() {
   [[ -n "$name" ]] || die "usage: sim_ctl.sh start NAME [k=v...]" 1
   require_console
   local ov; ov="$(overrides_json "$@")" || die "bad override" 1
+  # `custom` is the dashboard's launch form: k=v are SETTINGS (map=warehouse
+  # mode=extend robots=2 ...), validated by session.py's config_to_run.
+  # Anything else is a preset name with per-run overrides, as before.
   local payload; payload="$(python3 -c '
 import json, sys
-print(json.dumps({"scenario": sys.argv[1], "overrides": json.loads(sys.argv[2])}))' \
+name, ov = sys.argv[1], json.loads(sys.argv[2])
+print(json.dumps({"config": ov} if name == "custom" else {"scenario": name, "overrides": ov}))' \
     "$name" "$ov")"
   local out; out="$(api_post session/start "$payload")" || exit $?
   echo "$out" | jq -r '"[sim_ctl] started \(.scenario) (session \(.session_id))"'

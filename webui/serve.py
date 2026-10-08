@@ -98,6 +98,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_waypoints()
         elif route == "/api/nav_waypoints":
             self._serve_json(_load_nav_waypoints())
+        elif route == "/api/launch/options":
+            self._serve_launch_options()
         elif route == "/api/robots":
             self._serve_robots()
         elif route == "/api/scenarios":
@@ -121,6 +123,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_control(self._finish_session)
         elif route == "/api/nav_waypoints":
             self._save_nav_waypoints()
+        elif route == "/api/launch/preview":
+            self._preview_launch()
+        elif route == "/api/presets":
+            self._with_control(self._save_preset)
         elif route == "/api/map/save":
             self._with_control(self._save_map)
         elif route == "/api/map/clear":
@@ -136,6 +142,86 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         with open(WAYPOINTS_CONFIG) as f:
             stations = yaml.safe_load(f)["stations"]
         self._serve_json(stations)
+
+    # -- launch form -------------------------------------------------------
+
+    def _serve_launch_options(self):
+        """Everything the Scenarios tab's form needs to draw itself.
+
+        Readable without --control (like /api/scenarios), so the form still
+        shows what COULD be launched — and why it can't — when the console
+        is down.
+        """
+        roster = ["robot_0"]
+        if ROBOTS_CONFIG.exists():
+            with open(ROBOTS_CONFIG) as f:
+                roster = [r["id"] for r in yaml.safe_load(f)["robots"]]
+        maps = []
+        for m in maps_lib.list_maps():
+            wp = maps_lib.MAPS_DIR / m["name"] / maps_lib.MAP_WAYPOINTS_NAME
+            try:
+                n_wp = len(json.loads(wp.read_text()).get("waypoints", [])) if wp.is_file() else 0
+            except (OSError, ValueError):
+                n_wp = 0
+            maps.append({
+                "name": m["name"], "title": m.get("title") or m["name"],
+                "db_state": m.get("db_state"), "error": m.get("error"),
+                "free_m2": (m.get("coverage") or {}).get("free_m2"),
+                "scene": m.get("scene"), "waypoints": n_wp,
+            })
+        presets = []
+        for sc in session_mod.load_scenarios():
+            if sc["platform"] not in (PLATFORM, None):
+                continue
+            entry = {"name": sc["name"], "title": sc["title"], "status": sc["status"],
+                     "description": sc["description"], "origin": sc.get("origin", "file")}
+            if sc["status"] == "invalid":
+                entry["reason"] = sc.get("error")
+            else:
+                entry.update(session_mod.run_to_config(sc["run"], sc["platform"],
+                                                       sc["capture"]["bag"]))
+            presets.append(entry)
+        working = session_mod.working_db_path("robot_0")
+        self._serve_json({
+            "control": SESSIONS is not None,
+            "platform": PLATFORM,
+            "fields": sorted(session_mod.CONFIG_KEYS[PLATFORM]),
+            "defaults": {k: v for k, v in session_mod.CONFIG_DEFAULTS.items()
+                         if k in session_mod.CONFIG_KEYS[PLATFORM]},
+            "scenes": ["nvidia", "primitive"],
+            "roster": roster,
+            "maps": maps,
+            "working_db": {"path": str(working), "exists": working.exists()},
+            "working_waypoints": len(maps_lib.read_working_waypoints(PLATFORM)),
+            "presets": presets,
+        })
+
+    def _preview_launch(self):
+        # Not behind --control: it launches nothing, and the form should be
+        # able to explain itself even with the console down.
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            self._serve_json(session_mod.preview_config(body.get("config") or {}, PLATFORM))
+        except session_mod.ScenarioError as exc:
+            self._serve_error(400, str(exc))
+        except (TypeError, ValueError) as exc:
+            self._serve_error(400, f"bad setting: {exc}")
+
+    def _save_preset(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            self._serve_json(session_mod.write_preset(
+                str(body.get("name", "")), body.get("config") or {}, PLATFORM,
+                title=body.get("title"), description=body.get("description"),
+                overwrite=bool(body.get("overwrite"))))
+        except session_mod.ScenarioError as exc:
+            self._serve_error(400, str(exc))
+        except OSError as exc:
+            self._serve_error(500, f"failed to write preset: {exc}")
 
     def _save_nav_waypoints(self):
         # Storage lives in maps_lib (data/nav_waypoints.json, the WORKING set;
@@ -227,16 +313,24 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         body = self._read_json_body()
         if body is None:
             return
+        # Two shapes: {config} from the launch form, or {scenario, overrides}
+        # (a preset by name — sim_ctl.sh and older pages).
+        config = body.get("config")
         name = body.get("scenario")
-        if not isinstance(name, str):
-            self._serve_error(400, "scenario must be a string")
+        if config is not None:
+            if not isinstance(config, dict):
+                self._serve_error(400, "config must be an object")
+                return
+        elif not isinstance(name, str):
+            self._serve_error(400, "scenario must be a string (or send a config)")
             return
         overrides = body.get("overrides") or {}
         if not isinstance(overrides, dict):
             self._serve_error(400, "overrides must be an object")
             return
         try:
-            self._serve_json(SESSIONS.start(name, overrides, force=bool(body.get("force"))))
+            self._serve_json(SESSIONS.start(name, overrides, force=bool(body.get("force")),
+                                            config=config))
         except session_mod.SessionConflict as exc:
             self._serve_error(409, str(exc))
         except session_mod.ScenarioError as exc:

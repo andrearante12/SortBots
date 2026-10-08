@@ -190,6 +190,11 @@ def _map_path(flag: str):
             return []  # run_demo.sh's own default: ~/.ros/sortbots_<robot_id>.db
         if not isinstance(value, str):
             raise ScenarioError(f"{flag}: expected a path string, got {value!r}")
+        # A bare library name (`map: warehouse`) is the portable spelling — a
+        # preset written by the dashboard must not bake /home/<user>/... into
+        # a committed file. NAME_RX has no `/` or `.`, so it can't traverse.
+        if maps_lib.NAME_RX.match(value):
+            value = str(library_db_path(value))
         resolved = Path(os.path.expanduser(value)).resolve()
         # maps_lib.MAPS_DIR by reference, not a literal `REPO_ROOT/"maps"`: it
         # honours SORTBOTS_MAPS_DIR, which is how scenarios_test.mjs points the
@@ -276,6 +281,28 @@ REAL_RUN_FLAGS = {
 REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS[key] for key in REAL_RUN_FLAGS}
 
 PLATFORM_FLAGS = {"sim": RUN_FLAGS, "real": REAL_RUN_FLAGS}
+
+# `run:` keys that the SESSION acts on rather than the launcher: build_argv
+# never sees them (it only walks PLATFORM_FLAGS), but they are validated and
+# stored with the run like any other key, so a preset can carry them.
+#   waypoints: map  = load the library map's own waypoints (if it has any)
+#              keep = leave the dashboard's working set as it is
+#              none = start with no waypoints
+WAYPOINT_POLICIES = ("map", "keep", "none")
+SESSION_KEYS = {"waypoints"}
+
+
+def library_db_path(name: str) -> Path:
+    """maps/<name>/map.db for a library entry, by name only."""
+    if not maps_lib.NAME_RX.match(str(name)):
+        raise ScenarioError(f"map: {name!r} is not a library map name")
+    return maps_lib.MAPS_DIR / name / "map.db"
+
+
+def _check_session_keys(run: dict) -> None:
+    if run.get("waypoints", "map") not in WAYPOINT_POLICIES:
+        raise ScenarioError(
+            f"waypoints: expected one of {list(WAYPOINT_POLICIES)}, got {run['waypoints']!r}")
 PLATFORM_DEFAULTS = {"sim": RUN_DEFAULTS, "real": REAL_RUN_DEFAULTS}
 
 
@@ -331,12 +358,17 @@ def _validate(path: Path, raw: dict) -> dict:
     run = raw.get("run") or {}
     if not isinstance(run, dict):
         raise ScenarioError("run: must be a mapping")
-    unknown = sorted(set(run) - set(flags))
+    unknown = sorted(set(run) - set(flags) - SESSION_KEYS)
     if unknown:
         raise ScenarioError(
-            f"run: unknown key(s) {unknown} for platform {platform!r} — allowed: {sorted(flags)}")
+            f"run: unknown key(s) {unknown} for platform {platform!r} — "
+            f"allowed: {sorted(set(flags) | SESSION_KEYS)}")
+    # SESSION_KEYS are not defaulted in: absent means the default policy
+    # (run.get("waypoints", "map")), and `run` stays exactly the launcher's
+    # keys for any preset that doesn't use them.
     merged = {**PLATFORM_DEFAULTS[platform], **run}
     build_argv(merged, platform)  # type/range check now, not at launch time
+    _check_session_keys(merged)
     if merged["localize"] and merged["resume"]:
         raise ScenarioError("run: localize and resume are mutually exclusive")
 
@@ -357,6 +389,7 @@ def _validate(path: Path, raw: dict) -> dict:
         "description": (raw.get("description") or "").strip(),
         "status": status,
         "platform": platform,
+        "origin": raw.get("origin") or "file",
         "run": merged,
         "overrides": list(overrides),
         "capture": {"bag": bool(capture.get("bag", False))},
@@ -428,6 +461,204 @@ def apply_overrides(scenario: dict, overrides: dict | None) -> dict:
     if run["localize"] and run["resume"]:
         raise ScenarioError("localize and resume are mutually exclusive")
     return run
+
+
+# ---------------------------------------------------------------------------
+# Launch form: settings <-> run
+# ---------------------------------------------------------------------------
+#
+# The Scenarios tab's form speaks in SETTINGS (environment, map, mode, robots,
+# waypoints, ...), never in paths or flags. config_to_run is the one place
+# those become a `run:` mapping, which then goes through exactly the same
+# build_argv allowlist as a preset file — so the form widens what is easy to
+# ask for, not what can be launched.
+#
+#   map:  "new"     -> empty map (no --resume/--localize, no --map)
+#         "working" -> the working DB ~/.ros/sortbots_<id>.db
+#         <name>    -> a library entry, by name only (never a path)
+#   mode: "extend"  -> --resume   (keep mapping)
+#         "readonly"-> --localize (Mem/IncrementalMemory=false)
+
+CONFIG_SIM_KEYS = {"scene", "robots", "map", "mode", "explore", "waypoints",
+                   "headless", "chase_cam", "chase_cam_robots", "teleop", "bag"}
+CONFIG_REAL_KEYS = {"map", "mode", "waypoints", "bag"}
+CONFIG_KEYS = {"sim": CONFIG_SIM_KEYS, "real": CONFIG_REAL_KEYS}
+CONFIG_DEFAULTS = {
+    "scene": "nvidia", "robots": 1, "map": "new", "mode": "extend",
+    "explore": True, "waypoints": "map", "headless": False, "chase_cam": False,
+    "chase_cam_robots": 1, "teleop": False, "bag": False,
+}
+MODES = ("extend", "readonly")
+
+
+def working_db_path(robot_id: str = "robot_0") -> Path:
+    # Same default run_demo.sh/run_robot.sh use when no --map is given.
+    return Path.home() / ".ros" / f"sortbots_{robot_id}.db"
+
+
+def _as_bool(value) -> bool:
+    if isinstance(value, str):
+        return value.lower() in ("true", "1", "yes", "on")
+    return bool(value)
+
+
+def config_to_run(config: dict, platform: str = "sim") -> dict:
+    """Form settings -> a validated `run:` mapping (raises ScenarioError)."""
+    if platform not in PLATFORMS:
+        raise ScenarioError(f"unknown platform {platform!r}")
+    if not isinstance(config, dict):
+        raise ScenarioError("config must be an object")
+    unknown = sorted(set(config) - CONFIG_KEYS[platform])
+    if unknown:
+        raise ScenarioError(
+            f"unknown setting(s) {unknown} for platform {platform!r} — "
+            f"allowed: {sorted(CONFIG_KEYS[platform])}")
+    cfg = {k: v for k, v in CONFIG_DEFAULTS.items() if k in CONFIG_KEYS[platform]}
+    cfg.update(config)
+
+    run = dict(PLATFORM_DEFAULTS[platform])
+    mode = cfg["mode"]
+    if mode not in MODES:
+        raise ScenarioError(f"mode: expected one of {list(MODES)}, got {mode!r}")
+    where = str(cfg["map"])
+    if where == "new":
+        run.update(resume=False, localize=False, map=None)
+    else:
+        run.update(resume=mode == "extend", localize=mode == "readonly")
+        if where == "working":
+            run["map"] = None
+            db = working_db_path(run.get("robot_id") or "robot_0")
+            if not db.exists():
+                raise ScenarioError(
+                    f"no working map yet ({db}) — pick a saved map or start a new one")
+        else:
+            try:
+                manifest = maps_lib.read_manifest(where)
+            except maps_lib.MapError as exc:
+                raise ScenarioError(f"map: {exc}") from None
+            if manifest.get("db_state") != "complete":
+                raise ScenarioError(
+                    f"map {where!r} can't be loaded: pose graph is {manifest.get('db_state')}")
+            run["map"] = str(library_db_path(where))
+
+    if platform == "sim":
+        run["scene"] = cfg["scene"]
+        run["robots"] = int(cfg["robots"])
+        run["explore"] = _as_bool(cfg["explore"])
+        run["headless"] = _as_bool(cfg["headless"])
+        run["chase_cam"] = _as_bool(cfg["chase_cam"])
+        run["teleop"] = _as_bool(cfg["teleop"])
+        if run["chase_cam"]:
+            run["chase_cam_robots"] = int(cfg["chase_cam_robots"])
+    run["waypoints"] = cfg["waypoints"]
+    _check_session_keys(run)
+    build_argv(run, platform)  # the allowlist: type, range, choice, path containment
+    return run
+
+
+def run_to_config(run: dict, platform: str = "sim", bag: bool = False) -> dict:
+    """A preset's `run:` -> form settings, for Quick start.
+
+    Returns {"config": {...}} or {"config": None, "reason": "..."} when the
+    run can't be expressed in the form (a map path outside the library, say)
+    — the form says so rather than silently launching something else.
+    """
+    cfg = {}
+    m = run.get("map")
+    if m:
+        name = maps_lib.map_name_for_path(m) if "/" in str(m) else str(m)
+        if not name:
+            return {"config": None, "reason": f"map {m} is not in the maps/ library"}
+        cfg["map"] = name
+    else:
+        cfg["map"] = "working" if (run.get("resume") or run.get("localize")) else "new"
+    if cfg["map"] != "new" and not (run.get("resume") or run.get("localize")):
+        return {"config": None, "reason": "loads a map without --resume or --localize"}
+    cfg["mode"] = "readonly" if run.get("localize") else "extend"
+    cfg["waypoints"] = run.get("waypoints", "map")
+    cfg["bag"] = bool(bag)
+    if platform == "sim":
+        cfg["scene"] = run.get("scene", "nvidia")
+        cfg["robots"] = int(run.get("robots") or 1)
+        for key in ("explore", "headless", "chase_cam", "teleop"):
+            cfg[key] = bool(run.get(key))
+        cfg["chase_cam_robots"] = int(run.get("chase_cam_robots") or 1)
+    return {"config": cfg}
+
+
+def describe_config(cfg: dict, platform: str = "sim") -> str:
+    """One-line human summary, shown under the form and in the session pane."""
+    full = {**CONFIG_DEFAULTS, **cfg}
+    where = {"new": "new map", "working": "working map"}.get(full["map"], full["map"])
+    bits = []
+    if platform == "sim":
+        bits.append({"nvidia": "NVIDIA warehouse", "primitive": "primitive scene"}.get(
+            full["scene"], full["scene"]))
+        n = int(full["robots"])
+        bits.append(f"{n} robot{'s' if n != 1 else ''}")
+    bits.append(where if full["map"] == "new"
+                else f"{where} ({'read-only' if full['mode'] == 'readonly' else 'extend'})")
+    if platform == "sim":
+        bits.append("explorer on" if _as_bool(full["explore"]) else "explorer off")
+    bits.append({"map": "map's waypoints", "keep": "current waypoints",
+                 "none": "no waypoints"}[full["waypoints"]])
+    return " · ".join(bits)
+
+
+def preview_config(config: dict, platform: str = "sim") -> dict:
+    """What a form config would launch, without launching it."""
+    run = config_to_run(config, platform)
+    argv = [str(LAUNCHERS[platform]), *build_argv(run, platform), "--keep-console"]
+    return {"argv": argv, "command": shlex.join(argv),
+            "summary": describe_config(config, platform)}
+
+
+def write_preset(name: str, config: dict, platform: str = "sim", *, title: str | None = None,
+                 description: str | None = None, overwrite: bool = False) -> dict:
+    """Save a form config as configs/scenarios/<name>.yaml (a Quick start entry).
+
+    Validated by the SAME _validate a hand-written file goes through, on a
+    temp file, before it replaces anything. Only presets the dashboard wrote
+    (origin: dashboard) can be overwritten — a hand-written preset carries
+    comments and intent that a form round-trip would silently discard.
+    """
+    if not maps_lib.NAME_RX.match(str(name)):
+        raise ScenarioError(f"preset name {name!r} must match {maps_lib.NAME_RX.pattern}")
+    run = config_to_run(config, platform)
+    # Portable: a library map is stored by name, never as /home/<user>/... .
+    if run.get("map"):
+        run["map"] = maps_lib.map_name_for_path(run["map"]) or run["map"]
+    run = {k: v for k, v in run.items() if v is not None}
+    path = SCENARIO_DIR / f"{name}.yaml"
+    if path.exists():
+        existing = yaml.safe_load(path.read_text()) or {}
+        if existing.get("origin") != "dashboard":
+            raise ScenarioError(f"{path.name} is a hand-written preset — pick another name")
+        if not overwrite:
+            raise ScenarioError(f"a preset named {name!r} already exists")
+    doc = {
+        "name": name,
+        "title": (title or name).strip()[:120],
+        "description": (description or describe_config(config, platform)).strip()[:1000],
+        "status": "ready",
+        "platform": platform,
+        "origin": "dashboard",
+        "run": run,
+        "overrides": [],
+        "capture": {"bag": _as_bool(config.get("bag", False))},
+    }
+    header = ("# Saved from the dashboard's launch form (origin: dashboard).\n"
+              "# A Quick start preset: picking it fills the form in. See\n"
+              "# configs/scenarios/explore_fresh.yaml for the schema.\n")
+    tmp = path.with_suffix(".yaml.tmp")
+    tmp.write_text(header + yaml.safe_dump(doc, sort_keys=False))
+    try:
+        _validate(path, yaml.safe_load(tmp.read_text()))
+        tmp.replace(path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+    return get_scenario(name)
 
 
 # ---------------------------------------------------------------------------
@@ -731,6 +962,8 @@ class SessionManager:
             # (localize = read-only, so only its waypoints are worth saving).
             run = session.get("run") or {}
             session["map_name"] = maps_lib.map_name_for_path(run["map"]) if run.get("map") else None
+            if session.get("config"):
+                session["summary"] = describe_config(session["config"], session.get("platform", "sim"))
             session["read_only"] = bool(run.get("localize"))
             # Freeze the clock once the session ends, or a finished run keeps
             # reporting an ever-growing runtime for as long as the console lives.
@@ -738,7 +971,9 @@ class SessionManager:
             session["elapsed_s"] = round(end - session["started_at"], 1)
             return session
 
-    def start(self, name: str, overrides: dict | None = None, force: bool = False) -> dict:
+    def start(self, name: str | None = None, overrides: dict | None = None,
+              force: bool = False, config: dict | None = None) -> dict:
+        """Start a preset by `name` (+ overrides), or a launch-form `config`."""
         with self._lock:
             if self.is_busy():
                 if not force:
@@ -747,7 +982,16 @@ class SessionManager:
                     )
                 self._stop_blocking()
 
-            scenario = get_scenario(name)
+            if config is not None:
+                # The launch form: settings -> run through config_to_run, which
+                # ends in the same build_argv allowlist a preset does.
+                run = config_to_run(config, self.platform)
+                scenario = {"name": "custom", "title": describe_config(config, self.platform),
+                            "status": "ready", "platform": self.platform,
+                            "capture": {"bag": _as_bool(config.get("bag", False))}}
+                name = "custom"
+            else:
+                scenario = get_scenario(name)
             if scenario["status"] != "ready":
                 raise ScenarioError(
                     f"scenario {name!r} has status {scenario['status']!r} and cannot be started"
@@ -760,13 +1004,10 @@ class SessionManager:
                     f"scenario {name!r} is for platform {scenario['platform']!r}; "
                     f"this console runs {self.platform!r}"
                 )
-            run = apply_overrides(scenario, overrides)
+            if config is None:
+                run = apply_overrides(scenario, overrides)
             argv = launcher_argv(scenario, run)
-            # A run started FROM a library map gets that map's waypoints, the
-            # same as the dashboard's Load button (load_map_blocking).
-            lib_map = maps_lib.map_name_for_path(run["map"]) if run.get("map") else None
-            if lib_map:
-                maps_lib.restore_waypoints(lib_map, self.platform)
+            self._apply_waypoint_policy(run)
 
             session_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{name}"
             session_dir = SESSIONS_DIR / session_id
@@ -782,6 +1023,11 @@ class SessionManager:
                 "argv": argv,
                 "platform": scenario["platform"],
                 "run": run,
+                # What the launch form would show for this run — set for presets
+                # too, so the session pane can describe any run the same way.
+                "config": config if config is not None else
+                          run_to_config(run, scenario["platform"],
+                                        scenario["capture"]["bag"]).get("config"),
                 "state": "starting",
                 "phase": "idle",
                 "started_at": time.time(),
@@ -826,6 +1072,18 @@ class SessionManager:
             self._persist()
             threading.Thread(target=self._stop_blocking, daemon=True).start()
             return self.status()
+
+    def _apply_waypoint_policy(self, run: dict) -> None:
+        """run["waypoints"]: map = the library map's own set (if it carries
+        one — same as the dashboard's Load button), keep = untouched,
+        none = start empty."""
+        policy = run.get("waypoints", "map")
+        if policy == "none":
+            maps_lib.write_working_waypoints(self.platform, [])
+        elif policy == "map":
+            lib_map = maps_lib.map_name_for_path(run["map"]) if run.get("map") else None
+            if lib_map:
+                maps_lib.restore_waypoints(lib_map, self.platform)
 
     def finish(self, name: str, robot_id: str = "robot_0") -> dict:
         """Save the run into maps/<name>, then stop it — the dashboard's
@@ -1128,7 +1386,22 @@ def main() -> None:
                         help="print the launcher command a scenario would run")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                         help="apply an override before printing (repeatable)")
+    parser.add_argument("--platform", choices=PLATFORMS, default=None,
+                        help="for `--print-argv custom`: platform (default: detected)")
     args = parser.parse_args()
+
+    if args.print_argv == "custom":
+        # The launch form's path: --set entries are form settings, not overrides.
+        config = {}
+        for item in args.set:
+            key, _, value = item.partition("=")
+            low = value.lower()
+            config[key] = True if low == "true" else False if low == "false" else (
+                int(value) if value.lstrip("-").isdigit() else value)
+        out = preview_config(config, args.platform or detect_platform())
+        print(out["command"])
+        print(f"# {out['summary']}")
+        return
 
     if args.list or not args.print_argv:
         for scenario in load_scenarios():

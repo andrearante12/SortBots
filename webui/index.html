@@ -336,35 +336,45 @@
   #scenario-hint { font-size: 0.75rem; color: #9aa; }
   /* Scenario list left, the running session's status + log right. */
   #scenario-body { display: grid; grid-template-columns: 1.1fr 1fr; gap: 10px; flex: 1 1 auto; min-height: 0; }
-  #scenario-list { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; }
-
-  .scenario-card {
-    background: #14161a; border: 1px solid #2a2e35; border-radius: 6px;
-    padding: 10px; flex: none;
+  #launch-form {
+    display: flex; flex-direction: column; gap: 9px; overflow-y: auto; min-height: 0;
+    align-self: start; max-height: 100%;
+    background: #14161a; border: 1px solid #2a2e35; border-radius: 6px; padding: 12px;
   }
-  .scenario-card.selected { border-color: #2d5; }
-  .scenario-card.disabled { opacity: 0.55; }
-  .scenario-card h3 { margin: 0 0 5px; font-size: 0.9rem; font-weight: 600; }
-  .scenario-card p { margin: 0; font-size: 0.78rem; line-height: 1.4; color: #9aa; }
-  .scenario-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-  .scenario-row label { display: flex; align-items: center; gap: 4px; font-size: 0.76rem; color: #9aa; cursor: pointer; }
-  .scenario-row input[type="number"] {
-    width: 46px; background: #14161a; color: #e6e6e6;
-    border: 1px solid #2a2e35; border-radius: 4px; padding: 2px 4px; font-size: 0.76rem;
+  .lf-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .lf-row[hidden], #launch-form [data-field][hidden] { display: none; }
+  .lf-k { width: 92px; flex: none; font-size: 0.78rem; color: #9aa; }
+  #launch-form select, #launch-form > .lf-row > button {
+    background: #0f1114; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 4px 7px; font-size: 0.8rem;
   }
-  /* The saved-map picker. max-width, not a fixed width: an entry's label
-     carries its coverage and date, and letting it size the flex row would
-     push the Start button off a phone-width card. */
-  .scenario-row select {
-    max-width: 240px; background: #14161a; color: #e6e6e6;
-    border: 1px solid #2a2e35; border-radius: 4px; padding: 2px 4px; font-size: 0.76rem;
+  #lf-preset, #lf-map { flex: 1 1 180px; min-width: 0; max-width: 100%; }
+  #launch-form > .lf-row > button { cursor: pointer; }
+  #launch-form > .lf-row > button:hover { background: #222831; }
+  .lf-seg { margin-left: 0; flex-wrap: wrap; }
+  .lf-check { display: flex; align-items: center; gap: 5px; font-size: 0.8rem; color: #cdd; cursor: pointer; }
+  .lf-note { margin: 0; font-size: 0.74rem; color: #889; line-height: 1.4; }
+  .lf-note:empty { display: none; }
+  .lf-warn { color: #fb7; }
+  #lf-advanced summary { cursor: pointer; font-size: 0.78rem; color: #9aa; }
+  #lf-advanced[open] summary { margin-bottom: 8px; }
+  #lf-advanced .lf-row { gap: 14px; padding-left: 4px; }
+  #lf-footer {
+    margin-top: 6px; padding-top: 10px; border-top: 1px solid #2a2e35;
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center;
   }
-  .scenario-row button {
-    margin-left: auto; background: #2d5; color: #111; border: none; font-weight: 600;
-    border-radius: 4px; padding: 5px 12px; font-size: 0.8rem; cursor: pointer;
+  #lf-summary { font-size: 0.85rem; color: #e6e6e6; }
+  #lf-command {
+    grid-column: 1; font-size: 0.68rem; color: #667; word-break: break-all;
   }
-  .scenario-row button:hover:not(:disabled) { background: #3e6; }
-  .scenario-row button:disabled { background: #2a2e35; color: #778; cursor: not-allowed; }
+  #lf-error { grid-column: 1; font-size: 0.76rem; color: #f77; }
+  #lf-error:empty, #lf-command:empty { display: none; }
+  #lf-start {
+    grid-column: 2; grid-row: 1 / span 3; background: #2d5; color: #111; border: none;
+    font-weight: 600; border-radius: 5px; padding: 9px 22px; font-size: 0.9rem; cursor: pointer;
+  }
+  #lf-start:hover:not(:disabled) { background: #3e6; }
+  #lf-start:disabled { background: #2a2e35; color: #778; cursor: not-allowed; }
   /* Same class-per-state chip pattern as the task queue's .state-* badges. */
   .sc-badge { padding: 1px 6px; border-radius: 3px; font-size: 0.7rem; font-family: monospace; }
   .sc-ready { background: #043; color: #2d5; }
@@ -705,13 +715,76 @@
     <div id="scenario-head">
       <h2>Scenarios</h2>
       <span id="scenario-hint"
-            title="Each card is a preset for scripts/run_demo.sh, defined in configs/scenarios/*.yaml. Starting one launches Isaac Sim plus the whole ROS 2 stack; this dashboard stays up throughout.">
-        Presets from configs/scenarios/ — starting one launches Isaac Sim and the ROS 2 stack.
+            title="Pick each setting, or start from a Quick start preset (configs/scenarios/*.yaml). Starting launches Isaac Sim plus the whole ROS 2 stack; this dashboard stays up throughout.">
+        Choose a setup and start — launches Isaac Sim and the ROS 2 stack.
       </span>
     </div>
     <div id="console-warning" hidden></div>
     <div id="scenario-body">
-      <div id="scenario-list"></div>
+      <!-- The launch form (webui/scenarios.js). It sends SETTINGS, never paths
+           or flags: webui/session.py's config_to_run turns them into the same
+           RUN_FLAGS allowlist a preset file goes through. Rows carry
+           data-field so the robot console can hide sim-only settings. -->
+      <form id="launch-form" autocomplete="off">
+        <div class="lf-row">
+          <span class="lf-k">Quick start</span>
+          <select id="lf-preset" title="Presets from configs/scenarios/ — picking one fills the form in"></select>
+          <button type="button" id="lf-save-preset" title="Save these settings as a new Quick start preset (configs/scenarios/NAME.yaml)">Save as preset&hellip;</button>
+        </div>
+        <p id="lf-preset-note" class="lf-note"></p>
+        <div class="lf-row" data-field="scene">
+          <span class="lf-k">Environment</span>
+          <div class="segmented lf-seg" id="lf-scene">
+            <button type="button" data-v="nvidia">NVIDIA warehouse</button>
+            <button type="button" data-v="primitive">primitive</button>
+          </div>
+        </div>
+        <div class="lf-row" data-field="map">
+          <span class="lf-k">Map</span>
+          <select id="lf-map" title="Start from an empty map, the working map left by the last run, or a saved map from maps/ (always loaded from a copy)"></select>
+        </div>
+        <div class="lf-row" data-field="mode" id="lf-mode-row">
+          <span class="lf-k">Mode</span>
+          <div class="segmented lf-seg" id="lf-mode">
+            <button type="button" data-v="extend" title="Keep mapping: new ground is added to the map (save it with Save &amp; finish)">extend &mdash; keep mapping</button>
+            <button type="button" data-v="readonly" title="Localize only: the map is used, never changed (Mem/IncrementalMemory=false)">read-only &mdash; localize</button>
+          </div>
+        </div>
+        <p id="lf-map-note" class="lf-note lf-warn"></p>
+        <div class="lf-row" data-field="robots">
+          <span class="lf-k">Robots</span>
+          <select id="lf-robots"></select>
+          <span id="lf-robot-ids" class="lf-note"></span>
+        </div>
+        <div class="lf-row" data-field="explore">
+          <span class="lf-k">Exploration</span>
+          <label class="lf-check"><input type="checkbox" id="lf-explore"> autonomous frontier exploration</label>
+        </div>
+        <div class="lf-row" data-field="waypoints">
+          <span class="lf-k">Waypoints</span>
+          <div class="segmented lf-seg" id="lf-waypoints">
+            <button type="button" data-v="map" title="Load the saved map's own waypoints (maps/NAME/waypoints.json)">from map</button>
+            <button type="button" data-v="keep" title="Keep the dashboard's current waypoints">keep current</button>
+            <button type="button" data-v="none" title="Start with no waypoints">start empty</button>
+          </div>
+        </div>
+        <details id="lf-advanced">
+          <summary>Advanced</summary>
+          <div class="lf-row">
+            <label class="lf-check" data-field="headless" title="No Isaac window; the dashboard, map and cameras all still work"><input type="checkbox" id="lf-headless"> headless</label>
+            <label class="lf-check" data-field="chase_cam" title="Cosmetic 3rd-person view. Each one is another render product: ~30% of real-time factor (0.47x -> 0.33x, scripts/bench_sim.sh)"><input type="checkbox" id="lf-chase_cam"> chase cam</label>
+            <select id="lf-chase_cam_robots" data-field="chase_cam_robots" title="How many robots get a chase cam"></select>
+            <label class="lf-check" data-field="teleop"><input type="checkbox" id="lf-teleop"> teleop</label>
+            <label class="lf-check" data-field="bag" title="Record a rosbag into the session directory for the life of the run (large)"><input type="checkbox" id="lf-bag"> record bag</label>
+          </div>
+        </details>
+        <div id="lf-footer">
+          <div id="lf-summary"></div>
+          <code id="lf-command"></code>
+          <div id="lf-error"></div>
+          <button type="submit" id="lf-start">Start</button>
+        </div>
+      </form>
       <div id="session-pane">
         <div id="session-strip">
           <span id="session-state">no session</span>
