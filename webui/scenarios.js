@@ -139,16 +139,18 @@
     mapSel.textContent = "";
     option(mapSel, "new", "New map (empty)");
     const w = options.working_db;
-    option(mapSel, "working",
-           w.exists ? "Working map (left by the last run, ~/.ros)"
-                    : "Working map — none yet (no ~/.ros/sortbots_robot_0.db)", !w.exists);
+    option(mapSel, "working", w.exists ? "Working map" : "Working map (none yet)", !w.exists)
+      .title = `Whatever the last run left in ${w.path}`;
+    // Just the name in the list; the details live in the tooltip. Only an
+    // entry that CAN'T load says why inline — that's the case worth seeing.
     for (const m of options.maps) {
       const ok = !m.error && m.db_state === "complete";
+      const o = option(mapSel, m.name, ok ? m.name
+        : `${m.name} (${m.error ? "invalid" : DB_STATE_NOTE[m.db_state] || m.db_state})`, !ok);
       const bits = [m.title];
       if (m.free_m2 != null) bits.push(`${Math.round(m.free_m2)} m²`);
       if (m.waypoints) bits.push(`${m.waypoints} waypoint${m.waypoints === 1 ? "" : "s"}`);
-      option(mapSel, m.name, ok ? `${m.name} — ${bits.join(" · ")}`
-                                : `${m.name} — (${m.error ? "invalid" : DB_STATE_NOTE[m.db_state] || m.db_state})`, !ok);
+      o.title = bits.join(" · ");
     }
 
     robotsSel.textContent = "";

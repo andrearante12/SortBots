@@ -394,7 +394,7 @@ async function main() {
         // db is missing or an unfetched git-lfs pointer renders disabled, and
         // that difference is the whole point of maps_lib's db_state.
         seededOption: [...document.querySelectorAll('#lf-map option')]
-                        .some((o) => !o.disabled && /Seeded warehouse/.test(o.textContent)),
+                        .some((o) => !o.disabled && o.value === ${JSON.stringify(SEEDED_MAP)}),
       };
     })()`);
 
