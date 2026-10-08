@@ -945,7 +945,11 @@ document.getElementById("map-load").addEventListener("click", async () => {
     return;
   }
   if (!confirm(`Load "${name}" into the running map? The current live map is replaced (save it first if needed).`)) return;
-  await mapAction("/api/map/load", { name }, `loading ${name}…`, `loaded ${name} ✓ — drive to localize`);
+  // A map carries its own waypoints (maps/<name>/waypoints.json); the load
+  // swapped them into the working set server-side, so pick them up.
+  if (await mapAction("/api/map/load", { name }, `loading ${name}…`, `loaded ${name} ✓ — drive to localize`)) {
+    loadNavWaypoints();
+  }
 });
 
 // -- map + robot trail ------------------------------------------------

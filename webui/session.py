@@ -624,7 +624,8 @@ def load_map_blocking(name: str, robot_id: str = "robot_0") -> dict:
     _ros_service_call(
         f"/{rid}/rtabmap/load_database", "rtabmap_msgs/srv/LoadDatabase",
         f"{{database_path: '{dst}', clear: false}}", timeout=180.0)
-    return {"loaded": name, "robot_id": rid, "db": str(dst)}
+    n = maps_lib.restore_waypoints(name, detect_platform())
+    return {"loaded": name, "robot_id": rid, "db": str(dst), "waypoints": n}
 
 
 _PIPELINE_PATTERNS = ("spawn_warehouse.py", "sortbots_bringup.launch.py")
@@ -755,6 +756,11 @@ class SessionManager:
                 )
             run = apply_overrides(scenario, overrides)
             argv = launcher_argv(scenario, run)
+            # A run started FROM a library map gets that map's waypoints, the
+            # same as the dashboard's Load button (load_map_blocking).
+            lib_map = maps_lib.map_name_for_path(run["map"]) if run.get("map") else None
+            if lib_map:
+                maps_lib.restore_waypoints(lib_map, self.platform)
 
             session_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}_{name}"
             session_dir = SESSIONS_DIR / session_id

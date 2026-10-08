@@ -45,13 +45,6 @@ import maps_lib
 WEBUI_DIR = Path(__file__).resolve().parent
 WAYPOINTS_CONFIG = WEBUI_DIR.parent / "configs" / "waypoints.yaml"
 ROBOTS_CONFIG = WEBUI_DIR.parent / "configs" / "robots.yaml"
-# Operator waypoints placed on the dashboard map (the A/B points the navigate
-# panel drives between). Under data/, which is gitignored: these are working
-# state on a shared machine, not config — writing them into configs/ would
-# dirty the tree every time someone drops a pin. Keyed by platform because the
-# sim's world-anchored `map` frame and the robot's are unrelated coordinates.
-NAV_WAYPOINTS_FILE = WEBUI_DIR.parent / "data" / "nav_waypoints.json"
-MAX_NAV_WAYPOINTS = 64
 
 MAX_BODY_BYTES = 64 * 1024
 
@@ -63,38 +56,8 @@ SESSIONS: session_mod.SessionManager | None = None
 PLATFORM = "sim"
 
 
-def _read_nav_waypoint_file() -> dict:
-    try:
-        data = json.loads(NAV_WAYPOINTS_FILE.read_text())
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def _load_nav_waypoints() -> dict:
-    return {"platform": PLATFORM,
-            "waypoints": _read_nav_waypoint_file().get(PLATFORM, [])}
-
-
-def _validate_nav_waypoints(raw) -> list[dict]:
-    if not isinstance(raw, list) or len(raw) > MAX_NAV_WAYPOINTS:
-        raise ValueError(f"waypoints must be a list of at most {MAX_NAV_WAYPOINTS}")
-    out, seen = [], set()
-    for w in raw:
-        if not isinstance(w, dict):
-            raise ValueError("each waypoint must be an object")
-        name = str(w.get("name", "")).strip()
-        if not name or len(name) > 32:
-            raise ValueError("waypoint names must be 1-32 characters")
-        if name in seen:
-            raise ValueError(f"duplicate waypoint name: {name}")
-        seen.add(name)
-        try:
-            x, y, yaw = (float(w.get(k, 0.0)) for k in ("x", "y", "yaw"))
-        except (TypeError, ValueError):
-            raise ValueError(f"waypoint {name}: x, y, yaw must be numbers") from None
-        out.append({"name": name, "x": round(x, 3), "y": round(y, 3), "yaw": round(yaw, 3)})
-    return out
+    return {"platform": PLATFORM, "waypoints": maps_lib.read_working_waypoints(PLATFORM)}
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -159,7 +122,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self._serve_json(stations)
 
     def _save_nav_waypoints(self):
-        # Not behind --control: it only rewrites one JSON file under data/ and
+        # Storage lives in maps_lib (data/nav_waypoints.json, the WORKING set;
+        # saving/loading a map snapshots/restores it). Not behind --control: it
+        # only rewrites one JSON file under data/ and
         # needs no ROS shell, so the plain dashboard can place pins too. The
         # client always sends the full list (last write wins) — two operators
         # editing at once is not a case worth a merge protocol.
@@ -167,16 +132,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if body is None:
             return
         try:
-            points = _validate_nav_waypoints(body.get("waypoints"))
-        except ValueError as exc:
+            maps_lib.write_working_waypoints(PLATFORM, body.get("waypoints"))
+        except maps_lib.MapError as exc:
             self._serve_error(400, str(exc))
             return
-        data = _read_nav_waypoint_file()
-        data[PLATFORM] = points
-        NAV_WAYPOINTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        tmp = NAV_WAYPOINTS_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2))
-        tmp.replace(NAV_WAYPOINTS_FILE)
         self._serve_json(_load_nav_waypoints())
 
     def _serve_robots(self):
