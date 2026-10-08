@@ -726,6 +726,12 @@ class SessionManager:
                 self._persist()
                 session = dict(self._session)
             session["phase_label"] = PHASE_LABELS.get(session["phase"], session["phase"])
+            # What "Save & finish" should default to: the library map this run
+            # was started from, and whether the run can change it at all
+            # (localize = read-only, so only its waypoints are worth saving).
+            run = session.get("run") or {}
+            session["map_name"] = maps_lib.map_name_for_path(run["map"]) if run.get("map") else None
+            session["read_only"] = bool(run.get("localize"))
             # Freeze the clock once the session ends, or a finished run keeps
             # reporting an ever-growing runtime for as long as the console lives.
             end = session.get("stopped_at") or time.time()
@@ -820,6 +826,72 @@ class SessionManager:
             self._persist()
             threading.Thread(target=self._stop_blocking, daemon=True).start()
             return self.status()
+
+    def finish(self, name: str, robot_id: str = "robot_0") -> dict:
+        """Save the run into maps/<name>, then stop it — the dashboard's
+        "Save & finish", and the same sequence as `sim_ctl.sh stop --save-map`.
+
+        Asynchronous like stop(): the two saves copy a multi-hundred-MB sqlite
+        file, so the work runs on a thread and progress is published as
+        session["finish"] = {map, step, error} for the UI's existing poll.
+        """
+        if not maps_lib.NAME_RX.match(str(name)):
+            raise maps_lib.MapError(
+                f"map name {name!r} does not match {maps_lib.NAME_RX.pattern}")
+        rid = _check_robot_id(robot_id)
+        with self._lock:
+            if self._session is None or self._session["state"] != "running":
+                raise SessionConflict("no running session to finish")
+            fin = self._session.get("finish")
+            if fin and fin.get("step") not in ("done", "failed"):
+                raise SessionConflict(f"already finishing into {fin['map']!r}")
+            run = self._session.get("run") or {}
+            loaded = maps_lib.map_name_for_path(run["map"]) if run.get("map") else None
+            # A localize run can't have changed its map: re-copying an
+            # unchanged 800 MB database would only cost time. Its waypoints
+            # are the one thing worth saving — but only back INTO the map it
+            # loaded; saving under a new name is a real (full) save.
+            waypoints_only = bool(run.get("localize")) and loaded == name
+            self._session["finish"] = {"map": name, "step": "saving",
+                                       "waypoints_only": waypoints_only}
+            self._persist()
+        threading.Thread(target=self._finish_blocking,
+                         args=(name, rid, waypoints_only), daemon=True).start()
+        return self.status()
+
+    def _finish_step(self, step: str, error: str | None = None) -> None:
+        with self._lock:
+            if self._session is None or "finish" not in self._session:
+                return
+            self._session["finish"]["step"] = step
+            if error:
+                self._session["finish"]["error"] = error
+            self._persist()
+
+    def _finish_blocking(self, name: str, rid: str, waypoints_only: bool) -> None:
+        try:
+            if waypoints_only:
+                self._finish_step("saving waypoints")
+                maps_lib.snapshot_waypoints(name, self.platform)
+            else:
+                # Grid first, while /map is still being published. A failure
+                # here aborts WITHOUT stopping: the run is the only copy of
+                # the exploration, and tearing it down would throw it away.
+                self._finish_step("saving map (grid)")
+                save_map_blocking(name, robot_id=rid)
+            self._finish_step("stopping")
+            self._stop_blocking()
+            if not waypoints_only:
+                # Stack down: maps.sh now copies the closed pose graph safely.
+                self._finish_step("saving pose graph")
+                manifest = save_map_blocking(name, robot_id=rid)
+                if manifest.get("db_state") != "complete":
+                    raise maps_lib.MapError(
+                        f"pose graph is {manifest.get('db_state')} — "
+                        f"run: scripts/maps.sh save {name}")
+            self._finish_step("done")
+        except (maps_lib.MapError, OSError) as exc:
+            self._finish_step("failed", str(exc))
 
     def is_busy(self) -> bool:
         with self._lock:

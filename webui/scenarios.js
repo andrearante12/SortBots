@@ -37,6 +37,7 @@
   const warningEl = document.getElementById("console-warning");
   const stateEl = document.getElementById("session-state");
   const stopBtn = document.getElementById("session-stop");
+  const finishBtn = document.getElementById("session-finish");
   const logEl = document.getElementById("session-log");
   const hintEl = document.getElementById("scenario-hint");
 
@@ -251,8 +252,18 @@
     }
   }
 
+  // A "Save & finish" in flight (session.finish.step not done/failed) owns the
+  // session: neither button may start a second teardown under it.
+  function isFinishing(s) {
+    return !!(s && s.finish && !["done", "failed"].includes(s.finish.step));
+  }
+
   function renderSession() {
-    stopBtn.disabled = !hasControl || !isActive(session) || busy;
+    stopBtn.disabled = !hasControl || !isActive(session) || busy || isFinishing(session);
+    finishBtn.disabled = !hasControl || !session || session.state !== "running" || busy ||
+      isFinishing(session);
+    finishBtn.textContent = session && session.read_only && session.map_name
+      ? "Save waypoints & finish" : "Save & finish";
     if (!session || session.state === "idle") {
       stateEl.textContent = hasControl ? "no session" : "console not running";
       return;
@@ -265,6 +276,12 @@
       bits.push(`${Math.round(session.elapsed_s)}s`);
     }
     if (session.error) bits.push(session.error);
+    if (session.finish) {
+      const f = session.finish;
+      bits.push(f.step === "done" ? `saved to maps/${f.map} ✓`
+        : f.step === "failed" ? `save to maps/${f.map} FAILED: ${f.error || "see log"}`
+        : `maps/${f.map}: ${f.step}…`);
+    }
     stateEl.textContent = bits.join(" · ");
   }
 
@@ -378,6 +395,11 @@
 
   async function stopSession() {
     if (busy) return;
+    // Stop discards whatever the run mapped: runs work on a copy in ~/.ros,
+    // never on maps/. Only a read-only localize run has nothing to lose.
+    if (session && session.state === "running" && !session.read_only &&
+        !confirm("Stop WITHOUT saving? Anything this run mapped is not in the maps/ library " +
+                 "(use Save & finish to keep it).")) return;
     busy = true;
     renderSession();
     try {
@@ -393,6 +415,28 @@
   }
 
   stopBtn.addEventListener("click", stopSession);
+
+  async function finishSession() {
+    if (busy || !session) return;
+    const readOnly = session.read_only && session.map_name;
+    const name = readOnly ? session.map_name
+      : (prompt("Save this run into maps/ as:", session.map_name || "") || "").trim();
+    if (!name) return;
+    if (readOnly && !confirm(`Save the current waypoints into maps/${name} and stop? ` +
+                             "(This run loaded the map read-only, so the map itself is unchanged.)")) return;
+    busy = true;
+    renderSession();
+    try {
+      session = await postJson("/api/session/finish", { name });
+    } catch (e) {
+      renderWarning(`Could not save & finish: ${e.message}`);
+    } finally {
+      busy = false;
+    }
+    renderSession();
+    schedulePoll(0);
+  }
+  finishBtn.addEventListener("click", finishSession);
 
   async function poll() {
     if (!hasControl) {

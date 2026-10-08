@@ -359,12 +359,16 @@
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: none;
     margin-bottom: 6px; font-family: monospace; font-size: 0.76rem; color: #7bf;
   }
-  #session-stop {
-    margin-left: auto; background: #14161a; color: #f77; border: 1px solid #2a2e35;
+  #session-stop, #session-finish {
+    background: #14161a; color: #f77; border: 1px solid #2a2e35;
     border-radius: 4px; padding: 4px 10px; font-size: 0.78rem; cursor: pointer;
   }
+  #session-finish { margin-left: auto; background: #2d5; color: #111; border-color: #2d5; font-weight: 600; }
   #session-stop:hover:not(:disabled) { background: #222831; }
-  #session-stop:disabled { color: #667; cursor: not-allowed; }
+  #session-finish:hover:not(:disabled) { background: #3e6; }
+  #session-stop:disabled, #session-finish:disabled {
+    background: #14161a; border-color: #2a2e35; color: #667; cursor: not-allowed; font-weight: normal;
+  }
   #session-log {
     flex: 1 1 auto; min-height: 0; overflow: auto; margin: 0;
     background: #000; border: 1px solid #2a2e35; border-radius: 4px; padding: 8px;
@@ -648,6 +652,7 @@
           <input id="map-name" placeholder="map name (a-z 0-9 - _)" size="18"
                  title="Name to save this map under in maps/ — lowercase letters, digits, - and _">
           <button type="submit" class="primary" title="Save the fused /map grid and this robot's pose graph into maps/ under that name (scripts/maps.sh save). Needs the dashboard console.">Save</button>
+          <button type="button" id="map-finish" title="Save into maps/ under that name, then stop the session (same as scripts/sim_ctl.sh stop --save-map NAME). Needs the dashboard console.">Save &amp; finish</button>
           <button type="button" id="map-save-cancel">Cancel</button>
         </form>
         <div id="explore-status" class="ops-status">explorer: not running</div>
@@ -687,8 +692,10 @@
       <div id="session-pane">
         <div id="session-strip">
           <span id="session-state">no session</span>
+          <button type="button" id="session-finish" disabled
+                  title="Save this run into the maps/ library (map, pose graph and waypoints), then stop it. The normal way to end a session.">Save &amp; finish</button>
           <button type="button" id="session-stop" disabled
-                  title="Tear down Isaac Sim and the ROS 2 stack. The dashboard console stays up.">Stop</button>
+                  title="Tear down Isaac Sim and the ROS 2 stack WITHOUT saving. The dashboard console stays up.">Stop</button>
         </div>
         <pre id="session-log" title="Live output from scripts/run_demo.sh for this session (also saved to data/sessions/&lt;id&gt;/console.log)."></pre>
       </div>

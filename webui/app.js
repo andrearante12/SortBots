@@ -858,10 +858,68 @@ const mapSaveRow = document.getElementById("map-save-row");
 const mapNameEl = document.getElementById("map-name");
 function showMapSave(show) {
   mapSaveRow.hidden = !show;
-  if (show) mapNameEl.focus();
+  if (!show) return;
+  mapNameEl.focus();
+  // Default to the library map this run loaded, so re-saving "warehouse"
+  // after a session on it is one click, not a retype.
+  if (!mapNameEl.value) {
+    fetch("/api/session").then((r) => r.json()).then((s) => {
+      if (s.map_name && !mapNameEl.value) mapNameEl.value = s.map_name;
+    }).catch(() => {});
+  }
 }
 document.getElementById("map-save-open").addEventListener("click", () => showMapSave(mapSaveRow.hidden));
 document.getElementById("map-save-cancel").addEventListener("click", () => showMapSave(false));
+
+// Save & finish: hand the whole save -> stop -> save-pose-graph sequence to
+// serve.py (SessionManager.finish) and follow its progress. Run from here
+// rather than chained in the browser so closing the tab mid-save can't leave
+// the map half-saved and the run torn down.
+document.getElementById("map-finish").addEventListener("click", async () => {
+  const name = (mapNameEl.value || "").trim();
+  exploreMsgUntil = performance.now() + 4000;
+  if (!name) {
+    exploreStatusEl.textContent = "name the map first (a-z 0-9 - _)";
+    return;
+  }
+  if (!confirm(`Save this run into maps/${name} and stop the sim?`)) return;
+  let res, body;
+  try {
+    res = await fetch("/api/session/finish", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, robot_id: ROBOT_ID }),
+    });
+    body = await res.json().catch(() => ({}));
+  } catch (err) {
+    exploreStatusEl.textContent = "save & finish failed — see console";
+    console.error("finish failed", err);
+    return;
+  }
+  if (!res.ok) {
+    exploreStatusEl.textContent = res.status === 503
+      ? "console not running — scripts/sim_ctl.sh stop --save-map " + name
+      : `save & finish failed: ${body.error || res.statusText}`;
+    return;
+  }
+  showMapSave(false);
+  const timer = setInterval(async () => {
+    let s;
+    try { s = await (await fetch("/api/session")).json(); } catch (e) { return; }
+    const f = s.finish || {};
+    exploreMsgUntil = performance.now() + 60000;
+    if (f.step === "done") {
+      exploreStatusEl.textContent = `saved to maps/${f.map} ✓ — session finished`;
+      clearInterval(timer);
+      refreshMapLibrary();
+    } else if (f.step === "failed") {
+      exploreStatusEl.textContent = `save failed: ${f.error || "see Scenarios log"}`;
+      clearInterval(timer);
+    } else {
+      exploreStatusEl.textContent = `maps/${f.map || name}: ${f.step || "saving"}…`;
+    }
+  }, 1000);
+});
 mapSaveRow.addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const name = (mapNameEl.value || "").trim();

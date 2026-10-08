@@ -103,6 +103,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_control(self._start_session)
         elif route == "/api/session/stop":
             self._with_control(lambda: self._serve_json(SESSIONS.stop()))
+        elif route == "/api/session/finish":
+            self._with_control(self._finish_session)
         elif route == "/api/nav_waypoints":
             self._save_nav_waypoints()
         elif route == "/api/map/save":
@@ -249,6 +251,19 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_error(500, f"failed to save map: {exc}")
             return
         self._serve_json(manifest)
+
+    def _finish_session(self):
+        """Save the running session into maps/<name>, then stop it."""
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            self._serve_json(SESSIONS.finish(
+                str(body.get("name", "")), body.get("robot_id") or "robot_0"))
+        except maps_lib.MapError as exc:
+            self._serve_error(400, str(exc))
+        except session_mod.SessionConflict as exc:
+            self._serve_error(409, str(exc))
 
     def _clear_map(self):
         """Wipe the live map (RTAB-Map reset + odometry reset)."""
