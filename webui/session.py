@@ -962,6 +962,12 @@ class SessionManager:
             # (localize = read-only, so only its waypoints are worth saving).
             run = session.get("run") or {}
             session["map_name"] = maps_lib.map_name_for_path(run["map"]) if run.get("map") else None
+            # Sessions started before the launch form (or adopted across a
+            # console restart) carry no config: derive one from the run.
+            if not session.get("config") and run:
+                session["config"] = run_to_config(
+                    run, session.get("platform", "sim"),
+                    bool(session.get("capture_bag"))).get("config")
             if session.get("config"):
                 session["summary"] = describe_config(session["config"], session.get("platform", "sim"))
             session["read_only"] = bool(run.get("localize"))
