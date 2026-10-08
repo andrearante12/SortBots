@@ -60,6 +60,20 @@ def _load_nav_waypoints() -> dict:
     return {"platform": PLATFORM, "waypoints": maps_lib.read_working_waypoints(PLATFORM)}
 
 
+def _session_robot_ids(roster: list[str]) -> list[str] | None:
+    if SESSIONS is None:
+        return None
+    status = SESSIONS.status()
+    if status.get("state") not in ("starting", "running"):
+        return None
+    run = status.get("run") or {}
+    if run.get("robot_ids"):
+        return [r for r in str(run["robot_ids"]).split(",") if r]
+    if isinstance(run.get("robots"), int) and run["robots"] > 0:
+        return roster[:run["robots"]]
+    return None
+
+
 class DashboardHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEBUI_DIR), **kwargs)
@@ -154,9 +168,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             # entry whose topics nothing publishes.
             if PLATFORM == "real":
                 robots = [r for r in robots if "real" in (r.get("spawn") or {})]
+            ids = [r["id"] for r in robots]
+            # The roster is every robot this CONFIG knows; a running session
+            # may use fewer. Listing the roster made a 1-robot run offer
+            # robot_1 in the switcher (a page of dead topics) and label the
+            # map "2 robots". So narrow to the live session when there is one
+            # — same derivation as run_demo.sh: explicit robot_ids, else the
+            # first --robots N of the roster, in roster order.
+            live = _session_robot_ids(ids)
             data = {
                 "default": raw["default"],
-                "robots": [r["id"] for r in robots],
+                "robots": live or ids,
+                "configured": ids,
             }
         else:
             data = {"default": "robot_0", "robots": ["robot_0"]}
