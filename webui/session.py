@@ -651,7 +651,7 @@ def write_preset(name: str, config: dict, platform: str = "sim", *, title: str |
               "# A Quick start preset: picking it fills the form in. See\n"
               "# configs/scenarios/explore_fresh.yaml for the schema.\n")
     tmp = path.with_suffix(".yaml.tmp")
-    tmp.write_text(header + yaml.safe_dump(doc, sort_keys=False))
+    tmp.write_text(header + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=100))
     try:
         _validate(path, yaml.safe_load(tmp.read_text()))
         tmp.replace(path)
