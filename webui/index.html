@@ -61,7 +61,8 @@
     padding: 4px 12px; font-size: 0.78rem; cursor: pointer;
   }
   .segmented button:first-child { border-radius: 5px 0 0 5px; }
-  .segmented button:last-child { border-radius: 0 5px 5px 0; border-left: none; }
+  .segmented button + button { border-left: none; }
+  .segmented button:last-child { border-radius: 0 5px 5px 0; }
   .segmented button.active { background: #2d5; color: #111; font-weight: 600; }
   #view-mode { margin-left: 4px; }
   #slam-badge {
@@ -143,6 +144,10 @@
     transform: translateY(-120%); opacity: 0; transition: opacity 0.15s;
   }
   #stage-panel:hover #pip-hint { opacity: 1; }
+  /* Top-right, where the PiP sits in map mode — the two are never shown
+     together (the toggle only exists in the camera stage). */
+  #cam-source { position: absolute; top: 8px; right: 10px; z-index: 6; margin: 0; }
+  #cam-source[hidden] { display: none; }
 
   /* -- map view (inside the stage) --------------------------------------- */
   /* The canvas backing store is a FIXED square (app.js's MAP_CANVAS_PX) and
@@ -256,16 +261,42 @@
   #recon-canvas { flex: 1 1 auto; min-height: 0; position: relative; background: #000; border-radius: 4px; overflow: hidden; }
   #recon-canvas canvas { display: block; width: 100% !important; height: 100% !important; }
 
-  /* Dispatch + task queue, merged into one panel. */
-  #ops-panel { flex: 1 1 40%; min-height: 0; }
-  #dispatch-form { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; flex: none; margin-bottom: 8px; }
-  #dispatch-form select, #dispatch-form button {
-    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
-    border-radius: 4px; padding: 5px 7px; font-size: 0.85rem;
+  /* Operator panel: Navigate / Map / (folded) pick & place. One control
+     vocabulary for every input in it, so the sections read as one panel. */
+  #ops-panel { flex: 1 1 40%; min-height: 0; overflow-y: auto; gap: 12px; }
+  .ops-section { flex: none; }
+  .ops-section h2 { margin-bottom: 6px; }
+  #nav-form, #dispatch-form, .ops-row {
+    display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
   }
-  #dispatch-form button { background: #2d5; color: #111; border: none; font-weight: 600; cursor: pointer; }
-  #dispatch-form button:hover { background: #3e6; }
-  #queue-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+  #ops-panel select, #ops-panel button, #ops-panel input {
+    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 5px 8px; font-size: 0.82rem;
+  }
+  #ops-panel select { min-width: 0; max-width: 100%; }
+  #ops-panel button { cursor: pointer; }
+  #ops-panel button:hover { background: #222831; }
+  #ops-panel button.primary { background: #2d5; color: #111; border-color: #2d5; font-weight: 600; }
+  #ops-panel button.primary:hover { background: #3e6; }
+  #ops-panel button.danger:hover { border-color: #f77; color: #f77; }
+  #ops-panel button.active { border-color: #2d5; color: #2d5; }
+  #nav-from, #nav-to { flex: 1 1 90px; }
+  #map-load-select { flex: 1 1 110px; }
+  #map-name { flex: 1 1 120px; }
+  .ops-right { margin-left: auto; }
+  .ops-arrow { color: #667; }
+  .ops-status {
+    margin-top: 6px; font-family: monospace; font-size: 0.76rem; color: #7bf;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #map-save-row { margin-top: 6px; }
+  #map-save-row[hidden] { display: none; }
+  #tasks-section summary {
+    cursor: pointer; font-size: 0.85rem; text-transform: uppercase;
+    letter-spacing: 0.05em; color: #9aa;
+  }
+  #tasks-section[open] summary { margin-bottom: 8px; }
+  #queue-list { list-style: none; margin: 8px 0 0; padding: 0; }
   #queue-list li {
     display: flex; justify-content: space-between; padding: 5px 8px; margin-bottom: 4px;
     background: #14161a; border-radius: 4px; font-size: 0.82rem; font-family: monospace;
@@ -275,25 +306,6 @@
   .state-NAV_TO_PICKUP, .state-NAV_TO_DROPOFF { background: #430; color: #fb7; }
   .state-PICKING, .state-PLACING { background: #043; color: #7fb; }
   .state-FAILED { background: #400; color: #f77; }
-
-  /* -- autonomous exploration bar (nodes/explorer.py) --------------------- */
-  #explore-bar {
-    display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: none;
-    margin-bottom: 8px; font-size: 0.78rem; color: #9aa;
-  }
-  #explore-bar button {
-    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
-    border-radius: 4px; padding: 4px 8px; font-size: 0.78rem; cursor: pointer;
-  }
-  #explore-bar button:hover { background: #222831; }
-  #map-name {
-    width: 96px; background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
-    border-radius: 4px; padding: 4px 6px; font-size: 0.78rem;
-  }
-  #explore-status {
-    font-family: monospace; color: #7bf; margin-left: auto;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
 
   /* -- scenarios view (webui/scenarios.js) -------------------------------- */
   /* Sibling grid items spanning both columns rather than a wrapper around the
@@ -447,7 +459,6 @@
     #stage-panel { min-height: 52vh; }
     #right-col { flex-direction: row; }
     #recon-panel, #ops-panel { flex: 1 1 50%; min-width: 0; }
-    #dispatch-form select { min-width: 0; flex: 1 1 auto; max-width: 100%; }
     /* The scenario list and its log won't both fit across a phone; stack them
        and give the log a fixed slice so the cards stay reachable. */
     #scenario-body { grid-template-columns: 1fr; grid-auto-rows: auto; }
@@ -467,11 +478,9 @@
     #recon-panel { min-height: 220px; }
     #map-bar { padding-right: 26%; }
     #map-hint { display: none; }  /* the title tooltip still has the full text */
-    /* The explore bar is five controls wide on a 360px screen. Saving to the
-       library is a deliberate, named action that belongs on a real keyboard —
-       drop it here rather than let it wrap the status readout off-screen.
-       scripts/maps.sh save does the same thing from a terminal. */
-    #map-name, #explore-save-lib, #map-load-select, #map-load, #map-clear { display: none; }
+    /* Saving to the library is a deliberate, named action that belongs on a
+       real keyboard; scripts/maps.sh save does the same from a terminal. */
+    #map-save-open, #map-save-row { display: none; }
   }
 </style>
 </head>
@@ -490,9 +499,8 @@
               title="Pick a scenario and start or stop the simulation itself">scenarios</button>
     </div>
     <div id="stage-mode" class="segmented">
-      <button type="button" data-stage="camera" class="active">camera</button>
-      <button type="button" data-stage="sensors"
-              title="RGB with tracked visual features, beside the depth view">sensors</button>
+      <button type="button" data-stage="camera" class="active"
+              title="The robot's cameras. Chase cam or head RGB + depth — switch with the toggle in the corner of the view">camera</button>
       <button type="button" data-stage="map">map</button>
     </div>
     <span id="slam-badge" title="RTAB-Map SLAM status (from the active robot's /info)">SLAM: waiting…</span>
@@ -501,6 +509,13 @@
   <div class="panel" id="stage-panel">
     <span id="stage-label">3rd person (chase cam)</span>
     <span id="pip-hint">click to swap</span>
+    <!-- Which camera the "camera" stage shows. Only rendered when this robot
+         has a chase cam; without one (every real robot) the head view is the
+         only choice and the toggle would be a control that does nothing. -->
+    <div id="cam-source" class="segmented" hidden>
+      <button type="button" data-cam="chase" title="Third-person chase camera (sim only)">chase</button>
+      <button type="button" data-cam="sensors" title="Head RGB with tracked visual features, over the depth view">head + depth</button>
+    </div>
 
     <img id="chase-stream" class="stage-view stage-main"
          alt="chase camera stream (waiting for web_video_server)" />
@@ -537,6 +552,8 @@
                   title="Drag sets a Nav2 goal directly (press = position, drag = heading). Overrides any active task — but while the explorer is running it will preempt this goal within about a second.">nav goal</button>
           <button type="button" data-mapmode="steer"
                   title="Click to send exploration to that area — it preempts the current goal and works that region until it's mapped. Shift-click to QUEUE an area instead, to be visited after the current one. Not a goal: the explorer still picks its own frontiers, so an unreachable click can't strand it.">steer</button>
+          <button type="button" data-mapmode="waypoint"
+                  title="Place a named waypoint (press = position, drag = heading). Click an existing waypoint to delete it. Waypoints show up in the Navigate panel.">waypoint</button>
         </div>
         <span id="map-hint"
               title="Drag on the map to set a Nav2 goal: press sets the position, drag sets the heading. This overrides any task the task_manager is currently navigating — Nav2 always takes the newest goal.">
@@ -600,27 +617,55 @@
            title="Fused fleet recon (/fleet/recon_cloud): every robot's RTAB-Map cloud transformed into world map via spawn anchors, then budgeted. Drag to orbit, scroll to zoom, right-drag to pan."></div>
     </div>
     <div class="panel" id="ops-panel">
-      <h2>Dispatch &amp; task queue</h2>
-      <form id="dispatch-form">
-        <select id="pickup-select"></select>
-        <span>&rarr;</span>
-        <select id="dropoff-select"></select>
-        <button type="submit">Dispatch</button>
-      </form>
-      <div id="explore-bar">
-        <span>Explore:</span>
-        <button type="button" id="explore-start" title="Start autonomous frontier exploration (nodes/explorer.py)">Start</button>
-        <button type="button" id="explore-stop" title="Stop exploring">Stop</button>
-        <button type="button" id="explore-save" title="Snapshot the current RTAB-Map database via its backup service">Save map</button>
-        <input id="map-name" placeholder="library name" size="12"
-               title="Name to save this map under in maps/ — lowercase letters, digits, - and _">
-        <button type="button" id="explore-save-lib" title="Save the fused /map grid and this robot's pose graph into maps/ under that name (scripts/maps.sh save). Needs the dashboard console.">Save to library</button>
-        <select id="map-load-select" title="Saved maps in maps/ — pick one, then Load"></select>
-        <button type="button" id="map-load" title="Load the selected library map into the running RTAB-Map (from a copy; the library file is never modified). Resets odometry. Needs the dashboard console.">Load</button>
-        <button type="button" id="map-clear" title="Wipe the live map and restart odometry from the origin. Save first if you want to keep it.">Clear</button>
-        <span id="explore-status">explorer: not running</span>
-      </div>
-      <ul id="queue-list"></ul>
+      <!-- Navigate: drive between operator waypoints placed in the map view's
+           "waypoint" mode. "here" sends one navigate_to_pose; a named start
+           sends Nav2's follow_waypoints [from, to] so the robot visits both
+           in order without the browser having to sequence goals. -->
+      <section class="ops-section">
+        <h2>Navigate</h2>
+        <form id="nav-form">
+          <select id="nav-from" title="Where the route starts. &quot;here&quot; = straight from the robot's current position"></select>
+          <span class="ops-arrow">&rarr;</span>
+          <select id="nav-to" title="Destination waypoint"></select>
+          <button type="submit" id="nav-go" class="primary">Go</button>
+          <button type="button" id="nav-stop" title="Cancel the active navigation goal">Stop</button>
+        </form>
+        <div id="nav-status" class="ops-status">add waypoints in the map view &rarr; waypoint mode</div>
+      </section>
+
+      <!-- Map: the live map's lifecycle. Save/Load/Clear go through serve.py
+           --control (scripts/maps.sh); exploration through explore_cmd. -->
+      <section class="ops-section">
+        <h2>Map</h2>
+        <div class="ops-row">
+          <select id="map-load-select" title="Saved maps in maps/ — pick one, then Load"></select>
+          <button type="button" id="map-load" title="Load the selected library map into the running RTAB-Map (from a copy; the library file is never modified). Resets odometry. Needs the dashboard console.">Load</button>
+          <button type="button" id="map-save-open" title="Save the live map into the maps/ library under a name">Save&hellip;</button>
+          <button type="button" id="map-clear" class="danger" title="Wipe the live map and restart odometry from the origin. Save first if you want to keep it.">Clear</button>
+          <button type="button" id="explore-toggle" class="ops-right" title="Autonomous frontier exploration (nodes/explorer.py)">Explore</button>
+        </div>
+        <form id="map-save-row" class="ops-row" hidden>
+          <input id="map-name" placeholder="map name (a-z 0-9 - _)" size="18"
+                 title="Name to save this map under in maps/ — lowercase letters, digits, - and _">
+          <button type="submit" class="primary" title="Save the fused /map grid and this robot's pose graph into maps/ under that name (scripts/maps.sh save). Needs the dashboard console.">Save</button>
+          <button type="button" id="map-save-cancel">Cancel</button>
+        </form>
+        <div id="explore-status" class="ops-status">explorer: not running</div>
+      </section>
+
+      <!-- The arm pick-and-place pipeline (task_manager.py). Folded away: it
+           needs configs/waypoints.yaml stations and a captured arm, which is
+           not the everyday operator flow. -->
+      <details id="tasks-section" class="ops-section">
+        <summary>Pick &amp; place tasks</summary>
+        <form id="dispatch-form">
+          <select id="pickup-select"></select>
+          <span class="ops-arrow">&rarr;</span>
+          <select id="dropoff-select"></select>
+          <button type="submit" class="primary">Dispatch</button>
+        </form>
+        <ul id="queue-list"></ul>
+      </details>
     </div>
   </div>
 
