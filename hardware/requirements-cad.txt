@@ -1,0 +1,4 @@
+# hardware/.venv only — never install into the sim/ROS/lerobot environments.
+# cadquery-ocp ships cp311..cp314 wheels, so the system python3 works; no conda.
+cadquery==2.8.0
+pytest>=7.4

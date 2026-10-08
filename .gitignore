@@ -52,3 +52,7 @@ scenes/*.usda
 
 # Reference papers — kept local, not redistributed
 literature_review/
+
+# Full SO-101 arm assembly (20 MB). Fetched by hardware/setup_cad.sh at a pinned
+# commit; only build.py --arm and the whole-arm tests need it.
+hardware/magnet_effector/reference/SO101_Assembly.step
