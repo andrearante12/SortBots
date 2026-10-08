@@ -52,3 +52,8 @@ scenes/*.usda
 
 # Reference papers — kept local, not redistributed
 literature_review/
+
+# commsim: run outputs and the colcon workspace build products
+commsim/results/
+commsim/ws/install/
+commsim/ws/log/

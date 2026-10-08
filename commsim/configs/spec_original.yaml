@@ -1,0 +1,16 @@
+# The design exactly as first specified (simulation_plan_prompt.md), layered
+# over base.yaml to reproduce "before the fixes" runs:
+#   python3 -m commsim.des.run --configs commsim/configs/spec_original.yaml ...
+# Known to fail: lease bug (V3+), false "silent" after any reroute, two TCP
+# sessions per pair. Kept for comparison, not for use.
+batman:
+  orig_interval_ms: 500
+zenoh:
+  transport_lease_ms: 2000
+  connect: all
+protocol:
+  status_timeout_s: 3.0
+  lease_beacon_hz: 0.0
+  status_qos_depth: 1
+  status_transport: tcp
+  max_open_bids: 0

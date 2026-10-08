@@ -1,0 +1,3 @@
+# Kept for the fix_sweep.sh comparison; 250 ms is now the base.yaml default.
+batman:
+  orig_interval_ms: 250

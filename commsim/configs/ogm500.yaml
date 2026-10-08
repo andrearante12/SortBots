@@ -1,0 +1,3 @@
+# The design's original batman originator interval, for comparison runs.
+batman:
+  orig_interval_ms: 500
