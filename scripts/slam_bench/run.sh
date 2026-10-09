@@ -48,11 +48,18 @@ DOM=$(( 40 + $$ % 50 ))
 ENVS=(-e ROS_DOMAIN_ID=$DOM -e ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST -e HOME=/tmp
       -e FASTRTPS_DEFAULT_PROFILES_FILE=/repo/configs/dds/fastdds_large_shm.xml)
 
+# Memory caps, per container, swap included (--memory-swap = --memory, so a
+# leak is OOM-killed instead of swapping the laptop to a halt). An uncapped
+# run shut this 15 GB laptop down on 2026-10-08. Sum stays under 8 GB: the
+# robot side gets roughly the Jetson's share of its 8 GB (measured ~1 GB for
+# odometry + RTAB-Map + obstacles), the "workstation" the same headroom.
+declare -A MEM=([jetson]=3g [workstation]=3g [logger]=1g)
 dk() {  # name cpuset quota cmd...
   local name="$1" cpuset="$2" quota="$3"; shift 3
   local q=(); [ "$quota" != "-" ] && q=(--cpus "$quota")
+  local m="${MEM[$name]:-1g}"
   docker run -d --rm --name "${TAG}_$name" --network host --ipc host \
-    --cpuset-cpus "$cpuset" "${q[@]}" --user "$(id -u):$(id -g)" "${ENVS[@]}" \
+    --memory "$m" --memory-swap "$m" --cpuset-cpus "$cpuset" "${q[@]}" --user "$(id -u):$(id -g)" "${ENVS[@]}" \
     -v "$REPO:/repo:ro" -v "$SEQ:/seq:ro" -v "$OUT:/out" \
     sortbots-slam-bench bash -c "source /opt/ros/jazzy/setup.bash; $*" >/dev/null
 }
@@ -141,7 +148,7 @@ esac
 
 dk logger "$TOOL_CPUSET" - "python3 /repo/scripts/slam_bench/odom_logger.py --out /out > /out/logger.log 2>&1"
 # Player in the foreground: the run lasts as long as the sequence.
-docker run --rm --name "${TAG}_player" --network host --ipc host --cpuset-cpus "$TOOL_CPUSET" \
+docker run --rm --name "${TAG}_player" --network host --ipc host --memory 1g --memory-swap 1g --cpuset-cpus "$TOOL_CPUSET" \
   --user "$(id -u):$(id -g)" "${ENVS[@]}" -v "$REPO:/repo:ro" -v "$SEQ:/seq:ro" -v "$OUT:/out" \
   sortbots-slam-bench bash -c "source /opt/ros/jazzy/setup.bash; \
   python3 /repo/scripts/slam_bench/tum_player.py --seq /seq --stamps /out/stamps.csv --rate $RATE" \
@@ -157,7 +164,7 @@ trap - EXIT
 if [ -f "$OUT/slam.db" ]; then
   # SLAM graph: optimized base_link poses, ROS stamps. Format 10 = ROS axes;
   # format 1 converts to motion-capture/optical axes and scores the wrong frame.
-  docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$OUT:/out" sortbots-slam-bench bash -c \
+  docker run --rm --memory 2g --memory-swap 2g --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$OUT:/out" sortbots-slam-bench bash -c \
     "source /opt/ros/jazzy/setup.bash; rtabmap-export --poses --poses_format 10 --output_dir /out --output slam /out/slam.db" \
     > "$OUT/export.log" 2>&1 || true
 fi
