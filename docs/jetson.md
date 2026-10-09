@@ -132,6 +132,50 @@ same page ticks at full rate (worst stall <60 ms) and WebGL still works.
 Fully quit the old window first, or the flags are ignored by the running
 instance. Expect a slow, CPU-bound 3D view (it defaults to points here).
 
+## SLAM on the workstation (offload)
+
+RTAB-Map's mapping (graph, loop closure, Grid/3D ray tracing, the
+reconstruction clouds) is the part of the stack that grows with the map, and
+on the Orin Nano it competes with the parts that must keep up: odometry and
+the live obstacle cloud. `slam_role` splits them (tasks/slam_offload.md has
+the measurements):
+
+| | Jetson (`--slam-role robot`) | Workstation |
+|---|---|---|
+| runs | D435 driver, visual odometry, `nodes/obstacle_cloud.py`, compressed keyframes (`rgbd_sync`, 2 Hz) | `launch/sortbots_slam_workstation.launch.py`: RTAB-Map + cloud relays |
+| sends | `/<id>/rgbd_image/compressed`, `/<id>/odom`, TF | `/<id>/map`, `<id>/map -> <id>/odom`, reconstruction clouds |
+
+```bash
+# workstation (Ubuntu 24.04 + ROS 2 Jazzy, clean shell):
+export ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST ROS_STATIC_PEERS=<jetson address>
+ros2 launch ./launch/sortbots_slam_workstation.launch.py robot_id:=robot_0
+# Jetson: the container must be (re)started with the workstation as its peer
+SORTBOTS_WORKSTATION=<workstation address> scripts/jetson.sh console
+# then the Scenarios tab's real_map_offload, or: scripts/run_robot.sh --slam-role robot
+```
+
+Without a workstation, `--slam-role all` (the default) still maps on the
+Jetson, with RTAB-Map at nice 10 so obstacles and odometry win the CPU.
+
+Bandwidth: full-resolution keyframes are ~2.5-3.8 Mb/s per robot, about 27%
+of a 2.4 GHz mesh channel per hop. Over the fleet mesh, use
+`keyframe_decimation:=2` (~1 Mb/s) — or a wired/5 GHz link for a single robot.
+
+### Check that images actually arrive
+
+Fast DDS's default shared-memory segment (512 KB) is smaller than one D435
+frame (1.2 MB). Frames then go over fragmented UDP, and with the stock
+`net.core.rmem_max` (212 KB) most are dropped, silently: odometry just runs
+on fewer frames, with bigger motion between them. `scripts/jetson.sh` now
+sets `FASTRTPS_DEFAULT_PROFILES_FILE=configs/dds/fastdds_large_shm.xml`
+(32 MB segment). To confirm on the robot, compare frames published with
+frames odometry processed over the same minute:
+
+```bash
+sysctl net.core.rmem_max                       # 212992 = the default that drops fragments
+ros2 topic echo /robot_0/odom_info --field header.stamp.sec | uniq -c   # frames/s actually used
+```
+
 ## What differs from sim, and where it's configured
 
 | | sim | real |
@@ -166,4 +210,7 @@ need to talk to each other over the LAN.
 - **MPU6050:** a driver publishing raw `/<id>/imu/data_raw`, plus
   `imu_filter_madgwick` (already in the image) to `/<id>/imu`. Then
   `wait_imu_to_init:=true`.
-- **cuVSLAM** (Isaac ROS) in place of RTAB-Map's visual odometry.
+- **cuVSLAM** in place of RTAB-Map's visual odometry. Isaac ROS 4.6 (Aug 2026)
+  supports Jetson Orin on **JetPack 7.2 + ROS 2 Jazzy** — a reflash from
+  JetPack 6, after which Jazzy also runs natively (no container). Confirm the
+  Orin Nano 8 GB is on its supported list first; see tasks/slam_offload.md.

@@ -271,9 +271,12 @@ REAL_RUN_FLAGS = {
     "localize": RUN_FLAGS["localize"],
     "resume": RUN_FLAGS["resume"],
     "map": RUN_FLAGS["map"],
+    # all = map on the Jetson; robot = map on the workstation from the robot's
+    # keyframe stream (tasks/slam_offload.md). Real-only: sim has no Jetson.
+    "slam_role": _choice("--slam-role", {"all", "robot"}),
 }
 
-REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS[key] for key in REAL_RUN_FLAGS}
+REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all"}
 
 PLATFORM_FLAGS = {"sim": RUN_FLAGS, "real": REAL_RUN_FLAGS}
 PLATFORM_DEFAULTS = {"sim": RUN_DEFAULTS, "real": REAL_RUN_DEFAULTS}

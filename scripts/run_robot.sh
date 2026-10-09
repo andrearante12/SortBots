@@ -13,13 +13,18 @@
 #
 # Usage:
 #   scripts/run_robot.sh [--robot-id robot_0] [--localize | --resume]
-#                        [--map PATH] [--keep-console]
+#                        [--map PATH] [--keep-console] [--slam-role all|robot]
 #   scripts/run_robot.sh stop [--keep-console]
 #
 # Map lifecycle is the same three modes as run_demo.sh: default = fresh map,
 # --resume = keep mapping into the existing DB, --localize = read-only. --map
 # into maps/ is loaded by COPY (scripts/_map_db.sh). Save with the dashboard's
 # map-save button or `scripts/maps.sh save NAME` while this is up.
+#
+# --slam-role robot keeps only odometry, the live obstacle cloud and a ~2 Hz
+# compressed keyframe stream here; RTAB-Map mapping runs on the workstation
+# (launch/sortbots_slam_workstation.launch.py, tasks/slam_offload.md). The
+# default `all` maps on the Jetson as before, at lower CPU priority.
 #
 # Not started, on purpose: Nav2, task_manager, scripted_pick and the explorer.
 # There is no base driver yet, so nothing would move; the dashboard's drive
@@ -49,7 +54,8 @@ PIPELINE_PATTERNS=(realsense2_camera_node rtabmap_slam rgbd_odometry rtabmap_viz
                    rtabmap_cloud_pump.py recon_cloud_relay.py \
                    map_merge.py static_transform_publisher \
                    fleet_radio.py dynamic_obstacle_filter.py recon_cloud_merge.py \
-                   depth_colorizer.py feature_overlay.py)
+                   depth_colorizer.py feature_overlay.py obstacle_cloud.py \
+                   rtabmap_sync)
 KEEP_CONSOLE=false
 
 stop_pipeline() {
@@ -77,7 +83,7 @@ if [[ "${1:-}" == "stop" ]]; then
   exit 0
 fi
 
-ROBOT_ID=robot_0; LOCALIZE=false; RESUME=false; MAP_DB=""
+ROBOT_ID=robot_0; LOCALIZE=false; RESUME=false; MAP_DB=""; SLAM_ROLE=all
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
@@ -85,10 +91,16 @@ while [[ $# -gt 0 ]]; do
     --resume)   RESUME=true; shift;;
     --map)      MAP_DB="$2"; shift 2;;
     --keep-console) KEEP_CONSOLE=true; shift;;
-    -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    --slam-role) SLAM_ROLE="$2"; shift 2;;
+    -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "[run_robot] unknown arg: $1"; exit 2;;
   esac
 done
+
+if [[ "$SLAM_ROLE" != "all" && "$SLAM_ROLE" != "robot" ]]; then
+  echo "ERROR: --slam-role must be all or robot (got '$SLAM_ROLE')."
+  exit 2
+fi
 
 if [[ "$LOCALIZE" == "true" && "$RESUME" == "true" ]]; then
   echo "ERROR: --localize and --resume are mutually exclusive (read-only vs. keep-mapping)."
@@ -130,7 +142,12 @@ fi
 WEBUI=true; [[ "$KEEP_CONSOLE" == "true" ]] && WEBUI=false
 ROS_ENV="source '$ROS_SETUP'; \
   export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
-  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0"
+  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
+  export FASTRTPS_DEFAULT_PROFILES_FILE='$REPO_ROOT/configs/dds/fastdds_large_shm.xml'"
+# ^ Fast DDS's default 512 KB shared-memory segment is smaller than one D435
+#   frame (1.2 MB), so every image fell back to fragmented UDP. On the bench
+#   (tasks/slam_offload.md) that delivered 1.6 Hz of 11.7 Hz published, and
+#   odometry processed 23 of 832 frames. Unset it to compare.
 
 echo "[run_robot] launching RTAB-Map + RealSense D435 for $ROBOT_ID..."
 # use_sim_time:=false — there is no /clock on hardware, and with it true every
@@ -142,7 +159,7 @@ setsid bash -c "$ROS_ENV; \
        nav2:=false task_manager:=false scripted_pick:=false explore:=false \
        webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
-       delete_db_on_start:=$DELETE_DB_ON_START" \
+       delete_db_on_start:=$DELETE_DB_ON_START slam_role:=$SLAM_ROLE" \
   >"$BRINGUP_LOG" 2>&1 &
 
 # Wait for the camera for real rather than sleeping a fixed time: the D435
@@ -170,7 +187,7 @@ cat <<EOF
     * Web dashboard : http://localhost:$DASHBOARD_PORT/  (or the tailnet URL above)
         - head camera, live SLAM map, 3D reconstruction
         - drive pad / nav goals do nothing yet: no base driver
-    * RTAB-Map      : visual odometry, no IMU
+    * RTAB-Map      : visual odometry, no IMU; mapping $( [[ "$SLAM_ROLE" == "robot" ]] && echo "on the WORKSTATION (keyframes sent from here)" || echo "here, at nice 10" )
     * Map           : $MAP_DB $( [[ "$LOCALIZE" == "true" ]] && echo "(localization — read-only)" || { [[ "$RESUME" == "true" ]] && echo "(resumed — extending existing map)" || echo "(mapping — rebuilt this run)"; } )
   Log  : $BRINGUP_LOG
   Stop : scripts/run_robot.sh stop
