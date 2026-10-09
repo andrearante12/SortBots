@@ -98,7 +98,8 @@ trap cleanup EXIT
   echo "    publish_tf: true"
   echo "    approx_sync: true"
   echo "    wait_imu_to_init: false"
-  declare -A RP=([Odom/ResetCountdown]=1 [Odom/ImageDecimation]=2 [Vis/MaxFeatures]=600 [OdomF2M/MaxSize]=1200)
+  declare -A RP=([Odom/ResetCountdown]=1 [Odom/ImageDecimation]=2 [Vis/MaxFeatures]=600 [OdomF2M/MaxSize]=1200
+                [Odom/Strategy]=1)
   for kv in $ODOM_EXTRA; do RP[${kv%%=*}]="${kv#*=}"; done
   for k in "${!RP[@]}"; do echo "    $k: \"${RP[$k]}\""; done
 } > "$OUT/odom_params.yaml"
@@ -123,7 +124,7 @@ OBST="python3 /repo/nodes/obstacle_cloud.py --robot-id robot_0 > /out/obstacle.l
 # Offload link: the robot sends compressed RGB-D keyframes (JPEG rgb + PNG depth,
 # RTAB-Map's own RGBDImage) at KF_RATE Hz, decimated by KF_DECIM; the
 # workstation decompresses and runs SLAM on them with the robot's odometry.
-KF_RATE="${KF_RATE:-2}" KF_DECIM="${KF_DECIM:-1}"
+KF_RATE="${KF_RATE:-2}" KF_DECIM="${KF_DECIM:-2}"
 SYNC="ros2 run rtabmap_sync rgbd_sync --ros-args -r __ns:=/robot_0 -p approx_sync:=false \
  -p compressed_rate:=$KF_RATE.0 -p decimation:=$KF_DECIM \
  -r rgb/image:=/robot_0/camera/rgb -r depth/image:=/robot_0/camera/depth \

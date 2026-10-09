@@ -332,10 +332,15 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "keyframe_decimation",
-            default_value="1",
+            # 2 = half resolution, a third of the bytes: 2.7 -> 0.95 Mb/s per
+            # robot. Full resolution is ~27% of a 2.4 GHz mesh channel per robot
+            # per hop, so two robots would cross the 50% busy line where the
+            # comms model starts failing. Costs some SLAM accuracy (bench at 2x
+            # speed: ATE 0.7 -> 1.15 m); set 1 on a wired or 5 GHz-only link.
+            default_value="2",
             description=(
                 "slam_role:=robot — image decimation before compression "
-                "(2 = half resolution, about a quarter of the bytes)."
+                "(1 = full resolution, ~2.7 Mb/s per robot; 2 = half, ~1 Mb/s)."
             ),
         ),
         DeclareLaunchArgument(
@@ -488,6 +493,14 @@ def generate_launch_description():
                 "Odom/ImageDecimation": "2",
                 "Vis/MaxFeatures": "600",
                 "OdomF2M/MaxSize": "1200",
+                # Frame-to-frame, not the default frame-to-map: no local feature
+                # map to match against and update, so each frame is cheaper and
+                # odometry keeps more of the camera's frames on a CPU-bound Orin.
+                # Bench (tasks/slam_offload.md, TUM pioneer_slam at 2x speed,
+                # Jetson CPU budget, 3 runs each): 6.6 -> 9.9 Hz, odometry ATE
+                # 2.4 -> 1.3 m, SLAM ATE 2.6 -> 0.7 m. At 1x speed SLAM ATE is
+                # unchanged (0.19 m); short-window drift is ~1-2 points higher.
+                "Odom/Strategy": "1",
             }],
             remappings=[
                 ("rgb/image", ["/", robot_id, "/camera/rgb"]),
