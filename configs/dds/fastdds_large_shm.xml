@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Shared-memory segment big enough for whole camera frames.
+     Fast DDS's default SHM segment is 512 KB; a 640x480 rgb8 frame is 921 KB
+     and the D435's 848x480 is 1.2 MB, so every image silently falls back to
+     UDP fragments. With the stock net.core.rmem_max (212 KB) most of those
+     fragments are dropped: the bench measured 1.6 Hz delivered of 11.7 Hz
+     published, the C++ odometry processed 23 of 832 frames. -->
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <transport_descriptors>
+    <transport_descriptor>
+      <transport_id>shm_large</transport_id>
+      <type>SHM</type>
+      <segment_size>33554432</segment_size>
+    </transport_descriptor>
+    <transport_descriptor>
+      <transport_id>udp</transport_id>
+      <type>UDPv4</type>
+    </transport_descriptor>
+  </transport_descriptors>
+  <participant profile_name="large_shm" is_default_profile="true">
+    <rtps>
+      <useBuiltinTransports>false</useBuiltinTransports>
+      <userTransports>
+        <transport_id>shm_large</transport_id>
+        <transport_id>udp</transport_id>
+      </userTransports>
+    </rtps>
+  </participant>
+</profiles>
