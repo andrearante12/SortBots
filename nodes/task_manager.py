@@ -25,7 +25,8 @@ Talks to three things:
     (see _on_explore_status / _on_dispatch). Nav2 itself would silently let
     a new goal preempt the old one either way — this gate exists so the
     explorer's own replan timer doesn't immediately fight back with another
-    frontier goal.
+    frontier goal. Once the queue drains it sends "start" again, but only if
+    a task was what stopped it (nodes/explorer_handoff.py has the why).
 
 No custom .msg/.srv package: the repo has no ament package scaffolding yet
 (everything runs as loose scripts — see docs/quickstart.md), so task dispatch and
@@ -71,6 +72,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import String
 
+from explorer_handoff import ExplorerHandoff
 from stations import Station, load_stations  # noqa: F401  (Station re-exported)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -101,7 +103,7 @@ class TaskManager(Node):
         self.state = "IDLE"
         self.current_task: Task | None = None
         self._pick_timeout_deadline: float | None = None
-        self._explorer_active = False
+        self.explorer = ExplorerHandoff()
 
         self.nav_client = ActionClient(
             self, NavigateToPose, f"/{robot_id}/navigate_to_pose"
@@ -157,10 +159,8 @@ class TaskManager(Node):
             f"queued task {task.task_id}: {task.pickup} -> {task.dropoff} "
             f"(queue depth {len(self.queue)})"
         )
-        if self._explorer_active:
-            stop_msg = String()
-            stop_msg.data = "stop"
-            self.explore_cmd_pub.publish(stop_msg)
+        if self.explorer.on_task_queued():
+            self._explore_cmd("stop")
             self.get_logger().info(
                 "dispatch received while explorer was active — sent stop so it "
                 "releases the nav goal server for this task"
@@ -192,14 +192,22 @@ class TaskManager(Node):
             status = json.loads(msg.data)
         except json.JSONDecodeError:
             return
-        self._explorer_active = status.get("state") == "exploring"
+        self.explorer.on_status(status.get("state"))
+
+    def _explore_cmd(self, cmd: str) -> None:
+        msg = String()
+        msg.data = cmd
+        self.explore_cmd_pub.publish(msg)
 
     # -- FSM ------------------------------------------------------------
 
     def _tick(self) -> None:
-        if self.state == "IDLE" and self.queue and not self._explorer_active:
+        if self.state == "IDLE" and self.queue and self.explorer.may_start_task():
             self.current_task = self.queue.popleft()
             self._start_nav(self.current_task.pickup, next_state="NAV_TO_PICKUP")
+        elif self.state == "IDLE" and self.explorer.on_idle(not self.queue):
+            self._explore_cmd("start")
+            self.get_logger().info("task queue empty — resumed the exploration a task interrupted")
         elif self.state in ("PICKING", "PLACING") and self._pick_timeout_deadline is not None:
             if time.monotonic() >= self._pick_timeout_deadline:
                 self.get_logger().error(
