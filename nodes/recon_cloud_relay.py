@@ -49,6 +49,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import PointCloud2, PointField
+from std_msgs.msg import String
 
 # rtabmap publishes the assembled clouds latched (MapsManager's `latch` defaults
 # true), and the pump only forces a republish every 3s. Matching transient-local
@@ -94,6 +95,12 @@ class ReconCloudRelay(Node):
         self.create_subscription(
             PointCloud2, f"/{robot_id}/cloud_map", self._on_cloud, CLOUD_QOS
         )
+        # Dashboard "clear map": RTAB-Map publishes nothing for an emptied map,
+        # so the latched cloud_map, our keepalive copy and the browser would
+        # all keep showing the old cloud. A reset drops the copy and sends one
+        # explicit empty cloud downstream.
+        self.create_subscription(
+            String, f"/{robot_id}/recon_reset", self._on_reset, 10)
         if keepalive_sec > 0:
             self.create_timer(keepalive_sec, self._keepalive)
         self.get_logger().info(
@@ -101,6 +108,18 @@ class ReconCloudRelay(Node):
             f"(budget {max_points} pts, leaf {voxel_size} m, "
             f"keepalive {keepalive_sec}s)"
         )
+
+    def _on_reset(self, _msg):
+        self.last_cloud = None
+        self.published_since_tick = True
+        empty = PointCloud2()
+        empty.header.stamp = self.get_clock().now().to_msg()
+        empty.header.frame_id = "map"
+        empty.height = 1
+        empty.width = 0
+        empty.point_step = OUT_POINT_STEP
+        self.pub.publish(empty)
+        self.get_logger().info("recon_reset: dropped cached cloud, sent empty")
 
     def _keepalive(self):
         """Re-send the last cloud if nothing new arrived since the last tick."""

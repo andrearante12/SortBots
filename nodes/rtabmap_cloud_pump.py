@@ -27,15 +27,22 @@ PUMP_PERIOD_SEC = 3.0
 
 
 class RtabmapCloudPump(Node):
-    def __init__(self, robot_id: str):
+    def __init__(self, robot_id: str, period: float = PUMP_PERIOD_SEC):
         super().__init__("rtabmap_cloud_pump")
         self.cli = self.create_client(PublishMap, f"/{robot_id}/rtabmap/publish_map")
         self.get_logger().info("waiting for RTAB-Map's publish_map service...")
         self.cli.wait_for_service()
-        self.get_logger().info("connected — pumping the map every %.1fs" % PUMP_PERIOD_SEC)
-        self.timer = self.create_timer(PUMP_PERIOD_SEC, self._pump)
+        self.get_logger().info("connected — pumping the map every %.1fs" % period)
+        self._inflight = False
+        self.timer = self.create_timer(period, self._pump)
 
     def _pump(self):
+        # A global assemble can outlast the period on a loaded board; firing
+        # another on top of it just queues redundant full-map rebuilds in
+        # rtabmap and makes the stall worse.
+        if self._inflight:
+            return
+        self._inflight = True
         req = PublishMap.Request()
         req.global_map = True
         req.optimized = True
@@ -44,6 +51,7 @@ class RtabmapCloudPump(Node):
         future.add_done_callback(self._on_response)
 
     def _on_response(self, future):
+        self._inflight = False
         exc = future.exception()
         if exc is not None:
             self.get_logger().warn(f"publish_map call failed: {exc}")
@@ -54,10 +62,11 @@ class RtabmapCloudPump(Node):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot-id", default="robot_0")
+    parser.add_argument("--period", type=float, default=PUMP_PERIOD_SEC)
     args = parser.parse_args()
 
     rclpy.init()
-    node = RtabmapCloudPump(args.robot_id)
+    node = RtabmapCloudPump(args.robot_id, args.period)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

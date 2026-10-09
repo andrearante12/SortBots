@@ -43,10 +43,28 @@ ROS_SETUP="/opt/ros/jazzy/setup.bash"
 CONSOLE_LOG="/tmp/sortbots_console.log"
 PORT=8081
 
+# sim (desktop, Isaac) or real (the Jetson, inside docker/jetson's container —
+# scripts/jetson.sh sets SORTBOTS_PLATFORM=real, since /etc/nv_tegra_release
+# isn't visible from inside the container). Selects which pipeline launcher
+# the Scenarios tab drives and which scenarios it lists; see webui/session.py.
+if [[ -n "${SORTBOTS_PLATFORM:-}" ]]; then
+  PLATFORM="$SORTBOTS_PLATFORM"
+elif [[ -f /etc/nv_tegra_release ]]; then
+  PLATFORM=real
+else
+  PLATFORM=sim
+fi
+case "$PLATFORM" in
+  sim)  LAUNCHER="$REPO_ROOT/scripts/run_demo.sh";;
+  real) LAUNCHER="$REPO_ROOT/scripts/run_robot.sh";;
+  *) echo "ERROR: SORTBOTS_PLATFORM must be sim or real, got '$PLATFORM'"; exit 2;;
+esac
+
 stop_console() {
-  # The sim first (it's the noisy half), then our own processes. --keep-console
-  # is deliberately NOT passed here: this path is "shut everything down".
-  bash "$REPO_ROOT/scripts/run_demo.sh" stop
+  # The pipeline first (it's the noisy half), then our own processes.
+  # --keep-console is deliberately NOT passed here: this path is "shut
+  # everything down".
+  bash "$LAUNCHER" stop
   pkill -INT -f "sortbots_webui.launch.py" 2>/dev/null || true
   sleep 1
   for p in rosbridge_websocket web_video_server "webui/serve.py" \
@@ -126,7 +144,7 @@ python3 "$REPO_ROOT/scripts/webui_url.py" --port "$PORT" 2>/dev/null || \
 cat <<EOF
 
 ============================================================
-  SortBots dashboard console is UP
+  SortBots dashboard console is UP  (platform: $PLATFORM)
     * Dashboard      : http://localhost:$PORT/  (or the tailnet URL above)
     * Scenarios tab  : pick a scenario and hit Start to launch the sim
     * Session logs   : $REPO_ROOT/data/sessions/<timestamp>_<scenario>/
@@ -140,4 +158,4 @@ EOF
 # Foreground on purpose: Ctrl-C here is how you stop the console. Deliberately
 # NOT exec'd — exec would replace this shell and take the EXIT trap with it,
 # leaving rosbridge and web_video_server orphaned on Ctrl-C.
-python3 "$REPO_ROOT/webui/serve.py" --port "$PORT" --control
+python3 "$REPO_ROOT/webui/serve.py" --port "$PORT" --control --platform "$PLATFORM"

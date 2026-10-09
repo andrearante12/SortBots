@@ -25,12 +25,14 @@ import os
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
     LaunchConfiguration,
     PathJoinSubstitution,
     PythonExpression,
 )
+from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -130,6 +132,26 @@ GRID_ARGS = (
     "--GridGlobal/ProbMiss 0.45"
 )
 
+# Appended to GRID_ARGS ONLY on the real robot (camera_odometry:=true), never in
+# sim. Measured live 2026-10-02 on the Orin Nano (load average ~16 on 6 cores):
+# the board is CPU-bound, so every default here is a trade between map density
+# and the per-node cost of building it.
+#   RGBD/LinearUpdate, RGBD/AngularUpdate  0.1 -> 0.05  a node is added every
+#       5 cm / ~3 deg instead of 10 cm / ~6 deg, so slow walks still lay down
+#       a dense cloud instead of one sparse slice per 10 cm (tasks/
+#       real_perception_plan.md L4).
+#   Rtabmap/DetectionRate  1 -> 2 Hz  the cap that otherwise throttles the
+#       node rate regardless of the two thresholds above.
+#   Grid/RangeMax  5.0 -> 4.0  D435 depth is noisy past ~4 m and Grid/3D ray
+#       tracing cost grows with the swept volume; the filter's own
+#       max_range_m was already 4.5.
+REAL_GRID_ARGS = (
+    "--RGBD/LinearUpdate 0.05 "
+    "--RGBD/AngularUpdate 0.05 "
+    "--Rtabmap/DetectionRate 2 "
+    "--Grid/RangeMax 4.0"
+)
+
 
 def generate_launch_description():
     robot_id = LaunchConfiguration("robot_id")
@@ -139,6 +161,9 @@ def generate_launch_description():
     database_path = LaunchConfiguration("database_path")
     delete_db_on_start = LaunchConfiguration("delete_db_on_start")
     rtabmap_args = LaunchConfiguration("rtabmap_args")
+    camera_odometry = LaunchConfiguration("camera_odometry")
+    depth_filter = LaunchConfiguration("depth_filter")
+    wait_imu_to_init = LaunchConfiguration("wait_imu_to_init")
 
     # RTAB-Map takes --delete_db_on_start as a flag inside `args`, so it can't
     # just be a bool passed through. Forced OFF in localization mode: deleting
@@ -151,7 +176,33 @@ def generate_launch_description():
         "'.lower() not in ('true', '1') else ''",
     ])
 
+    # Real-only extras (REAL_GRID_ARGS) ride on camera_odometry, the same flag
+    # that already means "this is the real robot" in this file. Later flags
+    # win in RTAB-Map's CLI parsing, so they override GRID_ARGS' Grid/RangeMax.
+    real_extra_args = PythonExpression([
+        "'", REAL_GRID_ARGS, "' if '", camera_odometry,
+        "'.lower() in ('true', '1') else ''",
+    ])
+    # SLAM's depth: the mover-stripped depth_static, or raw camera/depth when
+    # the filter isn't running (single real robot — see sortbots_bringup).
+    depth_source = PythonExpression([
+        "'/camera/depth_static' if '", depth_filter,
+        "'.lower() in ('true', '1') else '/camera/depth'",
+    ])
+
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "depth_filter",
+            default_value="true",
+            description=(
+                "True: RTAB-Map reads camera/depth_static from "
+                "nodes/dynamic_obstacle_filter.py. False: raw camera/depth "
+                "(the filter must then not be started — sortbots_bringup "
+                "does that for platform:=real). The filter costs ~1 core and "
+                "republishes a 1.6 MB image per frame; with no peer robots "
+                "and Nav2 off there is nothing for it to protect."
+            ),
+        ),
         DeclareLaunchArgument(
             "robot_id",
             default_value="robot_0",
@@ -208,6 +259,35 @@ def generate_launch_description():
                 "localization:=true."
             ),
         ),
+        # NOT named "visual_odometry": that is also an argument of upstream's
+        # rtabmap.launch.py, which the include below always sets to false,
+        # and IncludeLaunchDescription shares one launch context (see the
+        # rgb_topic_relay comment) — so a same-named arg of ours was silently
+        # overwritten and the odometry Node's condition read false. Seen live
+        # 2026-09-30: no rgbd_odometry process, no /odom publisher, no error.
+        DeclareLaunchArgument(
+            "camera_odometry",
+            default_value="false",
+            description=(
+                "Run rgbd_odometry on RAW depth (see the Node below), which "
+                "then PUBLISHES /<robot_id>/odom and <robot_id>/odom -> "
+                "base_link. False in "
+                "sim, where Isaac publishes perfect odom. True on the real "
+                "robot until a base driver publishes wheel/optical odom — two "
+                "odom sources would fight over the same TF edge, so flip this "
+                "back off the day nodes/base_driver.py exists."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "wait_imu_to_init",
+            default_value="true",
+            description=(
+                "Block RTAB-Map's init on the first /<robot_id>/imu sample. "
+                "True in sim (IMU at ~60 Hz). MUST be false on hardware with "
+                "no IMU publisher — a plain D435 has none — or RTAB-Map waits "
+                "forever and the map never starts."
+            ),
+        ),
         DeclareLaunchArgument(
             "rtabmap_args",
             default_value=GRID_ARGS,
@@ -232,7 +312,7 @@ def generate_launch_description():
                 # so RTAB-Map does not permanently paint peer robots into the
                 # SLAM grid. Raw /camera/depth still feeds Nav2 via the filter's
                 # dynamic_obstacles cloud (+ depth_static points for static).
-                "depth_topic":        ["/", robot_id, "/camera/depth_static"],
+                "depth_topic":        ["/", robot_id, depth_source],
                 # Upstream rtabmap.launch.py does NOT remap rgb/image from
                 # rgb_topic directly — it bakes rgb_topic_relay /
                 # depth_topic_relay inside an OpaqueFunction via
@@ -254,13 +334,13 @@ def generate_launch_description():
                 # relay == topic, so pass both explicitly per robot the
                 # same way bringup already forces per-robot database_path.
                 "rgb_topic_relay":    ["/", robot_id, "/camera/rgb"],
-                "depth_topic_relay":  ["/", robot_id, "/camera/depth_static"],
+                "depth_topic_relay":  ["/", robot_id, depth_source],
                 "camera_info_topic":  ["/", robot_id, "/camera/camera_info"],
                 "imu_topic":          ["/", robot_id, "/imu"],
                 # RTAB-Map waits for the first IMU sample before initializing.
                 # Useful because the sim publishes IMU at ~60 Hz; without this
                 # RTAB-Map's odom estimator can race the publish.
-                "wait_imu_to_init":   "true",
+                "wait_imu_to_init":   wait_imu_to_init,
                 "frame_id":           [robot_id, "/base_link"],
                 "odom_frame_id":      [robot_id, "/odom"],
                 "odom_topic":         ["/", robot_id, "/odom"],
@@ -272,8 +352,16 @@ def generate_launch_description():
                 # a static map -> <robot_id>/map transform into (see
                 # nodes/map_merge.py).
                 "map_frame_id":       [robot_id, "/map"],
-                # Use the sim's perfect odom as the motion prior; don't ask
-                # RTAB-Map to compute visual odometry.
+                # ALWAYS false upstream. Sim: Isaac publishes perfect odom.
+                # Real: camera_odometry:=true starts OUR rgbd_odometry below
+                # instead of upstream's, because upstream feeds its odometry
+                # the same depth_topic as SLAM — the filtered depth_static —
+                # and odometry cannot track on that. Measured live 2026-09-30
+                # on the D435: every frame "Registration failed ... 0/20
+                # inliers" for 20 min straight on depth_static (7.8 Hz, ~0.5 s
+                # behind, pixels blanked frame-to-frame), while a second
+                # rgbd_odometry on raw /camera/depth tracked at once (quality
+                # ~180, 0 failures). SLAM keeps depth_static; odometry gets raw.
                 "visual_odometry":    "false",
                 "subscribe_rgbd":     "false",
                 "approx_sync":        "true",
@@ -300,8 +388,50 @@ def generate_launch_description():
                 # deprecated alias (rtabmap.launch.py:47 defaults one to the
                 # other). --delete_db_on_start is a flag *inside* this string,
                 # which is why it can't be its own launch argument upstream.
-                "args":               [rtabmap_args, " ", delete_db_flag],
+                "args":               [rtabmap_args, " ", real_extra_args, " ", delete_db_flag],
             }.items(),
+        ),
+
+        # Visual odometry on RAW depth — see the "visual_odometry" comment in
+        # the include above for why this isn't upstream's odometry node.
+        # Publishes /<id>/odom and <id>/odom -> <id>/base_link, which is
+        # exactly what Isaac publishes in sim, so RTAB-Map can't tell the two
+        # apart.
+        Node(
+            condition=IfCondition(camera_odometry),
+            package="rtabmap_odom",
+            executable="rgbd_odometry",
+            name="rgbd_odometry",
+            namespace=robot_id,
+            output="screen",
+            parameters=[{
+                "frame_id": [robot_id, "/base_link"],
+                "odom_frame_id": [robot_id, "/odom"],
+                "publish_tf": True,
+                "approx_sync": True,
+                "wait_imu_to_init": False,
+                "use_sim_time": use_sim_time,
+                # Default 0 = once lost, stay lost FOREVER: the pose freezes,
+                # RTAB-Map drops every frame, and the map and 3D view go stale
+                # while the camera feed still looks alive. 1 = reset on the
+                # next frame instead; RTAB-Map starts a new map session and
+                # re-links it to the old one on the next loop closure.
+                "Odom/ResetCountdown": "1",
+                # CPU cost knobs (Orin Nano, 2026-10-02: odometry ran ~3 Hz and
+                # ~60% of a core at the D435's 848x480). Half-resolution
+                # features are ~4x cheaper and plenty for a 4 m indoor scene;
+                # fewer features and a smaller local map cut matching/PnP time.
+                # Defaults were 1 / 1000 / 2000.
+                "Odom/ImageDecimation": "2",
+                "Vis/MaxFeatures": "600",
+                "OdomF2M/MaxSize": "1200",
+            }],
+            remappings=[
+                ("rgb/image", ["/", robot_id, "/camera/rgb"]),
+                ("depth/image", ["/", robot_id, "/camera/depth"]),
+                ("rgb/camera_info", ["/", robot_id, "/camera/camera_info"]),
+                ("odom", ["/", robot_id, "/odom"]),
+            ],
         ),
 
         # Keeps cloud_map/cloud_ground/cloud_obstacles/octomap_* flowing — see
@@ -311,6 +441,13 @@ def generate_launch_description():
                 "python3",
                 os.path.join(REPO_ROOT, "nodes", "rtabmap_cloud_pump.py"),
                 "--robot-id", robot_id,
+                # Each publish_map re-assembles the WHOLE global cloud; on the
+                # CPU-bound Jetson that is the periodic stall. The dashboard
+                # throttles to 3 s anyway, so a slower pump costs little.
+                "--period", PythonExpression([
+                    "'6.0' if '", camera_odometry,
+                    "'.lower() in ('true', '1') else '3.0'",
+                ]),
             ],
             output="screen",
         ),

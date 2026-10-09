@@ -7,8 +7,17 @@
     "needs to work in this repo, so sessions stop re-asking for the same ones.",
     "Deliberately NOT allowlisted, because they cost GPU/disk or are destructive:",
     "  sim_ctl.sh start/stop/console, run_demo.sh, run_console.sh, spawn_warehouse.py,",
-    "  git commit/push, rm. Those should stay a conscious decision each time."
+    "  git commit/push, rm. Those should stay a conscious decision each time.",
+    "",
+    "attribution: no Claude attribution anywhere, ever — no Co-Authored-By",
+    "trailer, no 'Generated with Claude Code' in PRs, no session links. Matches",
+    "CLAUDE.md's commit convention; this makes it the tool's default too."
   ],
+  "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
+  },
   "permissions": {
     "allow": [
       "Bash(scripts/sim_ctl.sh status)",

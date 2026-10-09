@@ -1,0 +1,29 @@
+# Real-robot scenario — see configs/scenarios/explore_fresh.yaml for the file
+# format. `platform: real` routes it to scripts/run_robot.sh (RealSense D435 +
+# RTAB-Map on the Jetson) instead of run_demo.sh, restricts `run:` to the keys
+# that launcher takes (webui/session.py's REAL_RUN_FLAGS), and lists it only on
+# a console started with --platform real (scripts/jetson.sh console).
+name: real_map_fresh
+
+title: Real robot — camera mapping, fresh map
+description: >
+  RealSense D435 on the robot's Jetson, feeding RTAB-Map with visual odometry
+  (no base driver or IMU yet). Carry or push the robot slowly around the space
+  and watch the map build — fast turns and blank walls are where visual
+  odometry loses track; the SLAM panel then shows it lost, and pointing the
+  camera back at something textured usually recovers it. Every launch wipes the
+  working database first. Save from the Map button before stopping.
+
+platform: real
+status: ready
+
+run:
+  robot_id: robot_0
+  resume: false          # true = keep mapping into the existing working DB
+  localize: false
+  map: null              # null = ~/.ros/sortbots_<robot_id>.db
+
+overrides: [resume]
+
+capture:
+  bag: false

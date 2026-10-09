@@ -104,6 +104,32 @@
     box-shadow: 0 2px 10px rgba(0,0,0,0.6);
   }
   .stage-view.stage-pip:hover { border-color: #2d5; }
+  /* -- sensors view: RGB (+ feature overlay) over colourised depth --------- */
+  /* Two tiles side by side. object-fit is contain, not the stage's usual
+     cover: the feature overlay maps keypoint pixels onto the drawn picture, and
+     a cropped feed would put every dot in the wrong place (app.js
+     drawFeatureOverlay inverts exactly this letterbox). */
+  #sensors-view.stage-main {
+    display: flex; flex-direction: column; gap: 6px; padding: 38px 8px 8px;
+    box-sizing: border-box;
+  }
+  .sensor-tile {
+    position: relative; flex: 1 1 0; min-width: 0; background: #0b0d10;
+    border: 1px solid #2a2f36; border-radius: 4px; overflow: hidden;
+  }
+  .sensor-tile img, .sensor-tile canvas {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: contain;
+  }
+  .sensor-tile canvas { pointer-events: none; }
+  .sensor-tag {
+    position: absolute; left: 6px; bottom: 6px; z-index: 2;
+    font-size: 0.68rem; color: #cdd; background: rgba(20,22,26,0.7);
+    padding: 2px 6px; border-radius: 4px; pointer-events: none;
+  }
+  #feature-toggle { position: absolute; right: 6px; bottom: 6px; z-index: 3;
+    font-size: 0.68rem; background: rgba(20,22,26,0.7); color: #cdd;
+    padding: 2px 6px; border-radius: 4px; }
   #stage-label {
     position: absolute; top: 10px; left: 12px; z-index: 6;
     font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;
@@ -445,7 +471,7 @@
        library is a deliberate, named action that belongs on a real keyboard —
        drop it here rather than let it wrap the status readout off-screen.
        scripts/maps.sh save does the same thing from a terminal. */
-    #map-name, #explore-save-lib { display: none; }
+    #map-name, #explore-save-lib, #map-load-select, #map-load, #map-clear { display: none; }
   }
 </style>
 </head>
@@ -465,6 +491,8 @@
     </div>
     <div id="stage-mode" class="segmented">
       <button type="button" data-stage="camera" class="active">camera</button>
+      <button type="button" data-stage="sensors"
+              title="RGB with tracked visual features, beside the depth view">sensors</button>
       <button type="button" data-stage="map">map</button>
     </div>
     <span id="slam-badge" title="RTAB-Map SLAM status (from the active robot's /info)">SLAM: waiting…</span>
@@ -478,6 +506,21 @@
          alt="chase camera stream (waiting for web_video_server)" />
     <img id="camera-stream" class="stage-view stage-pip"
          alt="head camera stream (waiting for web_video_server)" />
+
+    <div id="sensors-view" class="stage-view">
+      <div class="sensor-tile">
+        <img id="sensor-rgb" alt="head camera (waiting for web_video_server)" />
+        <canvas id="feature-overlay"></canvas>
+        <span class="sensor-tag" id="feature-tag">RGB</span>
+        <label id="feature-toggle"
+               title="Draw the features RTAB-Map's visual odometry tracks. Green = inlier (drives the pose), amber = matched, grey = detected only. Real robot only."><input
+               type="checkbox" id="feature-toggle-box" checked /> features</label>
+      </div>
+      <div class="sensor-tile">
+        <img id="sensor-depth" alt="depth view (waiting for depth_colorizer)" />
+        <span class="sensor-tag">depth · red near, blue far, black = no return</span>
+      </div>
+    </div>
 
     <div id="map-view" class="stage-view">
       <div id="map-bar">
@@ -572,6 +615,9 @@
         <input id="map-name" placeholder="library name" size="12"
                title="Name to save this map under in maps/ — lowercase letters, digits, - and _">
         <button type="button" id="explore-save-lib" title="Save the fused /map grid and this robot's pose graph into maps/ under that name (scripts/maps.sh save). Needs the dashboard console.">Save to library</button>
+        <select id="map-load-select" title="Saved maps in maps/ — pick one, then Load"></select>
+        <button type="button" id="map-load" title="Load the selected library map into the running RTAB-Map (from a copy; the library file is never modified). Resets odometry. Needs the dashboard console.">Load</button>
+        <button type="button" id="map-clear" title="Wipe the live map and restart odometry from the origin. Save first if you want to keep it.">Clear</button>
         <span id="explore-status">explorer: not running</span>
       </div>
       <ul id="queue-list"></ul>

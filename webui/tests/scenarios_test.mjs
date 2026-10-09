@@ -37,6 +37,7 @@ const argVal = (name, dflt) => {
 };
 const CONTROL_PORT = Number(argVal('--port', '8097'));
 const READONLY_PORT = CONTROL_PORT + 1;
+const REAL_PORT = CONTROL_PORT + 2;
 const CDP_PORT = Number(argVal('--cdp-port', '9223'));
 const SCREENSHOT_DIR = args.includes('--screenshot')
   ? path.resolve(argVal('--screenshot', path.join(os.tmpdir(), 'sortbots-scenario-shots')))
@@ -181,17 +182,25 @@ async function main() {
   // test's assertions depend on whatever the developer happens to have saved.
   const mapsDir = seedMapLibrary();
   const serverEnv = { ...process.env, SORTBOTS_MAPS_DIR: mapsDir };
-  spawnTracked('python3', [path.join(WEBUI_DIR, 'serve.py'), '--control',
+  // --platform pinned: left to auto-detect, this test would see the real
+  // robot's scenario list when run on the Jetson and the sim's elsewhere.
+  spawnTracked('python3', [path.join(WEBUI_DIR, 'serve.py'), '--control', '--platform', 'sim',
                            '--port', String(CONTROL_PORT), '--host', '127.0.0.1'],
                { cwd: REPO_ROOT,
                  env: { ...serverEnv, SORTBOTS_SESSIONS_DIR: sessionsDir } });
-  spawnTracked('python3', [path.join(WEBUI_DIR, 'serve.py'),
+  spawnTracked('python3', [path.join(WEBUI_DIR, 'serve.py'), '--platform', 'sim',
                            '--port', String(READONLY_PORT), '--host', '127.0.0.1'],
+               { cwd: REPO_ROOT, env: serverEnv });
+  // API-only: the robot console's view of the same scenario directory.
+  spawnTracked('python3', [path.join(WEBUI_DIR, 'serve.py'), '--platform', 'real',
+                           '--port', String(REAL_PORT), '--host', '127.0.0.1'],
                { cwd: REPO_ROOT, env: serverEnv });
   await waitFor(async () => (await fetch(`http://127.0.0.1:${CONTROL_PORT}/`)).ok,
                 { what: `webui/serve.py --control on :${CONTROL_PORT}` });
   await waitFor(async () => (await fetch(`http://127.0.0.1:${READONLY_PORT}/`)).ok,
                 { what: `webui/serve.py on :${READONLY_PORT}` });
+  await waitFor(async () => (await fetch(`http://127.0.0.1:${REAL_PORT}/`)).ok,
+                { what: `webui/serve.py --platform real on :${REAL_PORT}` });
 
   // The API contract the tab depends on, asserted directly so a UI failure
   // below can be told apart from a server failure.
@@ -208,6 +217,21 @@ async function main() {
   const mapScenarios = (api.scenarios || []).filter((s) => (s.overrides || []).includes('map'));
   check('library scenarios expose a map override', mapScenarios.length > 0,
         mapScenarios.map((s) => s.name).join(', '));
+
+  // One dashboard, two consoles: each lists only its own platform's cards.
+  check('sim console reports platform: sim', api.platform === 'sim', api.platform);
+  check('sim console lists only sim scenarios',
+        (api.scenarios || []).every((s) => s.platform === 'sim'),
+        (api.scenarios || []).filter((s) => s.platform !== 'sim').map((s) => s.name).join(', '));
+  const realApi = await (await fetch(`http://127.0.0.1:${REAL_PORT}/api/scenarios`)).json();
+  const realNames = (realApi.scenarios || []).map((s) => s.name);
+  check('real console reports platform: real', realApi.platform === 'real', realApi.platform);
+  check('real console lists only real scenarios', realNames.length > 0 &&
+        (realApi.scenarios || []).every((s) => s.platform === 'real'), realNames.join(', '));
+  const realRobots = await (await fetch(`http://127.0.0.1:${REAL_PORT}/api/robots`)).json();
+  check('real console lists only robots with a `real` spawn',
+        JSON.stringify(realRobots.robots) === JSON.stringify(['robot_0']),
+        JSON.stringify(realRobots.robots));
 
   const idle = await (await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/session`)).json();
   check('no session is running at rest', idle.state === 'idle', idle.state);

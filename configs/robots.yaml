@@ -26,6 +26,11 @@ robots:
       nvidia: [-7.15, 11.62, 0.05]
       # Primitive scene: west of the hand-built shelf cluster.
       primitive: [-3.0, -1.0, 0.05]
+      # Real hardware (scripts/run_robot.sh, scene:=real): there is no known
+      # world pose, so the robot's own SLAM origin IS the world origin —
+      # map == robot_0/map. Only ids carrying a `real` entry exist on the
+      # robot; serve.py's /api/robots lists just those on the Jetson.
+      real: [0.0, 0.0, 0.0]
   - id: robot_1
     spawn:
       # Deep in the eastern rack aisle (dashboard click ~(1.23, 13.69)).

@@ -38,6 +38,7 @@
   const stateEl = document.getElementById("session-state");
   const stopBtn = document.getElementById("session-stop");
   const logEl = document.getElementById("session-log");
+  const hintEl = document.getElementById("scenario-hint");
 
   const POLL_ACTIVE_MS = 1000;
   const POLL_IDLE_MS = 3000;
@@ -49,6 +50,10 @@
   // what's saved when the console is down.
   let maps = [];
   let hasControl = false;
+  // "sim" (desktop, Isaac) or "real" (the robot's Jetson), from
+  // /api/scenarios. The same page is served by both consoles; serve.py only
+  // lists this platform's scenarios, so the tab just has to word itself right.
+  let platform = "sim";
   let session = null;
   let selected = null;
   // Upper bound for the `robots` override input, from configs/robots.yaml's
@@ -308,6 +313,7 @@
       const data = await getJson("/api/scenarios");
       scenarios = data.scenarios || [];
       hasControl = Boolean(data.control);
+      platform = data.platform === "real" ? "real" : "sim";
     } catch (e) {
       scenarios = [];
       hasControl = false;
@@ -320,10 +326,13 @@
     } catch (e) {
       maps = [];
     }
+    renderPlatform();
     if (!hasControl) {
       renderWarning(
         "The dashboard console isn't running, so scenarios can't be launched from here. " +
-        "Start it from a clean terminal with: scripts/run_console.sh"
+        (platform === "real"
+          ? "Start it on the robot's Jetson with: scripts/jetson.sh console"
+          : "Start it from a clean terminal with: scripts/run_console.sh")
       );
     } else {
       renderWarning(null);
@@ -333,6 +342,18 @@
     // "console not running", and in read-only mode poll() bails before ever
     // rendering it — leaving the markup's placeholder text on screen.
     renderSession();
+  }
+
+  function renderPlatform() {
+    if (platform === "real") {
+      hintEl.textContent =
+        "Real robot — presets from configs/scenarios/ start the RealSense camera and RTAB-Map on this Jetson.";
+      hintEl.title =
+        "Each card is a preset for scripts/run_robot.sh (platform: real in configs/scenarios/*.yaml). " +
+        "This dashboard stays up throughout.";
+      stopBtn.title = "Tear down the camera and the ROS 2 stack. The dashboard console stays up.";
+    }
+    // sim: index.html's own wording already describes Isaac Sim.
   }
 
   async function startSession(name, overrides) {
