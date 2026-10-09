@@ -21,6 +21,7 @@ class Robot:
     alloc: Allocator
     pos: tuple = (0.0, 0.0)
     speed_mps: float = 0.5
+    battery_pct: float | None = None  # None: no battery model, bid on distance alone
     clock_offset_s: float = 0.0
     clock_rate: float = 1.0
     alive: bool = True
@@ -50,12 +51,14 @@ class LoopbackNet:
     def add(self, rid: int, pos=(0.0, 0.0), gateway=False, **kw) -> Robot:
         r = Robot(alloc=None, pos=tuple(pos), **kw)
 
-        def cost_fn(pickup, r=r):
+        def cost_fn(pickup, dropoff=None, r=r):
             d = math.dist(r.pos, pickup)
-            return d / r.speed_mps, d
+            leg = math.dist(pickup, dropoff) if dropoff is not None else 0.0
+            return d / r.speed_mps, d, (d + leg) / r.speed_mps
 
         r.alloc = Allocator(rid, self.params, None if gateway else cost_fn,
-                            random.Random(self.seed * 1000 + rid), is_gateway=gateway)
+                            random.Random(self.seed * 1000 + rid), is_gateway=gateway,
+                            battery_fn=lambda r=r: r.battery_pct)
         self.robots[rid] = r
         # Stagger status phases like real robots booting at different times.
         self._next_status[rid] = self.t + random.Random(rid).uniform(0, 1 / self.status_hz)

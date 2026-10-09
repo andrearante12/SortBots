@@ -49,6 +49,17 @@ class Params:
     # EXPERIMENT (not adopted): cap on tasks a robot bids on at once. 0 = no
     # cap (spec). A 30-task burst made every idle robot bid on every task.
     max_open_bids: int = 0
+    # Battery. Only applies to robots given a battery_fn; without one a robot
+    # bids on travel time alone. Two effects:
+    #  - gate: no bid if driving the WHOLE task (to pickup, then dropoff) would
+    #    leave less than the reserve, so a winner can always finish what it
+    #    claimed and never strands a carried task mid-aisle;
+    #  - penalty: up to battery_penalty_s added to the bid, linear from 0 at
+    #    100 % to the full amount at the reserve, so a fuller robot beats a
+    #    slightly closer, drained one. 30 s = 15 m of travel at 0.5 m/s.
+    battery_drain_pct_per_s: float = 0.05  # placeholder: ~33 min driving per charge
+    battery_reserve_pct: float = 20.0      # placeholder: margin to reach a charger
+    battery_penalty_s: float = 30.0        # placeholder: open question, tune in DES
 
     @classmethod
     def from_config(cls, cfg: dict) -> "Params":
@@ -74,9 +85,13 @@ class TaskView:
     rebid_at: Optional[float] = None
 
 
-# cost_fn(pickup) -> (estimated travel time s, straight-line distance m), or
-# None if this robot cannot take the task at all.
-CostFn = Callable[[tuple], Optional[tuple]]
+# cost_fn(pickup, dropoff) -> (travel time to pickup s, straight-line distance
+# to pickup m[, drive time for the whole task s]), or None if this robot cannot
+# take the task at all. The third value feeds the battery gate; without it the
+# gate only sees the pickup leg.
+CostFn = Callable[[tuple, Optional[tuple]], Optional[tuple]]
+# battery_fn() -> state of charge in percent, or None if unknown.
+BatteryFn = Callable[[], Optional[float]]
 
 
 def _beats(a: tuple, b: tuple) -> bool:
@@ -86,10 +101,12 @@ def _beats(a: tuple, b: tuple) -> bool:
 
 class Allocator:
     def __init__(self, robot_id: int, params: Params, cost_fn: CostFn | None = None,
-                 rng: random.Random | None = None, is_gateway: bool = False):
+                 rng: random.Random | None = None, is_gateway: bool = False,
+                 battery_fn: BatteryFn | None = None):
         self.id = robot_id
         self.p = params
         self.cost_fn = cost_fn
+        self.battery_fn = battery_fn
         self.rng = rng or random.Random(robot_id)
         self.is_gateway = is_gateway
         self.tasks: dict[int, TaskView] = {}
@@ -127,6 +144,19 @@ class Allocator:
         return (not self.is_gateway and not self.isolated and self.cost_fn is not None
                 and len(self.owned()) < self.p.max_owned_tasks)
 
+    def bid_cost(self, travel_s: float, task_s: float) -> Optional[float]:
+        """Travel time adjusted for battery, or None if the battery gate
+        forbids bidding. The adjusted value is what goes on the wire and into
+        owner_cost, so every robot tie-breaks on the same number."""
+        soc = self.battery_fn() if self.battery_fn is not None else None
+        if soc is None:
+            return travel_s
+        reserve = self.p.battery_reserve_pct
+        if soc - task_s * self.p.battery_drain_pct_per_s < reserve:
+            return None
+        depleted = (100.0 - soc) / max(100.0 - reserve, 1e-9)
+        return travel_s + self.p.battery_penalty_s * min(max(depleted, 0.0), 1.0)
+
     def _heard(self, sender: int, now: float) -> None:
         if sender != self.id:
             self.last_peer_heard = now
@@ -157,11 +187,15 @@ class Allocator:
         t.window_end = now + self.p.bid_window_s
         if not self._can_take_new() or t.pickup is None:
             return
-        est = self.cost_fn(t.pickup)
+        est = self.cost_fn(t.pickup, t.dropoff)
         if est is None:
             return
-        cost, dist = est
+        travel, dist = est[0], est[1]
         if dist > self._radius(t.round):
+            return
+        cost = self.bid_cost(travel, est[2] if len(est) > 2 else travel)
+        if cost is None:
+            self._event("battery_gated", now, task_id=t.task_id)
             return
         if self.p.max_open_bids and sum(
                 1 for v in self.tasks.values()

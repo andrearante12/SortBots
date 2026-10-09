@@ -431,12 +431,18 @@ class Robot:
         self.heard_since: dict = {}
         self.subs_cells: set = set()
         self.status_n = 0
-        self.alloc = Allocator(rid, sim.params, None if self.is_gw else self.cost,
-                               random.Random(sim.seed * 7919 + rid), is_gateway=self.is_gw)
+        self.battery_pct = None  # set by Sim when commsim_des.battery_pct is configured
+        self.alloc = self.new_allocator(random.Random(sim.seed * 7919 + rid))
 
-    def cost(self, pickup):
-        d = path_length(self.sim.layout.route(self.pos, pickup))
-        return d / self.sim.speed, math.dist(self.pos, pickup)
+    def new_allocator(self, rng):
+        return Allocator(self.id, self.sim.params, None if self.is_gw else self.cost, rng,
+                         is_gateway=self.is_gw, battery_fn=lambda: self.battery_pct)
+
+    def cost(self, pickup, dropoff=None):
+        lay = self.sim.layout
+        d = path_length(lay.route(self.pos, pickup))
+        leg = path_length(lay.route(pickup, dropoff)) if dropoff is not None else 0.0
+        return d / self.sim.speed, math.dist(self.pos, pickup), (d + leg) / self.sim.speed
 
     # motion
     def start_task(self, tid):
@@ -451,6 +457,11 @@ class Robot:
         self.task, self.route = None, []
 
     def move(self, dt):
+        if self.battery_pct is not None and self.route:
+            # No chargers modelled: drain only. The gate keeps a robot from
+            # claiming a task it cannot finish, so it never stalls mid-route.
+            self.battery_pct = max(0.0, self.battery_pct
+                                   - dt * self.sim.params.battery_drain_pct_per_s)
         step = self.sim.speed * dt
         while self.route and step > 0:
             tgt = self.route[0]
@@ -556,6 +567,13 @@ class Sim:
         if positions:
             for rid, pos in enumerate(positions):
                 self.nodes[rid].pos = tuple(pos)
+        # Opt-in so existing sweeps reproduce: [lo, hi] draws each robot's
+        # starting charge uniformly; absent, robots bid on travel time alone.
+        soc = cfg.get("commsim_des", {}).get("battery_pct")
+        if soc is not None:
+            brng = random.Random(seed + 2)
+            for rid in range(1, n + 1):
+                self.nodes[rid].battery_pct = brng.uniform(*soc)
         self.ch = {b: Channel(self, b) for b in self.bands}
         self.st = {(i, b): Station(i, b) for i in self.nodes for b in self.bands}
         self.flows = {(a, b): Flow(self, a, b) for a in self.nodes for b in self.nodes if a != b}
@@ -712,8 +730,7 @@ class Sim:
         r = self.nodes[rid]
         r.alive = True
         if fresh:  # reboot: empty allocator; tasks re-learned from the fleet
-            r.alloc = Allocator(rid, self.params, None if r.is_gw else r.cost,
-                                random.Random(self.seed * 7919 + rid + 1), is_gateway=r.is_gw)
+            r.alloc = r.new_allocator(random.Random(self.seed * 7919 + rid + 1))
             r.stop_task()
         def notice():
             self.route_dead.discard(rid)

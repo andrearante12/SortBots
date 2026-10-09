@@ -101,7 +101,7 @@ def test_isolated_owner_stops_before_anyone_reclaims():
 
 
 def test_isolated_robot_stops_bidding():
-    a = Allocator(1, Params(status_timeout_s=3.0), cost_fn=lambda pk: (1.0, 1.0))
+    a = Allocator(1, Params(status_timeout_s=3.0), cost_fn=lambda pk, dp: (1.0, 1.0))
     a.on_status(2, [], now=0.0)
     a.on_announce(0, 4, (0, 0), (1, 1), now=0.0)
     a.tick(1.1)  # bid from robot 1 only... but suppose the window found no winner
@@ -184,7 +184,7 @@ def test_complete_marks_done_everywhere():
 
 def test_early_claim_does_not_beat_cheaper_bid_still_in_window():
     p = Params()
-    a = Allocator(1, p, cost_fn=lambda pk: (2.0, 1.0))
+    a = Allocator(1, p, cost_fn=lambda pk, dp: (2.0, 1.0))
     a.on_announce(0, 9, (0, 0), (1, 1), now=0.0)
     a.drain()
     a.on_claim(2, 9, cost=5.0, now=0.3)  # peer closed early, never saw our bid
@@ -238,7 +238,7 @@ def test_robot_never_owns_more_than_max_owned_tasks():
 def test_winner_at_capacity_declines_and_releases():
     # Safety net behind bid withdrawal: ownership can also arrive another way
     # (tie-break on a peer's Claim/Status) after we bid. Then we must decline.
-    a = Allocator(1, Params(), cost_fn=lambda pk: (1.0, 1.0))
+    a = Allocator(1, Params(), cost_fn=lambda pk, dp: (1.0, 1.0))
     a.on_announce(0, 2, (0, 0), (1, 1), now=0.0)   # we bid on task 2
     a.on_status(3, [(1, 9.0)], now=0.2)            # learn task 1, owned by 3...
     a.tasks[1].owner, a.tasks[1].owner_cost = 1, 0.5  # ...then it resolves to us
@@ -251,7 +251,7 @@ def test_winner_at_capacity_declines_and_releases():
 
 
 def test_claiming_withdraws_other_open_bids():
-    a = Allocator(1, Params(), cost_fn=lambda pk: (1.0, 1.0))
+    a = Allocator(1, Params(), cost_fn=lambda pk, dp: (1.0, 1.0))
     a.on_announce(0, 1, (0, 0), (1, 1), now=0.0)
     a.on_announce(0, 2, (0, 0), (1, 1), now=0.5)
     a.drain()
@@ -260,3 +260,40 @@ def test_claiming_withdraws_other_open_bids():
     assert any(m["type"] == "Claim" and m["task_id"] == 1 for m in out)
     assert any(m["type"] == "TaskEvent" and m["task_id"] == 2 and m["kind"] == 1 for m in out)
     assert 1 not in a.tasks[2].bids
+
+
+def test_fuller_battery_beats_slightly_closer_robot():
+    # Robot 2 is 2 m (4 s) closer but at the reserve: +30 s outweighs it.
+    net = fleet({1: (6, 0), 2: (4, 0)})
+    net.robots[1].battery_pct, net.robots[2].battery_pct = 100.0, 25.0
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 0))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+
+
+def test_much_closer_robot_still_wins_on_lower_battery():
+    # The penalty is capped at battery_penalty_s: 40 m (80 s) closer wins.
+    net = fleet({1: (45, 0), 2: (5, 0)}, bid_radius_m=100)
+    net.robots[1].battery_pct, net.robots[2].battery_pct = 100.0, 30.0
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 0))
+    net.run(3.0)
+    assert net.self_owners(1) == [2]
+
+
+def test_battery_gate_counts_the_dropoff_leg():
+    # 2 m to pickup, 98 m on to dropoff: 200 s of driving = 10 % at the default
+    # drain. 28 % can reach the pickup but would finish below the 20 % reserve.
+    net = fleet({1: (2, 0), 2: (10, 0)})
+    net.robots[1].battery_pct, net.robots[2].battery_pct = 28.0, 90.0
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (98, 0))
+    net.run(3.0)
+    assert net.self_owners(1) == [2]
+    assert [e for e in net.events("battery_gated") if e["robot_id"] == 1]
+
+
+def test_no_battery_model_bids_on_travel_time():
+    a = Allocator(1, Params(), cost_fn=lambda pk, dp: (7.0, 1.0))
+    assert a.bid_cost(7.0, 7.0) == 7.0
