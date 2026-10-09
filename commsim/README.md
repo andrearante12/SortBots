@@ -56,7 +56,8 @@ the same place.
 | `emu/mesh.py`, `emu/m1.py`, `emu/reroute.py` | Build the emulated mesh; run Status stubs and capture; measure reroute time |
 | `stubs/status_stub.py` | ROS 2 node run inside each emulated robot (Zenoh or UDP Status) |
 | `ws/src/commsim_msgs/` | The message definitions (`.msg`), so wire sizes are real |
-| `configs/` | `base.yaml` = the recommended design; `spec_original.yaml` = the design as first written, for before/after runs; `ogm250.yaml`/`ogm500.yaml` = routing-interval comparisons |
+| `hw/` | **Real hardware:** per-router OpenWrt setup + host config generated from the same fleet list, a UDP probe, and the calibration runbook ([`hw/README.md`](hw/README.md)) |
+| `configs/` | `base.yaml` = the recommended design; `hw_lab.yaml` = 2 robots + gateway, 2.4 GHz only, for the first routers; `spec_original.yaml` = the design as first written, for before/after runs; `ogm250.yaml`/`ogm500.yaml` = routing-interval comparisons |
 | `measurements/` | Emulation measurements the model is checked against |
 | `scripts/` | `fix_sweep.sh` reproduces the final comparison; `check_isolation.sh` proves traffic stays on the fleet subnet |
 | `vm/` | Creating and provisioning the emulation VM |
@@ -100,6 +101,13 @@ sudo python3 -m commsim.emu.mesh down
 multi-step VM commands in a script under the gitignored `commsim/results/`
 (mounted in the VM) and run that.
 
+Real routers (bundles hold the mesh key; keep them in the gitignored `results/`):
+
+```bash
+/usr/bin/python3 -m commsim.hw.deploy commsim/configs/base.yaml commsim/configs/hw_lab.yaml \
+    --mesh-key-file ~/.config/sortbots/mesh.key --out commsim/results/hw
+```
+
 Fleet configs and the isolation check:
 
 ```bash
@@ -117,4 +125,6 @@ commsim/scripts/check_isolation.sh --subnet 10.42.0.0/24 --configs /tmp/fleet
   fleets). Neighbor-only Status needs a small "which areas I listen to"
   announcement before scaling past ~10 robots.
 - **Not yet measured on hardware:** link rates, rack attenuation, reroute
-  time on real radios. The 2-robot testbed replaces those placeholders.
+  time on real radios. The 2-robot testbed replaces those placeholders;
+  [`hw/README.md`](hw/README.md) is the bring-up and measurement runbook
+  (3 routers: one per robot plus the gateway).

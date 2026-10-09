@@ -1,0 +1,9 @@
+# First hardware bring-up: 2 robots + gateway, 2.4 GHz only, over base.yaml:
+#   python3 -m commsim.hw.deploy commsim/configs/base.yaml commsim/configs/hw_lab.yaml \
+#       --mesh-key-file ~/.config/sortbots/mesh.key --out commsim/results/hw
+# Single band is the V3 setup: enough for 3 nodes (~1% channel busy at this
+# size, sim_log Results), but no fallback if 2.4 GHz is jammed. Add g5 back
+# once both radios are confirmed to mesh (commsim/hw/README.md step 6).
+fleet:
+  robots: 2
+  bands: [g24]

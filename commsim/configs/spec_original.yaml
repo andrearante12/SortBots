@@ -1,4 +1,4 @@
-# The design exactly as first specified (simulation_plan_prompt.md), layered
+# The design exactly as first specified (docs/brief.md), layered
 # over base.yaml to reproduce "before the fixes" runs:
 #   python3 -m commsim.des.run --configs commsim/configs/spec_original.yaml ...
 # Known to fail: lease bug (V3+), false "silent" after any reroute, two TCP

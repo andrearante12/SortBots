@@ -109,6 +109,21 @@ measured:
     tcp: {250: 3.54}
     udp: {250: 3.0, 500: 5.67, 1000: 10.33}
 
+# Real routers and hosts only (commsim/hw/deploy.py); the emulation and DES
+# ignore this section.
+hardware:
+  # Regulatory domain. placeholder: wrong value = wrong channels/tx power.
+  country: US
+  # Routers bridge their Ethernet port into bat0; the Jetson/laptop behind it
+  # holds the fleet IP above. Each router also gets a management IP counted
+  # down from the top of the subnet: gateway router .254, robot_1's .253, ...
+  router_mgmt_ip_top: true
+  # Ethernet port on each host that plugs into its router. placeholder:
+  # enP8p1s0 is the Jetson Orin Nano devkit name; check `ip link` on yours.
+  robot_iface: enP8p1s0
+  gateway_iface: eth0           # placeholder: the operator laptop's port
+  htmode: HT20                  # 20 MHz, matches the model and emulation
+
 run:
   warmup_s: 60
   steady_s: 300
