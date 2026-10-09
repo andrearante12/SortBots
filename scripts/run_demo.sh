@@ -104,7 +104,7 @@ PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz
                    component_container task_manager.py scripted_pick.py explorer.py \
                    rtabmap_cloud_pump.py recon_cloud_relay.py wasd_teleop \
                    map_merge.py static_transform_publisher \
-                   fleet_radio.py dynamic_obstacle_filter.py recon_cloud_merge.py \
+                   fleet_radio.py fleet_tasks.py dynamic_obstacle_filter.py recon_cloud_merge.py \
                    depth_colorizer.py feature_overlay.py \
                    "spawn_warehouse.py")
 # Note scripts/save_map.sh --watch is deliberately absent from that list. Its
@@ -226,14 +226,26 @@ setsid bash -c "source '$REPO_ROOT/scripts/activate_isaac.sh' >/dev/null 2>&1; \
   exec python '$REPO_ROOT/scripts/spawn_warehouse.py' $HEADLESS --forever \
        --robots $ROBOTS --scene $SCENE --drive cmd_vel $CHASE_CAM_ARGS" \
   >"$SIM_LOG" 2>&1 &
+SIM_PID=$!  # setsid execs (not a group leader here), then bash execs python
 
 echo "[run_demo] waiting for the warehouse to load"
 echo "           (first run streams assets from NVIDIA — can take a few minutes)..."
 READY=0
 for _ in $(seq 1 72); do
   if grep -q "timeline.play()" "$SIM_RESULT" 2>/dev/null; then READY=1; break; fi
-  if grep -qiE "ERROR:|Traceback|RuntimeError" "$SIM_LOG" 2>/dev/null; then
-    echo "[run_demo] Isaac Sim failed to start — see $SIM_LOG"; exit 1
+  # Failure = Isaac exited before it was ready. spawn_warehouse.py's own fatal
+  # errors end the process, so this catches them all. It used to grep the log
+  # for "error:|Traceback" case-insensitively, but Kit logs plenty of
+  # non-fatal [Error] lines — a missing MDL material, an unused extension that
+  # can't find a library — and each one aborted a healthy start (2026-10-09).
+  if ! kill -0 "$SIM_PID" 2>/dev/null; then
+    echo "[run_demo] Isaac Sim failed to start — see $SIM_LOG"
+    # Kill what we started. Isaac is setsid'd, so exiting alone left it
+    # running untracked: the session read "failed" while Isaac went on loading
+    # (and spawned a second Kit for the URDF import), and on a 15 GB laptop that
+    # ran the machine out of memory (2026-10-09).
+    stop_pipeline
+    exit 1
   fi
   sleep 5
 done
