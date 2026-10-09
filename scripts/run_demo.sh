@@ -70,7 +70,11 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-ROS_SETUP="/opt/ros/jazzy/setup.bash"
+# Overridable for a source-built Jazzy (e.g. ROS_SETUP=~/ros2_jazzy/install/
+# setup.bash): Ubuntu releases newer than 24.04 have no Jazzy debs, so there
+# is no /opt/ros/jazzy to source. Inherited by session.py's runs through the
+# console's environment.
+ROS_SETUP="${ROS_SETUP:-/opt/ros/jazzy/setup.bash}"
 SIM_LOG="/tmp/sortbots_demo_sim.log"
 SIM_RESULT="/tmp/isaac_spawn_warehouse_result.txt"
 BRINGUP_LOG="/tmp/sortbots_demo_bringup.log"
