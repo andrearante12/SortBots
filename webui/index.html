@@ -359,6 +359,7 @@
   #lf-advanced summary { cursor: pointer; font-size: 0.78rem; color: #9aa; }
   #lf-advanced[open] summary { margin-bottom: 8px; }
   #lf-advanced .lf-row { gap: 14px; padding-left: 4px; }
+  #lf-advanced .lf-row + .lf-row { margin-top: 8px; }
   #lf-footer {
     margin-top: 6px; padding-top: 10px; border-top: 1px solid #2a2e35;
     display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center;
@@ -760,14 +761,6 @@
           <span class="lf-k">Exploration</span>
           <label class="lf-check" title="The explorer always runs. Checked: it starts driving to unexplored frontiers as soon as the sim is up. Unchecked: it waits — start it any time with the Explore button or X+click on the map."><input type="checkbox" id="lf-explore"> start exploring immediately</label>
         </div>
-        <div class="lf-row" data-field="waypoints">
-          <span class="lf-k">Waypoints</span>
-          <div class="segmented lf-seg" id="lf-waypoints">
-            <button type="button" data-v="map" title="Load the saved map's own waypoints (maps/NAME/waypoints.json)">from map</button>
-            <button type="button" data-v="keep" title="Keep the dashboard's current waypoints">keep current</button>
-            <button type="button" data-v="none" title="Start with no waypoints">start empty</button>
-          </div>
-        </div>
         <details id="lf-advanced">
           <summary>Advanced</summary>
           <div class="lf-row">
@@ -776,6 +769,14 @@
             <select id="lf-chase_cam_robots" data-field="chase_cam_robots" title="How many robots get a chase cam"></select>
             <label class="lf-check" data-field="teleop"><input type="checkbox" id="lf-teleop"> teleop</label>
             <label class="lf-check" data-field="bag" title="Record a rosbag into the session directory for the life of the run (large)"><input type="checkbox" id="lf-bag"> record bag</label>
+          </div>
+          <div class="lf-row" data-field="waypoints">
+            <span class="lf-k">Waypoints</span>
+            <div class="segmented lf-seg" id="lf-waypoints">
+              <button type="button" data-v="map" title="Load the saved map's own waypoints (maps/NAME/waypoints.json)">from map</button>
+              <button type="button" data-v="keep" title="Keep the dashboard's current waypoints">keep current</button>
+              <button type="button" data-v="none" title="Start with no waypoints">start empty</button>
+            </div>
           </div>
         </details>
         <div id="lf-footer">

@@ -166,7 +166,7 @@
     for (const el of formEl.querySelectorAll("[data-field]")) {
       el.hidden = !fields.has(el.dataset.field);
     }
-    $("lf-advanced").hidden = !["headless", "chase_cam", "teleop", "bag"].some((f) => fields.has(f));
+    $("lf-advanced").hidden = !["headless", "chase_cam", "teleop", "bag", "waypoints"].some((f) => fields.has(f));
   }
 
   // cfg -> controls (+ the dependent bits: mode only matters for a non-new

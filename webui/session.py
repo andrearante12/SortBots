@@ -600,8 +600,12 @@ def describe_config(cfg: dict, platform: str = "sim") -> str:
                 else f"{where} ({'read-only' if full['mode'] == 'readonly' else 'extend'})")
     if platform == "sim":
         bits.append("exploring from start" if _as_bool(full["explore"]) else "explorer idle")
-    bits.append({"map": "map's waypoints", "keep": "current waypoints",
-                 "none": "no waypoints"}[full["waypoints"]])
+    # Waypoints are an Advanced setting: only mention a non-default choice
+    # (the default is the map's own set for a saved map, else keep current).
+    default_wp = "keep" if full["map"] in ("new", "working") else "map"
+    if full["waypoints"] != default_wp:
+        bits.append({"map": "map's waypoints", "keep": "current waypoints",
+                     "none": "no waypoints"}[full["waypoints"]])
     return " · ".join(bits)
 
 
