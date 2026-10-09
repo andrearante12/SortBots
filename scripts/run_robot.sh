@@ -74,6 +74,12 @@ stop_pipeline() {
     pkill -9 -f "$p" 2>/dev/null || true
   done
   sleep 1
+  # SIGKILLed Fast DDS participants never unlink their shared-memory segments
+  # (16 MB each with configs/dds/fastdds_large_shm.xml), and /dev/shm is RAM —
+  # the Orin's 8 GB, shared with the GPU. On the bench, 1,058 leaked segments
+  # held 5.2 GB after ~30 runs (2026-10-09). `shm clean` removes only segments
+  # no live process holds, so the dashboard console's own are safe.
+  bash -c "source '$ROS_SETUP'; fastdds shm clean" >/dev/null 2>&1 || true
 }
 
 if [[ "${1:-}" == "stop" ]]; then

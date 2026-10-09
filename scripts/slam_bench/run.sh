@@ -56,13 +56,33 @@ ENVS=(-e ROS_DOMAIN_ID=$DOM -e ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST -e HOME=/
 declare -A MEM=([jetson]=3g [workstation]=3g [logger]=1g)
 dk() {  # name cpuset quota cmd...
   local name="$1" cpuset="$2" quota="$3"; shift 3
-  local q=(); [ "$quota" != "-" ] && q=(--cpus "$quota")
+  local q=()
+  if [ "$quota" != "-" ]; then
+    if [ -n "${JETSON_CPU_PERIOD_US:-}" ]; then
+      # Same CPU share, enforced over a short period. With the default 100 ms
+      # period the whole container freezes for up to 40 ms of every 100 once
+      # its 0.6 share is spent, and while frozen nothing runs whatever its
+      # nice value, so latency tails measure throttling, not contention. A
+      # real (slower) Jetson core never freezes like that.
+      q=(--cpu-period "$JETSON_CPU_PERIOD_US" \
+         --cpu-quota "$(awk -v c="$quota" -v p="$JETSON_CPU_PERIOD_US" 'BEGIN {printf "%d", c * p}')")
+    else
+      q=(--cpus "$quota")
+    fi
+  fi
   local m="${MEM[$name]:-1g}"
-  docker run -d --rm --name "${TAG}_$name" --network host --ipc host \
+  docker run -d --rm --name "${TAG}_$name" --network host --ipc "container:${TAG}_ipc" \
     --memory "$m" --memory-swap "$m" --cpuset-cpus "$cpuset" "${q[@]}" --user "$(id -u):$(id -g)" "${ENVS[@]}" \
     -v "$REPO:/repo:ro" -v "$SEQ:/seq:ro" -v "$OUT:/out" \
     sortbots-slam-bench bash -c "source /opt/ros/jazzy/setup.bash; $*" >/dev/null
 }
+# One private IPC namespace per run, shared by its containers so Fast DDS
+# shared memory still works between them. Its /dev/shm is a 1 GB tmpfs that
+# disappears with the run. With --ipc host, segments of stopped containers
+# stayed in the host's /dev/shm: 1,058 of them held 5.2 GB of RAM after ~30
+# runs (2026-10-09).
+docker run -d --rm --name "${TAG}_ipc" --ipc shareable --shm-size 1g --memory 64m \
+  --entrypoint sleep sortbots-slam-bench infinity >/dev/null
 cleanup() { docker ps -q --filter "name=${TAG}_" | xargs -r docker stop -t 3 >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
@@ -148,7 +168,7 @@ esac
 
 dk logger "$TOOL_CPUSET" - "python3 /repo/scripts/slam_bench/odom_logger.py --out /out > /out/logger.log 2>&1"
 # Player in the foreground: the run lasts as long as the sequence.
-docker run --rm --name "${TAG}_player" --network host --ipc host --memory 1g --memory-swap 1g --cpuset-cpus "$TOOL_CPUSET" \
+docker run --rm --name "${TAG}_player" --network host --ipc "container:${TAG}_ipc" --memory 1g --memory-swap 1g --cpuset-cpus "$TOOL_CPUSET" \
   --user "$(id -u):$(id -g)" "${ENVS[@]}" -v "$REPO:/repo:ro" -v "$SEQ:/seq:ro" -v "$OUT:/out" \
   sortbots-slam-bench bash -c "source /opt/ros/jazzy/setup.bash; \
   python3 /repo/scripts/slam_bench/tum_player.py --seq /seq --stamps /out/stamps.csv --rate $RATE" \

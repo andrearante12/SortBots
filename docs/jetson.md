@@ -168,7 +168,7 @@ frame (1.2 MB). Frames then go over fragmented UDP, and with the stock
 `net.core.rmem_max` (212 KB) most are dropped, silently: odometry just runs
 on fewer frames, with bigger motion between them. `scripts/jetson.sh` now
 sets `FASTRTPS_DEFAULT_PROFILES_FILE=configs/dds/fastdds_large_shm.xml`
-(32 MB segment). To confirm on the robot, compare frames published with
+(16 MB segment; `run_robot.sh stop` cleans up segments left by killed processes). To confirm on the robot, compare frames published with
 frames odometry processed over the same minute:
 
 ```bash

@@ -152,6 +152,11 @@ case "${1:-}" in
       # run_console.sh stop takes the robot pipeline down too (it calls
       # run_robot.sh stop on this platform), then the container itself.
       docker exec "$NAME" bash "$REPO_ROOT/scripts/run_console.sh" stop || true
+      # The container shares the host's /dev/shm (--ipc host): Fast DDS
+      # segments of killed processes outlive it and stay in RAM. Clean the
+      # zombies (segments no live process holds) before the container goes.
+      docker exec "$NAME" bash -c "source /opt/ros/jazzy/setup.bash; fastdds shm clean" \
+        >/dev/null 2>&1 || true
     fi
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     echo "[jetson] stopped."

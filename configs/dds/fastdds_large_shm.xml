@@ -4,13 +4,17 @@
      and the D435's 848x480 is 1.2 MB, so every image silently falls back to
      UDP fragments. With the stock net.core.rmem_max (212 KB) most of those
      fragments are dropped: the bench measured 1.6 Hz delivered of 11.7 Hz
-     published, the C++ odometry processed 23 of 832 frames. -->
+     published, the C++ odometry processed 23 of 832 frames.
+     16 MB holds ~12 D435 frames in flight. Segments are /dev/shm, i.e. RAM,
+     and a killed participant never frees its own: run_robot.sh stop and
+     jetson.sh stop run `fastdds shm clean` for that (32 MB here leaked 5.2 GB
+     over a day of bench runs before they did). -->
 <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
   <transport_descriptors>
     <transport_descriptor>
       <transport_id>shm_large</transport_id>
       <type>SHM</type>
-      <segment_size>33554432</segment_size>
+      <segment_size>16777216</segment_size>
     </transport_descriptor>
     <transport_descriptor>
       <transport_id>udp</transport_id>
