@@ -3,8 +3,8 @@
 Pure python with an injected clock: every handler takes `now`, the robot's
 OWN clock. Leases are measured from when *this* robot last heard the owner,
 never from message stamps, so a clock offset between robots cannot expire a
-lease early. The same class runs inside the ROS 2 stub (stubs/robot_stub.py),
-the in-memory harness (core/loopback.py) and the DES, so all three test one
+lease early. The same class runs on the robots (nodes/fleet_tasks.py), in the
+in-memory harness (core/loopback.py) and in the DES, so all three test one
 implementation.
 
 Handlers append to `self.out` (messages to publish: dicts with a "type") and
@@ -46,8 +46,10 @@ class Params:
     # now also sends its owned-task list fleet-wide at this rate. 0 = off
     # (spec as originally written).
     lease_beacon_hz: float = 1.0
-    # EXPERIMENT (not adopted): cap on tasks a robot bids on at once. 0 = no
-    # cap (spec). A 30-task burst made every idle robot bid on every task.
+    # Cap on tasks a robot bids on at once. 0 = no cap (spec, and this
+    # default so spec_original.yaml reproduces it). A 30-task burst made every
+    # idle robot bid on every task; configs/base.yaml and the robots
+    # (configs/fleet_tasks.yaml) set 3 — sim_log step 17.
     max_open_bids: int = 0
     # Battery. Only applies to robots given a battery_fn; without one a robot
     # bids on travel time alone. Two effects:
@@ -326,6 +328,11 @@ class Allocator:
         elif kind == RELEASE and t.state == BIDDING and sender in t.bids:
             t.bids.pop(sender)  # a bidder that cannot take it after all
 
+    def cancel(self, task_id: int, now: float) -> None:
+        """Gateway/operator side: withdraw a task fleet-wide."""
+        self.out.append({"type": "TaskEvent", "task_id": task_id, "kind": CANCEL})
+        self.on_task_event(self.id, task_id, CANCEL, now)
+
     def complete(self, task_id: int, now: float) -> None:
         self.tasks[task_id].state = DONE
         self.out.append({"type": "TaskEvent", "task_id": task_id, "kind": COMPLETE})
@@ -382,3 +389,24 @@ class Allocator:
             elif t.state == CLAIMED and now - t.last_renew > expiry:
                 self._event("lease_expired", now, task_id=t.task_id, owner=t.owner)
                 self._open_bidding(t, now)
+
+
+def deliver(alloc: Allocator, sender: int, m: dict, now: float) -> bool:
+    """Route one received message to its handler. False if the type is not
+    part of the task protocol (callers may carry other traffic alongside)."""
+    typ = m.get("type")
+    if typ == "TaskAnnounce":
+        alloc.on_announce(sender, m["task_id"], m["pickup"], m["dropoff"], now)
+    elif typ == "Bid":
+        alloc.on_bid(sender, m["task_id"], m["cost"], now)
+    elif typ == "Claim":
+        alloc.on_claim(sender, m["task_id"], m["cost"], now)
+    elif typ == "TaskEvent":
+        alloc.on_task_event(sender, m["task_id"], m["kind"], now)
+    elif typ == "Status":
+        alloc.on_status(sender, m["owned"], now)
+    elif typ == "LeaseBeacon":
+        alloc.on_lease_renewal(sender, m["owned"], now)
+    else:
+        return False
+    return True

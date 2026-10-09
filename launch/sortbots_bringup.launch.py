@@ -9,6 +9,8 @@ including the three existing launch files plus the task-dispatch node:
                                                                web_video_server +
                                                                serve.py
   4. nodes/task_manager.py — the pickup->dropoff dispatch FSM
+  5. nodes/fleet_tasks.py  — the fleet task auction feeding it (per robot),
+                             plus one gateway taking /fleet/task_request
 
 This does NOT start Isaac Sim (`scripts/spawn_warehouse.py`) — that runs in
 its own Python venv and must stay a separate process. Launch the sim first
@@ -262,6 +264,22 @@ def _make_per_robot_actions(
             condition=IfCondition(task_manager),
         ))
 
+        # Fleet auction (commsim's allocator): wins tasks for this robot and
+        # hands them to task_manager. Only the primary bids — it is the only
+        # robot spawn_warehouse.py gives a working arm, so another robot
+        # winning would stall in PICKING until PICK_TIMEOUT_SEC, fail, and be
+        # re-auctioned. The rest still run it as followers: they track owners
+        # and leases, so letting them bid later is a flag, not new code.
+        actions.append(ExecuteProcess(
+            cmd=[
+                "python3",
+                os.path.join(REPO_ROOT, "nodes", "fleet_tasks.py"),
+                "--robot-id", rid,
+            ] + ([] if rid == primary_robot_id else ["--no-bid"]),
+            output="screen",
+            condition=IfCondition(task_manager),
+        ))
+
         # The other half of the dispatch loop: task_manager publishes
         # pick_request and blocks on pick_result, so without this every task
         # stalls in PICKING until PICK_TIMEOUT_SEC. Primary robot only —
@@ -314,6 +332,15 @@ def _make_per_robot_actions(
                 ),
             ],
         ))
+
+    # Fleet gateway: takes /fleet/task_request, announces, keeps
+    # /fleet/task_board. Once per bringup, like the operator's laptop it stands
+    # in for.
+    actions.append(ExecuteProcess(
+        cmd=["python3", os.path.join(REPO_ROOT, "nodes", "fleet_tasks.py"), "--gateway"],
+        output="screen",
+        condition=IfCondition(task_manager),
+    ))
 
     # Fuses every robot's own /<rid>/map into the world-anchored /map (see
     # that node's docstring). Once per bringup, not per robot — it needs the
@@ -426,7 +453,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "task_manager",
             default_value="true",
-            description="Start nodes/task_manager.py, the pickup->dropoff dispatch FSM.",
+            description=(
+                "Start nodes/task_manager.py, the pickup->dropoff dispatch FSM, "
+                "and the fleet auction that feeds it (nodes/fleet_tasks.py: one "
+                "per robot plus the gateway)."
+            ),
         ),
         DeclareLaunchArgument(
             "scripted_pick",

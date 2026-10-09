@@ -1,0 +1,39 @@
+# Fleet task auction on the robots (nodes/fleet_tasks.py). The protocol block
+# feeds commsim's Params — same keys and meaning as commsim/configs/base.yaml
+# `protocol:`, where each value's reasoning and measurement live. Anything not
+# set here takes the Params default.
+
+protocol:
+  bid_window_s: 1.0
+  bid_radius_m: 15.0            # whole Isaac warehouse fits; rounds widen it anyway
+  task_lease_s: 10.0
+  reclaim_margin_s: 2.0
+  status_timeout_s: 6.0
+  max_owned_tasks: 1            # task_manager works one task at a time
+  lease_beacon_hz: 1.0          # the ONLY lease renewal here — see fleet_tasks.py
+  max_open_bids: 3              # commsim sim_log step 17: unlimited stormed the channel
+  # Battery (commsim protocol.py Params): placeholders until measured on the
+  # real XLeRobot pack.
+  battery_drain_pct_per_s: 0.05
+  battery_reserve_pct: 20.0
+  battery_penalty_s: 30.0
+
+# Turns bid distance into seconds. Nav2's max_velocity x
+# (configs/nav2_params.yaml); bids compare robots, so only consistency matters,
+# but battery_penalty_s is in the same seconds.
+speed_mps: 0.5
+
+# After task_manager reports FAILED, this robot skips that pickup->dropoff for
+# this long so the re-auction can reach a robot that might succeed.
+failed_backoff_s: 60.0
+
+# Gateway: repeat unowned announces this often (late joiners), and heartbeat
+# so a robot with no peer in range is not "isolated".
+reannounce_s: 5.0
+gateway_status_hz: 1.0
+
+battery:
+  # Isaac has no battery. Set a start % to simulate one (drains while the
+  # odometry says the robot moves); a real sensor_msgs/BatteryState on
+  # /<robot>/battery_state always overrides it. null = no battery model.
+  sim_start_pct: null

@@ -13,7 +13,7 @@ import math
 import random
 from dataclasses import dataclass, field
 
-from .protocol import Allocator, Params, CLAIMED
+from .protocol import Allocator, Params, CLAIMED, deliver
 
 
 @dataclass
@@ -86,20 +86,7 @@ class LoopbackNet:
 
     def _deliver(self, dst: int, sender: int, m: dict) -> None:
         r = self.robots[dst]
-        a, now = r.alloc, r.now(self.t)
-        typ = m["type"]
-        if typ == "TaskAnnounce":
-            a.on_announce(sender, m["task_id"], m["pickup"], m["dropoff"], now)
-        elif typ == "Bid":
-            a.on_bid(sender, m["task_id"], m["cost"], now)
-        elif typ == "Claim":
-            a.on_claim(sender, m["task_id"], m["cost"], now)
-        elif typ == "TaskEvent":
-            a.on_task_event(sender, m["task_id"], m["kind"], now)
-        elif typ == "Status":
-            a.on_status(sender, m["owned"], now)
-        elif typ == "LeaseBeacon":
-            a.on_lease_renewal(sender, m["owned"], now)
+        deliver(r.alloc, sender, m, r.now(self.t))
 
     def _flush(self, rid: int) -> None:
         out, ev = self.robots[rid].alloc.drain()

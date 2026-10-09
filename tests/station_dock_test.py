@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Unit tests for task_manager.Station's dock geometry + waypoints.yaml sanity.
+"""Unit tests for Station's dock geometry + waypoints.yaml sanity.
 
-Pure python — imports only the dataclass-ish `Station`/`load_stations` half of
-nodes/task_manager.py, which has no rclpy at module scope.
+Pure python — `Station`/`load_stations` live in nodes/stations.py, which has
+no rclpy, so this runs offline with the system python3.
 
     python3 -m pytest tests/station_dock_test.py
 
@@ -21,9 +21,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "nodes"))
 
-pytest.importorskip("rclpy", reason="task_manager imports rclpy at module scope")
-
-from task_manager import Station, load_stations  # noqa: E402
+from stations import Station, load_stations  # noqa: E402
 
 # Summed URDF link origins Rotation -> Fixed_Jaw_tip: fully extended
 # straight-line reach FROM THE SHOULDER. An upper bound, so anything usable

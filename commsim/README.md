@@ -115,6 +115,14 @@ Fleet configs and the isolation check:
 commsim/scripts/check_isolation.sh --subnet 10.42.0.0/24 --configs /tmp/fleet
 ```
 
+## On the robots
+
+`core/protocol.py` is not only simulated: `nodes/fleet_tasks.py` runs the same
+`Allocator` on each robot (plus a gateway) over ROS 2 topics and feeds the
+tasks it wins to `nodes/task_manager.py`. The bringup launch starts it with
+`task_manager:=true`. Its offline tests are `tests/fleet_tasks_test.py`.
+Request a task with `/fleet/task_request`, watch `/fleet/task_board`.
+
 ## Decisions and open items
 
 - **Partitions:** an owner that still hears its own half of a split network

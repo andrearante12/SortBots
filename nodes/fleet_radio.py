@@ -68,14 +68,25 @@ def encode_status(
     wz: float = 0.0,
     mode: str = "idle",
     stamp: float | None = None,
+    owned: list | None = None,
+    battery_pct: float | None = None,
 ) -> str:
-    return json.dumps({
+    """`owned` ([task_id, cost] pairs) and `battery_pct` come from
+    nodes/fleet_tasks.py — the same fields commsim's bundled Status carries.
+    They are informational here: leases are renewed on /fleet/tasks, where
+    they stay ordered with Release/Complete (see fleet_tasks.py)."""
+    data = {
         "robot_id": robot_id,
         "pose": {"x": float(x), "y": float(y), "yaw": float(yaw)},
         "twist": {"vx": float(vx), "wz": float(wz)},
         "mode": mode,
         "stamp": float(time.time() if stamp is None else stamp),
-    })
+    }
+    if owned:
+        data["owned"] = [[int(t), float(c)] for t, c in owned]
+    if battery_pct is not None:
+        data["battery_pct"] = round(float(battery_pct), 1)
+    return json.dumps(data)
 
 
 def encode_intent(
@@ -118,6 +129,9 @@ def parse_status(raw: str) -> dict | None:
             "wz": float((c.get("twist") or {}).get("wz", 0.0)),
             "mode": str(c.get("mode") or "idle"),
             "stamp": float(c.get("stamp") or 0.0),
+            "owned": [[int(t), float(cost)] for t, cost in c.get("owned") or []],
+            "battery_pct": (None if c.get("battery_pct") is None
+                            else float(c["battery_pct"])),
         }
     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
         return None
@@ -350,6 +364,8 @@ def main(argv=None):
         def __init__(self):
             super().__init__(f"{robot_id}_fleet_radio")
             self._mode = "idle"
+            self._owned: list = []
+            self._battery_pct = None
             self._vx = 0.0
             self._wz = 0.0
             self.tf_buffer = tf2_ros.Buffer()
@@ -360,6 +376,14 @@ def main(argv=None):
             )
             self.create_subscription(
                 Odometry, f"/{robot_id}/odom", self._on_odom, 10
+            )
+            # fleet_tasks.py's owned tasks + battery, latched so a restart of
+            # either node picks up the other's current state.
+            self.create_subscription(
+                String, f"/{robot_id}/task_alloc", self._on_alloc,
+                QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
+                           durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+                           history=QoSHistoryPolicy.KEEP_LAST),
             )
             # Dashboard teleop / Nav2 both end on cmd_vel; use as twist fallback.
             self.create_subscription(Twist, f"/{robot_id}/cmd_vel", self._on_cmd, 10)
@@ -389,6 +413,14 @@ def main(argv=None):
             except (json.JSONDecodeError, TypeError, ValueError):
                 pass
 
+        def _on_alloc(self, msg: String):
+            try:
+                d = json.loads(msg.data)
+                self._owned = list(d.get("owned") or [])
+                self._battery_pct = d.get("battery_pct")
+            except (json.JSONDecodeError, TypeError, AttributeError):
+                pass
+
         def _on_odom(self, msg: Odometry):
             self._vx = float(msg.twist.twist.linear.x)
             self._wz = float(msg.twist.twist.angular.z)
@@ -414,7 +446,8 @@ def main(argv=None):
             yaw = math.atan2(siny_cosp, cosy_cosp)
             msg = String()
             msg.data = encode_status(
-                robot_id, t.x, t.y, yaw, self._vx, self._wz, self._mode
+                robot_id, t.x, t.y, yaw, self._vx, self._wz, self._mode,
+                owned=self._owned, battery_pct=self._battery_pct,
             )
             self.pub.publish(msg)
 

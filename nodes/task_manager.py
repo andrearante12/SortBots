@@ -37,6 +37,13 @@ Run (system ROS 2 Jazzy sourced, NOT the Isaac venv or conda):
     source /opt/ros/jazzy/setup.bash
     python3 nodes/task_manager.py --robot-id robot_0
 
+Tasks arrive on `<robot>/dispatch_task`, either straight from a person (CLI
+below, dashboard) or from nodes/fleet_tasks.py after this robot wins a fleet
+auction. `<robot>/cancel_task` (a task_id) withdraws one: fleet_tasks sends it
+when the robot loses ownership (lease lost while isolated, out-bid on a
+partition heal, cancelled by the gateway) so it stops working a task some
+other robot now owns.
+
 Dispatch a task (Milestone 1 CLI path, no web UI needed):
 
     ros2 topic pub /robot_0/dispatch_task std_msgs/String \\
@@ -57,13 +64,14 @@ from collections import deque
 from pathlib import Path
 
 import rclpy
-import yaml
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_msgs.msg import String
+
+from stations import Station, load_stations  # noqa: F401  (Station re-exported)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_WAYPOINTS = REPO_ROOT / "configs" / "waypoints.yaml"
@@ -73,45 +81,6 @@ DEFAULT_WAYPOINTS = REPO_ROOT / "configs" / "waypoints.yaml"
 # module docstring), so this must be comfortably longer than that, not a
 # tight bound. Only fires if scripted_pick.py never responds at all.
 PICK_TIMEOUT_SEC = 30.0
-
-
-class Station:
-    def __init__(self, name: str, spec: dict):
-        self.name = name
-        self.kind = spec["kind"]
-        self.x = float(spec["pose"]["x"])
-        self.y = float(spec["pose"]["y"])
-        self.yaw = float(spec["pose"]["yaw"])
-        self.dock_offset_m = float(spec.get("dock_offset_m", 0.0))
-        self.dock_lateral_m = float(spec.get("dock_lateral_m", 0.0))
-
-    def dock_pose(self) -> tuple[float, float, float]:
-        """Stop `dock_offset_m` short of the station, still facing it.
-
-        The station pose is the pick/place point itself (shelf edge, bin);
-        backing off along the reverse of the facing direction keeps the
-        robot's arm workspace centered on that point instead of colliding
-        with it.
-
-        `dock_lateral_m` shifts the dock sideways, +90 degrees from the facing
-        direction. The first arm is mounted off base_link's centreline (URDF:
-        `Rotation` origin y=-0.0452, and the whole arm hangs to one side), so
-        parking head-on does NOT put the station in the middle of the arm's
-        workspace. Defaults to 0.0, which is the previous behaviour exactly.
-        The sign that helps is an empirical question — jog the arm at the shelf
-        and see which way it wants to go.
-        """
-        dx = self.dock_offset_m * math.cos(self.yaw)
-        dy = self.dock_offset_m * math.sin(self.yaw)
-        lx = -self.dock_lateral_m * math.sin(self.yaw)
-        ly = self.dock_lateral_m * math.cos(self.yaw)
-        return (self.x - dx + lx, self.y - dy + ly, self.yaw)
-
-
-def load_stations(path: Path) -> dict[str, Station]:
-    with open(path) as f:
-        raw = yaml.safe_load(f)
-    return {name: Station(name, spec) for name, spec in raw["stations"].items()}
 
 
 class Task:
@@ -145,6 +114,9 @@ class TaskManager(Node):
 
         self.create_subscription(
             String, f"/{robot_id}/dispatch_task", self._on_dispatch, 10
+        )
+        self.create_subscription(
+            String, f"/{robot_id}/cancel_task", self._on_cancel, 10
         )
         self.create_subscription(
             String, f"/{robot_id}/pick_result", self._on_pick_result, 10
@@ -194,6 +166,27 @@ class TaskManager(Node):
                 "releases the nav goal server for this task"
             )
 
+    def _on_cancel(self, msg: String) -> None:
+        task_id = msg.data.strip()
+        before = len(self.queue)
+        self.queue = deque(t for t in self.queue if t.task_id != task_id)
+        if len(self.queue) != before:
+            self.get_logger().info(f"cancelled queued task {task_id}")
+            return
+        if self.current_task is None or self.current_task.task_id != task_id:
+            return
+        self.get_logger().warn(f"cancelling active task {task_id} in {self.state}")
+        if self._nav_goal_handle is not None:
+            self._nav_goal_handle.cancel_goal_async()
+        # The cancelled goal still reports a result later; current_task is
+        # None by then, so _on_nav_result ignores it instead of failing
+        # whatever task is active at that point.
+        self._nav_goal_handle = None
+        self._pick_timeout_deadline = None
+        self._set_state("CANCELLED")
+        self.current_task = None
+        self._set_state("IDLE")
+
     def _on_explore_status(self, msg: String) -> None:
         try:
             status = json.loads(msg.data)
@@ -236,19 +229,28 @@ class TaskManager(Node):
 
         self._set_state(next_state)
         send_future = self.nav_client.send_goal_async(goal)
-        send_future.add_done_callback(self._on_goal_response)
+        task = self.current_task
+        send_future.add_done_callback(lambda f: self._on_goal_response(f, task))
 
-    def _on_goal_response(self, future) -> None:
+    def _on_goal_response(self, future, task: Task) -> None:
         goal_handle = future.result()
+        # Bound to the task the goal was sent for: after a cancel, a NEW task
+        # may be active by the time this stale response lands.
+        if task is not self.current_task:
+            if goal_handle.accepted:
+                goal_handle.cancel_goal_async()
+            return
         if not goal_handle.accepted:
             self.get_logger().error(f"nav goal rejected for task {self.current_task.task_id}")
             self._fail_task()
             return
         self._nav_goal_handle = goal_handle
         result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self._on_nav_result)
+        result_future.add_done_callback(lambda f: self._on_nav_result(f, task))
 
-    def _on_nav_result(self, future) -> None:
+    def _on_nav_result(self, future, task: Task) -> None:
+        if task is not self.current_task:  # result of a goal we cancelled
+            return
         status = future.result().status
         if status != GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().error(
