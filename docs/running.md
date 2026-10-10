@@ -849,6 +849,10 @@ the same `map` topic regardless.
 
 ### Saving a map off a run
 
+(A saved library map can also be turned into a photoreal Gaussian splat for
+the 3D panel's splat mode, trained on the workstation's GPU after the run:
+`scripts/sim_ctl.sh stop --save-map NAME --splat`. See `docs/splat.md`.)
+
 Two artifacts are worth keeping, and they have different lifetimes: the
 **occupancy grid** (`.pgm` + `.yaml`) can only be captured while the stack is
 up, since it comes off the live `/map` topic; the **RTAB-Map database**
