@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -45,6 +46,7 @@ import maps_lib
 WEBUI_DIR = Path(__file__).resolve().parent
 WAYPOINTS_CONFIG = WEBUI_DIR.parent / "configs" / "waypoints.yaml"
 ROBOTS_CONFIG = WEBUI_DIR.parent / "configs" / "robots.yaml"
+SPLAT_CONFIG = WEBUI_DIR.parent / "configs" / "splat.yaml"
 
 MAX_BODY_BYTES = 64 * 1024
 
@@ -106,6 +108,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_scenarios()
         elif route == "/api/maps":
             self._serve_maps()
+        elif route.startswith("/api/maps/") and route.endswith("/db"):
+            self._serve_map_db(route[len("/api/maps/"):-len("/db")])
+        elif route == "/api/splat/config":
+            self._serve_splat_config()
         elif route == "/api/session":
             self._with_control(lambda: self._serve_json(SESSIONS.status()))
         elif route == "/api/session/log":
@@ -293,9 +299,68 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         # explain that the console isn't running, rather than render empty.
         self._serve_json({
             "control": SESSIONS is not None,
+            # The splat worker on the workstation reads this to pick each
+            # robot's anchor (spawn.real vs the manifest's scene).
+            "platform": PLATFORM,
             "dir": str(maps_lib.MAPS_DIR),
             "maps": maps_lib.list_maps(),
         })
+
+    def _serve_map_db(self, name: str):
+        """Stream one robot's pose graph out of the library, read-only.
+
+        The splat worker (splat/worker.py, on the workstation) pulls a Jetson
+        map through this — the one thing the reconstruction ever needs from
+        the robot, and only after the run, never while it drives. Readable
+        without --control like /api/maps: it can't start or change anything,
+        and the tailnet is the perimeter either way.
+
+        Refuses anything but a "complete" DB: a "pending" entry has no pose
+        graph yet, and an unfetched git-lfs pointer would hand the worker 130
+        bytes that sqlite then chokes on far away from the cause.
+        """
+        robot = parse_qs(urlsplit(self.path).query).get("robot", [None])[0]
+        try:
+            manifest = maps_lib.read_manifest(name)   # NAME_RX + confinement
+        except maps_lib.MapError as exc:
+            self._serve_error(404, str(exc))
+            return
+        dbs = manifest.get("dbs") or {}
+        rid = robot or manifest.get("primary_robot_id", "robot_0")
+        entry = dbs.get(rid)
+        if entry is None:
+            self._serve_error(404, f"map {name!r} has no pose graph for {rid!r} "
+                                   f"(has: {', '.join(sorted(dbs)) or 'none'})")
+            return
+        if entry["state"] != "complete":
+            self._serve_error(409, f"map {name!r} {rid} pose graph is {entry['state']!r}")
+            return
+        path = maps_lib.resolve_dir(name) / Path(entry["file"]).name
+        try:
+            size = path.stat().st_size
+            f = open(path, "rb")
+        except OSError as exc:
+            self._serve_error(500, f"can't open {path.name}: {exc}")
+            return
+        with f:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.sqlite3")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", f'attachment; filename="{name}_{rid}.db"')
+            self.end_headers()
+            try:
+                shutil.copyfileobj(f, self.wfile, 1 << 20)
+            except (BrokenPipeError, ConnectionResetError):
+                pass   # worker cancelled mid-download; nothing to clean up here
+
+    def _serve_splat_config(self):
+        # Only the worker URL: everything else in splat.yaml is the
+        # workstation's business. A missing file just means "no worker known".
+        url = None
+        if SPLAT_CONFIG.exists():
+            with open(SPLAT_CONFIG) as f:
+                url = (yaml.safe_load(f) or {}).get("worker_url")
+        self._serve_json({"worker_url": url, "platform": PLATFORM})
 
     # -- session endpoints -------------------------------------------------
 
