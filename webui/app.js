@@ -2268,7 +2268,7 @@ const MAX_VOXEL_INSTANCES = 250000;
 const VOXEL_SIZE = 0.05;             // matches RTAB-Map's Grid/CellSize
 
 const QS = new URLSearchParams(window.location.search);
-const RECON_MODE_INIT = QS.get("recon") === "points" ? "points" : "voxels";
+const RECON_MODE_INIT = ["points", "splat"].includes(QS.get("recon")) ? QS.get("recon") : "voxels";
 const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
 
 (function initRecon() {
@@ -2379,7 +2379,7 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
     }
   }
   const softwareGL = isSoftwareGL();
-  let reconMode = QS.has("recon") || !softwareGL ? RECON_MODE_INIT : "points"; // "voxels" | "points"
+  let reconMode = QS.has("recon") || !softwareGL ? RECON_MODE_INIT : "points"; // "voxels" | "points" | "splat"
   let reconColor = RECON_COLOR_INIT;    // "photo"  | "height"
 
   // Pose markers: active robot is green (matches the 2D #2d5 marker);
@@ -2449,20 +2449,45 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
   // cloudPoints.geometry.boundingSphere, because in voxel mode there is no
   // cloudPoints — reading it there would silently leave the camera at its
   // (-4,-4,4) init, staring at nothing.
-  function cloudRadius() {
-    const { min, max } = lastCloud;
+  function cloudRadius(b = lastCloud) {
+    const { min, max } = b;
     return 0.5 * Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
   }
 
+  // In splat mode, frame the splat (robust bounds from splat_view.js) — after
+  // a run there is usually no live cloud at all, and that's when splats exist.
+  function viewBounds() {
+    if (reconMode === "splat" && splatView && splatView.bounds) return splatView.bounds;
+    return lastCloud;
+  }
+
   function fitView() {
-    if (!lastCloud) return;
-    const { min, max } = lastCloud;
+    const b = viewBounds();
+    if (!b) return;
+    const { min, max } = b;
     const center = new THREE.Vector3(
       (min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2
     );
-    const radius = cloudRadius();
+    const radius = cloudRadius(b);
     if (!isFinite(radius) || radius === 0) return;
     lastFitRadius = radius;
+    if (b !== lastCloud) {
+      // A splat of a warehouse is a closed room: framed from outside like the
+      // cloud below, all you see is the back of its walls and roof. Stand
+      // inside instead, near one corner at roughly the head camera's height
+      // (the trainer only ever saw it from there), looking across the hall.
+      const floor = min[2];
+      controls.target.set(center.x, center.y, floor + 1.2);
+      camera.position.set(
+        center.x - 0.35 * (max[0] - min[0]), center.y - 0.35 * (max[1] - min[1]), floor + 1.6
+      );
+      camera.near = 0.05;
+      camera.far = radius * 20;
+      camera.updateProjectionMatrix();
+      controls.update();
+      needsRender = true;
+      return;
+    }
     controls.target.copy(center);
     // 1.6 rather than a looser factor: the panel is a narrow column, and the
     // bounding sphere of a wide, flat map is dominated by its x/y diagonal, so
@@ -2652,6 +2677,8 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
   }
 
   function rebuild() {
+    syncSplatMode();
+    if (reconMode === "splat") return;
     if (!lastCloud) return;
     const useVoxels = reconMode === "voxels" && lastCloud.n <= MAX_VOXEL_INSTANCES;
     if (useVoxels) buildVoxels(); else buildPoints();
@@ -2670,6 +2697,224 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
     needsRender = true;
   }
 
+  // -- splat mode ---------------------------------------------------------
+  // A Gaussian splat trained post-run by the splat worker (splat/worker.py)
+  // on the WORKSTATION — never on the Jetson. The page may be served by the
+  // Jetson's serve.py, so the worker is another origin: its URL comes from
+  // ?splat_worker= or /api/splat/config, and every request is cross-origin.
+  const splatBar = document.getElementById("splat-bar");
+  const splatPick = document.getElementById("splat-pick");
+  const splatMapSel = document.getElementById("splat-map");
+  const splatBuild = document.getElementById("splat-build");
+  const splatStatus = document.getElementById("splat-status");
+  let splatView = null;          // created on first use: one more GL context
+  let splatError = null;
+  let splatWorker = null;        // base URL, no trailing slash
+  let splatLoadedUrl = null;
+  let splatPollTimer = null;
+  const splatJobsSeen = new Map(); // job id -> state, to notice "done"
+
+  const modeSel = document.getElementById("recon-mode");
+  const splatOption = modeSel && modeSel.querySelector('option[value="splat"]');
+  if (splatOption && softwareGL) {
+    // A million translucent quads blended per frame, on the CPU the robot's
+    // SLAM needs: never the default here, and labelled so nobody picks it
+    // expecting it to be usable (docs/jetson.md: view the 3D panel from
+    // another device). Not disabled — same rule as voxels, an explicit
+    // choice (or ?recon=splat, which the offline test relies on) wins.
+    splatOption.textContent = "splat (slow: no GPU)";
+  }
+
+  function splatSetStatus(text, title) {
+    splatStatus.textContent = text;
+    splatStatus.title = title || "";
+  }
+
+  async function splatWorkerUrl() {
+    if (splatWorker) return splatWorker;
+    let url = QS.get("splat_worker");
+    if (!url) {
+      try {
+        const res = await fetch("/api/splat/config");
+        if (res.ok) url = (await res.json()).worker_url;
+      } catch (e) { /* older serve.py: no endpoint */ }
+    }
+    splatWorker = url ? String(url).replace(/\/+$/, "") : null;
+    return splatWorker;
+  }
+
+  // "local" when the worker runs on the host that serves this page (sim: the
+  // workstation does both), else this dashboard's origin, which the worker
+  // pulls the map's pose graph from (real: the Jetson).
+  function splatSource(worker) {
+    const loopback = (h) => h === "localhost" || h === "127.0.0.1" || h === "::1";
+    const wh = new URL(worker).hostname;
+    const ph = window.location.hostname;
+    return wh === ph || (loopback(wh) && loopback(ph)) ? "local" : window.location.origin;
+  }
+
+  async function splatFetch(path, opts) {
+    const worker = await splatWorkerUrl();
+    if (!worker) throw new Error("no splat worker configured (configs/splat.yaml worker_url)");
+    const res = await fetch(worker + path, opts);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `${res.status} ${res.statusText}`);
+    return body;
+  }
+
+  async function refreshSplatLists() {
+    try {
+      const { splats } = await splatFetch("/api/splats");
+      const keep = splatPick.value;
+      splatPick.textContent = "";
+      for (const sp of splats) {
+        const o = document.createElement("option");
+        o.value = sp.url;
+        const when = sp.finished ? new Date(sp.finished * 1000).toLocaleString() : "";
+        const g = sp.gaussians >= 1e6 ? `${(sp.gaussians / 1e6).toFixed(2)}M`
+          : `${Math.max(1, Math.round(sp.gaussians / 1e3))}k`;
+        o.textContent = `${sp.map} · ${g}`;
+        o.title = `${sp.job}${sp.psnr ? ` · ${sp.psnr} dB` : ""} · ${when} · from ${sp.source}`;
+        splatPick.appendChild(o);
+      }
+      if (!splats.length) {
+        const o = document.createElement("option");
+        o.value = "";
+        o.textContent = "(no splats yet)";
+        splatPick.appendChild(o);
+      } else if (keep && [...splatPick.options].some((o) => o.value === keep)) {
+        splatPick.value = keep;
+      }
+    } catch (e) {
+      splatSetStatus("worker unreachable", String(e.message || e));
+      return false;
+    }
+    try {
+      const res = await fetch("/api/maps");
+      const body = await res.json();
+      const keep = splatMapSel.value;
+      splatMapSel.textContent = "";
+      for (const m of body.maps || []) {
+        if (m.db_state !== "complete") continue;
+        const o = document.createElement("option");
+        o.value = m.name;
+        o.textContent = m.name;
+        o.title = m.title || m.name;
+        splatMapSel.appendChild(o);
+      }
+      if (keep) splatMapSel.value = keep;
+      splatBuild.disabled = !splatMapSel.options.length;
+    } catch (e) {
+      splatBuild.disabled = true;
+    }
+    return true;
+  }
+
+  async function loadPickedSplat() {
+    const rel = splatPick.value;
+    if (!rel || !splatView) return;
+    const url = (await splatWorkerUrl()) + rel;
+    if (url === splatLoadedUrl) return;
+    splatLoadedUrl = url;
+    splatSetStatus("loading…");
+    try {
+      const { count } = await splatView.load(url, (f) => splatSetStatus(`loading ${Math.round(f * 100)}%`));
+      infoEl.textContent = `splat · ${count.toLocaleString()} gaussians`;
+      splatSetStatus("");
+      didFitView = false;
+      fitView();
+    } catch (e) {
+      splatLoadedUrl = null;
+      splatSetStatus("load failed", String(e.message || e));
+    }
+  }
+
+  async function pollSplatJobs() {
+    let jobs;
+    try {
+      ({ jobs } = await splatFetch("/api/jobs"));
+    } catch (e) {
+      splatSetStatus("worker unreachable", String(e.message || e));
+      return;
+    }
+    const active = jobs.find((j) => !["done", "failed", "cancelled"].includes(j.state));
+    let finished = null;
+    for (const j of jobs) {
+      const prev = splatJobsSeen.get(j.id);
+      if (prev && prev !== j.state && j.state === "done") finished = j;
+      splatJobsSeen.set(j.id, j.state);
+    }
+    if (active) {
+      const p = active.progress;
+      const detail = p
+        ? ` ${p.step}/${p.iters} · ${p.psnr} dB · ${Math.ceil((p.eta_s || 0) / 60)} min left`
+        : "";
+      splatSetStatus(`${active.map}: ${active.state.replace(/_/g, " ")}${detail}`,
+        active.state === "waiting_for_gpu" ? "Isaac Sim is using the GPU; the job starts when the sim stops" : "");
+    } else if (jobs[0] && jobs[0].finished > Date.now() / 1000 - 600) {
+      // The newest job's outcome, for ten minutes — long enough to notice a
+      // failure after walking away, short enough not to linger forever.
+      const j = jobs[0];
+      splatSetStatus(`${j.map}: ${j.state}`, j.error || "");
+    }
+    if (finished) {
+      await refreshSplatLists();
+      const opt = [...splatPick.options].find((o) => o.value.includes(`/${finished.id}.splat`));
+      if (opt) { splatPick.value = opt.value; loadPickedSplat(); }
+    }
+  }
+
+  function syncSplatMode() {
+    const on = reconMode === "splat";
+    splatBar.hidden = !on;
+    if (on && !splatView && !splatError) {
+      try {
+        splatView = new SplatView(container, () => { needsRender = true; });
+      } catch (e) {
+        splatError = String(e.message || e);
+      }
+    }
+    if (splatView) splatView.setVisible(on);
+    if (!on) {
+      if (splatPollTimer) { clearInterval(splatPollTimer); splatPollTimer = null; }
+      return;
+    }
+    if (splatError) {
+      infoEl.textContent = "splat unavailable";
+      splatSetStatus(splatError);
+      return;
+    }
+    infoEl.textContent = splatView.count
+      ? `splat · ${splatView.count.toLocaleString()} gaussians` : "splat";
+    if (!splatPollTimer) {
+      refreshSplatLists().then((ok) => { if (ok) loadPickedSplat(); });
+      pollSplatJobs();
+      splatPollTimer = setInterval(pollSplatJobs, 3000);
+    }
+    needsRender = true;
+  }
+
+  splatPick.addEventListener("change", loadPickedSplat);
+  splatBuild.addEventListener("click", async () => {
+    const map = splatMapSel.value;
+    if (!map) return;
+    splatBuild.disabled = true;
+    try {
+      const worker = await splatWorkerUrl();
+      const job = await splatFetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ map, source: splatSource(worker) }),
+      });
+      splatJobsSeen.set(job.id, job.state);
+      splatSetStatus(`${map}: queued`);
+    } catch (e) {
+      splatSetStatus("build refused", String(e.message || e));
+    } finally {
+      splatBuild.disabled = false;
+    }
+  });
+
   function wireSelect(id, initial, apply) {
     const el = document.getElementById(id);
     if (!el) return;
@@ -2678,6 +2923,7 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
   }
   wireSelect("recon-mode", reconMode, (v) => { reconMode = v; });
   wireSelect("recon-color", RECON_COLOR_INIT, (v) => { reconColor = v; });
+  if (reconMode === "splat") syncSplatMode();   // ?recon=splat
 
   new ROSLIB.Topic({
     ros,
@@ -2712,6 +2958,11 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
     controls.update();
     if (!needsRender) return;
     needsRender = false;
+    if (reconMode === "splat" && splatView) {
+      // The overlay is opaque; skip the three.js scene underneath it.
+      splatView.render(camera);
+      return;
+    }
     renderer.render(scene, camera);
   }
   animate();

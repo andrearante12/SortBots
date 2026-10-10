@@ -277,6 +277,16 @@
   #recon-controls button:hover { background: #222831; }
   #recon-canvas { flex: 1 1 auto; min-height: 0; position: relative; background: #000; border-radius: 4px; overflow: hidden; }
   #recon-canvas canvas { display: block; width: 100% !important; height: 100% !important; }
+  #splat-bar { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; flex: none; flex-wrap: wrap; }
+  #splat-bar[hidden] { display: none; }
+  #splat-bar select, #splat-bar button {
+    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 3px 6px; font-size: 0.75rem;
+  }
+  #splat-bar button { cursor: pointer; }
+  #splat-bar button:hover { background: #222831; }
+  #splat-bar button:disabled { opacity: 0.5; }
+  #splat-status { font-size: 0.75rem; font-family: monospace; color: #7bf; }
 
   /* Operator panel: Navigate / Map / (folded) pick & place. One control
      vocabulary for every input in it, so the sections read as one panel. */
@@ -644,12 +654,22 @@
         <select id="recon-mode" title="Voxel cubes are shaded, so vertical structure reads; points are cheaper">
           <option value="voxels">voxels</option>
           <option value="points">points</option>
+          <option value="splat">splat</option>
         </select>
         <select id="recon-color" title="Photo uses the cloud's own colour; height ramps blue (floor) to red (shelf top)">
           <option value="photo">photo</option>
           <option value="height">height</option>
         </select>
         <button type="button" id="recon-reset" title="Recenter the camera on the cloud">reset view</button>
+      </div>
+      <!-- Splat mode (webui/splat_view.js, docs/splat.md): a Gaussian splat
+           trained post-run by the splat worker on the WORKSTATION, fetched
+           straight from it. Hidden in the other modes. -->
+      <div id="splat-bar" hidden>
+        <select id="splat-pick" title="Finished splats on the splat worker, newest first"></select>
+        <select id="splat-map" title="Saved map (maps/) to build a splat from"></select>
+        <button type="button" id="splat-build" title="Train a splat from this saved map on the workstation's GPU">build</button>
+        <span id="splat-status"></span>
       </div>
       <div id="recon-canvas"
            title="Fused fleet recon (/fleet/recon_cloud): every robot's RTAB-Map cloud transformed into world map via spawn anchors, then budgeted. Drag to orbit, scroll to zoom, right-drag to pan."></div>
@@ -845,6 +865,8 @@
          https://cdn.jsdelivr.net/npm/three@0.137.5/examples/js/controls/OrbitControls.js -->
 <script src="vendor/three.min.js"></script>
 <script src="vendor/OrbitControls.js"></script>
+<!-- Gaussian-splat renderer for the 3D panel's splat mode; must load before app.js. -->
+<script src="splat_view.js"></script>
 <script src="app.js"></script>
 <!-- The scenarios tab. Independent of app.js and of ROS entirely: it talks
      only to webui/serve.py's control API, so it still works (and can start the
