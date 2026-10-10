@@ -12,11 +12,20 @@
 #   scripts/sim_ctl.sh list                 # scenarios and their status
 #   scripts/sim_ctl.sh dry-run NAME [k=v...]  # print the run_demo.sh command; launches nothing
 #   scripts/sim_ctl.sh start NAME [k=v...]  # start a scenario (returns immediately)
+#   scripts/sim_ctl.sh start custom map=warehouse mode=extend robots=2
+#                                         # the dashboard's launch form: settings
+#                                         # scene robots map(new|working|NAME)
+#                                         # mode(extend|readonly) explore
+#                                         # waypoints(map|keep|none) headless
+#                                         # chase_cam chase_cam_robots teleop bag
 #   scripts/sim_ctl.sh wait [PHASE] [--timeout S]   # block until PHASE (default: running)
 #   scripts/sim_ctl.sh status               # one line: state, phase, scenario, elapsed
 #   scripts/sim_ctl.sh log [--lines N]      # tail the current session's log
 #   scripts/sim_ctl.sh stop                 # tear the sim down, keep the console
 #   scripts/sim_ctl.sh stop --save-map NAME # ...saving the map into maps/ first
+#   scripts/sim_ctl.sh stop --save-map NAME --splat
+#                                         # ...then queue a Gaussian splat of it on
+#                                         # the splat worker (docs/splat.md)
 #
 # Saved maps (the library at maps/, see maps/README.md) are managed by
 # scripts/maps.sh; `stop --save-map NAME` is the one-gesture wrapper, since a
@@ -147,9 +156,13 @@ cmd_start() {
   [[ -n "$name" ]] || die "usage: sim_ctl.sh start NAME [k=v...]" 1
   require_console
   local ov; ov="$(overrides_json "$@")" || die "bad override" 1
+  # `custom` is the dashboard's launch form: k=v are SETTINGS (map=warehouse
+  # mode=extend robots=2 ...), validated by session.py's config_to_run.
+  # Anything else is a preset name with per-run overrides, as before.
   local payload; payload="$(python3 -c '
 import json, sys
-print(json.dumps({"scenario": sys.argv[1], "overrides": json.loads(sys.argv[2])}))' \
+name, ov = sys.argv[1], json.loads(sys.argv[2])
+print(json.dumps({"config": ov} if name == "custom" else {"scenario": name, "overrides": ov}))' \
     "$name" "$ov")"
   local out; out="$(api_post session/start "$payload")" || exit $?
   echo "$out" | jq -r '"[sim_ctl] started \(.scenario) (session \(.session_id))"'
@@ -219,13 +232,15 @@ run_maps_sh() {
 }
 
 cmd_stop() {
-  local save_map=""
+  local save_map="" splat=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --save-map) save_map="${2:-}"; shift 2;;
+      --splat)    splat=true; shift;;
       *) die "stop: unknown arg: $1" 1;;
     esac
   done
+  [[ "$splat" == true && -z "$save_map" ]] && die "stop: --splat needs --save-map NAME" 1
   require_console
 
   # Two saves, either side of teardown, because the two artifacts have
@@ -256,6 +271,14 @@ cmd_stop() {
     run_maps_sh save "$save_map" --force || \
       die "map '$save_map' did not complete — scripts/maps.sh show $save_map" 1
   fi
+
+  # Only now: a splat needs the COMPLETE pose graph, and the sim off the GPU.
+  # The map is saved either way, so a missing worker is a warning, not a
+  # failed stop.
+  if [[ "$splat" == true ]]; then
+    "$SCRIPT_DIR/splat.sh" build "$save_map" || \
+      echo "[sim_ctl] map saved, but the splat was not queued (scripts/splat.sh serve, then build $save_map)" >&2
+  fi
   return 0
 }
 
@@ -268,6 +291,6 @@ case "${1:-}" in
   log)      shift; cmd_log "$@";;
   wait)     shift; cmd_wait "$@";;
   stop)     shift; cmd_stop "$@";;
-  -h|--help|"") sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+  -h|--help|"") sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
   *) die "unknown command: $1  (try --help)" 1;;
 esac

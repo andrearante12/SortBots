@@ -1,0 +1,23 @@
+# Gaussian-splat trainer (splat/, scripts/splat.sh). Its own env, never mixed
+# with lerobot, the Isaac venv, or system ROS 2 — see docs/splat.md.
+#
+# Python 3.10 + torch 2.4/cu124 is not arbitrary: it is the newest combination
+# gsplat publishes PREBUILT wheels for (docs.gsplat.studio/whl). Anything else
+# makes gsplat JIT-compile its CUDA kernels on first import, which needs nvcc —
+# and this workstation has no CUDA toolkit, only the driver. cu124 runs fine on
+# the 580 driver.
+name: splat
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cu124
+      - torch==2.4.1+cu124
+      - --extra-index-url https://docs.gsplat.studio/whl/pt24cu124
+      - gsplat==1.5.3+pt24cu124
+      - numpy<2
+      - pillow
+      - pyyaml

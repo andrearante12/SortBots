@@ -1,13 +1,15 @@
 // SortBots dashboard — Scenarios tab. Starts and stops the simulation itself.
 //
 // Talks ONLY to webui/serve.py's control API over plain HTTP:
-//   GET  /api/scenarios        configs/scenarios/*.yaml, plus whether the
-//                              console is running (control: true/false)
-//   GET  /api/maps             the saved-map library, for the `map` picker
+//   GET  /api/launch/options   everything the launch form draws: platform,
+//                              roster, saved maps, working DB, Quick start
+//                              presets, and whether the console is running
+//   POST /api/launch/preview   {config} -> the exact command + a summary
+//   POST /api/presets          {name, config} -> configs/scenarios/NAME.yaml
 //   GET  /api/session          current session state + phase
 //   GET  /api/session/log      incremental console log, by byte offset
-//   POST /api/session/start    {scenario, overrides, force}
-//   POST /api/session/stop
+//   POST /api/session/start    {config} (the form) or {scenario, overrides}
+//   POST /api/session/stop / /api/session/finish
 //
 // Deliberately no rosbridge: the whole point of this tab is to work when
 // nothing is running, and rosbridge is one of the things that may not be.
@@ -33,10 +35,11 @@
     document.getElementById("slam-badge"),
   ];
 
-  const listEl = document.getElementById("scenario-list");
+  const formEl = document.getElementById("launch-form");
   const warningEl = document.getElementById("console-warning");
   const stateEl = document.getElementById("session-state");
   const stopBtn = document.getElementById("session-stop");
+  const finishBtn = document.getElementById("session-finish");
   const logEl = document.getElementById("session-log");
   const hintEl = document.getElementById("scenario-hint");
 
@@ -44,24 +47,17 @@
   const POLL_IDLE_MS = 3000;
   const ACTIVE_STATES = ["starting", "running", "stopping"];
 
-  let scenarios = [];
-  // The saved-map library (GET /api/maps), for the `map` override picker.
-  // Readable without --control, like /api/scenarios, so the picker still shows
-  // what's saved when the console is down.
-  let maps = [];
+  // GET /api/launch/options. Readable without --control, so the form still
+  // shows what could be launched (and why not) when the console is down.
+  let options = null;
+  let cfg = {}; // the form's current settings — what POST /api/session/start sends
+  let previewOk = false;
   let hasControl = false;
   // "sim" (desktop, Isaac) or "real" (the robot's Jetson), from
   // /api/scenarios. The same page is served by both consoles; serve.py only
   // lists this platform's scenarios, so the tab just has to word itself right.
   let platform = "sim";
   let session = null;
-  let selected = null;
-  // Upper bound for the `robots` override input, from configs/robots.yaml's
-  // roster length (webui/serve.py's /api/robots) — not hardcoded, so adding
-  // a robot_2 entry to the roster widens this automatically. Falls back to 2
-  // (today's roster size) if the fetch fails; that's a UI-only ceiling, not
-  // a security check (webui/session.py re-validates every override anyway).
-  let maxRobots = 2;
   // null means "we haven't read the log yet" — the first read asks for the
   // tail so opening the tab mid-run doesn't dump the whole file.
   let logOffset = null;
@@ -98,166 +94,283 @@
     return s && ACTIVE_STATES.includes(s.state);
   }
 
-  // Extra tooltip text for keys whose name can't answer "what does this cost
-  // me". Only worth adding where the honest answer is surprising.
-  const OVERRIDE_HINTS = {
-    chase_cam:
-      "Cosmetic 3rd-person view. Off by default because that render product " +
-      "costs about 30% of real-time factor (0.47x -> 0.33x, scripts/bench_sim.sh); " +
-      "the stage falls back to the head cam without it.",
-    chase_cam_robots:
-      "How many robots get a chase cam WHEN chase_cam is ticked. Only " +
-      "robot_0's feed is ever displayed, so 1 is normally right — each extra " +
-      "one is another render product.",
-    map:
-      "Which saved map to load (maps/, see maps/README.md). run_demo.sh " +
-      "copies the entry to ~/.ros/sortbots_<robot_id>.db and runs on the " +
-      "copy, so a run can never dirty the committed file — keeping what a " +
-      "resume run added takes an explicit scripts/maps.sh save. Blank means " +
-      "the working database, whatever the last run left behind.",
-  };
+  // -- the launch form ------------------------------------------------------
 
-  // Why a map can't be loaded, keyed by maps_lib.py's db_state. Shown in the
-  // option's own label, because a silently-missing entry is the confusing case.
+  const $ = (id) => document.getElementById(id);
+  const presetSel = $("lf-preset");
+  const mapSel = $("lf-map");
+  const robotsSel = $("lf-robots");
+  const chaseCountSel = $("lf-chase_cam_robots");
+  const startBtn = $("lf-start");
+  const SEGMENTS = { scene: $("lf-scene"), mode: $("lf-mode"), waypoints: $("lf-waypoints") };
+  const CHECKS = ["explore", "headless", "chase_cam", "teleop", "bag"];
+  const CFG_KEY = "sortbots.launchConfig";
+
+  // Why a saved map can't be loaded, keyed by maps_lib.py's db_state. Shown in
+  // the option's own label: a silently-missing entry is the confusing case.
   const DB_STATE_NOTE = {
     pending: "pose graph not saved yet",
     pointer: "run git lfs pull",
     missing: "database file is gone",
   };
 
-  function mapSelect() {
-    const select = document.createElement("select");
-    select.dataset.key = "map";
-
-    const blank = document.createElement("option");
-    blank.value = "";
-    blank.textContent = "(working DB — ~/.ros/sortbots_<id>.db)";
-    select.appendChild(blank);
-
-    for (const m of maps) {
-      const opt = document.createElement("option");
-      opt.value = m.db_path || "";
-      const loadable = m.status !== "invalid" && m.db_state === "complete";
-      const free = m.coverage ? `${Math.round(m.coverage.free_m2)} m²` : "no grid";
-      opt.textContent = loadable
-        ? `${m.title || m.name} · ${free} · ${(m.created || "").slice(0, 10)}`
-        : `${m.title || m.name} — (${m.error ? "invalid" : DB_STATE_NOTE[m.db_state] || m.db_state})`;
-      opt.disabled = !loadable;
-      select.appendChild(opt);
-    }
-
-    if (!maps.length) {
-      const none = document.createElement("option");
-      none.textContent = "(library is empty — scripts/maps.sh save NAME)";
-      none.disabled = true;
-      select.appendChild(none);
-    }
-    return select;
+  function option(sel, value, text, disabled) {
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = text;
+    o.disabled = !!disabled;
+    sel.appendChild(o);
+    return o;
   }
 
-  function overrideControl(scenario, key) {
-    const value = scenario.run[key];
-    const label = document.createElement("label");
-    label.title = `Override ${key} for this run only (configs/scenarios/${scenario.name}.yaml sets ${value}).`;
-    if (OVERRIDE_HINTS[key]) label.title += `\n\n${OVERRIDE_HINTS[key]}`;
-    // `map` is a path out of the saved-map library, not a number or a flag —
-    // a picker, deliberately, so no free-text path ever reaches the control
-    // API (webui/session.py's _map_path re-validates regardless).
-    if (key === "map") {
-      label.append(document.createTextNode(key), mapSelect());
-      return label;
-    }
-    const input = document.createElement("input");
-    input.dataset.key = key;
-    if (typeof value === "boolean") {
-      input.type = "checkbox";
-      input.checked = value;
-      label.append(input, document.createTextNode(key));
-    } else {
-      input.type = "number";
-      input.value = value;
-      // chase_cam_robots may be 0 (no chase cams); robots stays 1..max.
-      input.min = key === "chase_cam_robots" ? "0" : "1";
-      input.max = String(maxRobots);
-      label.append(document.createTextNode(key), input);
-    }
-    return label;
+  function libraryMap(name) {
+    return (options && options.maps || []).find((m) => m.name === name);
   }
 
-  function readOverrides(card) {
-    const out = {};
-    for (const el of card.querySelectorAll("[data-key]")) {
-      // A <select> reports type "select-one", so the old two-way ternary sent
-      // Number("/path/to/map.db") — NaN — for the map picker. Branch on the
-      // tag, and keep "" meaning "leave the scenario's own default alone"
-      // (webui/session.py's _map_path maps null/"" to no --map flag at all).
-      out[el.dataset.key] =
-        el.type === "checkbox" ? el.checked
-        : el.tagName === "SELECT" ? el.value
-        : Number(el.value);
+  // Fill the selects from /api/launch/options. Values survive the rebuild.
+  function buildChoices() {
+    presetSel.textContent = "";
+    option(presetSel, "", "— custom —");
+    for (const p of options.presets) {
+      const o = option(presetSel, p.name, p.title, p.status !== "ready");
+      if (p.origin === "dashboard") o.textContent += "  ★";
     }
-    return out;
+
+    mapSel.textContent = "";
+    option(mapSel, "new", "New map (empty)");
+    const w = options.working_db;
+    option(mapSel, "working", w.exists ? "Working map" : "Working map (none yet)", !w.exists)
+      .title = `Whatever the last run left in ${w.path}`;
+    // Just the name in the list; the details live in the tooltip. Only an
+    // entry that CAN'T load says why inline — that's the case worth seeing.
+    for (const m of options.maps) {
+      const ok = !m.error && m.db_state === "complete";
+      const o = option(mapSel, m.name, ok ? m.name
+        : `${m.name} (${m.error ? "invalid" : DB_STATE_NOTE[m.db_state] || m.db_state})`, !ok);
+      const bits = [m.title];
+      if (m.free_m2 != null) bits.push(`${Math.round(m.free_m2)} m²`);
+      if (m.waypoints) bits.push(`${m.waypoints} waypoint${m.waypoints === 1 ? "" : "s"}`);
+      o.title = bits.join(" · ");
+    }
+
+    robotsSel.textContent = "";
+    chaseCountSel.textContent = "";
+    options.roster.forEach((_, i) => {
+      option(robotsSel, String(i + 1), String(i + 1));
+      option(chaseCountSel, String(i + 1), `on ${i + 1} robot${i ? "s" : ""}`);
+    });
+
+    // Only the fields this platform takes (the robot console has no scene,
+    // fleet, window or chase cam).
+    const fields = new Set(options.fields);
+    for (const el of formEl.querySelectorAll("[data-field]")) {
+      el.hidden = !fields.has(el.dataset.field);
+    }
+    $("lf-advanced").hidden = !["headless", "chase_cam", "teleop", "bag", "waypoints"].some((f) => fields.has(f));
   }
 
-  function renderScenarios() {
-    listEl.textContent = "";
-    if (!scenarios.length) {
-      const empty = document.createElement("p");
-      empty.textContent = "No scenarios found in configs/scenarios/.";
-      listEl.appendChild(empty);
+  // cfg -> controls (+ the dependent bits: mode only matters for a non-new
+  // map, the chase count only with chase on, "from map" only for a library map).
+  function renderForm() {
+    if (!options) return;
+    // "from map" means nothing without a library map: never show it selected
+    // on a disabled button (or let the summary claim "map's waypoints").
+    if (cfg.waypoints === "map" && !libraryMap(cfg.map)) cfg.waypoints = "keep";
+    for (const [key, seg] of Object.entries(SEGMENTS)) {
+      for (const b of seg.querySelectorAll("button")) b.classList.toggle("active", b.dataset.v === cfg[key]);
+    }
+    mapSel.value = cfg.map;
+    robotsSel.value = String(cfg.robots);
+    chaseCountSel.value = String(cfg.chase_cam_robots);
+    for (const k of CHECKS) $(`lf-${k}`).checked = !!cfg[k];
+
+    const fields = new Set(options.fields);
+    $("lf-mode-row").hidden = !fields.has("mode") || cfg.map === "new";
+    chaseCountSel.hidden = !fields.has("chase_cam") || !cfg.chase_cam;
+    $("lf-robot-ids").textContent = options.roster.slice(0, cfg.robots).join(", ");
+
+    const lib = libraryMap(cfg.map);
+    const wpBtns = Object.fromEntries([...SEGMENTS.waypoints.querySelectorAll("button")].map((b) => [b.dataset.v, b]));
+    wpBtns.map.textContent = lib ? `from map (${lib.waypoints})` : "from map";
+    wpBtns.map.disabled = !lib;
+    wpBtns.keep.textContent = `keep current (${options.working_waypoints})`;
+
+    // Things that will launch fine but probably aren't what you meant.
+    const notes = [];
+    if (lib && lib.scene && fields.has("scene") && lib.scene !== cfg.scene) {
+      notes.push(`${lib.name} was mapped in the ${lib.scene} scene, not ${cfg.scene}.`);
+    }
+    if (cfg.map !== "new" && cfg.mode === "readonly" && cfg.explore && fields.has("explore")) {
+      notes.push("Read-only never adds to the map, so exploring won't grow it — use extend for that.");
+    }
+    if (cfg.map !== "new" && cfg.mode === "extend") {
+      notes.push("Runs on a copy: keep what it maps with Save & finish.");
+    }
+    $("lf-map-note").textContent = notes.join(" ");
+    updateStartButton();
+  }
+
+  // controls -> cfg, on any edit. An edit means "no longer exactly a preset".
+  function readForm() {
+    cfg.map = mapSel.value;
+    cfg.robots = Number(robotsSel.value) || 1;
+    cfg.chase_cam_robots = Number(chaseCountSel.value) || 1;
+    for (const k of CHECKS) cfg[k] = $(`lf-${k}`).checked;
+  }
+
+  function onEdit() {
+    presetSel.value = "";
+    $("lf-preset-note").textContent = "";
+    readForm();
+    saveCfg();
+    renderForm();
+    schedulePreview();
+  }
+
+  for (const [key, seg] of Object.entries(SEGMENTS)) {
+    seg.addEventListener("click", (ev) => {
+      const b = ev.target.closest("button[data-v]");
+      if (!b || b.disabled) return;
+      cfg[key] = b.dataset.v;
+      onEdit();
+    });
+  }
+  for (const el of [mapSel, robotsSel, chaseCountSel, ...CHECKS.map((k) => $(`lf-${k}`))]) {
+    el.addEventListener("change", () => {
+      // Picking a library map defaults its waypoints back to the map's own.
+      if (el === mapSel && libraryMap(mapSel.value)) cfg.waypoints = "map";
+      onEdit();
+    });
+  }
+
+  presetSel.addEventListener("change", () => {
+    const p = options.presets.find((x) => x.name === presetSel.value);
+    if (!p) return;
+    if (!p.config) {
+      $("lf-preset-note").textContent = `Can't show "${p.title}" in the form: ${p.reason}.`;
       return;
     }
+    cfg = { ...options.defaults, ...p.config };
+    saveCfg();
+    $("lf-preset-note").textContent = p.description;
+    renderForm();
+    presetSel.value = p.name; // renderForm doesn't touch it; keep the label
+    schedulePreview();
+  });
 
-    for (const scenario of scenarios) {
-      const runnable = scenario.status === "ready" && hasControl && !isActive(session) && !busy;
-
-      const card = document.createElement("div");
-      card.className = "scenario-card";
-      if (scenario.status !== "ready") card.classList.add("disabled");
-      if (selected === scenario.name) card.classList.add("selected");
-
-      const heading = document.createElement("h3");
-      heading.textContent = scenario.title;
-      const badge = document.createElement("span");
-      badge.className = `sc-badge sc-${scenario.status}`;
-      badge.textContent = scenario.status;
-      heading.append(" ", badge);
-
-      const body = document.createElement("p");
-      body.textContent = scenario.error || scenario.description;
-
-      const row = document.createElement("div");
-      row.className = "scenario-row";
-      for (const key of scenario.overrides || []) {
-        if (key in scenario.run) row.appendChild(overrideControl(scenario, key));
-      }
-
-      const start = document.createElement("button");
-      start.type = "button";
-      start.textContent = isActive(session) ? "Stop the running session first" : "Start";
-      start.disabled = !runnable;
-      if (scenario.status === "planned") {
-        start.title = "This scenario's environment doesn't exist yet.";
-      } else if (scenario.status === "invalid") {
-        start.title = "This scenario file failed validation — see the message above.";
-      } else if (!hasControl) {
-        start.title = "The dashboard console isn't running — see the note above.";
-      }
-      start.addEventListener("click", () => startSession(scenario.name, readOverrides(card)));
-      row.appendChild(start);
-
-      card.append(heading, body, row);
-      listEl.appendChild(card);
+  // Per-browser memory of the last setup — a convenience, so it fails soft.
+  function saveCfg() {
+    try { localStorage.setItem(CFG_KEY, JSON.stringify(cfg)); } catch (e) { /* private window */ }
+  }
+  function restoreCfg() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(CFG_KEY) || "null"); } catch (e) { saved = null; }
+    cfg = { ...options.defaults };
+    if (saved && typeof saved === "object") {
+      for (const k of Object.keys(cfg)) if (k in saved) cfg[k] = saved[k];
     }
+    // A remembered map that has since vanished (or a working DB that's gone)
+    // must not leave the select pointing at nothing.
+    const valid = [...mapSel.options].some((o) => o.value === cfg.map && !o.disabled);
+    if (!valid) cfg.map = "new";
+    if (cfg.robots > options.roster.length) cfg.robots = options.roster.length;
+  }
+
+  // The server's own build_argv decides what's launchable; the form just asks.
+  let previewTimer = null;
+  let previewSeq = 0;
+  function schedulePreview() {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(runPreview, 150);
+  }
+  async function runPreview() {
+    const seq = ++previewSeq;
+    const body = {};
+    for (const f of options.fields) if (f in cfg) body[f] = cfg[f];
+    try {
+      const out = await postJson("/api/launch/preview", { config: body });
+      if (seq !== previewSeq) return; // a newer edit superseded this answer
+      previewOk = true;
+      $("lf-summary").textContent = out.summary;
+      $("lf-command").textContent = out.command.replace(/^\S*\//, "");
+      $("lf-error").textContent = "";
+    } catch (e) {
+      if (seq !== previewSeq) return;
+      previewOk = false;
+      $("lf-summary").textContent = "";
+      $("lf-command").textContent = "";
+      $("lf-error").textContent = e.message;
+    }
+    updateStartButton();
+  }
+
+  function formConfig() {
+    const body = {};
+    for (const f of options.fields) if (f in cfg) body[f] = cfg[f];
+    return body;
+  }
+
+  function updateStartButton() {
+    const live = isActive(session);
+    startBtn.disabled = !hasControl || live || busy || !previewOk;
+    startBtn.textContent = live ? "Running…" : "Start";
+    startBtn.title = !hasControl ? "The dashboard console isn't running — see the note above."
+      : live ? "A session is running — Save & finish or Stop it first (right)."
+      : !previewOk ? "Fix the setting shown in red first." : "Launch with these settings";
+  }
+
+  formEl.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    startSession();
+  });
+
+  $("lf-save-preset").addEventListener("click", async () => {
+    if (!hasControl) {
+      renderWarning("Saving a preset needs the dashboard console (it writes configs/scenarios/).");
+      return;
+    }
+    const name = (prompt("Preset name (a-z 0-9 - _), saved as configs/scenarios/NAME.yaml:") || "").trim();
+    if (!name) return;
+    const title = (prompt("Title shown in Quick start:", $("lf-summary").textContent || name) || "").trim();
+    const payload = { name, title: title || name, config: formConfig() };
+    try {
+      await postJson("/api/presets", payload);
+    } catch (e) {
+      if (!/already exists/.test(e.message) || !confirm(`Replace the preset "${name}"?`)) {
+        renderWarning(`Could not save preset: ${e.message}`);
+        return;
+      }
+      try {
+        await postJson("/api/presets", { ...payload, overwrite: true });
+      } catch (e2) {
+        renderWarning(`Could not save preset: ${e2.message}`);
+        return;
+      }
+    }
+    renderWarning(null);
+    await loadOptions();
+    presetSel.value = name;
+  });
+
+  // A "Save & finish" in flight (session.finish.step not done/failed) owns the
+  // session: neither button may start a second teardown under it.
+  function isFinishing(s) {
+    return !!(s && s.finish && !["done", "failed"].includes(s.finish.step));
   }
 
   function renderSession() {
-    stopBtn.disabled = !hasControl || !isActive(session) || busy;
+    stopBtn.disabled = !hasControl || !isActive(session) || busy || isFinishing(session);
+    finishBtn.disabled = !hasControl || !session || session.state !== "running" || busy ||
+      isFinishing(session);
+    finishBtn.textContent = session && session.read_only && session.map_name
+      ? "Save waypoints & finish" : "Save & finish";
     if (!session || session.state === "idle") {
       stateEl.textContent = hasControl ? "no session" : "console not running";
       return;
     }
-    const bits = [session.scenario, session.state];
+    // A form launch is "custom"; its one-line summary says what it actually is.
+    const bits = [session.scenario === "custom" ? session.summary || "custom" : session.scenario,
+                  session.state];
     if (session.phase_label && session.phase_label !== session.state) {
       bits.push(session.phase_label);
     }
@@ -265,6 +378,12 @@
       bits.push(`${Math.round(session.elapsed_s)}s`);
     }
     if (session.error) bits.push(session.error);
+    if (session.finish) {
+      const f = session.finish;
+      bits.push(f.step === "done" ? `saved to maps/${f.map} ✓`
+        : f.step === "failed" ? `save to maps/${f.map} FAILED: ${f.error || "see log"}`
+        : `maps/${f.map}: ${f.step}…`);
+    }
     stateEl.textContent = bits.join(" · ");
   }
 
@@ -308,28 +427,22 @@
     return body;
   }
 
-  async function loadScenarios() {
+  async function loadOptions() {
     try {
-      const data = await getJson("/api/scenarios");
-      scenarios = data.scenarios || [];
-      hasControl = Boolean(data.control);
-      platform = data.platform === "real" ? "real" : "sim";
+      options = await getJson("/api/launch/options");
+      hasControl = Boolean(options.control);
+      platform = options.platform === "real" ? "real" : "sim";
     } catch (e) {
-      scenarios = [];
+      options = null;
       hasControl = false;
-      renderWarning(`Could not load scenarios: ${e.message}`);
-    }
-    // Never fatal: an empty library just means the picker offers the working
-    // DB, and this tab's whole point is working when things are down.
-    try {
-      maps = (await getJson("/api/maps")).maps || [];
-    } catch (e) {
-      maps = [];
+      renderWarning(`Could not load launch options: ${e.message}`);
+      renderSession();
+      return;
     }
     renderPlatform();
     if (!hasControl) {
       renderWarning(
-        "The dashboard console isn't running, so scenarios can't be launched from here. " +
+        "The dashboard console isn't running, so nothing can be launched from here. " +
         (platform === "real"
           ? "Start it on the robot's Jetson with: scripts/jetson.sh console"
           : "Start it from a clean terminal with: scripts/run_console.sh")
@@ -337,7 +450,10 @@
     } else {
       renderWarning(null);
     }
-    renderScenarios();
+    buildChoices();
+    restoreCfg();
+    renderForm();
+    schedulePreview();
     // Also the strip: hasControl decides whether it reads "no session" or
     // "console not running", and in read-only mode poll() bails before ever
     // rendering it — leaving the markup's placeholder text on screen.
@@ -347,37 +463,41 @@
   function renderPlatform() {
     if (platform === "real") {
       hintEl.textContent =
-        "Real robot — presets from configs/scenarios/ start the RealSense camera and RTAB-Map on this Jetson.";
+        "Real robot — choose a map and start the RealSense camera and RTAB-Map on this Jetson.";
       hintEl.title =
-        "Each card is a preset for scripts/run_robot.sh (platform: real in configs/scenarios/*.yaml). " +
-        "This dashboard stays up throughout.";
+        "Launches scripts/run_robot.sh. Quick start presets are configs/scenarios/*.yaml with " +
+        "platform: real. This dashboard stays up throughout.";
       stopBtn.title = "Tear down the camera and the ROS 2 stack. The dashboard console stays up.";
     }
     // sim: index.html's own wording already describes Isaac Sim.
   }
 
-  async function startSession(name, overrides) {
-    if (busy) return;
+  async function startSession() {
+    if (busy || !options) return;
     busy = true;
-    selected = name;
-    renderScenarios();
+    updateStartButton();
     logEl.textContent = "";
     logOffset = 0;
     logSessionId = null;
     try {
-      session = await postJson("/api/session/start", { scenario: name, overrides });
+      session = await postJson("/api/session/start", { config: formConfig() });
     } catch (e) {
-      renderWarning(`Could not start ${name}: ${e.message}`);
+      renderWarning(`Could not start: ${e.message}`);
     } finally {
       busy = false;
     }
     renderSession();
-    renderScenarios();
+    updateStartButton();
     schedulePoll(0);
   }
 
   async function stopSession() {
     if (busy) return;
+    // Stop discards whatever the run mapped: runs work on a copy in ~/.ros,
+    // never on maps/. Only a read-only localize run has nothing to lose.
+    if (session && session.state === "running" && !session.read_only &&
+        !confirm("Stop WITHOUT saving? Anything this run mapped is not in the maps/ library " +
+                 "(use Save & finish to keep it).")) return;
     busy = true;
     renderSession();
     try {
@@ -388,11 +508,33 @@
       busy = false;
     }
     renderSession();
-    renderScenarios();
+    updateStartButton();
     schedulePoll(0);
   }
 
   stopBtn.addEventListener("click", stopSession);
+
+  async function finishSession() {
+    if (busy || !session) return;
+    const readOnly = session.read_only && session.map_name;
+    const name = readOnly ? session.map_name
+      : (prompt("Save this run into maps/ as:", session.map_name || "") || "").trim();
+    if (!name) return;
+    if (readOnly && !confirm(`Save the current waypoints into maps/${name} and stop? ` +
+                             "(This run loaded the map read-only, so the map itself is unchanged.)")) return;
+    busy = true;
+    renderSession();
+    try {
+      session = await postJson("/api/session/finish", { name });
+    } catch (e) {
+      renderWarning(`Could not save & finish: ${e.message}`);
+    } finally {
+      busy = false;
+    }
+    renderSession();
+    schedulePoll(0);
+  }
+  finishBtn.addEventListener("click", finishSession);
 
   async function poll() {
     if (!hasControl) {
@@ -414,7 +556,7 @@
     } catch (e) {
       if (e.status === 503) {
         hasControl = false;
-        await loadScenarios();
+        await loadOptions();
         schedulePoll(POLL_IDLE_MS);
         return;
       }
@@ -433,10 +575,13 @@
     }
 
     renderSession();
-    // The cards' enabled state depends on whether a session is live, so
-    // re-render them on that edge (but not every second — the override inputs
-    // are live DOM state the user may be mid-edit on).
-    if (wasActive !== isActive(session)) renderScenarios();
+    // Start's enabled state depends on whether a session is live. On the
+    // session ENDING, also reload options: the run may have saved a map or
+    // left a working DB that the Map picker should now offer.
+    if (wasActive !== isActive(session)) {
+      updateStartButton();
+      if (!isActive(session)) loadOptions();
+    }
     schedulePoll(isActive(session) ? POLL_ACTIVE_MS : POLL_IDLE_MS);
   }
 
@@ -456,13 +601,5 @@
   });
 
   setView("live");
-  getJson("/api/robots")
-    .then((data) => {
-      if (Array.isArray(data.robots) && data.robots.length > 0) {
-        maxRobots = data.robots.length;
-      }
-    })
-    .catch(() => { /* keep the fallback of 2 */ })
-    .then(() => loadScenarios())
-    .then(() => schedulePoll(0));
+  loadOptions().then(() => schedulePoll(0));
 })();

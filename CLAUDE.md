@@ -47,6 +47,7 @@ This is **not a colcon workspace** — there is no `src/`, no `package.xml`, no
 | `scripts/` | Isaac Sim entry points, `run_demo.sh`, `run_console.sh`, `sim_ctl.sh` |
 | `configs/` | tuning YAML, `scenarios/` presets |
 | `maps/` | saved map library — named, committed snapshots of explored maps |
+| `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `docs/splat.md`) |
 | `docs/running.md` | the full runbook |
 
 No custom `.msg`/`.srv`: inter-node protocol is `std_msgs/String` carrying JSON.
@@ -100,6 +101,7 @@ Prefer offline. Seconds, no GPU, no display, no ROS:
 
 ```bash
 node webui/tests/scenarios_test.mjs   # scenarios tab (no fixture needed)
+node webui/tests/splat_test.mjs       # 3D panel splat mode, fake worker (no fixture needed)
 node webui/tests/dashboard_test.mjs   # dashboard (needs webui/testdata/)
 python3 webui/session.py --list       # scenario validation
 python3 -m pytest tests/              # pure-python node logic (system python3 — see below)

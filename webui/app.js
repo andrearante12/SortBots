@@ -18,6 +18,36 @@ const ROSBRIDGE_HOST = window.location.hostname || "localhost";
 const ROSBRIDGE_PORT = 9090;
 const VIDEO_PORT = 8080;
 const MAX_TRAIL_POINTS = 3000;
+// A step longer than this between consecutive pose samples is not driving
+// (0.5 m/s top speed against ~60 Hz /tf): it's a respawn or a relocalization
+// snapping map -> odom. The trail breaks there instead of joining the two
+// with a straight line — observed 2026-10-08, a tab left open across sim
+// sessions drew a "path" from the old run's last pose diagonally through a
+// rack to the new spawn, which read exactly like a stale Nav2 plan.
+const TRAIL_JUMP_M = 1.0;
+
+// Append a pose to a trail; null entries are segment breaks.
+function extendTrail(trail, x, y) {
+  const last = trail[trail.length - 1];
+  if (last && Math.hypot(x - last[0], y - last[1]) <= 0.02) return;
+  if (last && Math.hypot(x - last[0], y - last[1]) > TRAIL_JUMP_M) trail.push(null);
+  trail.push([x, y]);
+  while (trail.length > MAX_TRAIL_POINTS || trail[0] === null) trail.shift();
+}
+
+// Stroke a trail as one path, lifting the pen at each null break.
+function strokeTrail(trail) {
+  ctx.beginPath();
+  let pen = false;
+  for (const p of trail) {
+    if (!p) { pen = false; continue; }
+    const [px, py] = worldToPixel(p[0], p[1]);
+    if (pen) ctx.lineTo(px, py);
+    else ctx.moveTo(px, py);
+    pen = true;
+  }
+  ctx.stroke();
+}
 
 document.getElementById("page-title").textContent = `SortBots — ${ROBOT_ID}`;
 document.title = `SortBots — ${ROBOT_ID}`;
@@ -148,18 +178,25 @@ function markChaseMissing() {
 function wireCameraStream(elId, topic, onFrame) {
   const img = document.getElementById(elId);
   const isChase = elId === "chase-stream";
+  // The chase feed is also the probe for "does this robot HAVE a chase cam",
+  // which decides whether the camera-source toggle is shown. A page that
+  // opens on the head + depth view never puts chase on the stage, so without
+  // one unconditional first fetch the probe would never run and a real robot
+  // would offer a chase option that can't work.
+  let probePending = isChase;
   function tick() {
     // Stop hammering web_video_server once we know this robot has no chase
     // product — otherwise every 1.5s error backoff still opens a subscribe
     // that can never succeed.
     if (isChase && !chaseAvailable) return;
-    if (!isFeedVisible(img)) {
+    if (!isFeedVisible(img) && !probePending) {
       setTimeout(tick, CAMERA_POLL_MS);
       return;
     }
     const probe = new Image();
     // Swap the visible src only once the new frame is fully loaded, so the
     // panel never flashes blank between polls.
+    probePending = false;
     probe.onload = () => {
       if (isChase) {
         chaseEverOk = true;
@@ -197,13 +234,18 @@ function wireCameraStream(elId, topic, onFrame) {
 // The stage box shows exactly one main view, plus at most one picture-in-
 // picture inset:
 //
-//   "chase" -> chase cam large, no PiP                 (default)
-//   "head"  -> head cam large,  no PiP                 (reachable only if
-//              something still promotes it; camera toggle restores chase)
-//   "map"   -> map large,       chase cam as PiP
+//   "chase"   -> chase cam large, no PiP               (default in sim)
+//   "sensors" -> head RGB + feature overlay over depth  (only camera on real)
+//   "head"    -> head cam large, no PiP (reachable only if something still
+//                promotes it; folded into sensors when there's no chase)
+//   "map"     -> map large,       chase cam as PiP
 //
-// The header's camera/map buttons switch between the map and whichever
-// camera mode was last active.
+// The header has just camera/map. Which camera "camera" means is the in-stage
+// #cam-source toggle (chase vs head + depth) — there used to be a separate
+// "sensors" header button, but on a real robot camera already landed on the
+// sensors view, so the two buttons did the same thing there and only differed
+// in sim. One button plus a source toggle that only appears when there IS a
+// choice says that honestly.
 
 const STAGE_LABELS = {
   chase: "3rd person (chase cam)",
@@ -224,7 +266,10 @@ const pipHint = document.getElementById("pip-hint");
 const aimOverlay = document.getElementById("aim-overlay");
 
 let stageMode = "chase";
-let lastCameraMode = "chase"; // restored when switching back from the map
+// Restored when switching back from the map. Persisted: someone who works from
+// the head + depth view shouldn't be bounced to the chase cam on every reload.
+let lastCameraMode = localStorage.getItem("sortbots.cameraMode") === "sensors" ? "sensors" : "chase";
+const camSourceBar = document.getElementById("cam-source");
 
 // Set by initRecon() below so a stage swap can re-fit the three.js canvas.
 let onStageResize = () => {};
@@ -238,9 +283,12 @@ function setStageMode(mode) {
   if (!chaseAvailable && (mode === "chase" || mode === "head")) mode = "sensors";
 
   stageMode = mode;
-  // sensors, like map, is a detour: the camera button must return to the last
-  // real camera (chase/head), not to the sensors view.
-  if (mode !== "map" && mode !== "sensors") lastCameraMode = mode;
+  // Only an explicit choice (chase or sensors) is remembered. "sensors" forced
+  // by a missing chase cam must not overwrite a sim user's chase preference.
+  if (mode === "chase" || (mode === "sensors" && chaseAvailable)) {
+    lastCameraMode = mode;
+    localStorage.setItem("sortbots.cameraMode", mode);
+  }
 
   const main = { chase: chaseEl, head: headEl, map: mapViewEl, sensors: sensorsViewEl }[mode];
   // Head-cam PiP intentionally removed: Isaac still renders that camera
@@ -270,8 +318,11 @@ function setStageMode(mode) {
   aimOverlay.style.display = mode === "map" ? "none" : "";
 
   for (const btn of document.querySelectorAll("#stage-mode button")) {
-    const want = mode === "map" ? "map" : mode === "sensors" ? "sensors" : "camera";
-    btn.classList.toggle("active", btn.dataset.stage === want);
+    btn.classList.toggle("active", btn.dataset.stage === (mode === "map" ? "map" : "camera"));
+  }
+  camSourceBar.hidden = mode === "map" || !chaseAvailable;
+  for (const btn of camSourceBar.querySelectorAll("button")) {
+    btn.classList.toggle("active", btn.dataset.cam === (mode === "sensors" ? "sensors" : "chase"));
   }
   if (mode === "sensors") drawFeatureOverlay();
   syncFeatureSubscription();
@@ -304,9 +355,11 @@ for (const el of [chaseEl, headEl]) {
 
 for (const btn of document.querySelectorAll("#stage-mode button")) {
   btn.addEventListener("click", () => {
-    const s = btn.dataset.stage;
-    setStageMode(s === "map" || s === "sensors" ? s : lastCameraMode);
+    setStageMode(btn.dataset.stage === "map" ? "map" : lastCameraMode);
   });
+}
+for (const btn of camSourceBar.querySelectorAll("button")) {
+  btn.addEventListener("click", () => setStageMode(btn.dataset.cam));
 }
 
 // -- feature overlay (real robot) ------------------------------------------
@@ -393,7 +446,7 @@ function syncFeatureSubscription() {
 featureToggle.addEventListener("change", drawFeatureOverlay);
 window.addEventListener("resize", drawFeatureOverlay);
 
-setStageMode("chase");
+setStageMode(lastCameraMode);
 
 // Start snapshot polls only after the stage classes are coherent — otherwise
 // markChaseMissing can race setStageMode's first paint, and the HTML default
@@ -715,11 +768,15 @@ const exploreCmdTopic = new ROSLIB.Topic({
   reconnect_on_close: true,
 });
 
-document.getElementById("explore-start").addEventListener("click", () => {
-  exploreCmdTopic.publish(new ROSLIB.Message({ data: "start" }));
-});
-document.getElementById("explore-stop").addEventListener("click", () => {
-  exploreCmdTopic.publish(new ROSLIB.Message({ data: "stop" }));
+// One toggle instead of Start/Stop: its label follows explore_status, so it
+// always offers the action that changes the current state.
+const exploreToggle = document.getElementById("explore-toggle");
+function isExploring() {
+  return !!lastExploreStatus && performance.now() - lastExploreStatusAt <= 6000 &&
+    lastExploreStatus.state === "exploring";
+}
+exploreToggle.addEventListener("click", () => {
+  exploreCmdTopic.publish(new ROSLIB.Message({ data: isExploring() ? "stop" : "start" }));
 });
 
 const exploreStatusEl = document.getElementById("explore-status");
@@ -741,11 +798,38 @@ new ROSLIB.Topic({
   lastExploreStatusAt = performance.now();
 });
 
+const trkExplore = document.getElementById("trk-explore");
+// Whether this run can change the map at all. library_localize loads a map
+// READ-ONLY (Mem/IncrementalMemory=false), so a robot driving into unknown
+// space adds nothing — which on screen looked exactly like a broken map
+// (2026-10-08). Say so where the map is.
+const trkMap = document.getElementById("trk-map");
+async function refreshMapMode() {
+  try {
+    const s = await (await fetch("/api/session")).json();
+    if (!s.run || !["starting", "running"].includes(s.state)) {
+      trkMap.textContent = "no session"; trkMap.className = ""; return;
+    }
+    const name = s.map_name || "live map";
+    trkMap.textContent = s.read_only
+      ? `${name} · read-only (localize) — run library_resume to extend it`
+      : `${name} · mapping`;
+    trkMap.className = s.read_only ? "ro" : "";
+  } catch (e) {
+    trkMap.textContent = "unknown (console down)";
+  }
+}
+refreshMapMode();
+setInterval(refreshMapMode, 5000);
 function updateExploreStatus() {
+  const exploring = isExploring();
+  exploreToggle.textContent = exploring ? "Stop exploring" : "Explore";
+  exploreToggle.classList.toggle("active", exploring);
   if (performance.now() < exploreMsgUntil) return;
   const now = performance.now();
   if (!lastExploreStatus || now - lastExploreStatusAt > 6000) {
     exploreStatusEl.textContent = "explorer: not running";
+    trkExplore.textContent = "not running";
     return;
   }
   const s = lastExploreStatus;
@@ -774,34 +858,15 @@ function updateExploreStatus() {
     : "";
   exploreStatusEl.textContent =
     `explorer: ${s.state}${goal}${cov} · blacklisted ${s.blacklisted}${steer}`;
+  // The tracker's short form: state, coverage, and where it's being steered.
+  trkExplore.textContent = [
+    s.state,
+    s.coverage_pct != null ? `${s.coverage_pct}%` : null,
+    s.steer_hint ? `→ (${s.steer_hint.x.toFixed(1)}, ${s.steer_hint.y.toFixed(1)})` +
+      (queued ? ` +${queued}` : "") : null,
+  ].filter(Boolean).join(" · ");
 }
 setInterval(updateExploreStatus, 500);
-
-// RTAB-Map's database is written continuously as it maps (see docs/running.md
-// "Map lifecycle") — this button doesn't create persistence, it triggers
-// rtabmap's own `backup` service (std_srvs/Empty) for a labeled, timestamped
-// snapshot of the working DB you can point --map at later.
-const rtabmapBackup = new ROSLIB.Service({
-  ros,
-  name: `/${ROBOT_ID}/rtabmap/backup`,
-  serviceType: "std_srvs/srv/Empty",
-});
-document.getElementById("explore-save").addEventListener("click", () => {
-  exploreMsgUntil = performance.now() + 3000;
-  exploreStatusEl.textContent = "saving…";
-  rtabmapBackup.callService(
-    new ROSLIB.ServiceRequest({}),
-    () => {
-      exploreMsgUntil = performance.now() + 3000;
-      exploreStatusEl.textContent = "map backed up ✓ (see ~/.ros/*.back)";
-    },
-    (err) => {
-      exploreMsgUntil = performance.now() + 3000;
-      exploreStatusEl.textContent = "map backup failed — see console";
-      console.error("rtabmap backup failed", err);
-    }
-  );
-});
 
 // Save into the named map library (maps/, see maps/README.md) — a whole entry:
 // the fused /map grid, this robot's pose graph, and a manifest tying them
@@ -816,8 +881,79 @@ document.getElementById("explore-save").addEventListener("click", () => {
 // a safe pose-graph copy needs it DOWN — so a mid-run save can legitimately
 // come back "pending". That is reported, not treated as a failure; a second
 // save after teardown (or `sim_ctl.sh stop --save-map NAME`) completes it.
-document.getElementById("explore-save-lib").addEventListener("click", async () => {
-  const name = (document.getElementById("map-name").value || "").trim();
+// "Save…" only reveals the name field; the save itself is the form submit.
+// (The old one-click "Save map" button — rtabmap's backup service, a .back
+// file in ~/.ros — is gone: RTAB-Map writes its DB continuously anyway, and a
+// named library entry is the save anyone actually loads back.)
+const mapSaveRow = document.getElementById("map-save-row");
+const mapNameEl = document.getElementById("map-name");
+function showMapSave(show) {
+  mapSaveRow.hidden = !show;
+  if (!show) return;
+  mapNameEl.focus();
+  // Default to the library map this run loaded, so re-saving "warehouse"
+  // after a session on it is one click, not a retype.
+  if (!mapNameEl.value) {
+    fetch("/api/session").then((r) => r.json()).then((s) => {
+      if (s.map_name && !mapNameEl.value) mapNameEl.value = s.map_name;
+    }).catch(() => {});
+  }
+}
+document.getElementById("map-save-open").addEventListener("click", () => showMapSave(mapSaveRow.hidden));
+document.getElementById("map-save-cancel").addEventListener("click", () => showMapSave(false));
+
+// Save & finish: hand the whole save -> stop -> save-pose-graph sequence to
+// serve.py (SessionManager.finish) and follow its progress. Run from here
+// rather than chained in the browser so closing the tab mid-save can't leave
+// the map half-saved and the run torn down.
+document.getElementById("map-finish").addEventListener("click", async () => {
+  const name = (mapNameEl.value || "").trim();
+  exploreMsgUntil = performance.now() + 4000;
+  if (!name) {
+    exploreStatusEl.textContent = "name the map first (a-z 0-9 - _)";
+    return;
+  }
+  if (!confirm(`Save this run into maps/${name} and stop the sim?`)) return;
+  let res, body;
+  try {
+    res = await fetch("/api/session/finish", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, robot_id: ROBOT_ID }),
+    });
+    body = await res.json().catch(() => ({}));
+  } catch (err) {
+    exploreStatusEl.textContent = "save & finish failed — see console";
+    console.error("finish failed", err);
+    return;
+  }
+  if (!res.ok) {
+    exploreStatusEl.textContent = res.status === 503
+      ? "console not running — scripts/sim_ctl.sh stop --save-map " + name
+      : `save & finish failed: ${body.error || res.statusText}`;
+    return;
+  }
+  showMapSave(false);
+  const timer = setInterval(async () => {
+    let s;
+    try { s = await (await fetch("/api/session")).json(); } catch (e) { return; }
+    const f = s.finish || {};
+    exploreMsgUntil = performance.now() + 60000;
+    if (f.step === "done") {
+      exploreStatusEl.textContent = `saved to maps/${f.map} ✓ — session finished`;
+      clearInterval(timer);
+      refreshMapLibrary();
+    } else if (f.step === "failed") {
+      exploreStatusEl.textContent = `save failed: ${f.error || "see Scenarios log"}`;
+      clearInterval(timer);
+    } else {
+      exploreStatusEl.textContent = `maps/${f.map || name}: ${f.step || "saving"}…`;
+    }
+  }, 1000);
+});
+mapSaveRow.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const name = (mapNameEl.value || "").trim();
   exploreMsgUntil = performance.now() + 3000;
   if (!name) {
     exploreStatusEl.textContent = "name the map first (a-z 0-9 - _)";
@@ -841,6 +977,11 @@ document.getElementById("explore-save-lib").addEventListener("click", async () =
       exploreStatusEl.textContent = "grid saved ✓ — pose graph pending until stop";
     } else {
       exploreStatusEl.textContent = `saved to maps/${name} ✓`;
+    }
+    if (res.ok) {
+      showMapSave(false);
+      mapNameEl.value = "";
+      refreshMapLibrary();
     }
   } catch (err) {
     exploreMsgUntil = performance.now() + 3000;
@@ -881,8 +1022,6 @@ async function refreshMapLibrary() {
 }
 refreshMapLibrary();
 mapLoadSelect.addEventListener("focus", refreshMapLibrary);
-// A save just added an entry; show it without making the user click around.
-document.getElementById("explore-save-lib").addEventListener("click", () => setTimeout(refreshMapLibrary, 4000));
 
 async function mapAction(path, payload, busyText, doneText) {
   exploreMsgUntil = performance.now() + 60000;
@@ -925,7 +1064,11 @@ document.getElementById("map-load").addEventListener("click", async () => {
     return;
   }
   if (!confirm(`Load "${name}" into the running map? The current live map is replaced (save it first if needed).`)) return;
-  await mapAction("/api/map/load", { name }, `loading ${name}…`, `loaded ${name} ✓ — drive to localize`);
+  // A map carries its own waypoints (maps/<name>/waypoints.json); the load
+  // swapped them into the working set server-side, so pick them up.
+  if (await mapAction("/api/map/load", { name }, `loading ${name}…`, `loaded ${name} ✓ — drive to localize`)) {
+    loadNavWaypoints();
+  }
 });
 
 // -- map + robot trail ------------------------------------------------
@@ -1396,15 +1539,21 @@ new ROSLIB.Topic({
   const yaw = typeof pose.yaw === "number" ? pose.yaw : 0;
   state.lastPose = { x, y, yaw };
   state.statusAt = Date.now();
-  const last = state.trail[state.trail.length - 1];
-  if (!last || Math.hypot(x - last[0], y - last[1]) > 0.02) {
-    state.trail.push([x, y]);
-    if (state.trail.length > MAX_TRAIL_POINTS) state.trail.shift();
-  }
+  extendTrail(state.trail, x, y);
 });
 
+let lastTfStamp = 0; // seconds; sim time in sim
 function onTfMessage(msg) {
   for (const tr of msg.transforms || []) {
+    // Time going BACKWARDS means a new sim session (sim time restarts at 0),
+    // so everything the previous run left on the map is in the past. A small
+    // tolerance absorbs out-of-order /tf between publishers.
+    const st = tr.header.stamp ? tr.header.stamp.sec + tr.header.stamp.nanosec * 1e-9 : 0;
+    if (st && st < lastTfStamp - 5) {
+      trail.length = 0;
+      for (const p of peerRobots.values()) p.trail.length = 0;
+    }
+    if (st) lastTfStamp = st < lastTfStamp - 5 ? st : Math.max(lastTfStamp, st);
     tfTree.set(normFrame(tr.child_frame_id), {
       parent: normFrame(tr.header.frame_id),
       t: tr.transform.translation,
@@ -1419,11 +1568,7 @@ function onTfMessage(msg) {
     // Only extend the trail on real movement — /tf arrives at ~60 Hz and a
     // stationary robot would otherwise burn through MAX_TRAIL_POINTS standing
     // still, silently truncating the history that's actually interesting.
-    const last = trail[trail.length - 1];
-    if (!last || Math.hypot(x - last[0], y - last[1]) > 0.02) {
-      trail.push([x, y]);
-      if (trail.length > MAX_TRAIL_POINTS) trail.shift();
-    }
+    extendTrail(trail, x, y);
   }
   // Drop stale peer status so markers vanish if radio goes quiet.
   const now = Date.now();
@@ -1528,13 +1673,7 @@ function drawFrame() {
   if (trail.length > 1) {
     ctx.strokeStyle = "#2dd4ff";
     ctx.lineWidth = Math.max(1, 0.05  * view.scale);
-    ctx.beginPath();
-    trail.forEach(([x, y], i) => {
-      const [px, py] = worldToPixel(x, y);
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    });
-    ctx.stroke();
+    strokeTrail(trail);
   }
 
   // Blacklisted areas: where the explorer has given up after failed goals.
@@ -1594,6 +1733,30 @@ function drawFrame() {
     }
     ctx.restore();
   });
+
+  // Operator waypoints: small filled diamonds with their name, styled apart
+  // from the orange goal ring so a pin never reads as an active goal.
+  for (const w of navWaypoints) {
+    const [px, py] = worldToPixel(w.x, w.y);
+    const r = 6;
+    ctx.save();
+    ctx.fillStyle = "#c58cff";
+    ctx.strokeStyle = "rgba(0,0,0,0.7)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(px, py - r); ctx.lineTo(px + r, py); ctx.lineTo(px, py + r); ctx.lineTo(px - r, py);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = "#c58cff";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px + r * 2 * Math.cos(w.yaw), py - r * 2 * Math.sin(w.yaw));
+    ctx.stroke();
+    ctx.restore();
+    drawRobotLabel(px, py, r, w.name, "#c58cff");
+  }
 
   // Nav goal marker (from click-to-nav or dispatch): hollow ring + heading tick.
   if (goal) {
@@ -1656,13 +1819,7 @@ function drawFrame() {
     if (state.trail.length > 1) {
       ctx.strokeStyle = state.color.trail;
       ctx.lineWidth = Math.max(1, 0.05  * view.scale);
-      ctx.beginPath();
-      state.trail.forEach(([x, y], i) => {
-        const [px, py] = worldToPixel(x, y);
-        if (i === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
-      });
-      ctx.stroke();
+      strokeTrail(state.trail);
     }
 
     if (showBlacklist) {
@@ -1755,22 +1912,37 @@ function eventToCanvasPixel(ev) {
   return [px, py];
 }
 
-function sendNavGoal(x, y, yaw) {
-  ros.callOnConnection({
-    op: "send_action_goal",
-    action: `/${ROBOT_ID}/navigate_to_pose`,
-    action_type: "nav2_msgs/action/NavigateToPose",
-    args: {
-      pose: {
-        header: { frame_id: "map" },
-        pose: {
-          position: { x, y, z: 0 },
-          // Yaw-only (planar) -> quaternion, same as task_manager._start_nav.
-          orientation: { x: 0, y: 0, z: Math.sin(yaw / 2), w: Math.cos(yaw / 2) },
-        },
-      },
+// Yaw-only (planar) -> quaternion, same as task_manager._start_nav.
+function mapPose(x, y, yaw) {
+  return {
+    header: { frame_id: "map" },
+    pose: {
+      position: { x, y, z: 0 },
+      orientation: { x: 0, y: 0, z: Math.sin(yaw / 2), w: Math.cos(yaw / 2) },
     },
-  });
+  };
+}
+
+// The one manual goal this page last sent, so Stop can cancel it. rosbridge
+// keys its goal handles by the `id` we pass on send_action_goal.
+let activeNav = null; // {id, action, label, afterStamp}
+const newestGoalStamp = {}; // action short name -> newest goal stamp seen (s)
+let navGoalSeq = 0;
+function sendActionGoal(action, actionType, args, label) {
+  const id = `sortbots_nav_${Date.now()}_${navGoalSeq++}`;
+  ros.callOnConnection({ op: "send_action_goal", id, action, action_type: actionType, args });
+  // Status entries stamped after this are ours. Nav2 stamps goals with its
+  // node clock — sim time in sim — so wall-clock Date.now() can't be compared.
+  const short = action.slice(action.lastIndexOf("/") + 1);
+  activeNav = { id, action, label, afterStamp: newestGoalStamp[short] ?? -1 };
+  return id;
+}
+
+function sendNavGoal(x, y, yaw, label) {
+  sendActionGoal(`/${ROBOT_ID}/navigate_to_pose`, "nav2_msgs/action/NavigateToPose",
+                 { pose: mapPose(x, y, yaw) }, label || `(${x.toFixed(1)}, ${y.toFixed(1)})`);
+  setNavStatus(`navigating ${activeNav.label}…`, "busy");
+  const stoppedExplorer = stopExplorerForManualNav();
   // Stop the explorer first, exactly as task_manager.py does before it
   // dispatches (see its _on_dispatch). navigate_to_pose is a SINGLE-GOAL
   // server: without this the explorer keeps issuing its own goals, the two
@@ -1780,48 +1952,71 @@ function sendNavGoal(x, y, yaw) {
   // goals were silently poisoning good frontiers and driving spurious
   // escapes, with nothing on either side reporting a conflict.
   // Use `steer` mode to direct exploration without stopping it.
-  if (lastExploreStatus && lastExploreStatus.state === "exploring") {
-    exploreCmdTopic.publish(new ROSLIB.Message({ data: "stop" }));
-  }
   goal = { x, y, yaw }; // instant marker; /plan refreshes it once Nav2 replies
   goalStatus.textContent =
     `nav goal sent: x=${x.toFixed(2)} y=${y.toFixed(2)} yaw=${yaw.toFixed(2)}` +
-    (lastExploreStatus && lastExploreStatus.state === "exploring"
-      ? " — exploration stopped (use steer mode to guide it instead)"
-      : "");
+    (stoppedExplorer ? " — exploration stopped (use steer mode to guide it instead)" : "");
 }
 
-// What a map click means: "goal" (direct navigate_to_pose, the original
-// behaviour) or "steer" (an explore_hint that biases the explorer's frontier
-// scoring). They are genuinely different operations, not two ways to do one
-// thing: a nav goal competes with the explorer for the single-goal action
-// server and loses within about a second, whereas a hint never interrupts
-// exploration at all.
-// Persisted, because a reload silently reverting to "nav goal" is worse than
-// it sounds: the two modes look identical to click but do opposite things,
-// and a stray nav goal FIGHTS the explorer (see sendNavGoal) rather than
-// steering it. Observed live — a page refresh mid-run turned steer clicks
-// into competing Nav2 goals without anything on screen changing.
-let mapMode = localStorage.getItem("sortbots.mapMode") || "goal";
-const mapModeBar = document.getElementById("map-mode");
-const mapHintEl = document.getElementById("map-hint");
-const MAP_MODE_HINTS = {
-  goal: "Drag to set a Nav2 goal (press = position, drag = heading) — stops autonomous exploration.",
-  steer: "Click to send exploration to that area now — shift-click to queue it for after.",
-};
-function applyMapMode(mode) {
-  mapMode = mode;
-  localStorage.setItem("sortbots.mapMode", mode);
-  for (const b of mapModeBar.querySelectorAll("button")) {
-    b.classList.toggle("active", b.dataset.mapmode === mode);
-  }
-  mapHintEl.textContent = MAP_MODE_HINTS[mode];
+// Every manual goal (map click or the Navigate panel) has to stop the
+// explorer first — see the comment in sendNavGoal for what happens if not.
+function stopExplorerForManualNav() {
+  if (!isExploring()) return false;
+  exploreCmdTopic.publish(new ROSLIB.Message({ data: "stop" }));
+  return true;
 }
-mapModeBar.addEventListener("click", (ev) => {
-  const btn = ev.target.closest("button[data-mapmode]");
-  if (btn) applyMapMode(btn.dataset.mapmode);
+
+// What a map click means: "goal" (direct navigate_to_pose), "steer" (an
+// explore_hint that biases the explorer's frontier scoring) or "waypoint".
+// Goal and steer are genuinely different operations: a nav goal competes with
+// the explorer for the single-goal action server, a hint never interrupts
+// exploration at all.
+//
+// Chosen PER CLICK by a held key (X = explore, F = flag/waypoint; plain =
+// goal), not by a persistent mode. This used to be a mode selector stored in
+// localStorage, because a reload reverting it was worse than it sounds — the
+// modes look identical to click but do opposite things, and a stray nav goal
+// FIGHTS the explorer (observed live). A held key removes that whole class of
+// bug: nothing can outlive the click. X and F are clear of the drive keys
+// (W/A/S/D/Q/E, Space), and the keydown handler above ignores them.
+const MAP_TOOL_KEYS = { x: "steer", f: "waypoint" };
+let heldMapTool = null; // from a held key
+let touchMapTool = null; // from the touch-only picker; one-shot
+const mapKeysEl = document.getElementById("map-keys");
+const mapToolBar = document.getElementById("map-tool");
+
+function currentMapTool() {
+  return heldMapTool || touchMapTool || "goal";
+}
+function renderMapTool() {
+  const tool = currentMapTool();
+  for (const el of mapKeysEl.querySelectorAll("[data-tool]")) {
+    el.classList.toggle("armed", el.dataset.tool === tool);
+  }
+  for (const b of mapToolBar.querySelectorAll("button")) {
+    b.classList.toggle("active", b.dataset.tool === touchMapTool);
+  }
+  canvas.classList.toggle("tool-steer", tool === "steer");
+  canvas.classList.toggle("tool-waypoint", tool === "waypoint");
+}
+window.addEventListener("keydown", (ev) => {
+  if (isTypingTarget(ev.target) || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  const tool = MAP_TOOL_KEYS[ev.key.toLowerCase()];
+  if (tool && heldMapTool !== tool) { heldMapTool = tool; renderMapTool(); }
 });
-applyMapMode(mapMode);
+window.addEventListener("keyup", (ev) => {
+  if (MAP_TOOL_KEYS[ev.key.toLowerCase()] === heldMapTool) { heldMapTool = null; renderMapTool(); }
+});
+// Same reason as releaseAllDriveKeys: a keyup lost to alt-tab must not leave
+// the next click armed.
+window.addEventListener("blur", () => { heldMapTool = null; renderMapTool(); });
+mapToolBar.addEventListener("click", (ev) => {
+  const btn = ev.target.closest("button[data-tool]");
+  if (!btn) return;
+  touchMapTool = touchMapTool === btn.dataset.tool ? null : btn.dataset.tool;
+  renderMapTool();
+});
+renderMapTool();
 
 const exploreHintTopic = new ROSLIB.Topic({
   ros,
@@ -1843,10 +2038,13 @@ function sendExploreHint(x, y, append) {
     : `steering exploration toward x=${x.toFixed(2)} y=${y.toFixed(2)}`;
 }
 
+let pressTool = "goal"; // the tool armed at mousedown; releasing the key mid-drag can't change it
 canvas.addEventListener("mousedown", (ev) => {
   if (!mapInfo) return; // no grid yet -> can't convert pixels to world
   ev.preventDefault();
   goalPressWorld = pixelToWorld(...eventToCanvasPixel(ev));
+  pressTool = currentMapTool();
+  if (touchMapTool) { touchMapTool = null; renderMapTool(); } // one-shot
 });
 
 // mouseup on window (not just the canvas) so a heading drag that ends just
@@ -1856,7 +2054,7 @@ window.addEventListener("mouseup", (ev) => {
   if (!mapInfo || !goalPressWorld) return;
   const [sx, sy] = goalPressWorld;
   goalPressWorld = null;
-  if (mapMode === "steer") {
+  if (pressTool === "steer") {
     // Position only — a hint has no heading to express. Shift appends to the
     // queue instead of replacing it.
     sendExploreHint(sx, sy, ev.shiftKey);
@@ -1864,10 +2062,184 @@ window.addEventListener("mouseup", (ev) => {
   }
   const [ux, uy] = pixelToWorld(...eventToCanvasPixel(ev));
   const [dx, dy] = [ux - sx, uy - sy];
+  const dragged = Math.hypot(dx, dy) > 0.1;
   // Near-zero drag = a plain click: keep heading 0 rather than amplify jitter.
-  const yaw = Math.hypot(dx, dy) > 0.1 ? Math.atan2(dy, dx) : 0;
+  const yaw = dragged ? Math.atan2(dy, dx) : 0;
+  if (pressTool === "waypoint") {
+    // Let the mouseup finish before a modal prompt blocks the page.
+    setTimeout(() => placeOrDeleteWaypoint(sx, sy, yaw, dragged), 0);
+    return;
+  }
   sendNavGoal(sx, sy, yaw);
 });
+
+// -- operator waypoints + the Navigate panel ---------------------------------
+// Named poses placed on the map in "waypoint" mode, persisted by serve.py in
+// data/nav_waypoints.json (per platform) so every dashboard on the tailnet sees
+// the same set. The Navigate panel drives between them: from "here" is a
+// plain navigate_to_pose; from a named waypoint is Nav2's follow_waypoints
+// [from, to], which runs each leg through the same navigate_to_pose BT —
+// unlike navigate_through_poses, which would use a different, stock tree.
+let navWaypoints = []; // [{name, x, y, yaw}]
+const navFrom = document.getElementById("nav-from");
+const navTo = document.getElementById("nav-to");
+const navStatus = document.getElementById("nav-status");
+const trkNav = document.getElementById("trk-nav");
+// One nav status, shown twice: the Navigate panel and the map's tracker.
+function setNavStatus(text, cls) {
+  navStatus.textContent = text;
+  trkNav.textContent = text;
+  trkNav.className = cls || "";
+}
+
+function renderNavWaypoints() {
+  const keepFrom = navFrom.value, keepTo = navTo.value;
+  navFrom.innerHTML = "";
+  navTo.innerHTML = "";
+  const here = document.createElement("option");
+  here.value = "";
+  here.textContent = "here";
+  navFrom.appendChild(here);
+  for (const w of navWaypoints) {
+    for (const sel of [navFrom, navTo]) {
+      const o = document.createElement("option");
+      o.value = o.textContent = w.name;
+      sel.appendChild(o);
+    }
+  }
+  if (!navWaypoints.length) {
+    const o = document.createElement("option");
+    o.value = "";
+    o.textContent = "(no waypoints)";
+    navTo.appendChild(o);
+  }
+  if ([...navFrom.options].some((o) => o.value === keepFrom)) navFrom.value = keepFrom;
+  if ([...navTo.options].some((o) => o.value === keepTo)) navTo.value = keepTo;
+}
+
+async function loadNavWaypoints() {
+  try {
+    const body = await (await fetch("/api/nav_waypoints")).json();
+    navWaypoints = body.waypoints || [];
+  } catch (err) {
+    console.error("failed to load nav waypoints", err);
+  }
+  renderNavWaypoints();
+}
+
+async function saveNavWaypoints(next) {
+  try {
+    const res = await fetch("/api/nav_waypoints", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ waypoints: next }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || res.statusText);
+    navWaypoints = body.waypoints || next;
+  } catch (err) {
+    goalStatus.textContent = `waypoint save failed: ${err.message || err}`;
+    console.error("waypoint save failed", err);
+  }
+  renderNavWaypoints();
+}
+loadNavWaypoints();
+// Another operator may have added pins; cheap enough to refresh on focus.
+navFrom.addEventListener("focus", loadNavWaypoints);
+navTo.addEventListener("focus", loadNavWaypoints);
+
+// A..Z, then A2..Z2, … — the first label not already taken.
+function nextWaypointName() {
+  const taken = new Set(navWaypoints.map((w) => w.name));
+  for (let round = 1; ; round++) {
+    for (let c = 65; c <= 90; c++) {
+      const n = String.fromCharCode(c) + (round > 1 ? round : "");
+      if (!taken.has(n)) return n;
+    }
+  }
+}
+
+function waypointNear(x, y) {
+  // Same hit radius on screen at any zoom: ~12px, but never under 0.3 m.
+  const r = Math.max(0.3, 12 / view.scale);
+  return navWaypoints.find((w) => Math.hypot(w.x - x, w.y - y) <= r);
+}
+
+function placeOrDeleteWaypoint(x, y, yaw, dragged) {
+  const hit = !dragged && waypointNear(x, y);
+  if (hit) {
+    if (confirm(`Delete waypoint "${hit.name}"?`)) {
+      saveNavWaypoints(navWaypoints.filter((w) => w !== hit));
+    }
+    return;
+  }
+  const name = (prompt("Waypoint name:", nextWaypointName()) || "").trim();
+  if (!name) return;
+  // Re-using a name moves that waypoint rather than refusing.
+  const rest = navWaypoints.filter((w) => w.name !== name);
+  saveNavWaypoints([...rest, { name, x, y, yaw }]);
+  goalStatus.textContent = `waypoint ${name} at x=${x.toFixed(2)} y=${y.toFixed(2)}`;
+}
+
+document.getElementById("nav-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const to = navWaypoints.find((w) => w.name === navTo.value);
+  if (!to) {
+    setNavStatus("no destination — place waypoints in the map view");
+    return;
+  }
+  const from = navWaypoints.find((w) => w.name === navFrom.value);
+  if (from && from === to) {
+    setNavStatus("start and destination are the same waypoint");
+    return;
+  }
+  if (!from) {
+    sendNavGoal(to.x, to.y, to.yaw, to.name);
+  } else {
+    sendActionGoal(`/${ROBOT_ID}/follow_waypoints`, "nav2_msgs/action/FollowWaypoints",
+                   { poses: [from, to].map((w) => mapPose(w.x, w.y, w.yaw)) },
+                   `${from.name} → ${to.name}`);
+    stopExplorerForManualNav();
+    goal = { x: from.x, y: from.y, yaw: from.yaw };
+  }
+  setNavStatus(`navigating ${activeNav.label}…`, "busy");
+});
+
+document.getElementById("nav-stop").addEventListener("click", () => {
+  if (!activeNav) {
+    setNavStatus("nothing to stop");
+    return;
+  }
+  ros.callOnConnection({ op: "cancel_action_goal", id: activeNav.id, action: activeNav.action });
+  setNavStatus(`cancelling ${activeNav.label}…`, "busy");
+});
+
+// Progress comes from each action's GoalStatusArray: the vendored roslib
+// drops rosbridge's action_result messages on the floor, and the status
+// topic also reports goals the page didn't send (a task_manager dispatch
+// preempting ours shows up as CANCELED/ABORTED, which is the truth).
+const GOAL_STATES = { 1: "accepted", 2: "navigating", 3: "cancelling", 4: "arrived", 5: "cancelled", 6: "failed" };
+for (const action of ["navigate_to_pose", "follow_waypoints"]) {
+  new ROSLIB.Topic({
+    ros,
+    name: `/${ROBOT_ID}/${action}/_action/status`,
+    messageType: "action_msgs/msg/GoalStatusArray",
+    reconnect_on_close: true,
+  }).subscribe((msg) => {
+    const stamp = (g) => g.goal_info.stamp.sec + g.goal_info.stamp.nanosec * 1e-9;
+    const newest = (msg.status_list || []).reduce((a, g) => (!a || stamp(g) > stamp(a) ? g : a), null);
+    if (!newest) return;
+    const seen = newestGoalStamp[action];
+    if (seen == null || stamp(newest) > seen) newestGoalStamp[action] = stamp(newest);
+    if (!activeNav || !activeNav.action.endsWith(`/${action}`)) return;
+    // Not newer than what we'd seen before sending = an earlier goal; wait.
+    if (stamp(newest) <= activeNav.afterStamp) return;
+    const st = GOAL_STATES[newest.status] || `status ${newest.status}`;
+    setNavStatus(`${activeNav.label}: ${st}`,
+                 newest.status === 4 ? "ok" : newest.status >= 5 ? "bad" : "busy");
+    if (newest.status >= 4) activeNav = null;
+  });
+}
 
 // -- 3D reconstruction (RTAB-Map cloud_map, via the relay) ----------------
 // A three.js viewer for RTAB-Map's assembled 3D map. The cloud is a
@@ -1896,7 +2268,7 @@ const MAX_VOXEL_INSTANCES = 250000;
 const VOXEL_SIZE = 0.05;             // matches RTAB-Map's Grid/CellSize
 
 const QS = new URLSearchParams(window.location.search);
-const RECON_MODE_INIT = QS.get("recon") === "points" ? "points" : "voxels";
+const RECON_MODE_INIT = ["points", "splat"].includes(QS.get("recon")) ? QS.get("recon") : "voxels";
 const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
 
 (function initRecon() {
@@ -2007,7 +2379,7 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
     }
   }
   const softwareGL = isSoftwareGL();
-  let reconMode = QS.has("recon") || !softwareGL ? RECON_MODE_INIT : "points"; // "voxels" | "points"
+  let reconMode = QS.has("recon") || !softwareGL ? RECON_MODE_INIT : "points"; // "voxels" | "points" | "splat"
   let reconColor = RECON_COLOR_INIT;    // "photo"  | "height"
 
   // Pose markers: active robot is green (matches the 2D #2d5 marker);
@@ -2077,20 +2449,45 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
   // cloudPoints.geometry.boundingSphere, because in voxel mode there is no
   // cloudPoints — reading it there would silently leave the camera at its
   // (-4,-4,4) init, staring at nothing.
-  function cloudRadius() {
-    const { min, max } = lastCloud;
+  function cloudRadius(b = lastCloud) {
+    const { min, max } = b;
     return 0.5 * Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
   }
 
+  // In splat mode, frame the splat (robust bounds from splat_view.js) — after
+  // a run there is usually no live cloud at all, and that's when splats exist.
+  function viewBounds() {
+    if (reconMode === "splat" && splatView && splatView.bounds) return splatView.bounds;
+    return lastCloud;
+  }
+
   function fitView() {
-    if (!lastCloud) return;
-    const { min, max } = lastCloud;
+    const b = viewBounds();
+    if (!b) return;
+    const { min, max } = b;
     const center = new THREE.Vector3(
       (min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2
     );
-    const radius = cloudRadius();
+    const radius = cloudRadius(b);
     if (!isFinite(radius) || radius === 0) return;
     lastFitRadius = radius;
+    if (b !== lastCloud) {
+      // A splat of a warehouse is a closed room: framed from outside like the
+      // cloud below, all you see is the back of its walls and roof. Stand
+      // inside instead, near one corner at roughly the head camera's height
+      // (the trainer only ever saw it from there), looking across the hall.
+      const floor = min[2];
+      controls.target.set(center.x, center.y, floor + 1.2);
+      camera.position.set(
+        center.x - 0.35 * (max[0] - min[0]), center.y - 0.35 * (max[1] - min[1]), floor + 1.6
+      );
+      camera.near = 0.05;
+      camera.far = radius * 20;
+      camera.updateProjectionMatrix();
+      controls.update();
+      needsRender = true;
+      return;
+    }
     controls.target.copy(center);
     // 1.6 rather than a looser factor: the panel is a narrow column, and the
     // bounding sphere of a wide, flat map is dominated by its x/y diagonal, so
@@ -2280,6 +2677,8 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
   }
 
   function rebuild() {
+    syncSplatMode();
+    if (reconMode === "splat") return;
     if (!lastCloud) return;
     const useVoxels = reconMode === "voxels" && lastCloud.n <= MAX_VOXEL_INSTANCES;
     if (useVoxels) buildVoxels(); else buildPoints();
@@ -2298,6 +2697,224 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
     needsRender = true;
   }
 
+  // -- splat mode ---------------------------------------------------------
+  // A Gaussian splat trained post-run by the splat worker (splat/worker.py)
+  // on the WORKSTATION — never on the Jetson. The page may be served by the
+  // Jetson's serve.py, so the worker is another origin: its URL comes from
+  // ?splat_worker= or /api/splat/config, and every request is cross-origin.
+  const splatBar = document.getElementById("splat-bar");
+  const splatPick = document.getElementById("splat-pick");
+  const splatMapSel = document.getElementById("splat-map");
+  const splatBuild = document.getElementById("splat-build");
+  const splatStatus = document.getElementById("splat-status");
+  let splatView = null;          // created on first use: one more GL context
+  let splatError = null;
+  let splatWorker = null;        // base URL, no trailing slash
+  let splatLoadedUrl = null;
+  let splatPollTimer = null;
+  const splatJobsSeen = new Map(); // job id -> state, to notice "done"
+
+  const modeSel = document.getElementById("recon-mode");
+  const splatOption = modeSel && modeSel.querySelector('option[value="splat"]');
+  if (splatOption && softwareGL) {
+    // A million translucent quads blended per frame, on the CPU the robot's
+    // SLAM needs: never the default here, and labelled so nobody picks it
+    // expecting it to be usable (docs/jetson.md: view the 3D panel from
+    // another device). Not disabled — same rule as voxels, an explicit
+    // choice (or ?recon=splat, which the offline test relies on) wins.
+    splatOption.textContent = "splat (slow: no GPU)";
+  }
+
+  function splatSetStatus(text, title) {
+    splatStatus.textContent = text;
+    splatStatus.title = title || "";
+  }
+
+  async function splatWorkerUrl() {
+    if (splatWorker) return splatWorker;
+    let url = QS.get("splat_worker");
+    if (!url) {
+      try {
+        const res = await fetch("/api/splat/config");
+        if (res.ok) url = (await res.json()).worker_url;
+      } catch (e) { /* older serve.py: no endpoint */ }
+    }
+    splatWorker = url ? String(url).replace(/\/+$/, "") : null;
+    return splatWorker;
+  }
+
+  // "local" when the worker runs on the host that serves this page (sim: the
+  // workstation does both), else this dashboard's origin, which the worker
+  // pulls the map's pose graph from (real: the Jetson).
+  function splatSource(worker) {
+    const loopback = (h) => h === "localhost" || h === "127.0.0.1" || h === "::1";
+    const wh = new URL(worker).hostname;
+    const ph = window.location.hostname;
+    return wh === ph || (loopback(wh) && loopback(ph)) ? "local" : window.location.origin;
+  }
+
+  async function splatFetch(path, opts) {
+    const worker = await splatWorkerUrl();
+    if (!worker) throw new Error("no splat worker configured (configs/splat.yaml worker_url)");
+    const res = await fetch(worker + path, opts);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `${res.status} ${res.statusText}`);
+    return body;
+  }
+
+  async function refreshSplatLists() {
+    try {
+      const { splats } = await splatFetch("/api/splats");
+      const keep = splatPick.value;
+      splatPick.textContent = "";
+      for (const sp of splats) {
+        const o = document.createElement("option");
+        o.value = sp.url;
+        const when = sp.finished ? new Date(sp.finished * 1000).toLocaleString() : "";
+        const g = sp.gaussians >= 1e6 ? `${(sp.gaussians / 1e6).toFixed(2)}M`
+          : `${Math.max(1, Math.round(sp.gaussians / 1e3))}k`;
+        o.textContent = `${sp.map} · ${g}`;
+        o.title = `${sp.job}${sp.psnr ? ` · ${sp.psnr} dB` : ""} · ${when} · from ${sp.source}`;
+        splatPick.appendChild(o);
+      }
+      if (!splats.length) {
+        const o = document.createElement("option");
+        o.value = "";
+        o.textContent = "(no splats yet)";
+        splatPick.appendChild(o);
+      } else if (keep && [...splatPick.options].some((o) => o.value === keep)) {
+        splatPick.value = keep;
+      }
+    } catch (e) {
+      splatSetStatus("worker unreachable", String(e.message || e));
+      return false;
+    }
+    try {
+      const res = await fetch("/api/maps");
+      const body = await res.json();
+      const keep = splatMapSel.value;
+      splatMapSel.textContent = "";
+      for (const m of body.maps || []) {
+        if (m.db_state !== "complete") continue;
+        const o = document.createElement("option");
+        o.value = m.name;
+        o.textContent = m.name;
+        o.title = m.title || m.name;
+        splatMapSel.appendChild(o);
+      }
+      if (keep) splatMapSel.value = keep;
+      splatBuild.disabled = !splatMapSel.options.length;
+    } catch (e) {
+      splatBuild.disabled = true;
+    }
+    return true;
+  }
+
+  async function loadPickedSplat() {
+    const rel = splatPick.value;
+    if (!rel || !splatView) return;
+    const url = (await splatWorkerUrl()) + rel;
+    if (url === splatLoadedUrl) return;
+    splatLoadedUrl = url;
+    splatSetStatus("loading…");
+    try {
+      const { count } = await splatView.load(url, (f) => splatSetStatus(`loading ${Math.round(f * 100)}%`));
+      infoEl.textContent = `splat · ${count.toLocaleString()} gaussians`;
+      splatSetStatus("");
+      didFitView = false;
+      fitView();
+    } catch (e) {
+      splatLoadedUrl = null;
+      splatSetStatus("load failed", String(e.message || e));
+    }
+  }
+
+  async function pollSplatJobs() {
+    let jobs;
+    try {
+      ({ jobs } = await splatFetch("/api/jobs"));
+    } catch (e) {
+      splatSetStatus("worker unreachable", String(e.message || e));
+      return;
+    }
+    const active = jobs.find((j) => !["done", "failed", "cancelled"].includes(j.state));
+    let finished = null;
+    for (const j of jobs) {
+      const prev = splatJobsSeen.get(j.id);
+      if (prev && prev !== j.state && j.state === "done") finished = j;
+      splatJobsSeen.set(j.id, j.state);
+    }
+    if (active) {
+      const p = active.progress;
+      const detail = p
+        ? ` ${p.step}/${p.iters} · ${p.psnr} dB · ${Math.ceil((p.eta_s || 0) / 60)} min left`
+        : "";
+      splatSetStatus(`${active.map}: ${active.state.replace(/_/g, " ")}${detail}`,
+        active.state === "waiting_for_gpu" ? "Isaac Sim is using the GPU; the job starts when the sim stops" : "");
+    } else if (jobs[0] && jobs[0].finished > Date.now() / 1000 - 600) {
+      // The newest job's outcome, for ten minutes — long enough to notice a
+      // failure after walking away, short enough not to linger forever.
+      const j = jobs[0];
+      splatSetStatus(`${j.map}: ${j.state}`, j.error || "");
+    }
+    if (finished) {
+      await refreshSplatLists();
+      const opt = [...splatPick.options].find((o) => o.value.includes(`/${finished.id}.splat`));
+      if (opt) { splatPick.value = opt.value; loadPickedSplat(); }
+    }
+  }
+
+  function syncSplatMode() {
+    const on = reconMode === "splat";
+    splatBar.hidden = !on;
+    if (on && !splatView && !splatError) {
+      try {
+        splatView = new SplatView(container, () => { needsRender = true; });
+      } catch (e) {
+        splatError = String(e.message || e);
+      }
+    }
+    if (splatView) splatView.setVisible(on);
+    if (!on) {
+      if (splatPollTimer) { clearInterval(splatPollTimer); splatPollTimer = null; }
+      return;
+    }
+    if (splatError) {
+      infoEl.textContent = "splat unavailable";
+      splatSetStatus(splatError);
+      return;
+    }
+    infoEl.textContent = splatView.count
+      ? `splat · ${splatView.count.toLocaleString()} gaussians` : "splat";
+    if (!splatPollTimer) {
+      refreshSplatLists().then((ok) => { if (ok) loadPickedSplat(); });
+      pollSplatJobs();
+      splatPollTimer = setInterval(pollSplatJobs, 3000);
+    }
+    needsRender = true;
+  }
+
+  splatPick.addEventListener("change", loadPickedSplat);
+  splatBuild.addEventListener("click", async () => {
+    const map = splatMapSel.value;
+    if (!map) return;
+    splatBuild.disabled = true;
+    try {
+      const worker = await splatWorkerUrl();
+      const job = await splatFetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ map, source: splatSource(worker) }),
+      });
+      splatJobsSeen.set(job.id, job.state);
+      splatSetStatus(`${map}: queued`);
+    } catch (e) {
+      splatSetStatus("build refused", String(e.message || e));
+    } finally {
+      splatBuild.disabled = false;
+    }
+  });
+
   function wireSelect(id, initial, apply) {
     const el = document.getElementById(id);
     if (!el) return;
@@ -2306,6 +2923,7 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
   }
   wireSelect("recon-mode", reconMode, (v) => { reconMode = v; });
   wireSelect("recon-color", RECON_COLOR_INIT, (v) => { reconColor = v; });
+  if (reconMode === "splat") syncSplatMode();   // ?recon=splat
 
   new ROSLIB.Topic({
     ros,
@@ -2340,6 +2958,11 @@ const RECON_COLOR_INIT = QS.get("reconcolor") === "height" ? "height" : "photo";
     controls.update();
     if (!needsRender) return;
     needsRender = false;
+    if (reconMode === "splat" && splatView) {
+      // The overlay is opaque; skip the three.js scene underneath it.
+      splatView.render(camera);
+      return;
+    }
     renderer.render(scene, camera);
   }
   animate();

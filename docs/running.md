@@ -187,12 +187,43 @@ scripts/run_console.sh          # clean terminal, no ROS sourced. Leave it runni
 
 That starts only rosbridge (9090), web_video_server (8080) and
 `webui/serve.py --control` (8081), prints the dashboard URL, and stays in the
-foreground. Open the dashboard, switch the header to **scenarios**, pick a card
-and hit **Start**: `webui/session.py` runs `scripts/run_demo.sh` for you with
-`--keep-console`, which makes its teardown spare the console processes and
-makes the bringup start with `webui:=false` (two rosbridges would fight over
-port 9090). **Stop** tears the sim down and leaves the console — and your open
-page — up.
+foreground. Open the dashboard, switch the header to **scenarios**, choose the
+setup in the launch form and hit **Start**: `webui/session.py` runs
+`scripts/run_demo.sh` for you with `--keep-console`, which makes its teardown
+spare the console processes and makes the bringup start with `webui:=false`
+(two rosbridges would fight over port 9090). **Save & finish** saves the run
+into `maps/` and stops it; **Stop** tears the sim down without saving. Either
+way the console — and your open page — stays up.
+
+**The launch form.** One form instead of a card per preset:
+
+| Setting | Choices | Becomes |
+|---|---|---|
+| Environment | NVIDIA warehouse · primitive | `--scene` |
+| Map | new (empty) · working map (`~/.ros`) · a saved map from `maps/` | `--map` |
+| Mode (not for a new map) | extend (keep mapping) · read-only (localize) | `--resume` / `--localize` |
+| Robots | 1..roster size | `--robots` |
+| Start exploring immediately | on/off — the explorer always runs; off = it waits for the Explore button / X+click | `--explore` (autostart) |
+| Waypoints | from map · keep current · start empty | session-side, see below |
+| Advanced | headless, chase cam (+count), teleop, record bag | the matching flags |
+
+The form sends *settings*, never paths or flags: `config_to_run` in
+`webui/session.py` turns them into the same `RUN_FLAGS` allowlist a preset file
+goes through, a saved map is picked by library name only, and the line under
+the form is the server's own `build_argv` preview of exactly what Start will
+run. The robot's console shows only Map, Mode and Waypoints.
+
+**Quick start** lists `configs/scenarios/*.yaml`; picking one just fills the
+form. **Save as preset…** writes the current form to
+`configs/scenarios/<name>.yaml` (`origin: dashboard`, map stored by name so the
+file is portable), validated before it's written; hand-written presets can't be
+overwritten from the UI. From a terminal the same form is
+`scripts/sim_ctl.sh start custom map=warehouse mode=extend robots=2` (and
+`dry-run custom …` to just print the command).
+
+**Waypoints** follow the map: `from map` loads `maps/<name>/waypoints.json` into
+the dashboard's working set (`data/nav_waypoints.json`), `keep current` leaves
+it alone, `start empty` clears it. Save & finish snapshots them back into the map.
 
 - Ctrl-C in the console terminal stops the console only; a running sim keeps
   going. `scripts/run_console.sh stop` takes down both.
@@ -818,6 +849,10 @@ the same `map` topic regardless.
 
 ### Saving a map off a run
 
+(A saved library map can also be turned into a photoreal Gaussian splat for
+the 3D panel's splat mode, trained on the workstation's GPU after the run:
+`scripts/sim_ctl.sh stop --save-map NAME --splat`. See `docs/splat.md`.)
+
 Two artifacts are worth keeping, and they have different lifetimes: the
 **occupancy grid** (`.pgm` + `.yaml`) can only be captured while the stack is
 up, since it comes off the live `/map` topic; the **RTAB-Map database**
@@ -884,7 +919,7 @@ scripts/sim_ctl.sh start library_localize map=$PWD/maps/warehouse_full/map.db
 scripts/sim_ctl.sh start library_resume   map=$PWD/maps/warehouse_full/map.db
 ```
 
-or pick the entry from the **Map** dropdown on either card in the Scenarios tab.
+or pick the entry from the **Map** dropdown in the Scenarios tab's launch form.
 
 **A run can't dirty a library entry.** RTAB-Map opens its sqlite file
 read-write even under `--localize` (`Mem/IncrementalMemory=false` stops it
