@@ -99,22 +99,32 @@
   .wp { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 2px 9px; font-size: .76rem; display: flex; gap: 6px; align-items: center; }
   .wp b { color: var(--warn); } .wp button { background: none; border: none; color: var(--dim); padding: 0; }
 
-  /* robot drawer: the live view, secondary ------------------------------- */
-  #drawer { position: fixed; top: 10px; right: 10px; bottom: 10px; width: 400px; border: 1px solid var(--line); border-radius: 8px; box-shadow: -8px 0 24px rgba(0,0,0,.45); background: var(--panel); border-left: 1px solid var(--line);
-            transform: translateX(110%); transition: transform .2s; display: flex; flex-direction: column; gap: 8px; padding: 10px; z-index: 5; }
-  #drawer.open { transform: none; }
-  #drawer .hd { display: flex; align-items: center; gap: 8px; }
-  #drawer .hd h3 { margin: 0; font-size: 1rem; } #drawer .hd .x { margin-left: auto; background: none; border: none; font-size: 1.2rem; color: var(--dim); }
-  #cam { position: relative; aspect-ratio: 4/3; background: #0b0d10; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-  #cam canvas { width: 100%; height: 100%; display: block; }
-  #cam .live { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,.6); border-radius: 3px; padding: 1px 7px; font-size: .7rem; color: var(--bad); }
-  #cam .live::before { content: "● "; }
-  #cam .seg { position: absolute; bottom: 8px; left: 8px; }
-  #cam .seg button { padding: 2px 9px; font-size: .72rem; background: rgba(20,22,26,.85); }
-  #drawer .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: .8rem; }
-  #drawer .acts { display: flex; flex-wrap: wrap; gap: 6px; }
-  #pad { display: grid; grid-template-columns: repeat(3, 40px); gap: 4px; }
-  #pad button { height: 34px; background: var(--bg); border: 1px solid var(--line); border-radius: 5px; }
+  #empty { position: absolute; inset: 0; background: rgba(15,17,20,.88); display: flex; flex-direction: column; gap: 10px; align-items: center; justify-content: center; z-index: 3; font-size: 1rem; }
+  /* expanded fleet card ---------------------------------------------------- */
+  .robot .more { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; display: grid; gap: 8px; }
+  .robot canvas { width: 100%; aspect-ratio: 16/9; border-radius: 5px; background: #0b0d10; display: block; }
+  .robot .live { font-size: .68rem; color: var(--bad); }
+  .robot .acts { display: flex; gap: 6px; flex-wrap: wrap; }
+  .robot .open { width: 100%; text-align: center; background: var(--info); color: #111; border: none; border-radius: 5px; padding: 6px; font-weight: 600; font-size: .8rem; text-decoration: none; display: block; }
+
+  /* session panel (scenarios) ------------------------------------------- */
+  #session { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: flex; align-items: flex-start; justify-content: center; padding-top: 60px; z-index: 10; }
+  #session .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; width: 720px; max-height: calc(100vh - 90px); overflow: auto; padding: 16px; display: grid; gap: 14px; }
+  #session h3 { margin: 0; font-size: 1rem; display: flex; align-items: center; gap: 10px; }
+  #session h3 .x { margin-left: auto; background: none; border: none; color: var(--dim); font-size: 1.3rem; }
+  .sub { font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin-bottom: 6px; }
+  .presets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .preset { text-align: left; background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 9px 11px; }
+  .preset b { display: block; font-size: .85rem; } .preset span { font-size: .75rem; color: var(--dim); }
+  .preset.on { border-color: var(--ok); } .preset.planned { opacity: .45; cursor: not-allowed; }
+  .frow { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: .82rem; }
+  .frow .k { width: 90px; color: var(--dim); }
+  .runbox { background: var(--bg); border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; display: flex; align-items: center; gap: 10px; }
+  .runbox pre { margin: 8px 0 0; font-size: .72rem; color: var(--dim); max-height: 90px; overflow: auto; }
+  details summary { cursor: pointer; color: var(--dim); font-size: .8rem; margin-bottom: 8px; }
+  .chk { display: inline-flex; gap: 5px; align-items: center; font-size: .8rem; margin-right: 12px; }
+  .real-only { display: none; }
+
   #wrap { position: relative; min-height: 0; min-width: 0; grid-column: 2 / 4; grid-row: 2; display: grid; grid-template-columns: 1fr 330px; gap: 10px; overflow: hidden; }
   #wrap > #stage { min-width: 0; }
 </style>
@@ -142,7 +152,10 @@
 
   <span class="spacer"></span>
   <button class="btn" id="save-map" title="Save the map + waypoints to the library">Save map</button>
-  <a class="link" href="/" title="The existing engineering dashboard: cameras, drive pad, SLAM, scenarios">Engineering view ↗</a>
+  <!-- Scenarios land here: the session is the thing the whole page runs inside, so it
+       is a header control (always visible, one click) rather than a tab competing with
+       the operating view. Opens the launch panel; sim-only fields hide on a real robot. -->
+  <button class="btn" id="session-chip" title="Start, stop or save the sim / robot session"><span class="dot" id="s-dot"></span> <span id="s-label">Session: running</span> ▾</button>
   <button class="btn danger" id="estop">STOP ALL</button>
 </header>
 
@@ -172,6 +185,7 @@
       <span><i style="background:var(--warn)"></i>waypoint</span><span><i style="background:#3a3f48"></i>unexplored</span>
     </div>
     <div id="hint">Click a robot to inspect it · click the map with a tool active to act</div>
+    <div id="empty" hidden><b>No session running</b><span class="dim">Start a sim or robot session to see the fleet and assign tasks.</span><button class="btn primary" id="empty-go">Start a session</button></div>
     <div id="toast"></div>
   </section>
 
@@ -195,24 +209,56 @@
     </section>
   </div>
 
-  <!-- Drawer: one robot's live view. Secondary, on demand. ---------------- -->
-  <aside id="drawer">
-    <div class="hd"><span class="dot" id="d-dot"></span><h3 id="d-name"></h3><span class="chip" id="d-state"></span>
-      <button class="x" id="d-x" title="Close (Esc)">×</button></div>
-    <div id="cam">
-      <canvas id="cam-c" width="640" height="480"></canvas><span class="live">LIVE</span>
-      <div class="seg" id="cam-src"><button class="active">chase</button><button>head</button><button>depth</button></div>
+</div>
+
+<div id="session" hidden>
+  <div class="card">
+    <h3>Session <span class="chip done" id="sp-state">running · explore_fleet</span>
+      <span class="dim" style="font-weight:400;font-size:.8rem">platform: <b>sim</b> <span class="dim">(on the Jetson this reads "real" and the sim-only options below disappear)</span></span>
+      <button class="x" id="sp-x" title="Close (Esc)">×</button></h3>
+
+    <div class="runbox" id="sp-run">
+      <div><b id="sp-title">explore_fleet</b><div class="dim" style="font-size:.76rem" id="sp-sub">3 robots · elapsed 12:41 · Isaac Sim up · RTAB-Map up</div></div>
+      <span style="flex:1"></span>
+      <button class="btn primary" id="sp-finish" title="Save the map, pose graph and waypoints into the library, then stop">Save map &amp; finish</button>
+      <button class="btn danger" id="sp-stop" title="Tear down the sim and ROS stack WITHOUT saving">Stop</button>
     </div>
-    <div class="kv" id="d-kv"></div>
-    <div class="acts">
-      <button class="btn" id="d-pause">Pause</button>
-      <button class="btn" id="d-home">Return to dock</button>
-      <button class="btn" id="d-cancel">Cancel task</button>
+
+    <div id="sp-launch">
+      <div class="sub">Start with a preset</div>
+      <div class="presets" id="presets">
+        <button class="preset" data-p="explore_fresh"><b>Explore from scratch</b><span>1 robot, wipe the map, frontier exploration</span></button>
+        <button class="preset on" data-p="explore_fleet"><b>Explore with fleet</b><span>3 robots, one fused map</span></button>
+        <button class="preset" data-p="explore_resume"><b>Resume mapping</b><span>extend the last map</span></button>
+        <button class="preset" data-p="library_localize"><b>Premapped: localize</b><span>load a saved map, take tasks</span></button>
+        <button class="preset" data-p="library_resume"><b>Premapped: keep mapping</b><span>load a saved map and extend it</span></button>
+        <button class="preset planned" data-p="avoid" disabled><b>Person avoidance</b><span>planned: needs an animated-actor scene</span></button>
+      </div>
+
+      <div class="sub" style="margin-top:14px">…or set it up by hand</div>
+      <div class="frow"><span class="k">Map</span>
+        <div class="seg" id="sp-map"><button class="active">new</button><button>saved map</button></div>
+        <select id="sp-mapsel"><option>warehouse</option><option>fleet_warehouse_test</option></select></div>
+      <div class="frow"><span class="k">Mode</span>
+        <div class="seg"><button class="active">extend: keep mapping</button><button>read-only: localize</button></div></div>
+      <div class="frow"><span class="k">Robots</span><select><option>1</option><option>2</option><option selected>3</option></select>
+        <label class="chk"><input type="checkbox" checked> explore immediately</label></div>
+      <details><summary>Sim options</summary>
+        <label class="chk"><input type="checkbox"> headless</label>
+        <label class="chk"><input type="checkbox"> chase cam <span class="dim">(-30% real-time factor)</span></label>
+        <label class="chk"><input type="checkbox"> record bag</label>
+        <div class="frow" style="margin-top:8px"><span class="k">Waypoints</span>
+          <div class="seg"><button class="active">from map</button><button>keep current</button><button>start empty</button></div></div>
+      </details>
+      <div style="display:flex;gap:10px;align-items:center;margin-top:6px">
+        <span class="dim" style="font-size:.78rem">Starting replaces the running session. Isaac takes ~1 min warm, minutes on a first run.</span>
+        <span style="flex:1"></span><button class="btn primary" id="sp-start">Start session</button>
+      </div>
     </div>
-    <div class="dim" style="font-size:.72rem;text-transform:uppercase;letter-spacing:.05em;margin-top:2px">Manual drive <span style="text-transform:none">(takes the robot off its task)</span></div>
-    <div id="pad"><span></span><button>▲</button><span></span><button>◀</button><button>■</button><button>▶</button><span></span><button>▼</button><span></span></div>
-    <a class="link" href="/" style="margin-top:auto">Open full engineering view for this robot ↗</a>
-  </aside>
+    <pre class="mono dim" id="sp-log" style="margin:0;font-size:.72rem;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px;max-height:100px;overflow:auto">[run_demo] isaac sim up
+[run_demo] bringup: rtabmap, nav2, task_manager ready
+[run_demo] session running</pre>
+  </div>
 </div>
 
 <script>
@@ -292,25 +338,25 @@ function drawMap() {
 }
 
 // fake camera: a corridor in perspective with shelves, rendered per frame
-const cc = $("#cam-c").getContext("2d");
 function drawCam(r) {
-  const w = 640, h = 480, t = performance.now() / 1000;
+  const el = document.getElementById("cam-c"); if (!el) return;
+  const cc = el.getContext("2d"), w = 320, h = 180, t = performance.now() / 1000;
   cc.fillStyle = "#1a1d22"; cc.fillRect(0, 0, w, h);
   cc.fillStyle = "#23272e"; cc.fillRect(0, h * .55, w, h * .45);           // floor
   cc.fillStyle = "#15171b"; cc.fillRect(0, 0, w, h * .55 * .5);            // ceiling
   const off = (t * 60) % 120;
   for (let i = 0; i < 6; i++) {                                             // shelf bays receding
     const k = (i * 120 + off) / 720, s = k * k, y = h * .5 + (h * .5) * s * .3;
-    const bw = 40 + s * 260, bh = 30 + s * 220;
-    [[w / 2 - 70 - bw, 1], [w / 2 + 70, 1]].forEach(([x]) => {
+    const bw = 20 + s * 130, bh = 15 + s * 110;
+    [[w / 2 - 35 - bw, 1], [w / 2 + 35, 1]].forEach(([x]) => {
       cc.fillStyle = `rgba(138,147,163,${.25 + s * .6})`; cc.fillRect(x, y - bh * .7, bw, bh);
       cc.strokeStyle = `rgba(20,22,26,${.8})`; cc.lineWidth = 2; cc.strokeRect(x, y - bh * .7, bw, bh);
     });
   }
-  cc.fillStyle = r.c; cc.beginPath(); cc.arc(w / 2, h - 52, 22, 0, 7); cc.fill();      // own body (chase cam)
-  cc.fillStyle = "rgba(0,0,0,.5)"; cc.fillRect(0, h - 28, w, 28);
-  cc.fillStyle = "#cfe"; cc.font = "13px ui-monospace, monospace"; cc.textAlign = "left";
-  cc.fillText(`${r.id}  x=${r.x.toFixed(1)} y=${r.y.toFixed(1)}  ${r.state}`, 10, h - 9);
+  cc.fillStyle = r.c; cc.beginPath(); cc.arc(w / 2, h - 26, 11, 0, 7); cc.fill();      // own body (chase cam)
+  cc.fillStyle = "rgba(0,0,0,.5)"; cc.fillRect(0, h - 16, w, 16);
+  cc.fillStyle = "#cfe"; cc.font = "10px ui-monospace, monospace"; cc.textAlign = "left";
+  cc.fillText(`${r.id}  x=${r.x.toFixed(1)} y=${r.y.toFixed(1)}  ${r.state}`, 6, h - 4);
 }
 
 // ---- panels ------------------------------------------------------------------
@@ -321,6 +367,10 @@ function renderFleet() {
       <div class="task">${r.task}</div>
       ${r.prog ? `<div class="bar"><i style="width:${Math.round(r.prog * 100)}%"></i></div>` : ""}
       <div class="meta"><span class="batt ${r.batt < 25 ? "low" : ""}">🔋 ${Math.round(r.batt)}%</span><span class="mono">${r.x.toFixed(1)}, ${r.y.toFixed(1)} m</span><span>${r.state === "charging" ? "0.0" : r.speed.toFixed(1)} m/s</span></div>
+      ${selected === r.id ? `<div class="more">
+        <canvas id="cam-c" width="320" height="180"></canvas>
+        <div class="acts"><button class="btn small" data-act="pause">Pause</button><button class="btn small" data-act="home">Return to dock</button><button class="btn small" data-act="cancel">Cancel task</button></div>
+        <a class="open" href="/?robot=${r.id}" target="_blank" title="The full per-robot dashboard: cameras, SLAM, drive pad, pick &amp; place">Open ${r.id} live view ↗</a></div>` : ""}
     </div>`).join("");
 }
 function renderTasks() {
@@ -344,24 +394,21 @@ function renderWps() {
   if (keep[0]) $("#nt-from").value = keep[0]; if (keep[1]) { $("#nt-to").value = keep[1]; } else $("#nt-to").selectedIndex = Math.min(2, waypoints.length - 1);
   $("#nt-who").innerHTML = `<option value="auto">Auto (nearest idle robot)</option>` + robots.map(r => `<option value="${r.id}">${r.id}</option>`).join("");
 }
-function renderDrawer() {
-  const r = robots.find(x => x.id === selected); if (!r) return;
-  $("#d-name").textContent = r.id; $("#d-dot").style.background = r.c;
-  $("#d-state").textContent = r.state; $("#d-state").className = "chip " + (r.state === "exploring" ? "done" : "running");
-  $("#d-kv").innerHTML = `<span class="dim">Task</span><span>${r.task}</span><span class="dim">Battery</span><span>${Math.round(r.batt)}%</span>
-    <span class="dim">Pose</span><span class="mono">${r.x.toFixed(2)}, ${r.y.toFixed(2)}</span><span class="dim">SLAM</span><span style="color:var(--ok)">tracking · loop closed</span>`;
-}
 function toast(m) { const t = $("#toast"); t.textContent = m; t.classList.add("on"); clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("on"), 1800); }
-function select(id) {
-  selected = id; $("#drawer").classList.toggle("open", !!id); renderFleet(); if (id) renderDrawer();
+function select(id) { selected = id; renderFleet(); }
+function act(a) {
+  const r = robots.find(x => x.id === selected); if (!r) return;
+  if (a === "pause") { r.speed = 0; r.state = "idle"; toast("Paused"); }
+  if (a === "home") { r.route = [[DOCK.x, DOCK.y]]; r.speed = 1; r.state = "navigating"; r.task = "Returning to dock"; toast("Returning to dock"); }
+  if (a === "cancel") { r.route = []; r.state = "idle"; r.task = "Idle"; r.speed = 0; }
+  renderFleet();
 }
 
 // ---- interaction -------------------------------------------------------------
-$("#fleet").onclick = e => { const c = e.target.closest(".robot"); if (c) select(selected === c.dataset.id ? null : c.dataset.id); };
-$("#d-x").onclick = () => select(null);
+$("#fleet").onclick = e => { if (e.target.dataset.act) return act(e.target.dataset.act); if (e.target.closest("a")) return; const c = e.target.closest(".robot"); if (c) select(selected === c.dataset.id ? null : c.dataset.id); };
 addEventListener("keydown", e => {
   if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
-  if (e.key === "Escape") select(null);
+  if (e.key === "Escape") { select(null); $("#session").hidden = true; }
   const m = { v: "select", f: "wp", g: "goto" }[e.key.toLowerCase()]; if (m) setTool(m);
 });
 function setTool(t) {
@@ -402,10 +449,6 @@ $("#mode").onclick = e => {
 $("#estop").onclick = () => { robots.forEach(r => { r.route = []; r.speed = 0; r.state = r.state === "charging" ? "charging" : "idle"; r.task = r.state === "charging" ? r.task : "Stopped by operator"; }); toast("All robots stopped"); renderFleet(); };
 $("#save-map").onclick = () => toast("Map saved to library");
 $("#sel-all").onclick = () => toast("Fleet-wide commands: stop, dock, pause (mock)");
-$("#d-pause").onclick = () => { const r = robots.find(x => x.id === selected); r.speed = 0; r.state = "idle"; toast("Paused"); renderFleet(); renderDrawer(); };
-$("#d-home").onclick = () => { const r = robots.find(x => x.id === selected); r.route = [[DOCK.x, DOCK.y]]; r.speed = 1; r.state = "navigating"; r.task = "Returning to dock"; toast("Returning to dock"); renderFleet(); };
-$("#d-cancel").onclick = () => { const r = robots.find(x => x.id === selected); r.route = []; r.state = "idle"; r.task = "Idle"; r.speed = 0; renderFleet(); renderDrawer(); };
-document.querySelectorAll("#cam-src button").forEach(b => b.onclick = () => { document.querySelectorAll("#cam-src button").forEach(x => x.classList.toggle("active", x === b)); });
 
 // ---- sim tick ----------------------------------------------------------------
 let last = performance.now(), tk = 0;
@@ -420,13 +463,33 @@ function tick(now) {
     else { r.x += dx / d * r.speed * dt * 2; r.y += dy / d * r.speed * dt * 2; r.prog = Math.min(1, r.prog + dt * .02); }
   });
   if (mode === "map") { cov = Math.min(97, cov + dt * .25); $("#cov-n").textContent = Math.round(cov) + "%"; $("#cov-bar").style.width = cov + "%"; $("#cov-sub").textContent = `${Math.max(1, Math.round((100 - cov) / 9))} frontiers left`; }
-  if (tk > 1) { tk = 0; renderFleet(); if (selected) renderDrawer(); }
+  if (tk > 1) { tk = 0; renderFleet(); }
   drawMap(); const s = robots.find(r => r.id === selected); if (s) drawCam(s);
   requestAnimationFrame(tick);
 }
+// session panel: running vs idle changes what the panel offers and what the page shows
+let session = "running";
+function renderSession() {
+  const run = session === "running";
+  $("#sp-run").hidden = !run; $("#sp-state").textContent = run ? "running · explore_fleet" : "no session";
+  $("#sp-state").className = "chip " + (run ? "done" : "");
+  $("#empty").hidden = run;
+  $("#s-label").textContent = run ? "Session: running" : "No session"; $("#s-dot").className = "dot " + (run ? "" : "idle");
+  $("#sp-start").textContent = run ? "Restart with these settings" : "Start session";
+}
+$("#empty-go").onclick = () => $("#session").hidden = false;
+$("#session-chip").onclick = () => $("#session").hidden = false;
+$("#sp-x").onclick = () => $("#session").hidden = true;
+$("#session").onclick = e => { if (e.target.id === "session") $("#session").hidden = true; };
+$("#presets").onclick = e => { const b = e.target.closest(".preset"); if (!b || b.disabled) return;
+  document.querySelectorAll(".preset").forEach(x => x.classList.toggle("on", x === b)); };
+document.querySelectorAll("#session .seg").forEach(g => g.onclick = e => { if (e.target.tagName === "BUTTON") [...g.children].forEach(b => b.classList.toggle("active", b === e.target)); });
+$("#sp-start").onclick = () => { session = "running"; renderSession(); $("#session").hidden = true; toast("Session starting…"); };
+$("#sp-stop").onclick = () => { session = "none"; renderSession(); toast("Session stopped"); };
+$("#sp-finish").onclick = () => { session = "none"; renderSession(); toast("Map saved, session stopped"); };
 addEventListener("resize", resize);
-resize(); renderFleet(); renderTasks(); renderWps(); setTool("select"); requestAnimationFrame(tick);
-if (location.hash.length > 1) select(location.hash.slice(1));   // #robot_1 opens that robot's drawer
+resize(); renderFleet(); renderTasks(); renderWps(); renderSession(); setTool("select"); requestAnimationFrame(tick);
+if (location.hash === "#session") $("#session").hidden = false; else if (location.hash.length > 1) select(location.hash.slice(1));   // #robot_1 expands that card, #session opens the session panel
 </script>
 </body>
 </html>
