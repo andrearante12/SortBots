@@ -1081,6 +1081,27 @@ ufw status                                # inactive, or tailscale0 allowed?
 curl -s -o /dev/null -w '%{http_code}\n' http://<tailnet-ip>:8081/   # expect 200
 ```
 
+## The operator view (`/operator.html`)
+
+Fleet-first front end for warehouse operators; the per-robot dashboard at `/?robot=ID` stays
+as the engineering view and is one click away. Left: every robot (state, current task), and
+clicking one expands its camera and Stop / Explore buttons plus an **Open live view** link to
+`/?robot=ID`. Centre: the fused `/map`, robot poses (composed from `/tf`) and Nav2 plans,
+with a select / waypoint / send-robot toolbar (drag on a click to set the heading). Right:
+the task list, the waypoints, and a new-task form that dispatches to `/<id>/dispatch_task`.
+
+- **Session** (header chip) opens the launch form, which is `scenarios.js` unchanged, so
+  scenarios, saved maps, Save & finish and Stop work exactly as in the engineering view. The
+  Mapping / Premapped switch just reports the running session; switching restarts the stack
+  (RTAB-Map cannot go from extend to read-only mid-run), so clicking the other side opens the
+  panel.
+- **Stop all** stops exploring, cancels every navigation goal (including task_manager's) and
+  zeroes cmd_vel on every robot.
+- Tasks: task_manager keeps one queue per robot and only reports the current task, so the
+  list is tasks this page dispatched plus any task a status message mentions. There is no
+  cancel and no battery readout; neither exists on the ROS side yet.
+- Offline test: `node webui/tests/operator_test.mjs [--screenshot DIR]`.
+
 ## Testing the dashboard without the sim (recorded data)
 
 Checking a dashboard change shouldn't need Isaac Sim, a GPU and a display. So

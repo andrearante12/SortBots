@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SortBots</title>
+<style>
+  /* Operator view. A warehouse floor, not a cockpit: concrete-grey ground, white
+     work surfaces, ink text. Hi-vis yellow is floor tape, so it marks waypoints and
+     nothing else; red is for stopping. The map is the one big thing and everything
+     else is plain lists divided by hairlines. One type family, sentence case.
+     The per-robot engineering view (cameras, SLAM, drive pad) stays at /?robot=ID. */
+  :root {
+    color-scheme: light;
+    --ground: #f2f3f4; --surface: #fff; --ink: #15191e; --muted: #68717b; --faint: #9aa3ac; --line: #e3e6e9;
+    --tape: #f2b705; --stop: #d63b2f; --go: #1f9d63; --info: #2f6fed;
+  }
+  [hidden] { display: none !important; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.4 "IBM Plex Sans", system-ui, sans-serif;
+         font-variant-numeric: tabular-nums; display: grid; grid-template-columns: 280px 1fr 320px; grid-template-rows: 56px 1fr; overflow: hidden; }
+  button, select, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: .5; }
+  :focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+  .muted { color: var(--muted); }
+
+  .btn { background: var(--surface); border: 1px solid #d3d8dd; border-radius: 6px; padding: 6px 14px; font-weight: 500; }
+  .btn:hover:not(:disabled) { background: #f7f8f9; }
+  .btn.primary { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .btn.primary:hover:not(:disabled) { background: #2a3139; }
+  .btn.stop { color: var(--stop); border-color: #efc4c0; }
+  .btn.stop:hover:not(:disabled) { background: #fdf1f0; }
+  .btn.small { padding: 3px 10px; font-size: .8rem; }
+  select { background: var(--surface); border: 1px solid #d3d8dd; border-radius: 6px; padding: 5px 8px; }
+  .seg { display: inline-flex; flex-wrap: wrap; background: #e9ecef; border-radius: 8px; padding: 3px; margin: 0; }
+  .seg button { background: none; border: none; border-radius: 6px; padding: 5px 14px; color: var(--muted); font-weight: 500; }
+  .seg button.active { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(20,25,30,.12); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--go); display: inline-block; }
+  .dot.idle { background: var(--faint); } .dot.busy { background: var(--tape); }
+
+  header { grid-column: 1 / -1; background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 16px; padding: 0 16px; }
+  h1 { margin: 0; font-size: 1rem; font-weight: 600; letter-spacing: -.01em; width: 248px; }
+  #mode-strip { display: flex; align-items: center; gap: 10px; }
+  header .spacer { flex: 1; }
+  #session-chip { display: inline-flex; align-items: center; gap: 8px; }
+
+  aside { background: var(--surface); display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+  #left { border-right: 1px solid var(--line); }
+  #right { border-left: 1px solid var(--line); }
+  .head { display: flex; align-items: baseline; gap: 8px; padding: 14px 16px 8px; position: sticky; top: 0; background: var(--surface); z-index: 1; }
+  .head h2 { margin: 0; font-size: .95rem; font-weight: 600; }
+  .head .muted { font-size: .82rem; margin-left: auto; }
+  .none { padding: 6px 16px 14px; color: var(--muted); font-size: .88rem; }
+
+  .robot { padding: 10px 16px; border-top: 1px solid var(--line); cursor: pointer; border-left: 3px solid transparent; }
+  .robot:hover { background: #fafbfb; }
+  .robot.sel { background: #f6f8fb; border-left-color: var(--c); }
+  .robot.offline { opacity: .55; }
+  .robot .l1 { display: flex; align-items: center; gap: 8px; }
+  .robot .sw { width: 10px; height: 10px; border-radius: 50%; background: var(--c); }
+  .robot .name { font-weight: 600; }
+  .robot .tag { margin-left: auto; font-size: .8rem; color: var(--muted); }
+  .robot .l2 { margin: 2px 0 0 18px; font-size: .84rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .more { margin: 10px 0 2px 18px; display: grid; gap: 10px; }
+  .more .cam { width: 100%; aspect-ratio: 16/9; border-radius: 6px; background: #0b0d10 center / cover no-repeat; position: relative; }
+  .more .cam span { position: absolute; inset: 0; display: grid; place-items: center; color: #8b95a0; font-size: .8rem; }
+  .more .facts { display: flex; gap: 14px; font-size: .82rem; color: var(--muted); flex-wrap: wrap; }
+  .more .acts { display: flex; gap: 6px; flex-wrap: wrap; }
+  .more .open { text-align: center; background: var(--ink); color: #fff; border-radius: 6px; padding: 7px; font-weight: 500; text-decoration: none; }
+  .more .open:hover { background: #2a3139; }
+
+  #stage { position: relative; min-width: 0; min-height: 0; }
+  #map { width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
+  .float { position: absolute; background: rgba(255,255,255,.94); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 2px 8px rgba(20,25,30,.08); }
+  #tools { top: 14px; left: 14px; display: flex; flex-direction: column; padding: 4px; gap: 2px; }
+  #tools button { width: 36px; height: 36px; border: none; background: none; border-radius: 6px; font-size: 1.05rem; color: var(--muted); }
+  #tools button:hover { background: #f1f3f5; }
+  #tools button.active { background: var(--ink); color: #fff; }
+  #coverage { bottom: 14px; left: 14px; padding: 8px 14px; display: flex; gap: 8px; align-items: baseline; }
+  #coverage b { font-weight: 600; font-size: 1rem; }
+  #hint { position: absolute; bottom: 20px; right: 16px; font-size: .82rem; color: var(--muted); }
+  #empty { position: absolute; inset: 0; background: rgba(242,243,244,.92); display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; z-index: 3; text-align: center; padding: 24px; }
+  #empty b { font-size: 1.15rem; font-weight: 600; } #empty .btn { margin-top: 8px; }
+  #toast { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 6px 14px; border-radius: 6px; font-size: .84rem; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.on { opacity: 1; }
+  #link-down { position: absolute; top: 14px; right: 14px; background: #fff4e5; border: 1px solid #f3d3a0; color: #8a5200; border-radius: 6px; padding: 5px 12px; font-size: .84rem; }
+
+  #tasks { flex: 1; min-height: 80px; }
+  .tk { padding: 10px 16px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 1px 10px; }
+  .tk .t1 { font-weight: 500; } .tk .t2 { color: var(--muted); font-size: .84rem; }
+  .tk .st { font-size: .8rem; text-align: right; color: var(--muted); }
+  .tk .st.active { color: var(--info); font-weight: 600; } .tk .st.done { color: var(--go); } .tk .st.failed { color: var(--stop); font-weight: 600; }
+  .tk .who { font-size: .8rem; color: var(--muted); text-align: right; display: flex; align-items: center; gap: 5px; justify-content: flex-end; }
+  .tk .who i { width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
+  .tk.finished { opacity: .6; }
+  #wps { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 12px; }
+  .wp { display: inline-flex; align-items: center; gap: 6px; padding: 3px 4px 3px 10px; border-radius: 12px; background: var(--ground); font-size: .84rem; border: none; }
+  .wp::before { content: ""; width: 8px; height: 8px; background: var(--tape); transform: rotate(45deg); }
+  .wp .go { background: none; border: none; padding: 0; }
+  .wp .go:hover { text-decoration: underline; }
+  .wp .del { background: none; border: none; color: var(--faint); padding: 0 6px; }
+  .wp .del:hover { color: var(--stop); }
+  #newtask { border-top: 1px solid var(--line); padding: 12px 16px 16px; }
+  #newtask summary { cursor: pointer; font-weight: 600; font-size: .95rem; list-style: none; }
+  #newtask summary::-webkit-details-marker { display: none; }
+  #newtask summary::before { content: "+"; display: inline-block; width: 1.1em; color: var(--muted); }
+  #newtask[open] summary::before { content: "\2212"; }
+  #newtask .fields { display: grid; gap: 10px; margin-top: 12px; }
+  #newtask label { display: grid; gap: 3px; font-size: .82rem; color: var(--muted); }
+  #newtask select { width: 100%; color: var(--ink); }
+
+  /* session panel: the launch form from scenarios.js, restyled */
+  #session { position: fixed; inset: 0; background: rgba(21,25,30,.35); display: flex; align-items: flex-start; justify-content: center; padding-top: 64px; z-index: 10; }
+  #session .card { background: var(--surface); border-radius: 12px; box-shadow: 0 12px 40px rgba(20,25,30,.25); width: 700px; max-width: calc(100vw - 24px); max-height: calc(100vh - 90px); overflow: auto; padding: 20px 22px; display: grid; gap: 16px; }
+  #session h3 { margin: 0; font-size: 1.1rem; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+  #session h3 .x { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 1.4rem; line-height: 1; }
+  #console-warning { padding: 8px 12px; border-radius: 6px; background: #fff4e5; border: 1px solid #f3d3a0; color: #8a5200; font-size: .86rem; }
+  #scenario-hint { margin: 0; color: var(--muted); font-size: .86rem; }
+  #launch-form { display: flex; flex-direction: column; gap: 10px; }
+  .lf-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .lf-row[hidden], #launch-form [data-field][hidden] { display: none; }
+  .lf-k { width: 92px; flex: none; color: var(--muted); }
+  #lf-preset, #lf-map { flex: 1 1 180px; min-width: 0; }
+  #launch-form > .lf-row > button { background: var(--surface); border: 1px solid #d3d8dd; border-radius: 6px; padding: 5px 12px; }
+  .lf-check { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  .lf-note { margin: 0; font-size: .82rem; color: var(--muted); }
+  .lf-note:empty { display: none; }
+  .lf-warn { color: #8a5200; }
+  #lf-advanced summary { cursor: pointer; color: var(--muted); }
+  #lf-advanced[open] summary { margin-bottom: 10px; }
+  #lf-advanced .lf-row { gap: 14px; }
+  #lf-advanced .lf-row + .lf-row { margin-top: 8px; }
+  #lf-footer { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; }
+  #lf-command { grid-column: 1; font: .7rem ui-monospace, monospace; color: var(--faint); word-break: break-all; }
+  #lf-error { grid-column: 1; color: var(--stop); font-size: .84rem; }
+  #lf-error:empty, #lf-command:empty { display: none; }
+  #lf-start { grid-column: 2; grid-row: 1 / span 3; background: var(--ink); color: #fff; border: none; font-weight: 500; border-radius: 6px; padding: 9px 20px; }
+  .sc-badge { padding: 1px 6px; border-radius: 3px; font-size: .72rem; }
+  #session-pane { display: grid; gap: 8px; }
+  #session-strip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: .88rem; }
+  #session-stop, #session-finish { background: var(--surface); border: 1px solid #d3d8dd; border-radius: 6px; padding: 5px 14px; font-weight: 500; }
+  #session-stop { color: var(--stop); border-color: #efc4c0; }
+  #session-finish { margin-left: auto; background: var(--ink); color: #fff; border-color: var(--ink); }
+  #session-log { margin: 0; max-height: 120px; overflow: auto; background: var(--ground); border-radius: 8px; padding: 10px 12px; font: .74rem/1.5 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+  #session-log:empty::before { content: "Output from the launch script appears here."; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>SortBots</h1>
+  <!-- Mapping builds a new map; Premapped loads one and the robots localize against
+       it. Read from the running session. Switching restarts the stack (RTAB-Map
+       cannot go from extend to read-only mid-run), so clicking the other side opens
+       the session panel instead of flipping a switch. -->
+  <div id="mode-strip">
+    <div class="seg" id="mode">
+      <button data-m="map" title="Robots explore and build a map">Mapping</button>
+      <button data-m="loc" title="A saved map is loaded; robots localize and take tasks">Premapped</button>
+    </div>
+    <span class="muted" id="map-name"></span>
+  </div>
+  <span class="spacer"></span>
+  <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">No session</span></button>
+  <button class="btn stop" id="estop" title="Stop exploring and cancel every robot's navigation goal">Stop all</button>
+</header>
+
+<aside id="left">
+  <div class="head"><h2>Robots</h2><span class="muted" id="n-robots"></span></div>
+  <div id="fleet"></div>
+</aside>
+
+<main id="stage">
+  <canvas id="map"></canvas>
+  <div class="float" id="tools" role="toolbar" aria-label="Map tools">
+    <button data-t="select" class="active" title="Select (V)">&#8598;</button>
+    <button data-t="wp" title="Add waypoint (F). Drag to set the heading">&#9670;</button>
+    <button data-t="goto" title="Send the selected robot (G). Drag to set the heading">&#10140;</button>
+  </div>
+  <div class="float" id="coverage" hidden><b id="cov-n"></b><span class="muted">mapped</span></div>
+  <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
+  <div id="hint"></div>
+  <div id="empty" hidden><b id="empty-title">No session running</b><span class="muted" id="empty-sub">Start a session to see your robots and give them tasks.</span><button class="btn primary" id="empty-go">Start a session</button></div>
+  <div id="toast" role="status"></div>
+</main>
+
+<aside id="right">
+  <div class="head"><h2>Tasks</h2><span class="muted" id="tk-count"></span></div>
+  <div id="tasks"></div>
+  <div class="head"><h2>Waypoints</h2></div>
+  <div id="wps"></div>
+  <details id="newtask">
+    <summary>New task</summary>
+    <form class="fields" id="task-form">
+      <label>Pick up at<select id="nt-from"></select></label>
+      <label>Drop off at<select id="nt-to"></select></label>
+      <label>Robot<select id="nt-who"></select></label>
+      <button class="btn primary" type="submit" id="nt-add">Add task</button>
+    </form>
+  </details>
+</aside>
+
+<div id="session" hidden>
+  <div class="card" role="dialog" aria-label="Session">
+    <h3>Session <button class="x" id="sp-x" title="Close (Esc)" aria-label="Close">&times;</button></h3>
+    <div id="console-warning" hidden></div>
+    <p id="scenario-hint"></p>
+    <form id="launch-form" autocomplete="off">
+        <div class="lf-row">
+          <span class="lf-k">Quick start</span>
+          <select id="lf-preset" title="Presets from configs/scenarios/ — picking one fills the form in"></select>
+          <button type="button" id="lf-save-preset" title="Save these settings as a new Quick start preset (configs/scenarios/NAME.yaml)">Save as preset&hellip;</button>
+        </div>
+        <p id="lf-preset-note" class="lf-note"></p>
+        <div class="lf-row" data-field="scene">
+          <span class="lf-k">Environment</span>
+          <div class="seg lf-seg" id="lf-scene">
+            <button type="button" data-v="nvidia">NVIDIA warehouse</button>
+            <button type="button" data-v="primitive">primitive</button>
+          </div>
+        </div>
+        <div class="lf-row" data-field="map">
+          <span class="lf-k">Map</span>
+          <select id="lf-map" title="Start from an empty map, the working map left by the last run, or a saved map from maps/ (always loaded from a copy)"></select>
+        </div>
+        <div class="lf-row" data-field="mode" id="lf-mode-row">
+          <span class="lf-k">Mode</span>
+          <div class="seg lf-seg" id="lf-mode">
+            <button type="button" data-v="extend" title="Keep mapping: new ground is added to the map (save it with Save &amp; finish)">extend &mdash; keep mapping</button>
+            <button type="button" data-v="readonly" title="Localize only: the map is used, never changed (Mem/IncrementalMemory=false)">read-only &mdash; localize</button>
+          </div>
+        </div>
+        <p id="lf-map-note" class="lf-note lf-warn"></p>
+        <div class="lf-row" data-field="robots">
+          <span class="lf-k">Robots</span>
+          <select id="lf-robots"></select>
+          <span id="lf-robot-ids" class="lf-note"></span>
+        </div>
+        <div class="lf-row" data-field="explore">
+          <span class="lf-k">Exploration</span>
+          <label class="lf-check" title="The explorer always runs. Checked: it starts driving to unexplored frontiers as soon as the sim is up. Unchecked: it waits — start it any time with the Explore button or X+click on the map."><input type="checkbox" id="lf-explore"> start exploring immediately</label>
+        </div>
+        <details id="lf-advanced">
+          <summary>Advanced</summary>
+          <div class="lf-row">
+            <label class="lf-check" data-field="headless" title="No Isaac window; the dashboard, map and cameras all still work"><input type="checkbox" id="lf-headless"> headless</label>
+            <label class="lf-check" data-field="chase_cam" title="Cosmetic 3rd-person view. Each one is another render product: ~30% of real-time factor (0.47x -> 0.33x, scripts/bench_sim.sh)"><input type="checkbox" id="lf-chase_cam"> chase cam</label>
+            <select id="lf-chase_cam_robots" data-field="chase_cam_robots" title="How many robots get a chase cam"></select>
+            <label class="lf-check" data-field="teleop"><input type="checkbox" id="lf-teleop"> teleop</label>
+            <label class="lf-check" data-field="bag" title="Record a rosbag into the session directory for the life of the run (large)"><input type="checkbox" id="lf-bag"> record bag</label>
+          </div>
+          <div class="lf-row" data-field="waypoints">
+            <span class="lf-k">Waypoints</span>
+            <div class="seg lf-seg" id="lf-waypoints">
+              <button type="button" data-v="map" title="Load the saved map's own waypoints (maps/NAME/waypoints.json)">from map</button>
+              <button type="button" data-v="keep" title="Keep the dashboard's current waypoints">keep current</button>
+              <button type="button" data-v="none" title="Start with no waypoints">start empty</button>
+            </div>
+          </div>
+        </details>
+        <div id="lf-footer">
+          <div id="lf-summary"></div>
+          <code id="lf-command"></code>
+          <div id="lf-error"></div>
+          <button type="submit" id="lf-start">Start</button>
+        </div>
+      </form>
+    <div id="session-pane">
+        <div id="session-strip">
+          <span id="session-state">no session</span>
+          <button type="button" id="session-finish" disabled
+                  title="Save this run into the maps/ library (map, pose graph and waypoints), then stop it. The normal way to end a session.">Save &amp; finish</button>
+          <button type="button" id="session-stop" disabled
+                  title="Tear down Isaac Sim and the ROS 2 stack WITHOUT saving. The dashboard console stays up.">Stop</button>
+        </div>
+        <pre id="session-log" title="Live output from scripts/run_demo.sh for this session (also saved to data/sessions/&lt;id&gt;/console.log)."></pre>
+      </div>
+  </div>
+</div>
+
+<script src="vendor/roslib.min.js"></script>
+<script src="operator.js"></script>
+<script src="scenarios.js"></script>
+</body>
+</html>

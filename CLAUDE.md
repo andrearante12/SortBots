@@ -101,6 +101,7 @@ Prefer offline. Seconds, no GPU, no display, no ROS:
 
 ```bash
 node webui/tests/scenarios_test.mjs   # scenarios tab (no fixture needed)
+node webui/tests/operator_test.mjs    # operator view, fake ROSLIB (no fixture needed)
 node webui/tests/splat_test.mjs       # 3D panel splat mode, fake worker (no fixture needed)
 node webui/tests/dashboard_test.mjs   # dashboard (needs webui/testdata/)
 python3 webui/session.py --list       # scenario validation

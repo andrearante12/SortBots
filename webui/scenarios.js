@@ -22,10 +22,12 @@
 // and this tab explains that rather than showing dead buttons.
 
 (function () {
+  // .filter(Boolean): operator.html reuses this file for its session panel and
+  // has none of the live view's panes. A missing pane is simply not toggled.
   const viewLive = [
     document.getElementById("stage-panel"),
     document.getElementById("right-col"),
-  ];
+  ].filter(Boolean);
   const viewScenarios = document.getElementById("view-scenarios");
   const viewFleet = document.getElementById("view-fleet");
   // Live-only header chrome: the stage switcher and the SLAM badge are about
@@ -33,7 +35,7 @@
   const liveChrome = [
     document.getElementById("stage-mode"),
     document.getElementById("slam-badge"),
-  ];
+  ].filter(Boolean);
 
   const formEl = document.getElementById("launch-form");
   const warningEl = document.getElementById("console-warning");
@@ -602,4 +604,8 @@
 
   setView("live");
   loadOptions().then(() => schedulePoll(0));
+
+  // operator.html keeps the launch form in a panel it opens on demand: it asks
+  // for fast polling while the panel is open and the idle cadence when closed.
+  window.sortbotsScenarios = { setView, reload: () => loadOptions().then(() => schedulePoll(0)) };
 })();
