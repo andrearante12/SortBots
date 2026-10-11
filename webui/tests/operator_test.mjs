@@ -330,6 +330,33 @@ async function main() {
     await page.eval(`window.__fakeSession = null`);
   }
 
+
+  // -- light / dark: follows the system until the toggle pins a choice ------------------------
+  console.log('\n--- theme ---');
+  const bodyBg = () => page.eval(`getComputedStyle(document.body).backgroundColor`);
+  const emulate = (scheme) => page.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: scheme }] });
+  const load = async () => { await page.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/operator.html` }); await sleep(1200); };
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+  await page.eval(`localStorage.clear()`);
+  await emulate('dark'); await load();
+  check('theme: dark system setting gives dark by default', (await bodyBg()) === 'rgb(15, 18, 21)', await bodyBg());
+  check('theme: toggle offers the other mode', (await page.eval(`document.getElementById('theme').title`)) === 'Switch to light mode');
+  await emit('/map', grid(60, 40, 0.5, -10, -10));
+  await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); await sleep(500);
+  check('theme: map canvas uses the dark palette', (await page.eval(`(() => { const c = document.getElementById('map'); const d = window.devicePixelRatio || 1; return Array.from(c.getContext('2d').getImageData(4, 4, 1, 1).data).join(','); })()`)) === '15,18,21,255');
+  await shot('dark-fleet');
+  await click('#theme'); await sleep(200);
+  check('theme: clicking pins light', (await page.eval(`document.documentElement.dataset.theme`)) === 'light' && (await bodyBg()) === 'rgb(242, 243, 244)', await bodyBg());
+  await load();
+  check('theme: the pinned choice survives a reload, even against the system setting', (await bodyBg()) === 'rgb(242, 243, 244)');
+  await page.eval(`localStorage.clear()`); await emulate('light'); await load();
+  check('theme: light system setting gives light by default', (await bodyBg()) === 'rgb(242, 243, 244)');
+  await click('#theme'); await sleep(200);
+  check('theme: clicking in light mode pins dark', (await page.eval(`document.documentElement.dataset.theme`)) === 'dark' && (await bodyBg()) === 'rgb(15, 18, 21)');
+  await page.eval(`window.__emit('/map', ${JSON.stringify(grid(60, 40, 0.5, -10, -10))})`);
+  await click('#empty-go'); await sleep(700); await shot('dark-session-panel');
+  await emulate('no-override');
+
   check('no uncaught page errors', pageErrors.length === 0, pageErrors.join('; '));
   page.close();
   if (SCREENSHOT_DIR) console.log(`\nscreenshots: ${SCREENSHOT_DIR}`);

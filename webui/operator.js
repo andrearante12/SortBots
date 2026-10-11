@@ -122,9 +122,41 @@
 
   // -- map ----------------------------------------------------------------------
 
-  const UNKNOWN = 0xfffcfbfb, FREE = 0xffedeae7, OCCUPIED = 0xff8f827a; // ABGR (little-endian RGBA)
+  // -- theme --------------------------------------------------------------------------
+  // CSS owns the palette (custom properties, dark via prefers-color-scheme or a pinned
+  // data-theme). Canvas code can't use var(), so it reads the resolved values here and
+  // re-reads them whenever the theme changes.
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  // "#rrggbb" -> 0xAABBGGRR, the byte order of a Uint32 view over little-endian RGBA.
+  const abgr = (hex) => { const n = parseInt(hex.slice(1), 16); return (0xff000000 | ((n & 0xff) << 16) | (n & 0xff00) | (n >> 16)) >>> 0; };
+  let palette = {};
+  function readPalette() {
+    palette = {
+      bg: css("--map-bg"), ink: css("--map-ink"), robotInk: css("--map-robot-ink"),
+      unknown: abgr(css("--map-unknown")), free: abgr(css("--map-free")), occ: abgr(css("--map-occ")),
+    };
+  }
+  const systemDark = window.matchMedia("(prefers-color-scheme: dark)");
+  const isDark = () => (document.documentElement.dataset.theme ? document.documentElement.dataset.theme === "dark" : systemDark.matches);
+  function applyTheme() {
+    const btn = $("#theme"), dark = isDark();
+    btn.textContent = dark ? "\u2600" : "\u263E"; // sun / moon: the mode a click switches to
+    btn.title = btn.ariaLabel = dark ? "Switch to light mode" : "Switch to dark mode";
+    readPalette();
+    if (lastMap) handleMap(lastMap); // the grid is rasterised with palette colours
+    dirty = true;
+  }
+  $("#theme").addEventListener("click", () => {
+    const next = isDark() ? "light" : "dark";
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem("sortbots.theme", next); } catch (e) { /* private window: still works for this tab */ }
+    applyTheme();
+  });
+  systemDark.addEventListener("change", applyTheme); // only matters while nothing is pinned
 
-  topic("/map", "nav_msgs/OccupancyGrid").subscribe((msg) => {
+  let lastMap = null;
+  topic("/map", "nav_msgs/OccupancyGrid").subscribe((msg) => { lastMap = msg; handleMap(msg); });
+  function handleMap(msg) {
     const { width: w, height: h, resolution: res, origin } = msg.info;
     if (!w || !h) return;
     const off = mapCanvas || document.createElement("canvas");
@@ -137,8 +169,8 @@
       const dst = (h - 1 - row) * w; // grid row 0 is the bottom; image row 0 is the top
       for (let col = 0; col < w; col++) {
         const v = msg.data[row * w + col];
-        if (v < 0) { px[dst + col] = UNKNOWN; continue; }
-        px[dst + col] = v >= 50 ? OCCUPIED : FREE;
+        if (v < 0) { px[dst + col] = palette.unknown; continue; }
+        px[dst + col] = v >= 50 ? palette.occ : palette.free;
         known++;
         if (col < minC) minC = col; if (col > maxC) maxC = col;
         if (row < minR) minR = row; if (row > maxR) maxR = row;
@@ -154,7 +186,7 @@
     ];
     if (!view.moved) fitView();
     render();
-  });
+  }
 
   // -- view (pan / zoom) ----------------------------------------------------------
 
@@ -195,7 +227,7 @@
     requestAnimationFrame(drawFrame);
     if (!dirty || !cssW) return;
     dirty = false;
-    ctx.fillStyle = "#f2f3f4";
+    ctx.fillStyle = palette.bg;
     ctx.fillRect(0, 0, cssW, cssH);
 
     if (mapCanvas && mapInfo) {
@@ -216,10 +248,10 @@
     ctx.font = '500 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
     for (const w of waypoints) {
       const [a, b] = toPx(w.x, w.y);
-      ctx.fillStyle = "#f2b705"; ctx.strokeStyle = "#15191e"; ctx.lineWidth = 1;
+      ctx.fillStyle = "#f2b705"; ctx.strokeStyle = palette.ink; ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(a, b - 9); ctx.lineTo(a + 6, b); ctx.lineTo(a, b + 9); ctx.lineTo(a - 6, b); ctx.closePath();
       ctx.fill(); ctx.stroke();
-      ctx.fillStyle = "#15191e"; ctx.fillText(w.name, a, b - 14);
+      ctx.fillStyle = palette.ink; ctx.fillText(w.name, a, b - 14);
     }
 
     for (const r of robots.values()) {
@@ -229,12 +261,12 @@
       if (selected === r.id) { ctx.strokeStyle = r.color; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(a, b, 17, 0, 7); ctx.stroke(); }
       ctx.fillStyle = r.color; ctx.beginPath(); ctx.arc(a, b, 10, 0, 7); ctx.fill();
       const yaw = -r.pose.yaw; // canvas y points down
-      ctx.fillStyle = "#fff"; ctx.beginPath();
+      ctx.fillStyle = palette.robotInk; ctx.beginPath();
       ctx.moveTo(a + Math.cos(yaw) * 13, b + Math.sin(yaw) * 13);
       ctx.lineTo(a + Math.cos(yaw + 2.5) * 6, b + Math.sin(yaw + 2.5) * 6);
       ctx.lineTo(a + Math.cos(yaw - 2.5) * 6, b + Math.sin(yaw - 2.5) * 6);
       ctx.fill();
-      ctx.fillStyle = "#15191e"; ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif';
+      ctx.fillStyle = palette.ink; ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif';
       ctx.fillText(nameOf(r.id), a, b + 28);
       ctx.globalAlpha = 1;
     }
@@ -736,7 +768,7 @@
   }, 250);
 
   // -- boot ----------------------------------------------------------------------------------------------------------------------
-  resize(); setTool("select"); renderTasks(); renderWaypoints();
+  applyTheme(); resize(); setTool("select"); renderTasks(); renderWaypoints();
   refreshRoster(); loadWaypoints(); loadStations(); pollSession();
   setInterval(loadWaypoints, 10000); // another operator may have added pins
   setInterval(refreshRoster, 15000);
