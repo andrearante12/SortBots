@@ -9,6 +9,7 @@ only assume. The measurements go back into the configs.
 |---|---|
 | `deploy.py` | Fleet list → one bundle per node: `router-setup.sh` (OpenWrt), host network, Zenoh env, UDP Status endpoint, chrony |
 | `probe.py` | UDP round-trip probe: latency, loss and the longest outage (= reroute time). Standard library only, no ROS |
+| `firmware.py` | Builds the OpenWrt images with the mesh packages baked in (step 1) |
 | `router_stats.sh` | Run on a router over ssh: neighbors, link quality, bitrates, channel busy % |
 | `../../scripts/fleet_bridge.sh` | Runs zenoh-bridge-ros2dds from a bundle: the robots' `/fleet/*` topics onto the mesh (step 7) |
 
@@ -37,26 +38,47 @@ Broadcom); dual band for later; ≥ 16 MB flash, ≥ 128 MB RAM; an Ethernet
 port for the Jetson; runs from robot power. Antennas: ordinary 2–3 dBi
 omnis, mounted vertical and above the robot's metal frame.
 
-## 1. Flash OpenWrt
+## The lab routers
 
-Stock OpenWrt 23.05 or newer from the device page on openwrt.org. Reset to
-defaults. The router answers on `192.168.1.1` over its LAN port.
+| Router | Chip | Power | Role |
+|---|---|---|---|
+| GL.iNet GL-MT6000 (Flint 2) | MT7986, mt76 | 12 V wall | **gateway**, wired to the laptop |
+| GL.iNet GL-MT3000 (Beryl AX) ×2 | MT7981, mt76 | 5 V USB-C | **robot_1**, **robot_2**, one per robot, from its power bank |
 
-## 2. Install the mesh packages (once per router)
+Both are upstream OpenWrt `mediatek/filogic` targets. mt76 supports 802.11s
+and SAE. Label each one with its role before flashing.
 
-The default `wpad-basic-*` can't do mesh, and batman-adv isn't installed:
+## 1. Build the images (laptop, once)
 
-```sh
-opkg update
-opkg remove wpad-basic-mbedtls          # or wpad-basic-wolfssl, whichever is present
-opkg install wpad-mesh-mbedtls kmod-batman-adv batctl-default
+```bash
+/usr/bin/python3 -m commsim.hw.firmware --out ~/sortbots-firmware
 ```
 
-`opkg update` needs internet on the router's WAN port. Use a phone hotspot
-or your own router, **never eduroam**. Without internet, download the same
-`.ipk` files for your exact release and target on another machine, then
-`scp -O` them over and `opkg install ./*.ipk`. OpenWrt 25.x uses `apk add`
-in place of `opkg install`.
+This builds stock OpenWrt 25.12.5 plus `wpad-mesh-mbedtls`, `kmod-batman-adv`,
+`batctl-default` and LuCI on OpenWrt's own build service, then checks each
+download's sha256. It sends only the model and package list, never anything
+from a bundle. Reproducible: the 2026-10-15 builds were
+`gl-mt3000…` sha256 `1a76bdea…8e2b` and `gl-mt6000…` `b214ce48…d2b9`.
+
+## 2. Flash (each router)
+
+From GL.iNet's stock firmware, over its own Wi-Fi (the SSID and password are
+on the label):
+
+1. Browse to `http://192.168.8.1` and set an admin password if asked.
+2. **System → Upgrade → Local Upgrade**: upload the `.bin` for that model.
+   **Untick "Keep Settings."** Confirm the warning that this is not GL.iNet
+   firmware.
+3. Wait about 3 minutes, until the LED settles. Don't unplug it during this.
+
+Stock OpenWrt then boots with **Wi-Fi off**, LAN at `192.168.1.1` and DHCP on
+the LAN port. From here on you need an **Ethernet cable** into a LAN port
+(not WAN; on the MT3000 the LAN port is the 1 GbE one). The mesh packages are
+already in the image, so the routers never need internet.
+
+If the router won't boot, use U-Boot recovery. Unplug it, hold reset, power
+it on, and keep holding until the LED blinks. Set your Ethernet to
+`192.168.1.2/24`, browse to `http://192.168.1.1` and upload the same `.bin`.
 
 ## 3. Generate the bundles (laptop, from the repo root)
 
@@ -86,6 +108,11 @@ differ. A USB-Ethernet adapter on the gateway laptop is usually
 named `enx<mac>`.
 
 ## 4. Configure each router
+
+Checked 2026-10-15 against an OpenWrt 25.12 root filesystem (Docker) seeded
+with the MT3000's stock config: all `uci` steps apply, the stock open APs are
+removed, the 5 GHz radio stays off, and bat0 joins `br-lan`. Not yet checked
+on the router itself.
 
 Label the routers first. Then, from a laptop plugged into that router's LAN port:
 
