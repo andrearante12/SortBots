@@ -335,12 +335,15 @@ def _make_per_robot_actions(
 
     # Fleet gateway: takes /fleet/task_request, announces, keeps
     # /fleet/task_board. Once per bringup, like the operator's laptop it stands
-    # in for.
-    actions.append(ExecuteProcess(
-        cmd=["python3", os.path.join(REPO_ROOT, "nodes", "fleet_tasks.py"), "--gateway"],
-        output="screen",
-        condition=IfCondition(task_manager),
-    ))
+    # in for. Sim only: a real robot's bringup is one of several on the mesh,
+    # and each starting a gateway would put several wire-id-0 senders on
+    # /fleet/tasks. The real gateway is the laptop (commsim/hw/README.md).
+    if platform != "real":
+        actions.append(ExecuteProcess(
+            cmd=["python3", os.path.join(REPO_ROOT, "nodes", "fleet_tasks.py"), "--gateway"],
+            output="screen",
+            condition=IfCondition(task_manager),
+        ))
 
     # Fuses every robot's own /<rid>/map into the world-anchored /map (see
     # that node's docstring). Once per bringup, not per robot — it needs the
