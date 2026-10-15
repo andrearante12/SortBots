@@ -167,3 +167,8 @@ need to talk to each other over the LAN.
   `imu_filter_madgwick` (already in the image) to `/<id>/imu`. Then
   `wait_imu_to_init:=true`.
 - **cuVSLAM** (Isaac ROS) in place of RTAB-Map's visual odometry.
+- **Fleet mesh:** each robot carries an OpenWrt router, and
+  `scripts/jetson.sh bridge start <bundle>` puts this robot's `/fleet/*` topics
+  (only those) onto the mesh. The DDS discovery range stays LOCALHOST. Runbook:
+  `commsim/hw/README.md`, steps 1–7. Rebuild the image first: it now contains
+  the pinned zenoh-bridge-ros2dds.

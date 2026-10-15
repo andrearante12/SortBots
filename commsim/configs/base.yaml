@@ -123,6 +123,21 @@ hardware:
   robot_iface: enP8p1s0
   gateway_iface: eth0           # placeholder: the operator laptop's port
   htmode: HT20                  # 20 MHz, matches the model and emulation
+  # The robots' own ROS stack (RTAB-Map, RealSense, Nav2) stays on local
+  # Fast DDS, discovery LOCALHOST (scripts/jetson.sh). zenoh-bridge-ros2dds
+  # carries ONLY these topics across the mesh, over the same zenoh
+  # listen/connect/lease settings the emulation measured: a camera or map
+  # topic on the radio would swamp a channel sized for ~1% busy. Names must
+  # match nodes/fleet_radio.py and nodes/fleet_tasks.py (tests/fleet_bridge_test.py).
+  ros_bridge:
+    topics: [/fleet/status, /fleet/intent, /fleet/tasks]
+    # zenoh priority (1 highest .. 7, default 5): task protocol ahead of the
+    # 5 Hz Status stream when the link queue backs up during a reroute.
+    priorities: {/fleet/tasks: 4}
+    # Robots: the container's default domain. Gateway laptop: its own domain,
+    # so an Isaac sim on the same laptop (domain 0, also /fleet/* and
+    # robot_0) can never leak onto the real fleet or vice versa.
+    domain: {robot: 0, gateway: 42}
 
 run:
   warmup_s: 60

@@ -128,3 +128,33 @@ def test_probe_summary_finds_the_outage(tmp_path):
             w.writerow([i, t, "" if lost else t + 2_000_000])
     s = P.summary(str(p))
     assert "delivered 0.6250" in s and "rtt p50 2.0 ms" in s and "longest outage 1.51 s" in s
+
+
+def test_bridge_carries_only_fleet_topics_over_the_measured_transport(tmp_path):
+    out = bundle(tmp_path)
+    for name in ("gateway", "robot_1", "robot_2"):
+        conf = F.json.loads((out / name / "bridge.json5").read_text())
+        router = F.json.loads((out / name / "zenohd.json5").read_text())
+        assert conf["connect"] == router["connect"] and conf["transport"] == router["transport"]
+        assert conf["listen"]["endpoints"] == [e for e in router["listen"]["endpoints"]
+                                               if "127.0.0.1" not in e]
+        ros = conf["plugins"]["ros2dds"]
+        assert ros["allow"]["publishers"] == ["^/fleet/status$", "^/fleet/intent$", "^/fleet/tasks$"]
+        assert ros["ros_automatic_discovery_range"] == "LOCALHOST"
+    gw = F.json.loads((out / "gateway" / "bridge.json5").read_text())
+    assert gw["plugins"]["ros2dds"]["domain"] == 42  # never the sim's domain 0
+    assert "SORTBOTS_ROBOT_ID=robot_0" in (out / "robot_1" / "fleet.env").read_text()
+    assert [r["sortbots_id"] for r in F.json.loads((out / "fleet.json").read_text())] == [
+        "gateway", "robot_0", "robot_1"]
+
+
+def test_bridge_without_allow_list_is_a_violation(tmp_path):
+    out = bundle(tmp_path)
+    p = out / "robot_1" / "bridge.json5"
+    conf = F.json.loads(p.read_text())
+    del conf["plugins"]["ros2dds"]["allow"]
+    conf["plugins"]["ros2dds"]["ros_automatic_discovery_range"] = "SUBNET"
+    p.write_text(F.json.dumps(conf))
+    bad = F.check_dir(out, "10.42.0.0/24")
+    assert any("allow is empty" in v for v in bad)
+    assert any("not LOCALHOST" in v for v in bad)

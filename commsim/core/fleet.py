@@ -107,6 +107,29 @@ def zenoh_router_config(node: Node, fleet: list[Node], cfg: dict) -> dict:
     }
 
 
+def ros_bridge_config(node: Node, fleet: list[Node], cfg: dict) -> dict:
+    """zenoh-bridge-ros2dds config for one real host: the zenohd router config
+    above (same endpoints, lease, scouting) plus the ROS side, which exposes
+    only the fleet topics. Without an allow list the bridge forwards every
+    topic it discovers, cameras included (check_bridge_config refuses that)."""
+    rb = cfg.get("hardware", {}).get("ros_bridge", {})
+    # Anchored: the bridge matches allow entries as regexes, and an
+    # unanchored "/fleet/status" would also pass "/fleet/status_debug".
+    allow = ["^" + re.escape(t) + "$" for t in rb.get("topics", [])]
+    conf = zenoh_router_config(node, fleet, cfg)
+    # Fleet address only: nothing on the host speaks zenoh to the bridge (the
+    # ROS side is DDS over loopback), so the localhost listener zenohd keeps
+    # for rmw_zenoh nodes would just be one more open port.
+    conf["listen"]["endpoints"] = [f"tcp/{node.ip}:{int(cfg['fleet'].get('zenoh_port', 7447))}"]
+    conf["plugins"] = {"ros2dds": {
+        "domain": int(rb.get("domain", {}).get("gateway" if node.is_gateway else "robot", 0)),
+        "ros_automatic_discovery_range": "LOCALHOST",
+        "allow": {"publishers": allow, "subscribers": allow},
+        "pub_priorities": [f"^{re.escape(t)}$={p}" for t, p in rb.get("priorities", {}).items()],
+    }}
+    return conf
+
+
 def zenoh_override(conf: dict) -> str:
     """The same router config as a ZENOH_CONFIG_OVERRIDE string, layered on
     rmw_zenoh's DEFAULT_RMW_ZENOH_ROUTER_CONFIG. Those defaults are a 60 s
@@ -201,6 +224,22 @@ def check_zenoh_config(conf: dict, subnet: str) -> list[str]:
     return bad
 
 
+def check_bridge_config(conf: dict, subnet: str) -> list[str]:
+    bad = check_zenoh_config(conf, subnet)
+    ros = conf.get("plugins", {}).get("ros2dds", {})
+    allow = ros.get("allow", {})
+    if not allow.get("publishers") or not allow.get("subscribers"):
+        bad.append("ros2dds.allow is empty: the bridge would put every ROS topic on the mesh")
+    for kind in ("service_servers", "service_clients", "action_servers", "action_clients"):
+        if allow.get(kind):
+            bad.append(f"ros2dds.allow.{kind} is set: only fleet topics cross the mesh")
+    if ros.get("ros_automatic_discovery_range") != "LOCALHOST":
+        bad.append("ros2dds discovery is not LOCALHOST: the bridge's DDS side would reach other hosts")
+    if "rest" in conf.get("plugins", {}):
+        bad.append("rest plugin enabled: unauthenticated admin API")
+    return bad
+
+
 def check_status_udp_config(conf: dict, subnet: str) -> list[str]:
     net = ipaddress.ip_network(subnet)
     bad = []
@@ -220,6 +259,8 @@ def check_dir(out: Path, subnet: str) -> list[str]:
         return [f"{out}: no */zenohd.json5 found"]
     for f in files:
         bad += [f"{f}: {v}" for v in check_zenoh_config(json.loads(f.read_text()), subnet)]
+    for f in sorted(out.glob("*/bridge.json5")):
+        bad += [f"{f}: {v}" for v in check_bridge_config(json.loads(f.read_text()), subnet)]
     for f in sorted(out.glob("*/status_udp.json")):
         bad += [f"{f}: {v}" for v in check_status_udp_config(json.loads(f.read_text()), subnet)]
     return bad

@@ -1,6 +1,7 @@
 """Fleet list -> per-node bundles for REAL hardware: one OpenWrt router setup
 script per node, plus the host side (Jetson / operator laptop): static mesh
-address, zenohd + node env, UDP Status endpoint, chrony.
+address, zenohd + node env, UDP Status endpoint, chrony, and the
+zenoh-bridge-ros2dds config that puts the robots' /fleet/* topics on the mesh.
 
     python3 -m commsim.hw.deploy commsim/configs/base.yaml commsim/configs/hw_lab.yaml \\
         --mesh-key-file ~/.config/sortbots/mesh.key --out commsim/results/hw
@@ -232,6 +233,23 @@ def env_files(node: F.Node, fleet: list[F.Node], cfg: dict) -> tuple[str, str]:
     return router, nodes
 
 
+def sortbots_id(node: F.Node) -> str:
+    """SortBots name for a fleet node. The wire ids agree (nodes/fleet_tasks.py:
+    robot_N is N+1, gateway 0), but the names are off by one: this bundle's
+    robot_1 is the robot launched as --robot-id robot_0."""
+    return "gateway" if node.is_gateway else f"robot_{node.robot_id - 1}"
+
+
+def fleet_env(node: F.Node, cfg: dict) -> str:
+    rb = cfg["hardware"].get("ros_bridge", {})
+    domain = int(rb.get("domain", {}).get("gateway" if node.is_gateway else "robot", 0))
+    role = "the gateway's fleet_tasks.py --gateway" if node.is_gateway else "the robot stack"
+    return (f"# {node.name}: read by scripts/fleet_bridge.sh. ROS_DOMAIN_ID must match\n"
+            f"# {role}, which the bridge finds over localhost only.\n"
+            f"SORTBOTS_ROBOT_ID={sortbots_id(node)}\n"
+            f"ROS_DOMAIN_ID={domain}\n")
+
+
 def apply_script(node: F.Node, iface: str) -> str:
     return f"""#!/usr/bin/env bash
 # Apply {node.name}'s host network + time config. Run with sudo on that host.
@@ -302,6 +320,8 @@ def deploy(cfg: dict, out: Path, key: str, sources: str,
             "router.env": router_env,
             "node.env": node_env,
             "apply-host.sh": apply_script(node, iface),
+            "bridge.json5": json.dumps(F.ros_bridge_config(node, fleet, cfg), indent=2) + "\n",
+            "fleet.env": fleet_env(node, cfg),
         }
         for name, text in files.items():
             (d / name).write_text(text)
@@ -309,6 +329,7 @@ def deploy(cfg: dict, out: Path, key: str, sources: str,
     fl = json.loads((out / "fleet.json").read_text())
     for row, node in zip(fl, fleet):
         row["router_ip"] = router_ip(node, cfg)
+        row["sortbots_id"] = sortbots_id(node)
     (out / "fleet.json").write_text(json.dumps(fl, indent=2) + "\n")
     return fleet
 
@@ -339,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
     if bad:
         return 1
     for n in fleet:
-        print(f"{n.name:10s} host {n.ip:15s} router {router_ip(n, cfg)}")
+        print(f"{n.name:10s} host {n.ip:15s} router {router_ip(n, cfg):15s} runs {sortbots_id(n)}")
     print(f"bundles in {a.out} (contain the mesh key; don't commit or share them)")
     return 0
 

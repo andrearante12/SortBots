@@ -5,6 +5,7 @@
 #   scripts/jetson.sh build     # build the image (first time ~10-20 min)
 #   scripts/jetson.sh console   # start the dashboard console in the container
 #   scripts/jetson.sh shell     # a shell in the running container, ROS sourced
+#   scripts/jetson.sh bridge start BUNDLE   # fleet mesh bridge (commsim/hw/README.md step 7)
 #   scripts/jetson.sh logs      # follow the console's output
 #   scripts/jetson.sh stop      # stop the robot pipeline, the console, the container
 #   scripts/jetson.sh status    # container + camera + console at a glance
@@ -134,6 +135,24 @@ case "${1:-}" in
     running || { echo "[jetson] container '$NAME' is not running:  scripts/jetson.sh console"; exit 1; }
     exec docker exec -it -w "$REPO_ROOT" "$NAME" \
       bash -c "source /opt/ros/jazzy/setup.bash; export RMW_IMPLEMENTATION=rmw_fastrtps_cpp; exec bash -i"
+    ;;
+
+  bridge)
+    # The fleet mesh bridge, inside the container (it needs the image's
+    # glibc). BUNDLE is this robot's commsim.hw.deploy folder; it must be
+    # under the repo or ~/.ros, the only host paths the container sees.
+    running || { echo "[jetson] container '$NAME' is not running:  scripts/jetson.sh console"; exit 1; }
+    case "${2:-}" in
+      start)
+        [[ -n "${3:-}" ]] || { echo "usage: scripts/jetson.sh bridge start BUNDLE_DIR"; exit 2; }
+        bundle=$(realpath "$3")
+        [[ "$bundle" == "$REPO_ROOT"/* || "$bundle" == "$HOME/.ros"/* ]] || {
+          echo "ERROR: $bundle isn't visible in the container: put it under $REPO_ROOT or ~/.ros"; exit 1; }
+        exec docker exec "$NAME" "$REPO_ROOT/scripts/fleet_bridge.sh" start "$bundle" ;;
+      stop|status)
+        exec docker exec "$NAME" "$REPO_ROOT/scripts/fleet_bridge.sh" "$2" ;;
+      *) echo "usage: scripts/jetson.sh bridge start BUNDLE_DIR | stop | status"; exit 2 ;;
+    esac
     ;;
 
   logs)

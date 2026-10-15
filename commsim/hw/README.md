@@ -10,6 +10,7 @@ only assume. The measurements go back into the configs.
 | `deploy.py` | Fleet list → one bundle per node: `router-setup.sh` (OpenWrt), host network, Zenoh env, UDP Status endpoint, chrony |
 | `probe.py` | UDP round-trip probe: latency, loss and the longest outage (= reroute time). Standard library only, no ROS |
 | `router_stats.sh` | Run on a router over ssh: neighbors, link quality, bitrates, channel busy % |
+| `../../scripts/fleet_bridge.sh` | Runs zenoh-bridge-ros2dds from a bundle: the robots' `/fleet/*` topics onto the mesh (step 7) |
 
 ## How many routers
 
@@ -81,7 +82,8 @@ The generator refuses to write:
 
 Interface names are placeholders in `base.yaml` `hardware:`. Check
 `ip link` on each host and pass `--robot-iface` / `--gateway-iface` if they
-differ.
+differ. A USB-Ethernet adapter on the gateway laptop is usually
+named `enx<mac>`.
 
 ## 4. Configure each router
 
@@ -131,9 +133,75 @@ commsim/scripts/check_isolation.sh --subnet 10.42.0.0/24 --configs commsim/resul
 When this works on 2.4 GHz, set `fleet.bands: [g24, g5]` in `hw_lab.yaml`.
 Then regenerate the bundles and rerun step 4.
 
-## 7. Run the stack
+## 7. Run the SortBots stack over the mesh
 
-On each host, after building `commsim/ws` there:
+Each robot's own ROS graph (RealSense, RTAB-Map, Nav2) stays on local Fast
+DDS, which only looks for other nodes on the same machine (`scripts/jetson.sh`).
+**zenoh-bridge-ros2dds** is the only thing that crosses the mesh, and it
+carries exactly `/fleet/status`, `/fleet/intent` and `/fleet/tasks`
+(`hardware.ros_bridge` in `base.yaml`). It uses the zenoh endpoints, lease
+and scouting settings from step 3, so the timer ordering still holds. A camera
+or map topic on the radio would swamp a channel sized for ~1% busy, which is
+why the bridge refuses to be generated without its allow list.
+
+| Bundle | Runs as | ROS domain |
+|---|---|---|
+| `robot_1` | `--robot-id robot_0` | 0 (the container's) |
+| `robot_2` | `--robot-id robot_1` | 0 |
+| `gateway` | `fleet_tasks.py --gateway` | 42, so an Isaac sim on the same laptop (domain 0) never reaches the real fleet |
+
+The names are off by one, but the wire ids agree: `robot_N` is N+1 and the
+gateway is 0. `fleet.env` in each bundle states the id and domain.
+
+**Robot (Jetson).** Rebuild the image once (`scripts/jetson.sh build`; it now
+contains the pinned bridge). Copy the bundle under `~/.ros/`, since the
+container can only see that and the repo. Then:
+
+```bash
+scripts/jetson.sh console                                   # as before
+scripts/jetson.sh bridge start ~/.ros/sortbots_fleet/robot_1
+scripts/jetson.sh bridge status
+```
+
+`fleet_radio` already runs in every robot bringup. `fleet_tasks` runs only
+with `task_manager`, which `run_robot.sh` keeps off until there is a base
+driver. To test the auction before that, start it by hand in
+`scripts/jetson.sh shell` with `python3 nodes/fleet_tasks.py --robot-id robot_0`.
+
+**Gateway (laptop).** Run these from a plain shell, not one with the sim:
+
+```bash
+scripts/fleet_bridge.sh install                             # once: pinned binary, sha256-checked
+scripts/fleet_bridge.sh start commsim/results/hw/gateway
+bash -c 'source ~/ros2_jazzy/install/setup.bash
+  export ROS_DOMAIN_ID=42 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST
+  python3 nodes/fleet_tasks.py --gateway'
+```
+
+Request a task from the same domain:
+`ros2 topic pub --once /fleet/task_request std_msgs/String '{data: "{\"pickup\": \"shelf_a\", \"dropoff\": \"zone_a\"}"}'`
+Then watch `/fleet/task_board`.
+
+Checked offline 2026-10-15 with real generated bundles on loopback addresses
+and one ROS domain per "host". Both robots' Status reached the gateway, and
+the nearer robot won and was the only one dispatched. A `/robot_0/camera`
+topic and a `/fleet/status_debug` topic did not cross.
+
+**One condition before trusting bids on hardware:** a bid is a distance in
+the robot's own `map` frame. In sim every robot shares one frame. On real
+robots that only holds if they all localize on the same saved map
+(`library_localize`). Two robots each mapping from scratch bid in unrelated
+frames.
+
+**Known divergence:** the design adopted best-effort UDP for Status
+(`protocol.status_transport: udp`, sim_log steps 20–22). Through the bridge,
+`/fleet/status` rides the same zenoh TCP session as the task protocol. At 2
+robots that costs little, but measure the link-block Status gap from step 8
+with the bridge running before scaling up.
+
+### Calibration stubs (no SortBots stack)
+
+The step 8 measurements use the commsim stubs over rmw_zenoh, as in emulation:
 
 ```bash
 source /opt/ros/jazzy/setup.bash && source commsim/ws/install/setup.bash
@@ -145,11 +213,8 @@ python3 commsim/stubs/status_stub.py --robot-id 1 --transport udp --bind 10.42.0
 
 `--bind` and `--peers` come from that node's `status_udp.json`. The router and
 the nodes need separate env files: one shared override would make every node
-try to listen on the router's mesh port.
-
-JetPack 6 is Ubuntu 22.04, but ROS 2 Jazzy targets 24.04. On the Jetson,
-plan on a Jazzy container (with `--network host`) or a source build.
-Confirm which one before the demo.
+try to listen on the router's mesh port. Stop the bridge first, because both
+listen on the same zenoh port.
 
 ## 8. Calibration: what to measure and what it replaces
 
@@ -180,6 +245,8 @@ Everything in this folder is checked offline: generated files, shell
 syntax, addressing and isolation (`commsim/tests/hw_test.py`). None of it
 has run on a router yet. The parts most likely to need a fix on first
 contact:
+- The bridge inside the Jetson container: its Cyclone DDS pinned to `lo`
+  finding the robot's Fast DDS (checked on a laptop, not on a Jetson).
 - The 802.11b-rate hotplug hook. Check `tx bitrate` in step 6.
 - `mcast_rate` in mesh mode on your driver.
 - The host interface names.
