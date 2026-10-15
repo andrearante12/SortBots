@@ -35,7 +35,7 @@
 #
 # Typical unattended run:
 #   scripts/sim_ctl.sh console start
-#   scripts/sim_ctl.sh start explore_fresh headless=true
+#   scripts/sim_ctl.sh start explore_fresh
 #   scripts/sim_ctl.sh wait running --timeout 420   # first run streams NVIDIA assets
 #   ...
 #   scripts/sim_ctl.sh stop

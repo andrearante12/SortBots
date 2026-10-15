@@ -26,7 +26,7 @@ run:
   scene: nvidia
   robots: 2              # robot_ids derives from this, in configs/robots.yaml order
   robot_id: robot_0      # which robot --localize/--resume/--map/--teleop would apply to
-  headless: false
+  headless: true
   chase_cam: false       # the toggle; false wins over chase_cam_robots below
   chase_cam_robots: 1    # how many robots get one WHEN enabled — robot_0 only,
                          # since the dashboard never shows robot_1's chase feed

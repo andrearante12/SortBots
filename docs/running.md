@@ -243,8 +243,8 @@ background:
 ```bash
 scripts/sim_ctl.sh console start                  # detached; waits until :8081 answers
 scripts/sim_ctl.sh list                           # scenarios (works with no console up)
-scripts/sim_ctl.sh dry-run explore_fresh headless=true   # print the command, launch nothing
-scripts/sim_ctl.sh start explore_fresh headless=true
+scripts/sim_ctl.sh dry-run explore_fresh headless=false   # print the command, launch nothing
+scripts/sim_ctl.sh start explore_fresh                  # headless; headless=false opens the window
 scripts/sim_ctl.sh wait running --timeout 420     # first run streams NVIDIA assets
 scripts/sim_ctl.sh status                         # state, phase, scenario, elapsed
 scripts/sim_ctl.sh log --lines 100
@@ -292,7 +292,7 @@ run:                          # allowlisted keys only — see RUN_FLAGS
   scene: nvidia               # nvidia | primitive
   robots: 1                   # 1..2
   robot_id: robot_0
-  headless: false
+  headless: true              # false opens the Isaac window (-> --no-headless)
   chase_cam: true             # false -> --no-chase-cam
   chase_cam_robots: null      # null = every spawned robot; int = first N only
   explore: true
@@ -311,7 +311,7 @@ Unknown `run:` keys are rejected, not forwarded — the card renders with status
 ```bash
 python3 webui/session.py --list
 python3 webui/session.py --print-argv explore_resume        # prints the exact command
-python3 webui/session.py --print-argv explore_fresh --set headless=true
+python3 webui/session.py --print-argv explore_fresh --set headless=false
 ```
 
 `status: planned` is for scenarios whose environment doesn't exist yet — the

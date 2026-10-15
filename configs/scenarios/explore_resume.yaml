@@ -19,7 +19,7 @@ run:
   scene: nvidia
   robots: 1
   robot_id: robot_0
-  headless: false
+  headless: true
   chase_cam: false       # off by default for speed — see explore_fresh.yaml
   explore: true
   resume: true
