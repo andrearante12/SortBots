@@ -180,11 +180,13 @@ workstation GPU. Offload changes only where the database is:
 - `slam_role:=all`: it is on the Jetson, and `scripts/splat.sh build NAME
   --from http://<jetson>:8081` pulls it over the tailnet as before.
 - `slam_role:=robot`: it is already on the workstation
-  (`~/.ros/sortbots_<id>_ws.db`), so save it into `maps/` there and build with
-  source `local`. `scripts/maps.sh save` assumes the stack it talks to is the
-  local one; with the Jetson running the camera and the workstation running
-  RTAB-Map, check that the grid half of the save finds the workstation's
-  `/<id>/map` (open item).
+  (`~/.ros/sortbots_<id>_ws.db`), so save it there with
+  `scripts/maps.sh save NAME --live-db ~/.ros/<id>_ws.db` (the `--live-db`
+  flag exists for this: the saver otherwise assumes the bringup's default
+  path, and waits for the wrong `.back` file) and build with source `local`.
+  Open item: the grid half of the save reads `/map` from `nodes/map_merge.py`,
+  which runs in the Jetson's bringup; with `ROS_STATIC_PEERS` set both ways it
+  should be visible on the workstation, but that is unverified.
 
 The bench's exported databases were checked the same way the splat dataset
 module does it: cloud points re-projected into the exported cameras match the

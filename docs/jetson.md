@@ -169,6 +169,14 @@ SORTBOTS_WORKSTATION=<workstation address> scripts/jetson.sh console
 Without a workstation, `--slam-role all` (the default) still maps on the
 Jetson, with RTAB-Map at nice 10 so obstacles and odometry win the CPU.
 
+Saving and splatting an offloaded map happens on the workstation, where the
+database is (`~/.ros/sortbots_<id>_ws.db`, not the default path):
+
+```bash
+scripts/maps.sh save NAME --robot-id robot_0 --live-db ~/.ros/sortbots_robot_0_ws.db
+scripts/splat.sh build NAME          # source local: no --from <jetson> fetch
+```
+
 Bandwidth: full-resolution keyframes are ~2.5-3.8 Mb/s per robot, about 27%
 of a 2.4 GHz mesh channel per hop. Over the fleet mesh, use
 `keyframe_decimation:=2` (~1 Mb/s) — or a wired/5 GHz link for a single robot.
