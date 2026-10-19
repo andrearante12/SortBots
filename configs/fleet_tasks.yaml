@@ -9,7 +9,11 @@ protocol:
   task_lease_s: 10.0
   reclaim_margin_s: 2.0
   status_timeout_s: 6.0
-  max_owned_tasks: 1            # task_manager works one task at a time
+  # Up to 3 tasks per robot (team decision 2026-10-19). task_manager queues
+  # them and works them in order; a bid for another one includes the backlog
+  # (commsim protocol.py Params.max_owned_tasks), and each task still has to
+  # pass the radius and battery criteria on its own.
+  max_owned_tasks: 3
   lease_beacon_hz: 1.0          # the ONLY lease renewal here — see fleet_tasks.py
   max_open_bids: 3              # commsim sim_log step 17: unlimited stormed the channel
   # Battery (commsim protocol.py Params): placeholders until measured on the

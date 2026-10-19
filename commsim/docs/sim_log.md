@@ -170,6 +170,14 @@ than gain (`Step 23` has the link-budget table).
   every robot, which is right for 2).
 - Decide whether duplicate work during a network split is acceptable long
   term, and whether a 2.4 GHz outage needs a fallback.
+- Decided 2026-10-19: each task goes to one robot (the auction winner), and
+  a robot may hold up to 3 (`max_owned_tasks: 3` on the robots; the DES
+  baseline stays at 1). A bid now includes the backlog — time to finish
+  what the robot owns plus the drive from its last dropoff — and the
+  battery gate sees the whole promise. 30-task burst, V2, n = 6 and 10,
+  2 seeds: PASS at 1 and at 3; auction max 1.1–2.2 s → 1.2–1.6 s (fewer
+  "won at capacity, step aside" rounds). Each robot still works one task at
+  a time; the others wait in claim order (task_manager's queue).
 
 ### Where the details are
 Everything below this section is the chronological run log (what was done,

@@ -166,7 +166,7 @@ class FleetTasks:
 
     # ---- inputs -----------------------------------------------------------
 
-    def _cost(self, pickup, dropoff=None):
+    def _cost(self, pickup, dropoff=None, start=None):
         if self.pose is None:
             return None  # no localization yet: we cannot say how far it is
         until = self.failed.get((tuple(pickup), tuple(dropoff or ())))
@@ -176,7 +176,9 @@ class FleetTasks:
         # here would preempt the path request of whatever Nav2 is executing
         # (ComputePathToPose takes one goal at a time), and a rack between
         # robot and shelf makes the line an underestimate. Known limitation.
-        d = math.dist(self.pose, pickup)
+        # `start` is the last dropoff of what we already own (the allocator
+        # bids with the backlog): task_manager works its queue in order.
+        d = math.dist(start if start is not None else self.pose, pickup)
         leg = math.dist(pickup, dropoff) if dropoff is not None else 0.0
         return d / self.speed, d, (d + leg) / self.speed
 

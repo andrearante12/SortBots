@@ -297,3 +297,49 @@ def test_battery_gate_counts_the_dropoff_leg():
 def test_no_battery_model_bids_on_travel_time():
     a = Allocator(1, Params(), cost_fn=lambda pk, dp: (7.0, 1.0))
     assert a.bid_cost(7.0, 7.0) == 7.0
+
+
+# ---- several tasks per robot (max_owned_tasks > 1, team decision 2026-10-19)
+
+def test_loaded_robot_bids_with_its_backlog_so_the_idle_one_wins():
+    # Robot 1 owns a long task and stands next to the second pickup; robot 2
+    # is idle 12 m away. Measured from where robot 1 stands it would win and
+    # the task would wait behind its queue; with the backlog, robot 2 wins.
+    net = fleet({1: (0, 0), 2: (12, 0)}, max_owned_tasks=3, bid_radius_m=1000)
+    net.run(1.0)
+    net.announce(GW, 1, (1, 0), (100, 0))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.announce(GW, 2, (2, 0), (3, 0))
+    net.run(3.0)
+    assert net.self_owners(2) == [2]
+
+
+def test_robot_owns_up_to_the_cap_and_the_rest_goes_elsewhere():
+    net = fleet({1: (0, 0), 2: (50, 0)}, max_owned_tasks=3, bid_radius_m=1000)
+    net.run(1.0)
+    for tid in (1, 2, 3, 4):
+        net.announce(GW, tid, (1, 0), (2, 0))
+    for _ in range(int(8 / net.tick_s)):
+        net.step()
+        assert all(len(r.alloc.owned()) <= 3 for r in net.robots.values())
+    owners = sorted(net.self_owners(t)[0] for t in (1, 2, 3, 4))
+    assert owners == [1, 1, 1, 2], owners
+
+
+def test_backlog_counts_toward_the_battery_gate():
+    # 30 % with a 20 % reserve at 0.05 %/s = 200 s of driving = 100 m. The
+    # first task (60 m) fits. The second (50 m from where the robot stands)
+    # would fit on its own but not after the first, which ends 60 m away:
+    # the robot must not promise a task it cannot finish.
+    net = fleet({1: (0, 0)}, max_owned_tasks=3, bid_radius_m=1000,
+                battery_drain_pct_per_s=0.05, battery_reserve_pct=20.0)
+    net.robots[1].battery_pct = 30.0
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (60, 0))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.announce(GW, 2, (0, 0), (50, 0))
+    net.run(3.0)
+    assert net.self_owners(2) == []
+    assert net.events("battery_gated")

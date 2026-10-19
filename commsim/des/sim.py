@@ -421,6 +421,7 @@ class Robot:
         self.is_gw = rid == GW
         self.route: list = []
         self.task = None
+        self.queue: list = []  # owned tasks waiting behind self.task, claim order
         self.leg = 0
         self.replanned = False
         self.new_obstacles: list = []
@@ -438,14 +439,19 @@ class Robot:
         return Allocator(self.id, self.sim.params, None if self.is_gw else self.cost, rng,
                          is_gateway=self.is_gw, battery_fn=lambda: self.battery_pct)
 
-    def cost(self, pickup, dropoff=None):
+    def cost(self, pickup, dropoff=None, start=None):
         lay = self.sim.layout
-        d = path_length(lay.route(self.pos, pickup))
+        here = start if start is not None else self.pos
+        d = path_length(lay.route(here, pickup))
         leg = path_length(lay.route(pickup, dropoff)) if dropoff is not None else 0.0
-        return d / self.sim.speed, math.dist(self.pos, pickup), (d + leg) / self.sim.speed
+        return d / self.sim.speed, math.dist(here, pickup), (d + leg) / self.sim.speed
 
-    # motion
+    # motion. Like task_manager: one task driven at a time, the rest of what
+    # the robot owns (max_owned_tasks > 1) waits in claim order.
     def start_task(self, tid):
+        if self.task is not None:
+            self.queue.append(tid)
+            return
         t = self.alloc.tasks[tid]
         lay = self.sim.layout
         self.task = tid
@@ -453,8 +459,23 @@ class Robot:
         self.leg = len(lay.route(self.pos, t.pickup)) - 1  # waypoints until pickup reached
         self.replanned = True
 
-    def stop_task(self):
-        self.task, self.route = None, []
+    def stop_task(self, tid=None):
+        """Drop one task (queued or in progress), or everything if tid is None."""
+        if tid is None:
+            self.task, self.route, self.queue = None, [], []
+            return
+        if tid in self.queue:
+            self.queue.remove(tid)
+        elif tid == self.task:
+            self.task, self.route = None, []
+            self._start_next()
+
+    def _start_next(self):
+        while self.queue and self.task is None:
+            nxt = self.queue.pop(0)
+            t = self.alloc.tasks.get(nxt)
+            if t is not None and t.state == CLAIMED and t.owner == self.id:
+                self.start_task(nxt)
 
     def move(self, dt):
         if self.battery_pct is not None and self.route:
@@ -476,7 +497,7 @@ class Robot:
                 step = 0
         if self.task is not None and not self.route:
             tid = self.task
-            self.stop_task()
+            self.stop_task(tid)  # moves on to the next queued task, if any
             self.alloc.complete(tid, self.sim.now)
             self.sim.task_done(tid)
             self.sim.flush(self)
@@ -972,8 +993,7 @@ class Sim:
             if w:
                 self.claim_costs.append(e["cost"])
         elif k in ("stop_task", "task_yielded"):
-            if r.task == e["task_id"]:
-                r.stop_task()
+            r.stop_task(e["task_id"])
         elif k == "robot_silent" and w:
             peer = self.nodes[e["peer"]]
             if peer.alive:

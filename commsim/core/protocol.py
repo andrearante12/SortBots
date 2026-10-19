@@ -39,6 +39,11 @@ class Params:
     # after a single link loss (commsim/docs/sim_log.md steps 9 and 14).
     status_timeout_s: float = 6.0
     hold_safe_timeout_s: float = 15.0
+    # Tasks a robot may own at once; it works them in claim order. Above 1 a
+    # bid carries the backlog: the time to finish what it already owns plus
+    # the drive from its last dropoff (2026-10-19, team decision: up to 3 on
+    # the robots). Without that a loaded robot next to a pickup out-bids an
+    # idle one across the room and the task waits behind its queue.
     max_owned_tasks: int = 1
     # Fleet-wide lease renewal. With neighbor-only Status (V3+), robots outside
     # an owner's neighbor cells never saw its Status, so leases expired at them
@@ -85,13 +90,16 @@ class TaskView:
     window_end: Optional[float] = None
     round: int = 0
     rebid_at: Optional[float] = None
+    claimed_at: float = 0.0  # when WE claimed it: the order we work our backlog
 
 
-# cost_fn(pickup, dropoff) -> (travel time to pickup s, straight-line distance
-# to pickup m[, drive time for the whole task s]), or None if this robot cannot
-# take the task at all. The third value feeds the battery gate; without it the
-# gate only sees the pickup leg.
-CostFn = Callable[[tuple, Optional[tuple]], Optional[tuple]]
+# cost_fn(pickup, dropoff[, start]) -> (travel time to pickup s, straight-line
+# distance to pickup m[, drive time for the whole task s]), or None if this
+# robot cannot take the task at all. The third value feeds the battery gate;
+# without it the gate only sees the pickup leg. `start` is passed only when
+# the robot already owns a task (max_owned_tasks > 1): measure from there,
+# not from the robot's position.
+CostFn = Callable[..., Optional[tuple]]
 # battery_fn() -> state of charge in percent, or None if unknown.
 BatteryFn = Callable[[], Optional[float]]
 
@@ -146,6 +154,24 @@ class Allocator:
         return (not self.is_gateway and not self.isolated and self.cost_fn is not None
                 and len(self.owned()) < self.p.max_owned_tasks)
 
+    def _backlog(self) -> tuple[Optional[tuple], float]:
+        """(where we will be, how many seconds from now) once every task we
+        own is done, in claim order. (None, 0) with nothing owned. The task
+        in progress is counted from where we stand, as if not started: a
+        small overestimate that cannot make a loaded robot look idle."""
+        start, ahead = None, 0.0
+        mine = sorted((t for t in self.tasks.values()
+                       if t.state == CLAIMED and t.owner == self.id and t.pickup is not None),
+                      key=lambda t: t.claimed_at)
+        for t in mine:
+            est = self.cost_fn(t.pickup, t.dropoff) if start is None else \
+                self.cost_fn(t.pickup, t.dropoff, start)
+            if est is None:
+                continue
+            ahead += est[2] if len(est) > 2 else est[0]
+            start = t.dropoff if t.dropoff is not None else t.pickup
+        return start, ahead
+
     def bid_cost(self, travel_s: float, task_s: float) -> Optional[float]:
         """Travel time adjusted for battery, or None if the battery gate
         forbids bidding. The adjusted value is what goes on the wire and into
@@ -189,13 +215,18 @@ class Allocator:
         t.window_end = now + self.p.bid_window_s
         if not self._can_take_new() or t.pickup is None:
             return
-        est = self.cost_fn(t.pickup, t.dropoff)
+        start, ahead = self._backlog()
+        est = self.cost_fn(t.pickup, t.dropoff) if start is None else \
+            self.cost_fn(t.pickup, t.dropoff, start)
         if est is None:
             return
-        travel, dist = est[0], est[1]
+        # Both the bid and the battery gate include the backlog: the gate must
+        # see everything we have promised, or a third task could be claimed
+        # that we can only start, not finish.
+        travel, dist = est[0] + ahead, est[1]
         if dist > self._radius(t.round):
             return
-        cost = self.bid_cost(travel, est[2] if len(est) > 2 else travel)
+        cost = self.bid_cost(travel, (est[2] if len(est) > 2 else est[0]) + ahead)
         if cost is None:
             self._event("battery_gated", now, task_id=t.task_id)
             return
@@ -255,6 +286,7 @@ class Allocator:
         t.state, t.owner, t.owner_cost, t.last_renew = CLAIMED, winner, cost, now
         t.window_end, t.round = None, 0
         if winner == self.id:
+            t.claimed_at = now
             self.out.append({"type": "Claim", "task_id": t.task_id, "cost": cost,
                              "lease_s": self.p.task_lease_s})
             self._event("claimed", now, task_id=t.task_id, cost=cost)

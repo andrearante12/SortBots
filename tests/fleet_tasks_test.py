@@ -7,6 +7,7 @@ publish to every node (including the sender, as DDS does).
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -258,3 +259,36 @@ def test_alloc_state_reaches_fleet_radio_status_schema():
                            battery_pct=alloc["battery_pct"])
     st = fr.parse_status(raw)
     assert [t for t, _ in st["owned"]] == [tid] and st["battery_pct"] == 80.0
+
+
+def test_loaded_robot_bids_with_its_backlog_so_the_idle_one_wins():
+    # Up to 3 tasks per robot (team decision 2026-10-19), worked in order. A
+    # robot already holding a long task must not win a second one just
+    # because it stands next to the pickup: the idle one across the aisle
+    # would finish it sooner.
+    zone_b = STATIONS["zone_b"].dock_pose()[:2]
+    assert math.dist(shelf_a(), zone_b) > 1.25  # else robot_0 should win below
+    cfg = {"protocol": {**CFG["protocol"], "max_owned_tasks": 3}}
+    bus = Bus({"robot_0": near(0.5), "robot_1": near(3.0)}, **cfg)
+    bus.run(1.0)
+    t1 = bus.request("shelf_a", "zone_b")
+    bus.run(3.0)
+    assert bus.board(t1)["owner"] == "robot_0"
+    t2 = bus.request("shelf_a", "zone_a")
+    bus.run(3.0)
+    assert bus.board(t2)["owner"] == "robot_1"
+    assert [d["task_id"] for d in bus.dispatched["robot_1"]] == [f"fleet-{t2}"]
+
+
+def test_robot_queues_up_to_three_tasks_then_takes_the_next_when_one_is_done():
+    cfg = {"protocol": {**CFG["protocol"], "max_owned_tasks": 3}}
+    bus = Bus({"robot_0": near(0.5)}, **cfg)
+    bus.run(1.0)
+    tids = [bus.request() for _ in range(4)]
+    bus.run(4.0)
+    assert [d["task_id"] for d in bus.dispatched["robot_0"]] == [f"fleet-{t}" for t in tids[:3]]
+    assert bus.board(tids[3])["owner"] is None
+    bus.report("robot_0", tids[0], "DONE")
+    bus.run(3.0)
+    assert bus.board(tids[3])["owner"] == "robot_0"
+    assert bus.dispatched["robot_0"][-1]["task_id"] == f"fleet-{tids[3]}"

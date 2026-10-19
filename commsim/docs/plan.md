@@ -269,6 +269,12 @@ commsim/
     - Is that acceptable, given the §8 pass condition says both "no duplicate ownership" and "duplicates resolved by tie-break on heal"? If not, the options are:
       - (a) the owner stops when ANY known peer is unheard for the lease. Safe, but one dead robot makes every owner stop.
       - (b) majority quorum: only the side holding a majority of the fleet may reclaim.
+12. **Tasks per robot.** The spec's `max_owned_tasks` was 1 (one task, worked
+    to completion). **Answered 2026-10-19:** a task goes to exactly one robot,
+    the auction winner, and a robot may hold up to 3, worked in claim order.
+    Each still has to pass the radius and battery criteria, and a bid for a
+    further task includes the backlog, or a loaded robot beside a pickup
+    would beat an idle one (`Params.max_owned_tasks`, `Allocator._backlog`).
 
 ## Verification (of the implementation, once approved)
 

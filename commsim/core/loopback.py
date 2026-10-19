@@ -51,8 +51,8 @@ class LoopbackNet:
     def add(self, rid: int, pos=(0.0, 0.0), gateway=False, **kw) -> Robot:
         r = Robot(alloc=None, pos=tuple(pos), **kw)
 
-        def cost_fn(pickup, dropoff=None, r=r):
-            d = math.dist(r.pos, pickup)
+        def cost_fn(pickup, dropoff=None, start=None, r=r):
+            d = math.dist(start if start is not None else r.pos, pickup)
             leg = math.dist(pickup, dropoff) if dropoff is not None else 0.0
             return d / r.speed_mps, d, (d + leg) / r.speed_mps
 
