@@ -79,6 +79,19 @@ LFS_POINTER_MAGIC = b"version https://git-lfs"
 DB_STATES = ("pending", "complete", "pointer", "missing")
 
 
+# Operator waypoints (the dashboard's Navigate panel). Two places:
+#   - the WORKING set, data/nav_waypoints.json — what the dashboard edits live,
+#     keyed by platform (the sim's world-anchored `map` frame and the robot's
+#     are unrelated coordinates). data/ is gitignored: pins are working state.
+#   - a map's own copy, maps/<name>/waypoints.json — snapshotted on save and
+#     restored on load, because a waypoint is only meaningful in the frame of
+#     the map it was placed on.
+NAV_WAYPOINTS_FILE = Path(os.environ["SORTBOTS_NAV_WAYPOINTS"]) \
+    if os.environ.get("SORTBOTS_NAV_WAYPOINTS") else REPO_ROOT / "data" / "nav_waypoints.json"
+MAP_WAYPOINTS_NAME = "waypoints.json"
+MAX_NAV_WAYPOINTS = 64
+
+
 class MapError(ValueError):
     """Bad map name, bad manifest, or a refused library operation."""
 
@@ -600,6 +613,111 @@ def _cmd_rm(args) -> int:
     return 0
 
 
+# -- operator waypoints ------------------------------------------------------
+
+def detect_platform() -> str:
+    """Same rule as webui/session.py's, duplicated to keep this module leaf."""
+    env = os.environ.get("SORTBOTS_PLATFORM")
+    if env in ("sim", "real"):
+        return env
+    return "real" if Path("/etc/nv_tegra_release").exists() else "sim"
+
+
+def validate_waypoints(raw) -> list[dict]:
+    if not isinstance(raw, list) or len(raw) > MAX_NAV_WAYPOINTS:
+        raise MapError(f"waypoints must be a list of at most {MAX_NAV_WAYPOINTS}")
+    out, seen = [], set()
+    for w in raw:
+        if not isinstance(w, dict):
+            raise MapError("each waypoint must be an object")
+        name = str(w.get("name", "")).strip()
+        if not name or len(name) > 32:
+            raise MapError("waypoint names must be 1-32 characters")
+        if name in seen:
+            raise MapError(f"duplicate waypoint name: {name}")
+        seen.add(name)
+        try:
+            x, y, yaw = (float(w.get(k, 0.0)) for k in ("x", "y", "yaw"))
+        except (TypeError, ValueError):
+            raise MapError(f"waypoint {name}: x, y, yaw must be numbers") from None
+        out.append({"name": name, "x": round(x, 3), "y": round(y, 3), "yaw": round(yaw, 3)})
+    return out
+
+
+def _read_json_dict(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_json_atomic(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.replace(path)
+
+
+def read_working_waypoints(platform: str) -> list[dict]:
+    return _read_json_dict(NAV_WAYPOINTS_FILE).get(platform, [])
+
+
+def write_working_waypoints(platform: str, points) -> list[dict]:
+    points = validate_waypoints(points)
+    data = _read_json_dict(NAV_WAYPOINTS_FILE)
+    data[platform] = points
+    _write_json_atomic(NAV_WAYPOINTS_FILE, data)
+    return points
+
+
+def snapshot_waypoints(name: str, platform: str) -> int | None:
+    """Working set -> maps/<name>/waypoints.json. Returns the count written.
+
+    An EMPTY working set leaves the map's existing file alone (returns None):
+    saving a map from a fresh dashboard that hasn't loaded its pins yet must
+    not silently wipe the pins the map already carries.
+    """
+    points = read_working_waypoints(platform)
+    if not points:
+        return None
+    _write_json_atomic(resolve_dir(name, must_exist=True) / MAP_WAYPOINTS_NAME,
+                       {"waypoints": points})
+    return len(points)
+
+
+def restore_waypoints(name: str, platform: str) -> int | None:
+    """maps/<name>/waypoints.json -> working set. Returns the count, or None
+    when the map carries no waypoints (the working set is then left as is)."""
+    f = resolve_dir(name, must_exist=True) / MAP_WAYPOINTS_NAME
+    if not f.is_file():
+        return None
+    points = write_working_waypoints(platform, _read_json_dict(f).get("waypoints", []))
+    return len(points)
+
+
+def map_name_for_path(path) -> str | None:
+    """`maps/<name>/<anything>` -> name; None for a path outside the library."""
+    try:
+        rel = Path(path).resolve().relative_to(MAPS_DIR.resolve())
+    except (ValueError, OSError):
+        return None
+    return rel.parts[0] if len(rel.parts) >= 2 and NAME_RX.match(rel.parts[0]) else None
+
+
+def _cmd_waypoints(args) -> int:
+    platform = args.platform or detect_platform()
+    if args.action == "save":
+        n = snapshot_waypoints(args.name, platform)
+        print(f"[maps] {args.name}: " + (f"saved {n} waypoint(s)" if n is not None
+              else "no working waypoints — kept the map's existing set"))
+    else:
+        n = restore_waypoints(args.name, platform)
+        print(f"[maps] {args.name}: " + (f"restored {n} waypoint(s)" if n is not None
+              else "map has no waypoints — working set unchanged"))
+    return 0
+
+
 def main(argv=None) -> int:
     import argparse
     p = argparse.ArgumentParser(
@@ -636,6 +754,11 @@ def main(argv=None) -> int:
 
     q = sub.add_parser("verify"); q.add_argument("name"); q.set_defaults(fn=_cmd_verify)
     q = sub.add_parser("rm"); q.add_argument("name"); q.set_defaults(fn=_cmd_rm)
+    q = sub.add_parser("waypoints", help="snapshot (save) or restore (load) a map's operator waypoints")
+    q.add_argument("action", choices=("save", "load"))
+    q.add_argument("name")
+    q.add_argument("--platform", choices=("sim", "real"))
+    q.set_defaults(fn=_cmd_waypoints)
 
     args = p.parse_args(argv)
     try:

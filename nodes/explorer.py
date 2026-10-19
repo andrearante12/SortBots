@@ -281,6 +281,7 @@ class ExplorerNode(Node):
         self.cfg = cfg
 
         self.state = "exploring" if autostart else "stopped"
+        self._ticks_since_status = 0  # idle heartbeat counter, see _tick
         self._map_info = None
         self._grid: np.ndarray | None = None
         self._empty_cycles = 0
@@ -912,6 +913,17 @@ class ExplorerNode(Node):
 
     def _tick(self):
         if self.state != "exploring":
+            # Heartbeat while idle. Since run_demo.sh started launching the
+            # explorer in EVERY run (idle unless --explore, 2026-10-08), a
+            # stopped explorer is the normal case — and the dashboard reads
+            # 6 s of explore_status silence as "explorer: not running", which
+            # would hide the one control (Explore) that's actually live. Every
+            # third tick (~3 s at replan_period_s=1.0, steady clock).
+            if self._ticks_since_status >= 2:
+                self._ticks_since_status = 0
+                self._publish_status()
+            else:
+                self._ticks_since_status += 1
             return
 
         # Nothing here may be measured before the sim clock is live: every

@@ -85,8 +85,18 @@ Presets in `configs/scenarios/*.yaml`, one file each. Today:
 Both `library_*` take `map=<abs path>`, e.g.
 `scripts/sim_ctl.sh start library_localize map=$PWD/maps/<name>/map.db`.
 
-Per-run overrides are `key=value` and only for keys the scenario lists under
-`overrides:`:
+Or skip presets: `custom` is the dashboard's launch form, taking settings
+rather than a preset (`scene robots map=new|working|<library name>
+mode=extend|readonly explore waypoints=map|keep|none headless chase_cam
+chase_cam_robots teleop bag`):
+
+```bash
+scripts/sim_ctl.sh dry-run custom map=warehouse mode=extend      # print only
+scripts/sim_ctl.sh start custom map=warehouse mode=readonly robots=2
+```
+
+Per-run overrides on a named preset are `key=value` and only for keys the
+scenario lists under `overrides:`:
 
 ```bash
 scripts/sim_ctl.sh start explore_fresh headless=true robots=1

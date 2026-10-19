@@ -132,6 +132,18 @@ same page ticks at full rate (worst stall <60 ms) and WebGL still works.
 Fully quit the old window first, or the flags are ignored by the running
 instance. Expect a slow, CPU-bound 3D view (it defaults to points here).
 
+### Photoreal 3D: Gaussian splats are built on the workstation
+
+The 3D panel's **splat** mode shows a Gaussian splat of a saved map. It is
+NEVER trained on this board. After a run, save the map as usual. Then, on the
+workstation, run
+`scripts/splat.sh build NAME --from http://jetson-orin.tail0d28f9.ts.net:8081`.
+The workstation pulls the pose graph once over the tailnet (`GET
+/api/maps/NAME/db`) and trains on its own GPU. The browser then fetches the
+splat straight from the workstation, so the Jetson never stores or serves it.
+Set `worker_url` in `configs/splat.yaml` to the workstation's tailnet name, and
+view the result from a laptop, not this screen. See `docs/splat.md`.
+
 ## What differs from sim, and where it's configured
 
 | | sim | real |

@@ -1,0 +1,39 @@
+# Gaussian-splat reconstruction (splat/, scripts/splat.sh, docs/splat.md).
+# Read by splat/worker.py (and handed to splat/train.py) on the WORKSTATION, and
+# by webui/serve.py on whichever host serves the dashboard (only `worker_url`).
+
+# Where the dashboard's browser reaches the splat worker. The page fetches the
+# .splat straight from here (CORS), so on the robot this must be the
+# WORKSTATION's tailnet name, not localhost — the Jetson never stores or serves
+# a splat. Override per page load with ?splat_worker=http://host:8082.
+worker_url: http://localhost:8082
+
+worker:
+  port: 8082
+  # Artifacts live outside the repo: a splat is 50-300 MB and must not become
+  # another git-lfs object next to maps/<name>/map.db. $SORTBOTS_SPLAT_DIR wins.
+  dir: ~/.cache/sortbots/splats
+  # Each finished job keeps model.ply + model.splat (+ log). The extracted
+  # export and keyframe set are ~0.5 GB per map and are deleted on success
+  # unless this is true.
+  keep_dataset: false
+  # Refuse to start training while Isaac Sim runs on the same GPU (pgrep
+  # spawn_warehouse.py): rendering is the sim's whole cost (CLAUDE.md) and an
+  # 8 GB card can't hold both. Jobs wait as `waiting_for_gpu`; force=true skips.
+  wait_for_isaac: true
+
+dataset:
+  stride: 1                # keep every Nth keyframe (RTAB-Map already decimates)
+  init_points: 300000      # init cloud budget after voxel downsampling
+  init_voxel: 0.03         # m
+
+train:
+  iters: 15000
+  downscale: 2             # 848x480 -> 424x240; full res costs ~4x the time and VRAM
+  max_gaussians: 1500000   # densification stops here — sized for 8 GB with headroom
+  ssim_lambda: 0.2         # loss = (1-l)*L1 + l*(1-SSIM), the 3DGS default
+  depth_lambda: 0.5        # inverse-depth L1 against the D435/Isaac depth; helps a lot on blank walls
+  depth_min: 0.3           # m, D435 near limit
+  depth_max: 8.0           # m, beyond this D435 depth is mostly noise
+  snapshot_every: 3000     # write a viewable model.splat this often while training
+  seed: 0
