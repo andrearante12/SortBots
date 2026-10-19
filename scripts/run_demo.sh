@@ -42,9 +42,12 @@
 # what scripts/run_console.sh + the dashboard's Scenarios tab use, so the page
 # you clicked "Start" on survives the run it launched. Not needed by hand.
 #
-# --explore starts nodes/explorer.py, which autonomously maps the warehouse
-# with no human input (frontier-based: drives toward the nearest unexplored
-# opening until none remain). Combine with --localize for hands-off
+# nodes/explorer.py always runs (idle), so the dashboard's Explore button and
+# X+click "explore here" work in every run — before 2026-10-08 a run without
+# --explore had no explorer process at all and both silently did nothing.
+# --explore makes it START exploring on launch: it autonomously maps the
+# warehouse with no human input (frontier-based: drives toward the nearest
+# unexplored opening until none remain). Combine with --localize for hands-off
 # task_manager dispatch on an already-built map (nodes/task_manager.py and
 # nodes/explorer.py arbitrate over the shared Nav2 goal server — see
 # task_manager.py's module docstring) — NOT for continuing to explore new
@@ -267,7 +270,7 @@ setsid bash -c "source '$ROS_SETUP'; \
        webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
        delete_db_on_start:=$DELETE_DB_ON_START \
-       explore:=$EXPLORE" \
+       explore:=true explore_autostart:=$EXPLORE" \
   >"$BRINGUP_LOG" 2>&1 &
 sleep 12
 echo "[run_demo] ROS 2 stack up (see $BRINGUP_LOG)."
@@ -303,7 +306,8 @@ cat <<EOF
         - drag on the map to send a Nav2 goal; drive pad; pickup->dropoff dispatch
     * Nav2 + RTAB-Map   : running headless (rviz off; the dashboard replaces it)
     * Map               : $MAP_DB $( [[ "$LOCALIZE" == "true" ]] && echo "(localization — read-only)" || { [[ "$RESUME" == "true" ]] && echo "(resumed — extending existing map)" || echo "(mapping — rebuilt this run)"; } )
-$( [[ $EXPLORE == "true" ]] && echo "    * Explorer          : autonomous frontier exploration — no human input needed" )
+$( [[ $EXPLORE == "true" ]] && echo "    * Explorer          : autonomous frontier exploration — no human input needed" \
+                             || echo "    * Explorer          : idle — the dashboard's Explore button (or X+click) starts it" )
 $( [[ $TELEOP -eq 1 ]] && echo "    * WASD teleop       : w/s fwd-back  a/d turn  q/e strafe  space stop  k quit" )
   Logs : $SIM_LOG
          $BRINGUP_LOG

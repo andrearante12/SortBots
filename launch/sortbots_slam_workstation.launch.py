@@ -5,8 +5,10 @@ The robot keeps everything time-critical — the D435 driver, visual odometry,
 the live obstacle cloud — and sends only a rate-capped compressed RGB-D
 keyframe stream (/<id>/rgbd_image/compressed, ~2 Hz) plus its /<id>/odom.
 This machine runs the expensive part: RTAB-Map's graph, loop closure, Grid/3D
-ray tracing and the reconstruction clouds, and its database is what
-scripts/recon/rtabmap_to_colmap.py turns into Gaussian Splatting input.
+ray tracing and the reconstruction clouds. Its database
+(~/.ros/sortbots_<id>_ws.db) is what `scripts/maps.sh save` and then the
+splat worker (splat/, docs/splat.md) train the Gaussian splat from — already
+on this machine, so no `--from <jetson>` fetch is needed.
 
     # robot (Jetson container):  scripts/run_robot.sh --slam-role robot
     # workstation, clean shell with ROS 2 Jazzy sourced:

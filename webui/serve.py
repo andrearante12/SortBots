@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -45,6 +46,7 @@ import maps_lib
 WEBUI_DIR = Path(__file__).resolve().parent
 WAYPOINTS_CONFIG = WEBUI_DIR.parent / "configs" / "waypoints.yaml"
 ROBOTS_CONFIG = WEBUI_DIR.parent / "configs" / "robots.yaml"
+SPLAT_CONFIG = WEBUI_DIR.parent / "configs" / "splat.yaml"
 
 MAX_BODY_BYTES = 64 * 1024
 
@@ -54,6 +56,24 @@ SESSIONS: session_mod.SessionManager | None = None
 # sim | real — which platform's scenarios this console lists and can start.
 # Set by main() from --platform (default: session_mod.detect_platform()).
 PLATFORM = "sim"
+
+
+def _load_nav_waypoints() -> dict:
+    return {"platform": PLATFORM, "waypoints": maps_lib.read_working_waypoints(PLATFORM)}
+
+
+def _session_robot_ids(roster: list[str]) -> list[str] | None:
+    if SESSIONS is None:
+        return None
+    status = SESSIONS.status()
+    if status.get("state") not in ("starting", "running"):
+        return None
+    run = status.get("run") or {}
+    if run.get("robot_ids"):
+        return [r for r in str(run["robot_ids"]).split(",") if r]
+    if isinstance(run.get("robots"), int) and run["robots"] > 0:
+        return roster[:run["robots"]]
+    return None
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -78,12 +98,20 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         route = urlsplit(self.path).path
         if route == "/api/waypoints":
             self._serve_waypoints()
+        elif route == "/api/nav_waypoints":
+            self._serve_json(_load_nav_waypoints())
+        elif route == "/api/launch/options":
+            self._serve_launch_options()
         elif route == "/api/robots":
             self._serve_robots()
         elif route == "/api/scenarios":
             self._serve_scenarios()
         elif route == "/api/maps":
             self._serve_maps()
+        elif route.startswith("/api/maps/") and route.endswith("/db"):
+            self._serve_map_db(route[len("/api/maps/"):-len("/db")])
+        elif route == "/api/splat/config":
+            self._serve_splat_config()
         elif route == "/api/session":
             self._with_control(lambda: self._serve_json(SESSIONS.status()))
         elif route == "/api/session/log":
@@ -97,6 +125,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_control(self._start_session)
         elif route == "/api/session/stop":
             self._with_control(lambda: self._serve_json(SESSIONS.stop()))
+        elif route == "/api/session/finish":
+            self._with_control(self._finish_session)
+        elif route == "/api/nav_waypoints":
+            self._save_nav_waypoints()
+        elif route == "/api/launch/preview":
+            self._preview_launch()
+        elif route == "/api/presets":
+            self._with_control(self._save_preset)
         elif route == "/api/map/save":
             self._with_control(self._save_map)
         elif route == "/api/map/clear":
@@ -113,6 +149,103 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             stations = yaml.safe_load(f)["stations"]
         self._serve_json(stations)
 
+    # -- launch form -------------------------------------------------------
+
+    def _serve_launch_options(self):
+        """Everything the Scenarios tab's form needs to draw itself.
+
+        Readable without --control (like /api/scenarios), so the form still
+        shows what COULD be launched — and why it can't — when the console
+        is down.
+        """
+        roster = ["robot_0"]
+        if ROBOTS_CONFIG.exists():
+            with open(ROBOTS_CONFIG) as f:
+                roster = [r["id"] for r in yaml.safe_load(f)["robots"]]
+        maps = []
+        for m in maps_lib.list_maps():
+            wp = maps_lib.MAPS_DIR / m["name"] / maps_lib.MAP_WAYPOINTS_NAME
+            try:
+                n_wp = len(json.loads(wp.read_text()).get("waypoints", [])) if wp.is_file() else 0
+            except (OSError, ValueError):
+                n_wp = 0
+            maps.append({
+                "name": m["name"], "title": m.get("title") or m["name"],
+                "db_state": m.get("db_state"), "error": m.get("error"),
+                "free_m2": (m.get("coverage") or {}).get("free_m2"),
+                "scene": m.get("scene"), "waypoints": n_wp,
+            })
+        presets = []
+        for sc in session_mod.load_scenarios():
+            if sc["platform"] not in (PLATFORM, None):
+                continue
+            entry = {"name": sc["name"], "title": sc["title"], "status": sc["status"],
+                     "description": sc["description"], "origin": sc.get("origin", "file")}
+            if sc["status"] == "invalid":
+                entry["reason"] = sc.get("error")
+            else:
+                entry.update(session_mod.run_to_config(sc["run"], sc["platform"],
+                                                       sc["capture"]["bag"]))
+            presets.append(entry)
+        working = session_mod.working_db_path("robot_0")
+        self._serve_json({
+            "control": SESSIONS is not None,
+            "platform": PLATFORM,
+            "fields": sorted(session_mod.CONFIG_KEYS[PLATFORM]),
+            "defaults": {k: v for k, v in session_mod.CONFIG_DEFAULTS.items()
+                         if k in session_mod.CONFIG_KEYS[PLATFORM]},
+            "scenes": ["nvidia", "primitive"],
+            "roster": roster,
+            "maps": maps,
+            "working_db": {"path": str(working), "exists": working.exists()},
+            "working_waypoints": len(maps_lib.read_working_waypoints(PLATFORM)),
+            "presets": presets,
+        })
+
+    def _preview_launch(self):
+        # Not behind --control: it launches nothing, and the form should be
+        # able to explain itself even with the console down.
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            self._serve_json(session_mod.preview_config(body.get("config") or {}, PLATFORM))
+        except session_mod.ScenarioError as exc:
+            self._serve_error(400, str(exc))
+        except (TypeError, ValueError) as exc:
+            self._serve_error(400, f"bad setting: {exc}")
+
+    def _save_preset(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            self._serve_json(session_mod.write_preset(
+                str(body.get("name", "")), body.get("config") or {}, PLATFORM,
+                title=body.get("title"), description=body.get("description"),
+                overwrite=bool(body.get("overwrite"))))
+        except session_mod.ScenarioError as exc:
+            self._serve_error(400, str(exc))
+        except OSError as exc:
+            self._serve_error(500, f"failed to write preset: {exc}")
+
+    def _save_nav_waypoints(self):
+        # Storage lives in maps_lib (data/nav_waypoints.json, the WORKING set;
+        # saving/loading a map snapshots/restores it). Not behind --control: it
+        # only rewrites one JSON file under data/ and
+        # needs no ROS shell, so the plain dashboard can place pins too. The
+        # client always sends the full list (last write wins) — two operators
+        # editing at once is not a case worth a merge protocol.
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            maps_lib.write_working_waypoints(PLATFORM, body.get("waypoints"))
+        except maps_lib.MapError as exc:
+            self._serve_error(400, str(exc))
+            return
+        self._serve_json(_load_nav_waypoints())
+
     def _serve_robots(self):
         # configs/robots.yaml is the fleet roster (ids + per-scene spawn
         # poses); the dashboard only needs the id list, so reduce each
@@ -127,9 +260,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             # entry whose topics nothing publishes.
             if PLATFORM == "real":
                 robots = [r for r in robots if "real" in (r.get("spawn") or {})]
+            ids = [r["id"] for r in robots]
+            # The roster is every robot this CONFIG knows; a running session
+            # may use fewer. Listing the roster made a 1-robot run offer
+            # robot_1 in the switcher (a page of dead topics) and label the
+            # map "2 robots". So narrow to the live session when there is one
+            # — same derivation as run_demo.sh: explicit robot_ids, else the
+            # first --robots N of the roster, in roster order.
+            live = _session_robot_ids(ids)
             data = {
                 "default": raw["default"],
-                "robots": [r["id"] for r in robots],
+                "robots": live or ids,
+                "configured": ids,
             }
         else:
             data = {"default": "robot_0", "robots": ["robot_0"]}
@@ -157,9 +299,68 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         # explain that the console isn't running, rather than render empty.
         self._serve_json({
             "control": SESSIONS is not None,
+            # The splat worker on the workstation reads this to pick each
+            # robot's anchor (spawn.real vs the manifest's scene).
+            "platform": PLATFORM,
             "dir": str(maps_lib.MAPS_DIR),
             "maps": maps_lib.list_maps(),
         })
+
+    def _serve_map_db(self, name: str):
+        """Stream one robot's pose graph out of the library, read-only.
+
+        The splat worker (splat/worker.py, on the workstation) pulls a Jetson
+        map through this — the one thing the reconstruction ever needs from
+        the robot, and only after the run, never while it drives. Readable
+        without --control like /api/maps: it can't start or change anything,
+        and the tailnet is the perimeter either way.
+
+        Refuses anything but a "complete" DB: a "pending" entry has no pose
+        graph yet, and an unfetched git-lfs pointer would hand the worker 130
+        bytes that sqlite then chokes on far away from the cause.
+        """
+        robot = parse_qs(urlsplit(self.path).query).get("robot", [None])[0]
+        try:
+            manifest = maps_lib.read_manifest(name)   # NAME_RX + confinement
+        except maps_lib.MapError as exc:
+            self._serve_error(404, str(exc))
+            return
+        dbs = manifest.get("dbs") or {}
+        rid = robot or manifest.get("primary_robot_id", "robot_0")
+        entry = dbs.get(rid)
+        if entry is None:
+            self._serve_error(404, f"map {name!r} has no pose graph for {rid!r} "
+                                   f"(has: {', '.join(sorted(dbs)) or 'none'})")
+            return
+        if entry["state"] != "complete":
+            self._serve_error(409, f"map {name!r} {rid} pose graph is {entry['state']!r}")
+            return
+        path = maps_lib.resolve_dir(name) / Path(entry["file"]).name
+        try:
+            size = path.stat().st_size
+            f = open(path, "rb")
+        except OSError as exc:
+            self._serve_error(500, f"can't open {path.name}: {exc}")
+            return
+        with f:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.sqlite3")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", f'attachment; filename="{name}_{rid}.db"')
+            self.end_headers()
+            try:
+                shutil.copyfileobj(f, self.wfile, 1 << 20)
+            except (BrokenPipeError, ConnectionResetError):
+                pass   # worker cancelled mid-download; nothing to clean up here
+
+    def _serve_splat_config(self):
+        # Only the worker URL: everything else in splat.yaml is the
+        # workstation's business. A missing file just means "no worker known".
+        url = None
+        if SPLAT_CONFIG.exists():
+            with open(SPLAT_CONFIG) as f:
+                url = (yaml.safe_load(f) or {}).get("worker_url")
+        self._serve_json({"worker_url": url, "platform": PLATFORM})
 
     # -- session endpoints -------------------------------------------------
 
@@ -177,16 +378,24 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         body = self._read_json_body()
         if body is None:
             return
+        # Two shapes: {config} from the launch form, or {scenario, overrides}
+        # (a preset by name — sim_ctl.sh and older pages).
+        config = body.get("config")
         name = body.get("scenario")
-        if not isinstance(name, str):
-            self._serve_error(400, "scenario must be a string")
+        if config is not None:
+            if not isinstance(config, dict):
+                self._serve_error(400, "config must be an object")
+                return
+        elif not isinstance(name, str):
+            self._serve_error(400, "scenario must be a string (or send a config)")
             return
         overrides = body.get("overrides") or {}
         if not isinstance(overrides, dict):
             self._serve_error(400, "overrides must be an object")
             return
         try:
-            self._serve_json(SESSIONS.start(name, overrides, force=bool(body.get("force"))))
+            self._serve_json(SESSIONS.start(name, overrides, force=bool(body.get("force")),
+                                            config=config))
         except session_mod.SessionConflict as exc:
             self._serve_error(409, str(exc))
         except session_mod.ScenarioError as exc:
@@ -224,6 +433,19 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_error(500, f"failed to save map: {exc}")
             return
         self._serve_json(manifest)
+
+    def _finish_session(self):
+        """Save the running session into maps/<name>, then stop it."""
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            self._serve_json(SESSIONS.finish(
+                str(body.get("name", "")), body.get("robot_id") or "robot_0"))
+        except maps_lib.MapError as exc:
+            self._serve_error(400, str(exc))
+        except session_mod.SessionConflict as exc:
+            self._serve_error(409, str(exc))
 
     def _clear_map(self):
         """Wipe the live map (RTAB-Map reset + odometry reset)."""

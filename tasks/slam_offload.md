@@ -35,8 +35,8 @@ The robot checks are in "What to verify on the robot".
 **What changed:** mapping moves to the workstation (`slam_role`). The robot
 keeps odometry, a new live obstacle cloud, and a half-resolution keyframe
 stream. Odometry switches to frame-to-frame. On-robot mapping, the fallback,
-runs at lower CPU priority. The DDS profile is fixed. RTAB-Map's database
-exports straight to COLMAP for Gaussian Splatting.
+runs at lower CPU priority. The DDS profile is fixed. The map database the
+splat pipeline trains from now lands on the workstation directly.
 
 ## The bench (how we measured without the robot)
 
@@ -172,25 +172,27 @@ That is why `keyframe_decimation` defaults to 2. Set it to 1 on a wired or
 
 ## Gaussian Splatting
 
-The workstation's RTAB-Map database already holds every keyframe image with
-its loop-closed pose. `scripts/recon/rtabmap_to_colmap.py` turns an
-`rtabmap-export --images --poses --poses_format 10 --cloud` export into a
-COLMAP text model that splat trainers read (gsplat, nerfstudio `splatfacto`):
-- PINHOLE cameras;
-- world→camera poses in the optical frame;
-- seed points from the colored cloud.
+`splat/` (merged from main, `docs/splat.md`) already trains a splat from a
+saved map: `rtabmap-export` dumps every keyframe's RGB, depth, intrinsics and
+loop-closed optical-frame pose, and the worker trains with gsplat on the
+workstation GPU. Offload changes only where the database is:
 
-No second structure-from-motion pass is needed.
+- `slam_role:=all`: it is on the Jetson, and `scripts/splat.sh build NAME
+  --from http://<jetson>:8081` pulls it over the tailnet as before.
+- `slam_role:=robot`: it is already on the workstation
+  (`~/.ros/sortbots_<id>_ws.db`), so save it into `maps/` there and build with
+  source `local`. `scripts/maps.sh save` assumes the stack it talks to is the
+  local one; with the Jetson running the camera and the workstation running
+  RTAB-Map, check that the grid half of the save finds the workstation's
+  `/<id>/map` (open item).
 
-**Checked on a bench database:**
-- cloud points re-projected into the exported cameras match the image colour
-  (mean difference 7–17, against 26–54 for random pixels);
-- unit tests cover the frame conventions.
-
-A splat hasn't been trained yet.
+The bench's exported databases were checked the same way the splat dataset
+module does it: cloud points re-projected into the exported cameras match the
+image colour (mean difference 7–17, against 26–54 for random pixels).
 
 - Pose format 1 ("RGBD-SLAM") is in motion-capture/optical axes, not ROS
-  axes. Using it scored the wrong frame until this was caught.
+  axes; the bench scores format 10 (base_link, ROS axes). `splat/extract.py`
+  uses `--poses_camera` format 11 on purpose: optical frame, with the node id.
 - Train from a session recorded with **full-resolution** keyframes
   (`keyframe_decimation:=1` on a wired link, or a copy of the robot's own
   recording). Half resolution is fine for SLAM but costs splat detail.

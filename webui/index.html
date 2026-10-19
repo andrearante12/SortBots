@@ -61,7 +61,8 @@
     padding: 4px 12px; font-size: 0.78rem; cursor: pointer;
   }
   .segmented button:first-child { border-radius: 5px 0 0 5px; }
-  .segmented button:last-child { border-radius: 0 5px 5px 0; border-left: none; }
+  .segmented button + button { border-left: none; }
+  .segmented button:last-child { border-radius: 0 5px 5px 0; }
   .segmented button.active { background: #2d5; color: #111; font-weight: 600; }
   #view-mode { margin-left: 4px; }
   #slam-badge {
@@ -143,6 +144,10 @@
     transform: translateY(-120%); opacity: 0; transition: opacity 0.15s;
   }
   #stage-panel:hover #pip-hint { opacity: 1; }
+  /* Top-right, where the PiP sits in map mode — the two are never shown
+     together (the toggle only exists in the camera stage). */
+  #cam-source { position: absolute; top: 8px; right: 10px; z-index: 6; margin: 0; }
+  #cam-source[hidden] { display: none; }
 
   /* -- map view (inside the stage) --------------------------------------- */
   /* The canvas backing store is a FIXED square (app.js's MAP_CANVAS_PX) and
@@ -181,14 +186,31 @@
     margin-bottom: 6px; font-size: 0.72rem; color: #9aa;
   }
   #map-bar label { display: flex; align-items: center; gap: 4px; cursor: pointer; flex: none; }
-  #map-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #map-keys { display: flex; gap: 14px; overflow: hidden; white-space: nowrap; }
+  #map-keys > span { opacity: 0.75; transition: color 0.1s, opacity 0.1s; }
+  #map-keys > span.armed { opacity: 1; color: #2d5; }
+  #map-keys .dim { color: #667; }
+  #map-keys kbd {
+    font: 600 0.68rem ui-monospace, monospace; padding: 0 4px; border-radius: 3px;
+    border: 1px solid #3a4048; background: #14161a; color: #cdd;
+  }
+  /* Keyboard-less devices only (see #map-tool's comment in the markup). */
+  #map-tool { display: none; margin-left: 0; }
+  @media (hover: none) { #map-tool { display: flex; } #map-keys { display: none; } }
+  #map-canvas.tool-steer { cursor: cell; }
+  #map-canvas.tool-waypoint { cursor: copy; }
   /* Bottom-RIGHT: the drive pad owns bottom-left, and the aim pad (bottom-right)
      is hidden in map mode, so this corner is free. */
-  #goal-status {
-    position: absolute; right: 12px; bottom: 12px; z-index: 10;
-    font-family: monospace; font-size: 0.75rem; color: #fb7;
-    background: rgba(20,22,26,0.6); padding: 3px 8px; border-radius: 4px;
+  #map-tracker {
+    position: absolute; right: 12px; bottom: 12px; z-index: 10; max-width: 46%;
+    font-family: monospace; font-size: 0.74rem; color: #cdd; line-height: 1.5;
+    background: rgba(20,22,26,0.72); padding: 4px 9px; border-radius: 4px;
   }
+  #map-tracker > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .trk-k { display: inline-block; width: 7ch; color: #778; }
+  #trk-map.ro { color: #fb7; }
+  #trk-nav.ok { color: #2d5; } #trk-nav.bad { color: #f77; } #trk-nav.busy { color: #fb7; }
+  #goal-status { color: #9aa; }
   #goal-status:empty { display: none; }
 
   /* -- overlay control pads ---------------------------------------------- */
@@ -255,17 +277,53 @@
   #recon-controls button:hover { background: #222831; }
   #recon-canvas { flex: 1 1 auto; min-height: 0; position: relative; background: #000; border-radius: 4px; overflow: hidden; }
   #recon-canvas canvas { display: block; width: 100% !important; height: 100% !important; }
-
-  /* Dispatch + task queue, merged into one panel. */
-  #ops-panel { flex: 1 1 40%; min-height: 0; }
-  #dispatch-form { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; flex: none; margin-bottom: 8px; }
-  #dispatch-form select, #dispatch-form button {
+  #splat-bar { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; flex: none; flex-wrap: wrap; }
+  #splat-bar[hidden] { display: none; }
+  #splat-bar select, #splat-bar button {
     background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
-    border-radius: 4px; padding: 5px 7px; font-size: 0.85rem;
+    border-radius: 4px; padding: 3px 6px; font-size: 0.75rem;
   }
-  #dispatch-form button { background: #2d5; color: #111; border: none; font-weight: 600; cursor: pointer; }
-  #dispatch-form button:hover { background: #3e6; }
-  #queue-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+  #splat-bar button { cursor: pointer; }
+  #splat-bar button:hover { background: #222831; }
+  #splat-bar button:disabled { opacity: 0.5; }
+  #splat-status { font-size: 0.75rem; font-family: monospace; color: #7bf; }
+
+  /* Operator panel: Navigate / Map / (folded) pick & place. One control
+     vocabulary for every input in it, so the sections read as one panel. */
+  #ops-panel { flex: 1 1 40%; min-height: 0; overflow-y: auto; gap: 12px; }
+  .ops-section { flex: none; }
+  .ops-section h2 { margin-bottom: 6px; }
+  #nav-form, #dispatch-form, .ops-row {
+    display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+  }
+  #ops-panel select, #ops-panel button, #ops-panel input {
+    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 5px 8px; font-size: 0.82rem;
+  }
+  #ops-panel select { min-width: 0; max-width: 100%; }
+  #ops-panel button { cursor: pointer; }
+  #ops-panel button:hover { background: #222831; }
+  #ops-panel button.primary { background: #2d5; color: #111; border-color: #2d5; font-weight: 600; }
+  #ops-panel button.primary:hover { background: #3e6; }
+  #ops-panel button.danger:hover { border-color: #f77; color: #f77; }
+  #ops-panel button.active { border-color: #2d5; color: #2d5; }
+  #nav-from, #nav-to { flex: 1 1 90px; }
+  #map-load-select { flex: 1 1 110px; }
+  #map-name { flex: 1 1 120px; }
+  .ops-right { margin-left: auto; }
+  .ops-arrow { color: #667; }
+  .ops-status {
+    margin-top: 6px; font-family: monospace; font-size: 0.76rem; color: #7bf;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #map-save-row { margin-top: 6px; }
+  #map-save-row[hidden] { display: none; }
+  #tasks-section summary {
+    cursor: pointer; font-size: 0.85rem; text-transform: uppercase;
+    letter-spacing: 0.05em; color: #9aa;
+  }
+  #tasks-section[open] summary { margin-bottom: 8px; }
+  #queue-list { list-style: none; margin: 8px 0 0; padding: 0; }
   #queue-list li {
     display: flex; justify-content: space-between; padding: 5px 8px; margin-bottom: 4px;
     background: #14161a; border-radius: 4px; font-size: 0.82rem; font-family: monospace;
@@ -275,25 +333,6 @@
   .state-NAV_TO_PICKUP, .state-NAV_TO_DROPOFF { background: #430; color: #fb7; }
   .state-PICKING, .state-PLACING { background: #043; color: #7fb; }
   .state-FAILED { background: #400; color: #f77; }
-
-  /* -- autonomous exploration bar (nodes/explorer.py) --------------------- */
-  #explore-bar {
-    display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: none;
-    margin-bottom: 8px; font-size: 0.78rem; color: #9aa;
-  }
-  #explore-bar button {
-    background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
-    border-radius: 4px; padding: 4px 8px; font-size: 0.78rem; cursor: pointer;
-  }
-  #explore-bar button:hover { background: #222831; }
-  #map-name {
-    width: 96px; background: #14161a; color: #e6e6e6; border: 1px solid #2a2e35;
-    border-radius: 4px; padding: 4px 6px; font-size: 0.78rem;
-  }
-  #explore-status {
-    font-family: monospace; color: #7bf; margin-left: auto;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  }
 
   /* -- scenarios view (webui/scenarios.js) -------------------------------- */
   /* Sibling grid items spanning both columns rather than a wrapper around the
@@ -307,35 +346,46 @@
   #scenario-hint { font-size: 0.75rem; color: #9aa; }
   /* Scenario list left, the running session's status + log right. */
   #scenario-body { display: grid; grid-template-columns: 1.1fr 1fr; gap: 10px; flex: 1 1 auto; min-height: 0; }
-  #scenario-list { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; }
-
-  .scenario-card {
-    background: #14161a; border: 1px solid #2a2e35; border-radius: 6px;
-    padding: 10px; flex: none;
+  #launch-form {
+    display: flex; flex-direction: column; gap: 9px; overflow-y: auto; min-height: 0;
+    align-self: start; max-height: 100%;
+    background: #14161a; border: 1px solid #2a2e35; border-radius: 6px; padding: 12px;
   }
-  .scenario-card.selected { border-color: #2d5; }
-  .scenario-card.disabled { opacity: 0.55; }
-  .scenario-card h3 { margin: 0 0 5px; font-size: 0.9rem; font-weight: 600; }
-  .scenario-card p { margin: 0; font-size: 0.78rem; line-height: 1.4; color: #9aa; }
-  .scenario-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-  .scenario-row label { display: flex; align-items: center; gap: 4px; font-size: 0.76rem; color: #9aa; cursor: pointer; }
-  .scenario-row input[type="number"] {
-    width: 46px; background: #14161a; color: #e6e6e6;
-    border: 1px solid #2a2e35; border-radius: 4px; padding: 2px 4px; font-size: 0.76rem;
+  .lf-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .lf-row[hidden], #launch-form [data-field][hidden] { display: none; }
+  .lf-k { width: 92px; flex: none; font-size: 0.78rem; color: #9aa; }
+  #launch-form select, #launch-form > .lf-row > button {
+    background: #0f1114; color: #e6e6e6; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 4px 7px; font-size: 0.8rem;
   }
-  /* The saved-map picker. max-width, not a fixed width: an entry's label
-     carries its coverage and date, and letting it size the flex row would
-     push the Start button off a phone-width card. */
-  .scenario-row select {
-    max-width: 240px; background: #14161a; color: #e6e6e6;
-    border: 1px solid #2a2e35; border-radius: 4px; padding: 2px 4px; font-size: 0.76rem;
+  #lf-preset, #lf-map { flex: 1 1 180px; min-width: 0; max-width: 100%; }
+  #launch-form > .lf-row > button { cursor: pointer; }
+  #launch-form > .lf-row > button:hover { background: #222831; }
+  .lf-seg { margin-left: 0; flex-wrap: wrap; }
+  .lf-check { display: flex; align-items: center; gap: 5px; font-size: 0.8rem; color: #cdd; cursor: pointer; }
+  .lf-note { margin: 0; font-size: 0.74rem; color: #889; line-height: 1.4; }
+  .lf-note:empty { display: none; }
+  .lf-warn { color: #fb7; }
+  #lf-advanced summary { cursor: pointer; font-size: 0.78rem; color: #9aa; }
+  #lf-advanced[open] summary { margin-bottom: 8px; }
+  #lf-advanced .lf-row { gap: 14px; padding-left: 4px; }
+  #lf-advanced .lf-row + .lf-row { margin-top: 8px; }
+  #lf-footer {
+    margin-top: 6px; padding-top: 10px; border-top: 1px solid #2a2e35;
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center;
   }
-  .scenario-row button {
-    margin-left: auto; background: #2d5; color: #111; border: none; font-weight: 600;
-    border-radius: 4px; padding: 5px 12px; font-size: 0.8rem; cursor: pointer;
+  #lf-summary { font-size: 0.85rem; color: #e6e6e6; }
+  #lf-command {
+    grid-column: 1; font-size: 0.68rem; color: #667; word-break: break-all;
   }
-  .scenario-row button:hover:not(:disabled) { background: #3e6; }
-  .scenario-row button:disabled { background: #2a2e35; color: #778; cursor: not-allowed; }
+  #lf-error { grid-column: 1; font-size: 0.76rem; color: #f77; }
+  #lf-error:empty, #lf-command:empty { display: none; }
+  #lf-start {
+    grid-column: 2; grid-row: 1 / span 3; background: #2d5; color: #111; border: none;
+    font-weight: 600; border-radius: 5px; padding: 9px 22px; font-size: 0.9rem; cursor: pointer;
+  }
+  #lf-start:hover:not(:disabled) { background: #3e6; }
+  #lf-start:disabled { background: #2a2e35; color: #778; cursor: not-allowed; }
   /* Same class-per-state chip pattern as the task queue's .state-* badges. */
   .sc-badge { padding: 1px 6px; border-radius: 3px; font-size: 0.7rem; font-family: monospace; }
   .sc-ready { background: #043; color: #2d5; }
@@ -347,12 +397,16 @@
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: none;
     margin-bottom: 6px; font-family: monospace; font-size: 0.76rem; color: #7bf;
   }
-  #session-stop {
-    margin-left: auto; background: #14161a; color: #f77; border: 1px solid #2a2e35;
+  #session-stop, #session-finish {
+    background: #14161a; color: #f77; border: 1px solid #2a2e35;
     border-radius: 4px; padding: 4px 10px; font-size: 0.78rem; cursor: pointer;
   }
+  #session-finish { margin-left: auto; background: #2d5; color: #111; border-color: #2d5; font-weight: 600; }
   #session-stop:hover:not(:disabled) { background: #222831; }
-  #session-stop:disabled { color: #667; cursor: not-allowed; }
+  #session-finish:hover:not(:disabled) { background: #3e6; }
+  #session-stop:disabled, #session-finish:disabled {
+    background: #14161a; border-color: #2a2e35; color: #667; cursor: not-allowed; font-weight: normal;
+  }
   #session-log {
     flex: 1 1 auto; min-height: 0; overflow: auto; margin: 0;
     background: #000; border: 1px solid #2a2e35; border-radius: 4px; padding: 8px;
@@ -447,7 +501,6 @@
     #stage-panel { min-height: 52vh; }
     #right-col { flex-direction: row; }
     #recon-panel, #ops-panel { flex: 1 1 50%; min-width: 0; }
-    #dispatch-form select { min-width: 0; flex: 1 1 auto; max-width: 100%; }
     /* The scenario list and its log won't both fit across a phone; stack them
        and give the log a fixed slice so the cards stay reachable. */
     #scenario-body { grid-template-columns: 1fr; grid-auto-rows: auto; }
@@ -466,12 +519,9 @@
     #aim-pad { grid-template-columns: repeat(3, 36px); grid-template-rows: repeat(3, 36px); }
     #recon-panel { min-height: 220px; }
     #map-bar { padding-right: 26%; }
-    #map-hint { display: none; }  /* the title tooltip still has the full text */
-    /* The explore bar is five controls wide on a 360px screen. Saving to the
-       library is a deliberate, named action that belongs on a real keyboard —
-       drop it here rather than let it wrap the status readout off-screen.
-       scripts/maps.sh save does the same thing from a terminal. */
-    #map-name, #explore-save-lib, #map-load-select, #map-load, #map-clear { display: none; }
+    /* Saving to the library is a deliberate, named action that belongs on a
+       real keyboard; scripts/maps.sh save does the same from a terminal. */
+    #map-save-open, #map-save-row { display: none; }
   }
 </style>
 </head>
@@ -490,9 +540,8 @@
               title="Pick a scenario and start or stop the simulation itself">scenarios</button>
     </div>
     <div id="stage-mode" class="segmented">
-      <button type="button" data-stage="camera" class="active">camera</button>
-      <button type="button" data-stage="sensors"
-              title="RGB with tracked visual features, beside the depth view">sensors</button>
+      <button type="button" data-stage="camera" class="active"
+              title="The robot's cameras. Chase cam or head RGB + depth — switch with the toggle in the corner of the view">camera</button>
       <button type="button" data-stage="map">map</button>
     </div>
     <span id="slam-badge" title="RTAB-Map SLAM status (from the active robot's /info)">SLAM: waiting…</span>
@@ -501,6 +550,13 @@
   <div class="panel" id="stage-panel">
     <span id="stage-label">3rd person (chase cam)</span>
     <span id="pip-hint">click to swap</span>
+    <!-- Which camera the "camera" stage shows. Only rendered when this robot
+         has a chase cam; without one (every real robot) the head view is the
+         only choice and the toggle would be a control that does nothing. -->
+    <div id="cam-source" class="segmented" hidden>
+      <button type="button" data-cam="chase" title="Third-person chase camera (sim only)">chase</button>
+      <button type="button" data-cam="sensors" title="Head RGB with tracked visual features, over the depth view">head + depth</button>
+    </div>
 
     <img id="chase-stream" class="stage-view stage-main"
          alt="chase camera stream (waiting for web_video_server)" />
@@ -527,24 +583,33 @@
         <label><input type="checkbox" id="costmap-toggle" checked /> costmap</label>
         <label title="Show where the explorer has written territory off after failed goals. Dashed = will expire; solid = permanent (hit blacklist_permanent_strikes). The number is the strike count."><input
               type="checkbox" id="blacklist-toggle" /> blacklist</label>
-        <!-- What a map click MEANS. "nav goal" is the original behaviour: a
-             direct navigate_to_pose, which the explorer preempts within a
-             second while it's running. "steer" publishes an explore_hint
-             instead, biasing frontier scoring toward the click without ever
-             pausing exploration — see nodes/explorer.py's _on_hint. -->
-        <div id="map-mode" class="segmented">
-          <button type="button" data-mapmode="goal" class="active"
-                  title="Drag sets a Nav2 goal directly (press = position, drag = heading). Overrides any active task — but while the explorer is running it will preempt this goal within about a second.">nav goal</button>
-          <button type="button" data-mapmode="steer"
-                  title="Click to send exploration to that area — it preempts the current goal and works that region until it's mapped. Shift-click to QUEUE an area instead, to be visited after the current one. Not a goal: the explorer still picks its own frontiers, so an unreachable click can't strand it.">steer</button>
-        </div>
-        <span id="map-hint"
-              title="Drag on the map to set a Nav2 goal: press sets the position, drag sets the heading. This overrides any task the task_manager is currently navigating — Nav2 always takes the newest goal.">
-          Drag to set a Nav2 goal (press = position, drag = heading) — overrides any active task.
+        <!-- What a map click MEANS is chosen per click by a held key, not a
+             persistent mode: drag = Nav2 goal, X + click = steer exploration
+             (explore_hint, never pauses the explorer — see nodes/explorer.py's
+             _on_hint), F + drag = place a waypoint. A sticky mode survived
+             reloads and silently turned steer clicks into goals that fought
+             the explorer; a held key can't outlive the click. -->
+        <span id="map-keys">
+          <span data-tool="goal"><b>drag</b> nav goal</span>
+          <span data-tool="steer"><kbd>X</kbd>+click explore here <span class="dim">(+shift: queue)</span></span>
+          <span data-tool="waypoint"><kbd>F</kbd>+drag waypoint <span class="dim">(click pin: delete)</span></span>
         </span>
+        <!-- Touch screens have no keys to hold: a one-shot tool picker that
+             drops back to "goal" after a single use. -->
+        <div id="map-tool" class="segmented">
+          <button type="button" data-tool="steer">explore</button>
+          <button type="button" data-tool="waypoint">waypoint</button>
+        </div>
       </div>
       <canvas id="map-canvas"></canvas>
-      <span id="goal-status"></span>
+      <!-- Status tracker: what the robot is doing, what exploration is doing,
+           and the last thing a map click did. -->
+      <div id="map-tracker">
+        <div><span class="trk-k">nav</span> <span id="trk-nav">idle</span></div>
+        <div><span class="trk-k">map</span> <span id="trk-map">–</span></div>
+        <div><span class="trk-k">explore</span> <span id="trk-explore">not running</span></div>
+        <div id="goal-status"></div>
+      </div>
     </div>
 
     <div class="pad-overlay" id="drive-overlay">
@@ -589,6 +654,7 @@
         <select id="recon-mode" title="Voxel cubes are shaded, so vertical structure reads; points are cheaper">
           <option value="voxels">voxels</option>
           <option value="points">points</option>
+          <option value="splat">splat</option>
         </select>
         <select id="recon-color" title="Photo uses the cloud's own colour; height ramps blue (floor) to red (shelf top)">
           <option value="photo">photo</option>
@@ -596,31 +662,69 @@
         </select>
         <button type="button" id="recon-reset" title="Recenter the camera on the cloud">reset view</button>
       </div>
+      <!-- Splat mode (webui/splat_view.js, docs/splat.md): a Gaussian splat
+           trained post-run by the splat worker on the WORKSTATION, fetched
+           straight from it. Hidden in the other modes. -->
+      <div id="splat-bar" hidden>
+        <select id="splat-pick" title="Finished splats on the splat worker, newest first"></select>
+        <select id="splat-map" title="Saved map (maps/) to build a splat from"></select>
+        <button type="button" id="splat-build" title="Train a splat from this saved map on the workstation's GPU">build</button>
+        <span id="splat-status"></span>
+      </div>
       <div id="recon-canvas"
            title="Fused fleet recon (/fleet/recon_cloud): every robot's RTAB-Map cloud transformed into world map via spawn anchors, then budgeted. Drag to orbit, scroll to zoom, right-drag to pan."></div>
     </div>
     <div class="panel" id="ops-panel">
-      <h2>Dispatch &amp; task queue</h2>
-      <form id="dispatch-form">
-        <select id="pickup-select"></select>
-        <span>&rarr;</span>
-        <select id="dropoff-select"></select>
-        <button type="submit">Dispatch</button>
-      </form>
-      <div id="explore-bar">
-        <span>Explore:</span>
-        <button type="button" id="explore-start" title="Start autonomous frontier exploration (nodes/explorer.py)">Start</button>
-        <button type="button" id="explore-stop" title="Stop exploring">Stop</button>
-        <button type="button" id="explore-save" title="Snapshot the current RTAB-Map database via its backup service">Save map</button>
-        <input id="map-name" placeholder="library name" size="12"
-               title="Name to save this map under in maps/ — lowercase letters, digits, - and _">
-        <button type="button" id="explore-save-lib" title="Save the fused /map grid and this robot's pose graph into maps/ under that name (scripts/maps.sh save). Needs the dashboard console.">Save to library</button>
-        <select id="map-load-select" title="Saved maps in maps/ — pick one, then Load"></select>
-        <button type="button" id="map-load" title="Load the selected library map into the running RTAB-Map (from a copy; the library file is never modified). Resets odometry. Needs the dashboard console.">Load</button>
-        <button type="button" id="map-clear" title="Wipe the live map and restart odometry from the origin. Save first if you want to keep it.">Clear</button>
-        <span id="explore-status">explorer: not running</span>
-      </div>
-      <ul id="queue-list"></ul>
+      <!-- Navigate: drive between operator waypoints placed in the map view's
+           "waypoint" mode. "here" sends one navigate_to_pose; a named start
+           sends Nav2's follow_waypoints [from, to] so the robot visits both
+           in order without the browser having to sequence goals. -->
+      <section class="ops-section">
+        <h2>Navigate</h2>
+        <form id="nav-form">
+          <select id="nav-from" title="Where the route starts. &quot;here&quot; = straight from the robot's current position"></select>
+          <span class="ops-arrow">&rarr;</span>
+          <select id="nav-to" title="Destination waypoint"></select>
+          <button type="submit" id="nav-go" class="primary">Go</button>
+          <button type="button" id="nav-stop" title="Cancel the active navigation goal">Stop</button>
+        </form>
+        <div id="nav-status" class="ops-status">add waypoints in the map view &rarr; waypoint mode</div>
+      </section>
+
+      <!-- Map: the live map's lifecycle. Save/Load/Clear go through serve.py
+           --control (scripts/maps.sh); exploration through explore_cmd. -->
+      <section class="ops-section">
+        <h2>Map</h2>
+        <div class="ops-row">
+          <select id="map-load-select" title="Saved maps in maps/ — pick one, then Load"></select>
+          <button type="button" id="map-load" title="Load the selected library map into the running RTAB-Map (from a copy; the library file is never modified). Resets odometry. Needs the dashboard console.">Load</button>
+          <button type="button" id="map-save-open" title="Save the live map into the maps/ library under a name">Save&hellip;</button>
+          <button type="button" id="map-clear" class="danger" title="Wipe the live map and restart odometry from the origin. Save first if you want to keep it.">Clear</button>
+          <button type="button" id="explore-toggle" class="ops-right" title="Autonomous frontier exploration (nodes/explorer.py)">Explore</button>
+        </div>
+        <form id="map-save-row" class="ops-row" hidden>
+          <input id="map-name" placeholder="map name (a-z 0-9 - _)" size="18"
+                 title="Name to save this map under in maps/ — lowercase letters, digits, - and _">
+          <button type="submit" class="primary" title="Save the fused /map grid and this robot's pose graph into maps/ under that name (scripts/maps.sh save). Needs the dashboard console.">Save</button>
+          <button type="button" id="map-finish" title="Save into maps/ under that name, then stop the session (same as scripts/sim_ctl.sh stop --save-map NAME). Needs the dashboard console.">Save &amp; finish</button>
+          <button type="button" id="map-save-cancel">Cancel</button>
+        </form>
+        <div id="explore-status" class="ops-status">explorer: not running</div>
+      </section>
+
+      <!-- The arm pick-and-place pipeline (task_manager.py). Folded away: it
+           needs configs/waypoints.yaml stations and a captured arm, which is
+           not the everyday operator flow. -->
+      <details id="tasks-section" class="ops-section">
+        <summary>Pick &amp; place tasks</summary>
+        <form id="dispatch-form">
+          <select id="pickup-select"></select>
+          <span class="ops-arrow">&rarr;</span>
+          <select id="dropoff-select"></select>
+          <button type="submit" class="primary">Dispatch</button>
+        </form>
+        <ul id="queue-list"></ul>
+      </details>
     </div>
   </div>
 
@@ -632,18 +736,83 @@
     <div id="scenario-head">
       <h2>Scenarios</h2>
       <span id="scenario-hint"
-            title="Each card is a preset for scripts/run_demo.sh, defined in configs/scenarios/*.yaml. Starting one launches Isaac Sim plus the whole ROS 2 stack; this dashboard stays up throughout.">
-        Presets from configs/scenarios/ — starting one launches Isaac Sim and the ROS 2 stack.
+            title="Pick each setting, or start from a Quick start preset (configs/scenarios/*.yaml). Starting launches Isaac Sim plus the whole ROS 2 stack; this dashboard stays up throughout.">
+        Choose a setup and start — launches Isaac Sim and the ROS 2 stack.
       </span>
     </div>
     <div id="console-warning" hidden></div>
     <div id="scenario-body">
-      <div id="scenario-list"></div>
+      <!-- The launch form (webui/scenarios.js). It sends SETTINGS, never paths
+           or flags: webui/session.py's config_to_run turns them into the same
+           RUN_FLAGS allowlist a preset file goes through. Rows carry
+           data-field so the robot console can hide sim-only settings. -->
+      <form id="launch-form" autocomplete="off">
+        <div class="lf-row">
+          <span class="lf-k">Quick start</span>
+          <select id="lf-preset" title="Presets from configs/scenarios/ — picking one fills the form in"></select>
+          <button type="button" id="lf-save-preset" title="Save these settings as a new Quick start preset (configs/scenarios/NAME.yaml)">Save as preset&hellip;</button>
+        </div>
+        <p id="lf-preset-note" class="lf-note"></p>
+        <div class="lf-row" data-field="scene">
+          <span class="lf-k">Environment</span>
+          <div class="segmented lf-seg" id="lf-scene">
+            <button type="button" data-v="nvidia">NVIDIA warehouse</button>
+            <button type="button" data-v="primitive">primitive</button>
+          </div>
+        </div>
+        <div class="lf-row" data-field="map">
+          <span class="lf-k">Map</span>
+          <select id="lf-map" title="Start from an empty map, the working map left by the last run, or a saved map from maps/ (always loaded from a copy)"></select>
+        </div>
+        <div class="lf-row" data-field="mode" id="lf-mode-row">
+          <span class="lf-k">Mode</span>
+          <div class="segmented lf-seg" id="lf-mode">
+            <button type="button" data-v="extend" title="Keep mapping: new ground is added to the map (save it with Save &amp; finish)">extend &mdash; keep mapping</button>
+            <button type="button" data-v="readonly" title="Localize only: the map is used, never changed (Mem/IncrementalMemory=false)">read-only &mdash; localize</button>
+          </div>
+        </div>
+        <p id="lf-map-note" class="lf-note lf-warn"></p>
+        <div class="lf-row" data-field="robots">
+          <span class="lf-k">Robots</span>
+          <select id="lf-robots"></select>
+          <span id="lf-robot-ids" class="lf-note"></span>
+        </div>
+        <div class="lf-row" data-field="explore">
+          <span class="lf-k">Exploration</span>
+          <label class="lf-check" title="The explorer always runs. Checked: it starts driving to unexplored frontiers as soon as the sim is up. Unchecked: it waits — start it any time with the Explore button or X+click on the map."><input type="checkbox" id="lf-explore"> start exploring immediately</label>
+        </div>
+        <details id="lf-advanced">
+          <summary>Advanced</summary>
+          <div class="lf-row">
+            <label class="lf-check" data-field="headless" title="No Isaac window; the dashboard, map and cameras all still work"><input type="checkbox" id="lf-headless"> headless</label>
+            <label class="lf-check" data-field="chase_cam" title="Cosmetic 3rd-person view. Each one is another render product: ~30% of real-time factor (0.47x -> 0.33x, scripts/bench_sim.sh)"><input type="checkbox" id="lf-chase_cam"> chase cam</label>
+            <select id="lf-chase_cam_robots" data-field="chase_cam_robots" title="How many robots get a chase cam"></select>
+            <label class="lf-check" data-field="teleop"><input type="checkbox" id="lf-teleop"> teleop</label>
+            <label class="lf-check" data-field="bag" title="Record a rosbag into the session directory for the life of the run (large)"><input type="checkbox" id="lf-bag"> record bag</label>
+          </div>
+          <div class="lf-row" data-field="waypoints">
+            <span class="lf-k">Waypoints</span>
+            <div class="segmented lf-seg" id="lf-waypoints">
+              <button type="button" data-v="map" title="Load the saved map's own waypoints (maps/NAME/waypoints.json)">from map</button>
+              <button type="button" data-v="keep" title="Keep the dashboard's current waypoints">keep current</button>
+              <button type="button" data-v="none" title="Start with no waypoints">start empty</button>
+            </div>
+          </div>
+        </details>
+        <div id="lf-footer">
+          <div id="lf-summary"></div>
+          <code id="lf-command"></code>
+          <div id="lf-error"></div>
+          <button type="submit" id="lf-start">Start</button>
+        </div>
+      </form>
       <div id="session-pane">
         <div id="session-strip">
           <span id="session-state">no session</span>
+          <button type="button" id="session-finish" disabled
+                  title="Save this run into the maps/ library (map, pose graph and waypoints), then stop it. The normal way to end a session.">Save &amp; finish</button>
           <button type="button" id="session-stop" disabled
-                  title="Tear down Isaac Sim and the ROS 2 stack. The dashboard console stays up.">Stop</button>
+                  title="Tear down Isaac Sim and the ROS 2 stack WITHOUT saving. The dashboard console stays up.">Stop</button>
         </div>
         <pre id="session-log" title="Live output from scripts/run_demo.sh for this session (also saved to data/sessions/&lt;id&gt;/console.log)."></pre>
       </div>
@@ -696,6 +865,8 @@
          https://cdn.jsdelivr.net/npm/three@0.137.5/examples/js/controls/OrbitControls.js -->
 <script src="vendor/three.min.js"></script>
 <script src="vendor/OrbitControls.js"></script>
+<!-- Gaussian-splat renderer for the 3D panel's splat mode; must load before app.js. -->
+<script src="splat_view.js"></script>
 <script src="app.js"></script>
 <!-- The scenarios tab. Independent of app.js and of ROS entirely: it talks
      only to webui/serve.py's control API, so it still works (and can start the

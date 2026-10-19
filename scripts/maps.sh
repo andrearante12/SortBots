@@ -203,6 +203,10 @@ cmd_save() {
     save_db_offline "$name" "$rid" "$vac" || exit 1
   fi
 
+  # The dashboard's operator waypoints ride along with the map they were
+  # placed on (maps_lib.snapshot_waypoints; an empty working set is a no-op).
+  "$PY" "$MAPS_LIB" waypoints save "$name" || true
+
   local state
   state=$("$PY" "$MAPS_LIB" show "$name" --json | "$PY" -c \
           'import json,sys; print(json.load(sys.stdin)["db_state"])')

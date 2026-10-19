@@ -1,7 +1,10 @@
 # Scenario definition for the dashboard's Scenarios tab (webui/scenarios.js).
 #
 # A scenario is a named, reviewable preset for scripts/run_demo.sh — nothing
-# more. webui/session.py loads this file, validates it against a fixed
+# more. In the dashboard it is a Quick start entry: picking it fills the
+# launch form (webui/session.py's run_to_config), which is how runs are
+# started now. `waypoints: map|keep|none` is also accepted here (session-side,
+# not a run_demo.sh flag; default map). webui/session.py loads this file, validates it against a fixed
 # allowlist (session.py's RUN_FLAGS), and turns `run:` into an argv list.
 # Keys not in that allowlist are REJECTED, not passed through: this file is
 # reachable-adjacent to a control API that serve.py exposes on 0.0.0.0, so
