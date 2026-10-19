@@ -28,8 +28,15 @@ protocol:
 speed_mps: 0.5
 
 # After task_manager reports FAILED, this robot skips that pickup->dropoff for
-# this long so the re-auction can reach a robot that might succeed.
+# this long so the re-auction can reach a robot that might succeed. With the
+# item already on board the task is not released; the same robot retries the
+# dropoff after this backoff instead.
 failed_backoff_s: 60.0
+
+# No map->base_link TF for this long = localization lost. Bidding from the
+# last known pose would mis-price every task, so the robot stops bidding
+# until TF is back.
+pose_stale_s: 5.0
 
 # Gateway: repeat unowned announces this often (late joiners), and heartbeat
 # so a robot with no peer in range is not "isolated".

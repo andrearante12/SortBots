@@ -275,6 +275,11 @@ commsim/
     Each still has to pass the radius and battery criteria, and a bid for a
     further task includes the backlog, or a loaded robot beside a pickup
     would beat an idle one (`Params.max_owned_tasks`, `Allocator._backlog`).
+13. **Ownership once the item is on the robot.** The spec let any owner
+    yield, stop or be reclaimed at any time; physically the item goes with
+    the robot. **Answered 2026-10-19:** `Allocator.commit` after pickup —
+    the task no longer yields, stops or gets reclaimed; a failed dropoff is
+    retried by the same robot; only completion or a cancel ends it.
 
 ## Verification (of the implementation, once approved)
 

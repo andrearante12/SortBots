@@ -124,9 +124,20 @@ the sim bringup) takes `/fleet/task_request` and announces. The bringup
 launch starts the robot side with `task_manager:=true`. Tuning is
 `configs/fleet_tasks.yaml` (same keys as `configs/base.yaml` `protocol:`).
 Between hosts, `scripts/fleet_bridge.sh` carries `/fleet/*` and nothing else
-over the mesh (`hw/README.md` step 7). Offline tests:
-`tests/fleet_tasks_test.py`, `tests/fleet_bridge_test.py`. Request a task
-with `/fleet/task_request`, watch `/fleet/task_board`.
+over the mesh (`hw/README.md` step 7). Bids measure drive distance along the
+fused `/map` (`nodes/grid_dist.py`), falling back to the straight line.
+Offline tests: `tests/fleet_tasks_test.py`, `tests/fleet_bridge_test.py`,
+`tests/grid_dist_test.py`. Request a task with `/fleet/task_request`, watch
+`/fleet/task_board`.
+
+Once a robot has picked the item up (task_manager reports `NAV_TO_DROPOFF`)
+the task is **committed**: it never yields to a cheaper claim, keeps working
+while cut off, is not reclaimed when its lease expires elsewhere (peers log
+`owner_missing`), and a failed dropoff leg is retried by the same robot
+("carrying") instead of being re-auctioned. Only a gateway cancel or its own
+completion ends it. After a restart, `fleet_tasks` reads task_manager's
+latched status: a committed task is adopted, anything else is cancelled so
+the fleet re-auctions it.
 
 ## Decisions and open items
 
@@ -139,6 +150,17 @@ with `/fleet/task_request`, watch `/fleet/task_board`.
   tasks per robot (`max_owned_tasks`), worked in claim order. A bid for a
   further task includes the backlog, and every task must pass the radius
   and battery criteria on its own.
+- **Committed ownership (2026-10-19):** before this, a robot carrying an
+  item could lose the task (partition heal, isolation, dropoff failure) and
+  the next owner was sent to an empty shelf. `Allocator.commit` fixes the
+  protocol side; DES partition at n = 10: duplicate episodes 4–5 → 1–2
+  per run (V2), 1–3 → 0–2 (V4). Two committed owners of one task (only
+  possible in simulation, where both can "pick up" the same item) resolve
+  by robot ID, and the loser is told it holds the item.
+- **Sim coverage:** until 2026-10-19 every secondary robot in the Isaac
+  bringup ran `--no-bid` (only robot_0's arm is animated), so no sim auction
+  had two bidders. Secondaries now run `scripted_pick.py --mock` and bid.
+  A two-robot Isaac run needs ~10 GB and the workstation; it has not run yet.
 - **Status recipients over UDP** are currently every robot (right for small
   fleets). Neighbor-only Status needs a small "which areas I listen to"
   announcement before scaling past ~10 robots.

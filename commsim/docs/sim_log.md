@@ -178,6 +178,16 @@ than gain (`Step 23` has the link-budget table).
   2 seeds: PASS at 1 and at 3; auction max 1.1–2.2 s → 1.2–1.6 s (fewer
   "won at capacity, step aside" rounds). Each robot still works one task at
   a time; the others wait in claim order (task_manager's queue).
+- 2026-10-19, review finding: a robot that had picked the item up could
+  still lose the task (partition heal tie-break, lease lost while isolated,
+  nav failure on the dropoff leg), sending the next owner to an empty
+  shelf. `Allocator.commit` (the owner claims at COMMITTED_COST once
+  task_manager reports NAV_TO_DROPOFF) makes the task immovable; peers
+  whose lease on it expires log `owner_missing` instead of reclaiming.
+  DES partition, n = 10, seeds 1–3: duplicate episodes V2 4/4/5 → 2/1/1,
+  V4 2/3/1 → 2/1/0. V2 seed 1 still fails (baseline: 6 false silents; now:
+  a reclaim 3 s after heal, before the route to the real owner was back,
+  resolved by tie-break at 10 s). All other scenarios unchanged.
 
 ### Where the details are
 Everything below this section is the chronological run log (what was done,
