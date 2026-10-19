@@ -6,7 +6,7 @@ Imported by `webui/serve.py` (which exposes it over HTTP when started with
 
     python3 webui/session.py --list
     python3 webui/session.py --print-argv explore_resume
-    python3 webui/session.py --print-argv explore_fresh --set headless=true
+    python3 webui/session.py --print-argv explore_fresh --set headless=false
 
 Pure stdlib + PyYAML, deliberately no rclpy: this module has to run in a
 ROS-free environment, because `scripts/run_demo.sh` hard-refuses to start when
@@ -150,8 +150,8 @@ def _pattern(flag: str, rx: re.Pattern):
 def _switch(flag: str, when: bool):
     """Emit a bare flag when the value equals `when`, nothing otherwise.
 
-    Covers both polarities: headless=true -> --headless, but chase_cam=false ->
-    --no-chase-cam.
+    Covers both polarities: teleop=true -> --teleop, but chase_cam=false ->
+    --no-chase-cam (and headless=false -> --no-headless).
     """
     def build(value):
         if not isinstance(value, bool):
@@ -241,7 +241,7 @@ RUN_FLAGS = {
     "robots": _int_range("--robots", 1, _MAX_ROBOTS),
     "robot_id": _pattern("--robot-id", re.compile(r"^[A-Za-z0-9_]+$")),
     "robot_ids": _robot_ids("--robot-ids"),
-    "headless": _switch("--headless", when=True),
+    "headless": _switch("--no-headless", when=False),
     "chase_cam": _switch("--no-chase-cam", when=False),
     "chase_cam_robots": _chase_cam_robots("--chase-cam-robots"),
     "teleop": _switch("--teleop", when=True),
@@ -256,7 +256,7 @@ RUN_DEFAULTS = {
     "robots": 1,
     "robot_id": "robot_0",
     "robot_ids": None,
-    "headless": False,
+    "headless": True,
     "chase_cam": True,
     "chase_cam_robots": None,
     "teleop": False,
@@ -485,7 +485,7 @@ CONFIG_REAL_KEYS = {"map", "mode", "waypoints", "bag"}
 CONFIG_KEYS = {"sim": CONFIG_SIM_KEYS, "real": CONFIG_REAL_KEYS}
 CONFIG_DEFAULTS = {
     "scene": "nvidia", "robots": 1, "map": "new", "mode": "extend",
-    "explore": True, "waypoints": "map", "headless": False, "chase_cam": False,
+    "explore": True, "waypoints": "map", "headless": True, "chase_cam": False,
     "chase_cam_robots": 1, "teleop": False, "bag": False,
 }
 MODES = ("extend", "readonly")
@@ -581,7 +581,7 @@ def run_to_config(run: dict, platform: str = "sim", bag: bool = False) -> dict:
         cfg["scene"] = run.get("scene", "nvidia")
         cfg["robots"] = int(run.get("robots") or 1)
         for key in ("explore", "headless", "chase_cam", "teleop"):
-            cfg[key] = bool(run.get(key))
+            cfg[key] = bool(run.get(key, RUN_DEFAULTS[key]))
         cfg["chase_cam_robots"] = int(run.get("chase_cam_robots") or 1)
     return {"config": cfg}
 

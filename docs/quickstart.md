@@ -196,7 +196,7 @@ as the interface (`0` ok, `1` failure, `3` no console, `4` nothing running,
 
 ```bash
 scripts/sim_ctl.sh console start
-scripts/sim_ctl.sh start explore_fleet headless=true
+scripts/sim_ctl.sh start explore_fleet
 scripts/sim_ctl.sh wait running --timeout 420    # first run streams assets
 scripts/sim_ctl.sh status
 scripts/sim_ctl.sh stop
