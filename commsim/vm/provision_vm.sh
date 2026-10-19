@@ -14,7 +14,9 @@ set -euo pipefail
 [ -z "${AMENT_PREFIX_PATH:-}" ] || { echo "ROS is sourced in this shell; use a clean one" >&2; exit 1; }
 
 # Pin Mininet-WiFi: its master moves and we only use hwsim + wmediumd + nodes.
-MNWIFI_REF="${MNWIFI_REF:-master}"   # TODO(M0): replace with the commit that passes the M0 smoke test
+# master passed the M0 smoke test on 2026-10-03 (sim_log step 6); pin the
+# commit before the next VM is built so a later master cannot break it.
+MNWIFI_REF="${MNWIFI_REF:-master}"
 MNWIFI_DIR=/opt/mininet-wifi
 export DEBIAN_FRONTEND=noninteractive
 

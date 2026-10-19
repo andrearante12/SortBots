@@ -56,12 +56,12 @@ the same place.
 | `emu/mesh.py`, `emu/m1.py`, `emu/reroute.py` | Build the emulated mesh; run Status stubs and capture; measure reroute time |
 | `stubs/status_stub.py` | ROS 2 node run inside each emulated robot (Zenoh or UDP Status) |
 | `ws/src/commsim_msgs/` | The message definitions (`.msg`), so wire sizes are real |
-| `hw/` | **Real hardware:** per-router OpenWrt setup + host config generated from the same fleet list, a UDP probe, and the calibration runbook ([`hw/README.md`](hw/README.md)) |
+| `hw/` | **Real hardware:** OpenWrt images with the mesh packages baked in (`firmware.py`), per-router setup + host config generated from the same fleet list (`deploy.py`), a UDP probe, router statistics, and the bring-up and calibration runbook ([`hw/README.md`](hw/README.md)) |
 | `configs/` | `base.yaml` = the recommended design; `hw_lab.yaml` = 2 robots + gateway, 2.4 GHz only, for the first routers; `spec_original.yaml` = the design as first written, for before/after runs; `ogm250.yaml`/`ogm500.yaml` = routing-interval comparisons |
 | `measurements/` | Emulation measurements the model is checked against |
-| `scripts/` | `fix_sweep.sh` reproduces the final comparison; `check_isolation.sh` proves traffic stays on the fleet subnet |
+| `scripts/` | `fix_sweep.sh` reproduces the final comparison (`final_sweep.sh` the earlier session-1 one); `check_isolation.sh` proves traffic stays on the fleet subnet |
 | `vm/` | Creating and provisioning the emulation VM |
-| `tests/` | Offline tests (protocol, config generation, model sanity) |
+| `tests/` | Offline tests (protocol, config generation, hardware bundles, model sanity) |
 
 Every value in `configs/base.yaml` tagged `placeholder` or `estimate` is a
 parameter awaiting a hardware measurement, not a fact.
@@ -118,17 +118,27 @@ commsim/scripts/check_isolation.sh --subnet 10.42.0.0/24 --configs /tmp/fleet
 ## On the robots
 
 `core/protocol.py` is not only simulated: `nodes/fleet_tasks.py` runs the same
-`Allocator` on each robot (plus a gateway) over ROS 2 topics and feeds the
-tasks it wins to `nodes/task_manager.py`. The bringup launch starts it with
-`task_manager:=true`. Its offline tests are `tests/fleet_tasks_test.py`.
-Request a task with `/fleet/task_request`, watch `/fleet/task_board`.
+`Allocator` on each robot over ROS 2 topics and feeds the tasks it wins to
+`nodes/task_manager.py`; one more instance with `--gateway` (the laptop, or
+the sim bringup) takes `/fleet/task_request` and announces. The bringup
+launch starts the robot side with `task_manager:=true`. Tuning is
+`configs/fleet_tasks.yaml` (same keys as `configs/base.yaml` `protocol:`).
+Between hosts, `scripts/fleet_bridge.sh` carries `/fleet/*` and nothing else
+over the mesh (`hw/README.md` step 7). Offline tests:
+`tests/fleet_tasks_test.py`, `tests/fleet_bridge_test.py`. Request a task
+with `/fleet/task_request`, watch `/fleet/task_board`.
 
 ## Decisions and open items
 
 - **Partitions:** an owner that still hears its own half of a split network
   keeps working, so both halves may work the same task until the split heals;
-  the tie-break then picks one owner in about 2 s. Accepted by design
-  (`tests/protocol_test.py::test_partition_heal_converges_by_tie_break`).
+  the tie-break then picks one owner in about 2 s. Accepted by design for
+  now (`tests/protocol_test.py::test_partition_heal_converges_by_tie_break`);
+  `docs/plan.md` question 11 lists the alternatives.
+- **Tasks per robot (decided 2026-10-19):** one robot per task, up to 3
+  tasks per robot (`max_owned_tasks`), worked in claim order. A bid for a
+  further task includes the backlog, and every task must pass the radius
+  and battery criteria on its own.
 - **Status recipients over UDP** are currently every robot (right for small
   fleets). Neighbor-only Status needs a small "which areas I listen to"
   announcement before scaling past ~10 robots.

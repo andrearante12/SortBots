@@ -743,7 +743,7 @@ port to keep on the mesh interface only (`check_isolation.sh` should cover
 7450 if adopted). **Recommended, not yet adopted** — `status_transport: tcp`
 remains the default.
 
-### Still open
+### Still open at the end of session 2 (superseded by **Results → Still open**)
 - Partition: duplicate work during a split is still possible by design
   (accepted); V3/V4 at n = 15 resolve it in ~2 s in most but not all runs.
 - Band loss: a 2.4 GHz outage is a fleet outage on a racked floor.

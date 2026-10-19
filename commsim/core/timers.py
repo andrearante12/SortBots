@@ -35,7 +35,8 @@ def check(cfg: dict) -> list[str]:
     gap = worst_status_gap(cfg)
     ogm = int(cfg["batman"]["orig_interval_ms"])
     worst = {int(k): v for k, v in m.get("reroute_worst_s", {}).items()}
-    reroute = float(worst.get(ogm, reroute))  # worst case for THIS interval, not the 1.95 s best case
+    # worst case for THIS interval, not the 1.95 s best case
+    reroute = float(worst.get(ogm, reroute))
     bad = []
     if not reroute < lease:
         bad.append(f"zenoh lease {lease:.2f}s must exceed the worst measured reroute "

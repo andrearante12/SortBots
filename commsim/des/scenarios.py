@@ -19,7 +19,6 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from commsim.core.fleet import load_config
-from commsim.core.protocol import CLAIMED
 from .run import BASE
 from .sim import Sim, GW, pct
 
@@ -97,6 +96,7 @@ def scen_partition(sim, ctx):
     for x in a:
         for y in b:
             sim.block_link(x, y)
+
     def heal():
         ctx["t_heal"] = sim.now
         for x in a:
@@ -109,6 +109,7 @@ def scen_gateway_loss(sim, ctx):
     ctx["victim"] = GW
     ctx["done_before"] = sum(1 for t in sim.tasks.values() if t["done"])
     sim.kill(GW)
+
     def back():
         ctx["t_back"] = sim.now
         ctx["done_during"] = sum(1 for t in sim.tasks.values() if t["done"]) - ctx["done_before"]
@@ -194,6 +195,7 @@ def run_one(spec):
     res = sim.run()
 
     after = [e for e in events if e["t"] >= T_INJ]
+
     def legit(e):
         p = e.get("peer")
         return (p in ctx["legit_silent"] or e["robot_id"] in ctx["legit_silent"]
@@ -228,10 +230,12 @@ def run_one(spec):
     out = {
         **{k: spec[k] for k in ("scenario", "variant", "n", "seed")},
         "tag": spec.get("tag", ""), "status_transport": sim.status_transport,
-        "zenoh_lease_s": sim.lease_s, "orig_interval_ms": int(sim.cfg["batman"]["orig_interval_ms"]),
+        "zenoh_lease_s": sim.lease_s,
+        "orig_interval_ms": int(sim.cfg["batman"]["orig_interval_ms"]),
         "max_open_bids": sim.params.max_open_bids, "reroute_delay_s": sim.reroute_delay_s,
         "lease_beacon_hz": sim.lease_beacon_hz, "single_connect": sim.single_connect,
-        "status_timeout_s": 1.5 if spec["scenario"] == "timer_misorder" else sim.params.status_timeout_s,
+        "status_timeout_s": (1.5 if spec["scenario"] == "timer_misorder"
+                             else sim.params.status_timeout_s),
         "victim": str(ctx.get("victim")),
         "max_status_gap_s": max(gaps) if gaps else None,
         "p95_status_gap_s": pct(gaps, 95) if gaps else None,
@@ -257,13 +261,13 @@ def run_one(spec):
     if "t_heal" in ctx:
         dups_after = [e for e in after if e["event"] == "task_yielded" and e["t"] >= ctx["t_heal"]]
         out["yields_after_heal"] = len(dups_after)
-        out["last_yield_after_heal_s"] = max((e["t"] - ctx["t_heal"] for e in dups_after), default=None)
+        out["last_yield_after_heal_s"] = max((e["t"] - ctx["t_heal"] for e in dups_after),
+                                             default=None)
     if "done_during" in ctx:
         out["tasks_done_during_gw_outage"] = ctx["done_during"]
         out["stops_during_gw_outage"] = sum(
-            1 for e in after if e["event"] in ("stop_task", "task_yielded") and e["t"] < ctx["t_back"])
-        gw_heard = [t for (src, dst), ts in sim.status_rx.items() if dst == GW
-                    for t in ts if t >= ctx["t_back"]]
+            1 for e in after
+            if e["event"] in ("stop_task", "task_yielded") and e["t"] < ctx["t_back"])
         firsts = {}
         for (src, dst), ts in sim.status_rx.items():
             if dst == GW:
@@ -275,7 +279,8 @@ def run_one(spec):
     if "t_back" in ctx and spec["scenario"] == "reboot":
         r = sim.nodes[ctx["victim"]]
         out["rebooted_knows_tasks"] = len(r.alloc.tasks)
-        heard = [ts for (src, dst), ts in sim.status_rx.items() if src == ctx["victim"] and dst == GW]
+        heard = [ts for (src, dst), ts in sim.status_rx.items()
+                 if src == ctx["victim"] and dst == GW]
         out["rejoin_first_status_s"] = min((t for ts in heard for t in ts if t >= ctx["t_back"]),
                                            default=math.nan) - ctx["t_back"]
     out["pass"], out["why"] = judge(spec["scenario"], out)

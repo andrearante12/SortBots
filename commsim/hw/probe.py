@@ -85,6 +85,7 @@ def summary(path: str) -> str:
             if last_ok is not None:
                 gap = max(gap, (t - last_ok) / 1e9)
             last_ok = t
+
     def pct(p):
         return rtt[min(len(rtt) - 1, int(p * len(rtt)))] if rtt else float("nan")
     return (f"sent {len(rows)}  delivered {len(ok) / len(rows):.4f}  "

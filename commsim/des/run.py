@@ -60,7 +60,7 @@ def write(out: Path, rows: list[dict]) -> None:
     with open(out / "runs.jsonl", "a") as f:
         for r in rows:
             f.write(json.dumps(r, default=str) + "\n")
-    allrows = [json.loads(l) for l in open(out / "runs.jsonl")]
+    allrows = [json.loads(line) for line in open(out / "runs.jsonl")]
     keys = sorted({k for r in allrows for k in r})
     with open(out / "runs.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=keys)

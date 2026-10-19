@@ -25,7 +25,7 @@ BG_DESIGNS = ["V2+LB+SC", "V3+LB+SC", "V4+LB+SC"]
 
 
 def load(d):
-    return [json.loads(l) for l in open(Path(d) / "runs.jsonl")]
+    return [json.loads(line) for line in open(Path(d) / "runs.jsonl")]
 
 
 def agg(rows, label, bg=0.0, key="busy_g24"):
@@ -78,7 +78,8 @@ def lines(rows, key, ylabel, title, ref, ref_label, out, log=False, scale=1.0):
     for n, v, lab in sorted(ends, key=lambda e: e[1]):
         dy = 0
         for pn, pv, pdy in placed:
-            if pn == n and abs((math.log10(v) if log else v) - (math.log10(pv) if log else pv)) < (0.12 if log else 3):
+            gap = abs((math.log10(v) if log else v) - (math.log10(pv) if log else pv))
+            if pn == n and gap < (0.12 if log else 3):
                 dy = pdy + 10
         placed.append((n, v, dy))
         ax.annotate(lab, (n, v), xytext=(6, dy), textcoords="offset points",

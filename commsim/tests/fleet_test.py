@@ -1,3 +1,5 @@
+"""Fleet config generation (core/fleet.py): addresses, MACs, Zenoh/UDP config,
+timer checks and the isolation rules every generated file must satisfy."""
 import json
 
 import pytest

@@ -1,6 +1,4 @@
 """Auction + lease correctness over the in-memory fleet (no radio model)."""
-import math
-
 from commsim.core.loopback import LoopbackNet
 from commsim.core.protocol import Allocator, Params, CLAIMED, OPEN, DONE
 

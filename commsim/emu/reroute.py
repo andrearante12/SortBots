@@ -21,9 +21,9 @@ def sh(cmd, ns=None, check=True):
 
 
 def nexthop(ns, dst_mac):
-    for l in sh("batctl meshif bat0 o", ns).splitlines():
-        if dst_mac in l and l.strip().startswith("*"):
-            return l.split()[-3] if "[" in l else None
+    for line in sh("batctl meshif bat0 o", ns).splitlines():
+        if dst_mac in line and line.strip().startswith("*"):
+            return line.split()[-3] if "[" in line else None
     return None
 
 
@@ -42,22 +42,20 @@ def main(argv=None):
     for t in range(a.trials):
         time.sleep(8)
         o = sh("batctl meshif bat0 o", "n0")
-        line = [l for l in o.splitlines() if macs["n3"] in l and l.strip().startswith("*")]
+        line = [ln for ln in o.splitlines() if macs["n3"] in ln and ln.strip().startswith("*")]
         hop_mac = re.findall(r"02:00:00:00:0[12]:00", line[0])[0] if line else macs["n1"]
         relay = "n1" if hop_mac == macs["n1"] else "n2"
-        ping = subprocess.Popen(f"ip netns exec n0 ping -D -i 0.01 -W 1 -w 12 10.42.0.4",
+        ping = subprocess.Popen("ip netns exec n0 ping -D -i 0.01 -W 1 -w 12 10.42.0.4",
                                 shell=True, text=True, stdout=subprocess.PIPE)
         time.sleep(3)
-        t_block = time.time()
         sh(f"iw dev {devs['n0']} station set {macs[relay]} plink_action block", "n0")
         sh(f"iw dev {devs[relay]} station set {macs['n0']} plink_action block", relay)
         out, _ = ping.communicate()
         seqs = sorted(int(m) for m in re.findall(r"icmp_seq=(\d+)", out))
         gaps = [b - a_ for a_, b in zip(seqs, seqs[1:])]
         outage_s = (max(gaps) - 1) * 0.01 if gaps else None
-        after = nexthop("n0", macs["n3"])
         results.append({"trial": t, "blocked": f"n0-{relay}", "outage_s": outage_s,
-                        "received": len(seqs)})
+                        "received": len(seqs), "nexthop_after": nexthop("n0", macs["n3"])})
         print(json.dumps(results[-1]), flush=True)
         sh(f"iw dev {devs['n0']} station set {macs[relay]} plink_action open", "n0", check=False)
         sh(f"iw dev {devs[relay]} station set {macs['n0']} plink_action open", relay, check=False)

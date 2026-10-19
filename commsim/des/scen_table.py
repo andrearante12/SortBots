@@ -10,8 +10,8 @@ import sys
 def main(d):
     res = collections.defaultdict(lambda: collections.defaultdict(list))
     tags = []
-    for l in open(f"{d}/runs.jsonl"):
-        r = json.loads(l)
+    for line in open(f"{d}/runs.jsonl"):
+        r = json.loads(line)
         res[(r["scenario"], r["variant"], r["n"])][r["tag"]].append(r)
         if r["tag"] not in tags:
             tags.append(r["tag"])

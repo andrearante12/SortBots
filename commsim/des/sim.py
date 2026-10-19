@@ -27,7 +27,7 @@ import random
 import time
 from collections import defaultdict, deque
 
-from commsim.core.protocol import Allocator, Params, CLAIMED, COMPLETE
+from commsim.core.protocol import Allocator, Params, CLAIMED
 from . import radio as R
 from .layout import LAYOUTS, path_length
 
@@ -722,6 +722,7 @@ class Sim:
     def block_link(self, i, j, bands=None):
         for b in bands or self.bands:
             self.blocked.add(frozenset((i, j, b)))
+
         def notice():
             for b in bands or self.bands:
                 if frozenset((i, j, b)) in self.blocked:
@@ -732,6 +733,7 @@ class Sim:
     def unblock_link(self, i, j, bands=None):
         for b in bands or self.bands:
             self.blocked.discard(frozenset((i, j, b)))
+
         def notice():  # batman needs a couple of OGMs to trust a returning link
             for b in bands or self.bands:
                 if frozenset((i, j, b)) not in self.blocked:
@@ -741,6 +743,7 @@ class Sim:
 
     def kill(self, rid):
         self.nodes[rid].alive = False
+
         def notice():
             if not self.nodes[rid].alive:
                 self.route_dead.add(rid)
@@ -753,6 +756,7 @@ class Sim:
         if fresh:  # reboot: empty allocator; tasks re-learned from the fleet
             r.alloc = r.new_allocator(random.Random(self.seed * 7919 + rid + 1))
             r.stop_task()
+
         def notice():
             self.route_dead.discard(rid)
             self.topo()
@@ -921,7 +925,8 @@ class Sim:
             if typ in CONTROL:
                 self.lat[typ].append(now - msg["t0"])
                 self.hops.append(hops)
-            if typ in ("Status", "Pose") and (not via_bcast or src in r.heard_since or not self.v["neighbor"]):
+            if typ in ("Status", "Pose") and (not via_bcast or src in r.heard_since
+                                              or not self.v["neighbor"]):
                 self.st_recv[(src, dst)] += 1
         if self.status_rx is not None and typ in ("Status", "Pose", "StatusLite"):
             self.status_rx[(src, dst)].append(now)
@@ -1072,12 +1077,14 @@ class Sim:
                 if now >= f.retry_at:
                     # a re-dial is a TCP handshake: it needs a path that actually
                     # carries frames now, not just one batman still believes in
-                    if a.alive and b.alive and self.path_ok(f.src, f.dst) and self.path_ok(f.dst, f.src):
+                    if a.alive and b.alive and self.path_ok(f.src, f.dst) \
+                            and self.path_ok(f.dst, f.src):
                         f.reopen()
                     else:
                         f.retry_at = now + Flow.RECONNECT_S
                 continue
-            stale = max(now - max(f.last_rx, f.opened_at), now - max(f.rev.last_rx, f.rev.opened_at))
+            stale = max(now - max(f.last_rx, f.opened_at),
+                        now - max(f.rev.last_rx, f.rev.opened_at))
             if stale > self.lease_s and now > 5:
                 f.close()
                 if self.in_window(now) and f in self.flows.values():
@@ -1162,9 +1169,9 @@ class Sim:
                 fid = ("obs", self._seq)
                 self.seen_flood.add((fid, r.id))
                 for b in self.bands:
-                    self.ch[b].enqueue(self.st[(r.id, b)],
-                                       Frame("flood", R.MAC_OVERHEAD + R.BATMAN_BCAST + 32 + 8, r.id,
-                                             msg=msg, fid=fid))
+                    frame = Frame("flood", R.MAC_OVERHEAD + R.BATMAN_BCAST + 32 + 8, r.id,
+                                  msg=msg, fid=fid)
+                    self.ch[b].enqueue(self.st[(r.id, b)], frame)
             else:
                 self.publish(r.id, "ObstacleEvent", 48, self.all_robots(r.id))
             r.new_obstacles.append(1)
@@ -1274,7 +1281,8 @@ class Sim:
         self.every(1.0, self.sample_tick, 0.5)
         for r in self.nodes.values():
             if self.v["mesh"]:
-                self.every(self.orig_s, lambda i=r.id: self.ogm_tick(i), rng.uniform(0, self.orig_s))
+                self.every(self.orig_s, lambda i=r.id: self.ogm_tick(i),
+                           rng.uniform(0, self.orig_s))
             if self.status_only:
                 self.every(1 / self.status_hz, lambda r=r: self.status_tick(r),
                            rng.uniform(0, 1 / self.status_hz))
@@ -1334,14 +1342,16 @@ class Sim:
             "dup_episodes": self.dup_episodes, "dup_transient": self.dup_transient,
             "abandoned": self.abandoned,
             "auction_n": len(self.auction),
-            "auction_p95_s": pct(self.auction, 95), "auction_max_s": max(self.auction, default=math.nan),
+            "auction_p95_s": pct(self.auction, 95),
+            "auction_max_s": max(self.auction, default=math.nan),
             "map_lag_p95": pct(self.map_lags, 95),
             "stale_frac": self.stale[0] / self.stale[1] if self.stale[1] else math.nan,
             "mean_hops": sum(self.hops) / len(self.hops) if self.hops else math.nan,
             "isolated_events": self.isolated_events, "lease_expired": self.lease_expired,
             "session_drops": self.session_drops,
             "conn_frac": self.conn[0] / self.conn[1] if self.conn[1] else math.nan,
-            "claim_cost_mean_s": (sum(self.claim_costs) / len(self.claim_costs)) if self.claim_costs else math.nan,
+            "claim_cost_mean_s": (sum(self.claim_costs) / len(self.claim_costs)
+                                  if self.claim_costs else math.nan),
             "claims": len(self.claim_costs),
             "tasks_done": sum(1 for t in self.tasks.values() if t["done"]),
         }

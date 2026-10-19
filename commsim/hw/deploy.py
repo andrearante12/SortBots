@@ -54,7 +54,8 @@ def check_addresses(fleet: list[F.Node], cfg: dict) -> None:
     hosts = {ipaddress.ip_address(n.ip) for n in fleet}
     routers = {ipaddress.ip_address(router_ip(n, cfg)) for n in fleet}
     if hosts & routers or min(routers) <= max(hosts):
-        raise ValueError(f"subnet {cfg['fleet']['subnet']} too small: host and router addresses overlap")
+        raise ValueError(f"subnet {cfg['fleet']['subnet']} too small: "
+                         "host and router addresses overlap")
 
 
 def router_script(node: F.Node, fleet: list[F.Node], cfg: dict, key: str, sources: str) -> str:
@@ -311,7 +312,10 @@ def deploy(cfg: dict, out: Path, key: str, sources: str,
     for node in fleet:
         d = out / node.name
         os.chmod(d, 0o700)
-        iface = (gateway_iface or hw["gateway_iface"]) if node.is_gateway else (robot_iface or hw["robot_iface"])
+        if node.is_gateway:
+            iface = gateway_iface or hw["gateway_iface"]
+        else:
+            iface = robot_iface or hw["robot_iface"]
         router_env, node_env = env_files(node, fleet, cfg)
         files = {
             "router-setup.sh": router_script(node, fleet, cfg, key, sources),
@@ -339,7 +343,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("configs", nargs="+")
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--mesh-key-file", required=True, type=Path)
-    ap.add_argument("--new-key", action="store_true", help="create the key file (refuses to overwrite)")
+    ap.add_argument("--new-key", action="store_true",
+                    help="create the key file (refuses to overwrite)")
     ap.add_argument("--robot-iface", help="override hardware.robot_iface")
     ap.add_argument("--gateway-iface", help="override hardware.gateway_iface")
     a = ap.parse_args(argv)

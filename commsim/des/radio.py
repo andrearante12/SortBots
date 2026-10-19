@@ -81,8 +81,10 @@ class RadioParams:
     gateway_rack_factor: float = 0.5     # PLACEHOLDER: gateway mounted high clears some racks
     multicast_rate_mbps: float = 12.0
     cs_dbm: float = -82.0                # carrier-sense threshold (reported, see medium.py)
-    ht: float = 1.0                      # 1 = HT MCS rates; 0 = legacy OFDM (what hwsim's minstrel used)
-    max_rate_mbps: float = 1e9           # cap: a conservative rate controller (emulation sat at 9-24 Mb/s)
+    # 1 = HT MCS rates; 0 = legacy OFDM (what hwsim's minstrel used)
+    ht: float = 1.0
+    # cap: a conservative rate controller (emulation sat at 9-24 Mb/s)
+    max_rate_mbps: float = 1e9
 
     @classmethod
     def from_config(cls, cfg: dict) -> "RadioParams":

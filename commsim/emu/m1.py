@@ -100,7 +100,8 @@ def airtime(pcap: Path, duration: float) -> dict:
         if not line[:1].isdigit():
             continue
         if "Acknowledgment" in line:
-            busy += (R.SIFS_US["g24"] + R._ofdm_us(R.ACK_BYTES, 24.0, R.LEGACY_PREAMBLE_US, "g24")) * 1e-6
+            ack_us = R._ofdm_us(R.ACK_BYTES, 24.0, R.LEGACY_PREAMBLE_US, "g24")
+            busy += (R.SIFS_US["g24"] + ack_us) * 1e-6
             acks += 1
             continue
         m_len = re.search(r"length (\d+)", line)
@@ -136,12 +137,14 @@ def main(argv=None) -> int:
     ap.add_argument("--depth", type=int, default=None, help="default: protocol.status_qos_depth")
     ap.add_argument("--transport", choices=["zenoh", "udp"], default=None,
                     help="default: protocol.status_transport from the config")
-    ap.add_argument("--configs", nargs="*", default=[], help="extra YAML layers, e.g. spec_original.yaml")
+    ap.add_argument("--configs", nargs="*", default=[],
+                    help="extra YAML layers, e.g. spec_original.yaml")
     ap.add_argument("--links", default=None, help='explicit topology, e.g. "0-1,0-2,1-3,2-3"')
     ap.add_argument("--orig-ms", type=int, default=500)
     ap.add_argument("--lease-ms", type=int, default=None, help="override zenoh transport lease")
     ap.add_argument("--block-at", type=float, default=None,
-                    help="seconds into the stub run: block n0's link to its active next hop toward the last node")
+                    help="seconds into the stub run: block n0's link to its active next hop "
+                         "toward the last node")
     a = ap.parse_args(argv)
     if os.geteuid() != 0:
         print("run as root inside the commsim VM", file=sys.stderr)
@@ -200,13 +203,14 @@ def main(argv=None) -> int:
         time.sleep(a.block_at)
         last = state["nodes"][-1]
         o = mesh.sh("batctl meshif bat0 o", "n0")
-        line = [l for l in o.splitlines() if last["mac"] in l and l.strip().startswith("*")][0]
+        line = [ln for ln in o.splitlines() if last["mac"] in ln and ln.strip().startswith("*")][0]
         hop = re.findall(r"02:00:00:00:[0-9a-f]{2}:00", line)[1]
         relay = next(nd for nd in state["nodes"] if nd["mac"] == hop)
         mesh.sh(f"iw dev {state['nodes'][0]['dev']} station set {hop} plink_action block", "n0")
         mesh.sh(f"iw dev {relay['dev']} station set {state['nodes'][0]['mac']} plink_action block",
                 relay["ns"])
-        (a.out / "block.json").write_text(json.dumps({"t_ns": time.time_ns(), "relay": relay["ns"]}))
+        (a.out / "block.json").write_text(
+            json.dumps({"t_ns": time.time_ns(), "relay": relay["ns"]}))
         print(f"blocked n0-{relay['ns']}", flush=True)
         time.sleep(max(0, a.duration / 2 - a.block_at))
     else:
@@ -222,15 +226,16 @@ def main(argv=None) -> int:
     res = analyze(a.out, a.n, a.hz, a.duration, a.warmup)
     res.update(airtime(a.out / "hwsim0.pcap", a.duration))
     res["gateway_reaches_all"] = reach
-    res["rss_mb_per_node"] = round(sum(int(l.split()[0]) for l in mem.split("\n")
-                                       if l.strip()) / 1024 / a.n, 1)
-    res["cpu_pct_per_node"] = round(sum(float(l.split()[1]) for l in mem.split("\n")
-                                        if l.strip()) / a.n, 1)
+    res["rss_mb_per_node"] = round(sum(int(ln.split()[0]) for ln in mem.split("\n")
+                                       if ln.strip()) / 1024 / a.n, 1)
+    res["cpu_pct_per_node"] = round(sum(float(ln.split()[1]) for ln in mem.split("\n")
+                                        if ln.strip()) / a.n, 1)
     res["depth"] = a.depth
     res["transport"] = a.transport
     res["zenoh_connect"] = cfg["zenoh"].get("connect")
     res["zenoh_lease_ms"] = cfg["zenoh"]["transport_lease_ms"]
-    res["rss_mb_total"] = round(sum(int(l.split()[0]) for l in mem.split("\n") if l.strip()) / 1024, 1)
+    res["rss_mb_total"] = round(
+        sum(int(ln.split()[0]) for ln in mem.split("\n") if ln.strip()) / 1024, 1)
     for p in procs:
         try:
             os.killpg(p.pid, 15)

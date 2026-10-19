@@ -63,7 +63,8 @@ def n10(path="commsim/measurements/spec_config/m1_n10_interf_result.json",
         cfg = load_config(BASE, SPEC)
         cfg.setdefault("radio_model", {}).update(ht=ht, max_rate_mbps=cap)
         sim = Sim(cfg, "V2", n=len(m) - 1, seed=1, warmup_s=25, steady_s=95,
-                  status_only=True, fixed_snr=snr, positions=[tuple(p) for p in [n["pos"] for n in st["nodes"]]])
+                  status_only=True, fixed_snr=snr,
+                  positions=[tuple(nd["pos"]) for nd in st["nodes"]])
         r = sim.run()
         ctl = sim.lat["Status"]
         rows[label] = {"busy": r["busy_g24"], "p50": pct(ctl, 50) * 1e3, "p95": pct(ctl, 95) * 1e3,

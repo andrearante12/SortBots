@@ -51,11 +51,12 @@ def phys_by_mac() -> dict:
     return out
 
 
-def snr_matrix(n: int, line: bool, layout: str, seed: int, links: str | None = None) -> tuple[list, list]:
+def snr_matrix(n: int, line: bool, layout: str, seed: int,
+               links: str | None = None) -> tuple[list, list]:
     """Pairwise SNR (dB) and positions. --line: neighbors 25 dB, others none.
     Otherwise the DES propagation model on a layout (same placeholders)."""
     if links:  # explicit topology, e.g. "0-1,0-2,1-3,2-3": 25 dB on listed links only
-        pairs = {tuple(sorted(map(int, l.split("-")))) for l in links.split(",")}
+        pairs = {tuple(sorted(map(int, lk.split("-")))) for lk in links.split(",")}
         pos = [(5.0 * i, 0.0) for i in range(n)]
         m = [[(25 if tuple(sorted((i, j))) in pairs else -10) for j in range(n)] for i in range(n)]
         return m, pos
@@ -140,7 +141,8 @@ def up(n: int, line: bool, layout: str, seed: int, orig_ms: int, band: str = "g2
         sh(f"ip addr add 10.42.0.{i + 1}/24 dev bat0", ns)
         nodes.append({"ns": ns, "phy": phy, "dev": dev, "ip": f"10.42.0.{i + 1}",
                       "mac": radio_mac(i), "pos": pos[i]})
-    state = {"n": n, "interference": interference, "wmediumd_pid": wm.pid, "nodes": nodes, "snr": m, "band": band}
+    state = {"n": n, "interference": interference, "wmediumd_pid": wm.pid, "nodes": nodes,
+             "snr": m, "band": band}
     (RUN / "state.json").write_text(json.dumps(state, indent=2))
     return state
 

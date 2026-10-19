@@ -1,11 +1,9 @@
 """Sanity checks of the DES medium against textbook 802.11 behavior."""
-import math
-
 import pytest
 
 from commsim.core.fleet import load_config
 from commsim.des import radio as R
-from commsim.des.sim import Sim, Frame, BG_AIRTIME_S
+from commsim.des.sim import Sim, Frame
 from commsim.tests.fleet_test import BASE
 
 
@@ -85,7 +83,8 @@ def test_tiny_fleet_run_is_clean():
 def test_same_seed_same_result_across_processes():
     # Station objects in a set iterated in memory order -> results changed
     # between processes for one seed. Run in two fresh interpreters.
-    import subprocess, sys
+    import subprocess
+    import sys
     code = ("from commsim.core.fleet import load_config; from commsim.des.sim import Sim; "
             "from commsim.tests.fleet_test import BASE; "
             "r = Sim(load_config(BASE), 'V3', n=8, seed=5, warmup_s=5, steady_s=15).run(); "
@@ -103,7 +102,6 @@ def test_per_has_no_long_tail_below_threshold():
     assert R.per(30.0, 7.0, 1500) < 1e-6
     assert R.per(7.0, 7.0, 1000) == pytest.approx(0.5)
     assert R.per(7.0, 7.0, 100) < R.per(7.0, 7.0, 1500)  # short frames slightly easier
-
 
 
 def test_legacy_rate_table_exists_and_runs():

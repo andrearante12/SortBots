@@ -53,8 +53,8 @@ def _json(url: str, body: dict | None = None) -> dict:
 
 
 def build(profile: str, version: str = VERSION, timeout_s: int = 900) -> dict:
-    d = _json(f"{ASU}/api/v1/build", {"version": version, "target": TARGET,
-                                       "profile": profile, "packages": PACKAGES})
+    d = _json(f"{ASU}/api/v1/build",
+              {"version": version, "target": TARGET, "profile": profile, "packages": PACKAGES})
     deadline = time.monotonic() + timeout_s
     while d.get("status") == 202:
         if time.monotonic() > deadline:
@@ -62,7 +62,8 @@ def build(profile: str, version: str = VERSION, timeout_s: int = 900) -> dict:
         time.sleep(10)
         d = _json(f"{ASU}/api/v1/build/{d['request_hash']}")
     if d.get("status") != 200:
-        raise SystemExit(f"{profile}: build failed: {d.get('detail')}\n{d.get('stderr', '')[-2000:]}")
+        raise SystemExit(f"{profile}: build failed: {d.get('detail')}\n"
+                         f"{d.get('stderr', '')[-2000:]}")
     missing = [p for p in PACKAGES if not p.startswith("-") and p not in d["manifest"]]
     if missing or "wpad-basic-mbedtls" in d["manifest"]:
         raise SystemExit(f"{profile}: image manifest wrong (missing {missing})")
@@ -71,7 +72,8 @@ def build(profile: str, version: str = VERSION, timeout_s: int = 900) -> dict:
 
 def fetch(d: dict, out: Path) -> Path:
     img = next(i for i in d["images"] if i["type"] == "sysupgrade")
-    dest = out / f"{d['request']['profile'].removeprefix('glinet_')}-openwrt-{d['request']['version']}-mesh-sysupgrade.bin"
+    model = d["request"]["profile"].removeprefix("glinet_")
+    dest = out / f"{model}-openwrt-{d['request']['version']}-mesh-sysupgrade.bin"
     req = urllib.request.Request(f"{ASU}/store/{d['bin_dir']}/{img['name']}", headers=HEADERS)
     with urllib.request.urlopen(req, timeout=120) as r:
         data = r.read()

@@ -7,8 +7,9 @@ rmw_zenohd on tcp/localhost:7447.
 --transport udp (PROTOTYPE): the same CDR-serialized Status goes best-effort
 over UDP unicast to each peer's mesh address instead of through zenoh/TCP —
 batman-adv still routes it multi-hop, but there is no TCP ACK, retransmission
-or exponential backoff to stretch an outage past the reroute itself. All namespaces share the VM's clock, so
-recv - header.stamp IS the one-way latency (no clock-sync error in emulation).
+or exponential backoff to stretch an outage past the reroute itself. All
+namespaces share the VM's clock, so recv - header.stamp IS the one-way latency
+(no clock-sync error in emulation).
 
     python3 status_stub.py --robot-id 1 --hz 3 --duration 120 --out /run/commsim/r1.csv
 """

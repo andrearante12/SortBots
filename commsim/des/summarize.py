@@ -11,7 +11,7 @@ from collections import defaultdict
 def load(dirs):
     rows = []
     for d in dirs:
-        rows += [json.loads(l) for l in open(f"{d}/runs.jsonl")]
+        rows += [json.loads(line) for line in open(f"{d}/runs.jsonl")]
     return rows
 
 

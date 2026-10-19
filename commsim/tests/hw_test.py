@@ -1,3 +1,5 @@
+"""Hardware bundles (hw/deploy.py) and the UDP probe (hw/probe.py): what goes
+onto the routers and hosts, checked without any router present."""
 import csv
 import os
 import shutil
@@ -30,7 +32,8 @@ def test_lab_bundle_layout_and_addresses(tmp_path):
     assert sorted(p.name for p in out.iterdir() if p.is_dir()) == ["gateway", "robot_1", "robot_2"]
     s = (out / "robot_1" / "router-setup.sh").read_text()
     assert "uci set network.lan.ipaddr=10.42.0.253" in s
-    assert "addresses: [10.42.0.2/24]" in (out / "robot_1" / "netplan-sortbots-mesh.yaml").read_text()
+    netplan = (out / "robot_1" / "netplan-sortbots-mesh.yaml").read_text()
+    assert "addresses: [10.42.0.2/24]" in netplan
     # the hardware runs the same zenoh/udp configs the emulation measured, and they stay isolated
     assert F.check_dir(out, "10.42.0.0/24") == []
 
@@ -71,7 +74,8 @@ def test_key_only_in_router_scripts_and_private(tmp_path):
 def test_host_has_no_route_or_dns_onto_the_mesh(tmp_path):
     n = yaml.safe_load((bundle(tmp_path) / "robot_1" / "netplan-sortbots-mesh.yaml").read_text())
     eth = n["network"]["ethernets"]["enP8p1s0"]
-    assert eth == {"dhcp4": False, "dhcp6": False, "accept-ra": False, "addresses": ["10.42.0.2/24"]}
+    assert eth == {"dhcp4": False, "dhcp6": False, "accept-ra": False,
+                   "addresses": ["10.42.0.2/24"]}
 
 
 def test_nodes_only_talk_to_their_local_router(tmp_path):
@@ -139,7 +143,8 @@ def test_bridge_carries_only_fleet_topics_over_the_measured_transport(tmp_path):
         assert conf["listen"]["endpoints"] == [e for e in router["listen"]["endpoints"]
                                                if "127.0.0.1" not in e]
         ros = conf["plugins"]["ros2dds"]
-        assert ros["allow"]["publishers"] == ["^/fleet/status$", "^/fleet/intent$", "^/fleet/tasks$"]
+        assert ros["allow"]["publishers"] == ["^/fleet/status$", "^/fleet/intent$",
+                                              "^/fleet/tasks$"]
         assert ros["ros_automatic_discovery_range"] == "LOCALHOST"
     gw = F.json.loads((out / "gateway" / "bridge.json5").read_text())
     assert gw["plugins"]["ros2dds"]["domain"] == 42  # never the sim's domain 0

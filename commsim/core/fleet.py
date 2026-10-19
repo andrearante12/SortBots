@@ -234,7 +234,8 @@ def check_bridge_config(conf: dict, subnet: str) -> list[str]:
         if allow.get(kind):
             bad.append(f"ros2dds.allow.{kind} is set: only fleet topics cross the mesh")
     if ros.get("ros_automatic_discovery_range") != "LOCALHOST":
-        bad.append("ros2dds discovery is not LOCALHOST: the bridge's DDS side would reach other hosts")
+        bad.append("ros2dds discovery is not LOCALHOST: "
+                   "the bridge's DDS side would reach other hosts")
     if "rest" in conf.get("plugins", {}):
         bad.append("rest plugin enabled: unauthenticated admin API")
     return bad
@@ -285,7 +286,8 @@ def main(argv: list[str] | None = None) -> int:
         for v in bad:
             print(f"TIMER ORDER: {v}", file=sys.stderr)
         if bad and not a.allow_timer_violations:
-            print("refusing to write configs (--allow-timer-violations to override)", file=sys.stderr)
+            print("refusing to write configs (--allow-timer-violations to override)",
+                  file=sys.stderr)
             return 2
         fleet = generate(cfg, a.out)
         print(f"generated {len(fleet)} nodes in {a.out}")
