@@ -13,6 +13,19 @@ callers drain both with `drain()`.
 
 Task states: OPEN -> BIDDING -> CLAIMED -> DONE, plus CANCELLED. Release or
 lease expiry (+ margin) returns a task to OPEN.
+
+Committed ownership: once the owner has picked the item up it calls
+`commit()`. From then on the task is physically on that robot, so nothing
+may move it elsewhere: the owner never yields it to a cheaper claim, keeps
+working it while isolated, and peers whose lease on it expires do not
+reclaim it (they report `owner_missing` for the operator instead). The only
+way it leaves the owner is `complete`, the owner's own `release`, or a
+cancel. On the wire a committed owner claims with COMMITTED_COST, below any
+real travel cost, so the existing tie-break does the rest.
+
+Trust: every peer on the fleet topic is trusted. Any sender may complete or
+cancel any task, and anything on the gateway's request topic is a task.
+The mesh key (commsim/hw) is the boundary; nothing here authenticates.
 """
 from __future__ import annotations
 
@@ -23,6 +36,9 @@ from typing import Callable, Optional
 
 OPEN, BIDDING, CLAIMED, DONE, CANCELLED = "open", "bidding", "claimed", "done", "cancelled"
 COMPLETE, RELEASE, CANCEL = 0, 1, 2  # TaskEvent.kind, mirrors commsim_msgs/TaskEvent
+# Owner cost of a committed task: below any real bid (travel seconds >= 0),
+# so a committed owner wins every tie-break without a new message type.
+COMMITTED_COST = -1.0
 
 
 @dataclass
@@ -45,6 +61,11 @@ class Params:
     # the robots). Without that a loaded robot next to a pickup out-bids an
     # idle one across the room and the task waits behind its queue.
     max_owned_tasks: int = 1
+    # Done and cancelled tasks are forgotten this long after they finished.
+    # Kept a while so a late Status or re-announce of a finished task is
+    # recognised, not re-run; dropped so a node running for days does not
+    # grow (and scan on every tick) without bound.
+    finished_retention_s: float = 300.0
     # Fleet-wide lease renewal. With neighbor-only Status (V3+), robots outside
     # an owner's neighbor cells never saw its Status, so leases expired at them
     # and they reclaimed tasks still being carried (sim_log finding 1). An owner
@@ -91,6 +112,8 @@ class TaskView:
     round: int = 0
     rebid_at: Optional[float] = None
     claimed_at: float = 0.0  # when WE claimed it: the order we work our backlog
+    finished_at: Optional[float] = None  # DONE/CANCELLED at: pruned after retention
+    owner_missing: bool = False  # committed owner's lease expired; reported once
 
 
 # cost_fn(pickup, dropoff[, start]) -> (travel time to pickup s, straight-line
@@ -144,6 +167,23 @@ class Allocator:
         tie-break key so a healed partition converges without a re-Claim."""
         return [(t.task_id, t.owner_cost) for t in self.tasks.values()
                 if t.state == CLAIMED and t.owner == self.id]
+
+    def committed(self, task_id: int) -> bool:
+        t = self.tasks.get(task_id)
+        return t is not None and t.state == CLAIMED and t.owner_cost <= COMMITTED_COST
+
+    def commit(self, task_id: int, now: float) -> None:
+        """The item is on this robot: the task can no longer move (module
+        docstring). Idempotent; ignored unless we own the task."""
+        t = self.tasks.get(task_id)
+        if t is None or t.state != CLAIMED or t.owner != self.id:
+            return
+        if t.owner_cost <= COMMITTED_COST:
+            return
+        t.owner_cost = COMMITTED_COST
+        self.out.append({"type": "Claim", "task_id": task_id, "cost": COMMITTED_COST,
+                         "lease_s": self.p.task_lease_s})
+        self._event("committed", now, task_id=task_id)
 
     def _radius(self, rnd: int) -> float:
         if rnd >= self.p.rebid_max_rounds:
@@ -315,6 +355,7 @@ class Allocator:
         t.state, t.owner, t.owner_cost, t.last_renew = CLAIMED, sender, cost, now
         t.window_end = t.rebid_at = None
         t.bids = {}
+        t.owner_missing = False
 
     def on_claim(self, sender: int, task_id: int, cost: float, now: float) -> None:
         self._heard(sender, now)
@@ -350,11 +391,12 @@ class Allocator:
         if t is None:
             return
         if kind == COMPLETE:
-            t.state = DONE
+            t.state, t.finished_at = DONE, now
         elif kind == CANCEL:
             if t.owner == self.id and t.state == CLAIMED:
-                self._event("stop_task", now, task_id=task_id, reason="cancelled")
-            t.state = CANCELLED
+                self._event("stop_task", now, task_id=task_id, reason="cancelled",
+                            committed=t.owner_cost <= COMMITTED_COST)
+            t.state, t.finished_at = CANCELLED, now
         elif kind == RELEASE and t.owner == sender and t.state == CLAIMED:
             self._open_bidding(t, now)
         elif kind == RELEASE and t.state == BIDDING and sender in t.bids:
@@ -367,6 +409,7 @@ class Allocator:
 
     def complete(self, task_id: int, now: float) -> None:
         self.tasks[task_id].state = DONE
+        self.tasks[task_id].finished_at = now
         self.out.append({"type": "TaskEvent", "task_id": task_id, "kind": COMPLETE})
 
     def release(self, task_id: int, now: float) -> None:
@@ -414,13 +457,25 @@ class Allocator:
             elif t.state == CLAIMED and t.owner == self.id:
                 # An isolated owner must stop before ANY peer could reclaim:
                 # peers wait lease + margin from when they last heard us, and
-                # we stop at lease from when we last heard anyone.
-                if quiet > self.p.task_lease_s:
+                # we stop at lease from when we last heard anyone. Not once
+                # committed: the item is on board, nobody else can do it.
+                if quiet > self.p.task_lease_s and t.owner_cost > COMMITTED_COST:
                     t.state, t.owner, t.owner_cost = OPEN, None, math.inf
                     self._event("stop_task", now, task_id=t.task_id, reason="lease_lost")
             elif t.state == CLAIMED and now - t.last_renew > expiry:
+                if t.owner_cost <= COMMITTED_COST:
+                    # Reclaiming would send a robot to an empty shelf. Report
+                    # once; the owner finishes when it is back, or an operator
+                    # cancels.
+                    if not t.owner_missing:
+                        t.owner_missing = True
+                        self._event("owner_missing", now, task_id=t.task_id, owner=t.owner)
+                    continue
                 self._event("lease_expired", now, task_id=t.task_id, owner=t.owner)
                 self._open_bidding(t, now)
+        for tid in [tid for tid, t in self.tasks.items() if t.finished_at is not None
+                    and now - t.finished_at > self.p.finished_retention_s]:
+            del self.tasks[tid]
 
 
 def deliver(alloc: Allocator, sender: int, m: dict, now: float) -> bool:

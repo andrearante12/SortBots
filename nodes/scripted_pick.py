@@ -86,11 +86,12 @@ HOME_Q = [0.0] * len(ARM_JOINT_NAMES)
 
 
 class ScriptedPickNode(Node):
-    def __init__(self, robot_id: str, book: PoseBook, ik=None):
+    def __init__(self, robot_id: str, book: PoseBook, ik=None, mock: bool = False):
         super().__init__(f"{robot_id}_scripted_pick")
         self.robot_id = robot_id
         self.book = book
         self.ik = ik
+        self.mock = mock
         self._last_q = list(HOME_Q)
 
         self.arm_cmd_pub = self.create_publisher(JointState, f"/{robot_id}/arm_joint_cmd", 10)
@@ -167,7 +168,15 @@ class ScriptedPickNode(Node):
             return
         self._busy = True
         try:
-            if msg.data == "attach":
+            if self.mock:
+                # No arm to move (see --mock): answer as if the pick/place
+                # succeeded so the task FSM and the fleet auction run through.
+                if msg.data in ("attach", "detach"):
+                    self.get_logger().info(f"mock {msg.data}: reporting success")
+                    self._publish_result("picked" if msg.data == "attach" else "placed")
+                else:
+                    self.get_logger().error(f"unknown pick_request: {msg.data!r}")
+            elif msg.data == "attach":
                 self._publish_result("picked" if self._play("pick") else "failed")
             elif msg.data == "detach":
                 self._publish_result("placed" if self._play("place") else "failed")
@@ -202,6 +211,11 @@ def main() -> int:
     parser.add_argument("--play", choices=("pick", "place"), default=None,
                         help="run one sequence immediately and exit — iterate on "
                              "arm_poses.yaml against a live sim without Nav2 or the task FSM")
+    parser.add_argument("--mock", action="store_true",
+                        help="never move the arm; answer every pick_request with success. "
+                             "For robots whose arm nothing animates (Isaac's mock package "
+                             "follows robot_0's gripper only), so they can still win and "
+                             "finish fleet tasks end to end")
     args = parser.parse_args()
 
     try:
@@ -219,8 +233,11 @@ def main() -> int:
         ik = ArmIKSolver(args.urdf or URDF_PATH)
 
     rclpy.init()
-    node = ScriptedPickNode(args.robot_id, book, ik=ik)
-    _log_budgets(node)
+    node = ScriptedPickNode(args.robot_id, book, ik=ik, mock=args.mock)
+    if args.mock:
+        node.get_logger().warn("--mock: the arm will not move; picks are reported successful")
+    else:
+        _log_budgets(node)
     try:
         if args.play:
             node.get_logger().info(f"--play {args.play}: running once, then exiting")

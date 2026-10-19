@@ -11,10 +11,21 @@ gateway only injects tasks and keeps a board of what it has heard.
                 -> TaskAnnounce on /fleet/tasks
     robots:   Bid -> (1 s window) -> Claim by the winner
     winner:   /<robot>/dispatch_task -> task_manager.py works it
-              /<robot>/task_status DONE   -> Complete (fleet-wide)
-                                   FAILED -> Release  (re-auctioned)
+              /<robot>/task_status NAV_TO_DROPOFF -> commit (item on board:
+                                     the task can no longer move, protocol.py)
+                                   DONE   -> Complete (fleet-wide)
+                                   FAILED -> Release  (re-auctioned), or if
+                                     committed: re-dispatched here after the
+                                     backoff with "carrying" (dropoff only)
     loser of ownership (lease lost while isolated, out-bid on a partition
     heal, cancelled by the gateway) -> /<robot>/cancel_task
+
+After a restart this node reads task_manager's latched task_status: a task
+with the item on board is adopted (claimed back as committed), anything
+else task_manager still holds is cancelled so the fleet re-auctions it.
+
+Bid cost is the path length on the fused /map when one has arrived
+(nodes/grid_dist.py), else the straight line.
 
 Every task-protocol message travels on ONE reliable topic, `/fleet/tasks`.
 Leases are renewed by LeaseBeacons on that same topic, not by
@@ -56,8 +67,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from commsim.core.protocol import (  # noqa: E402
-    BIDDING, CLAIMED, OPEN, Allocator, Params, deliver,
+    BIDDING, CLAIMED, COMMITTED_COST, OPEN, Allocator, Params, TaskView, deliver,
 )
+from grid_dist import GridDistance  # noqa: E402
 from stations import load_stations  # noqa: E402
 
 DEFAULT_CFG = REPO_ROOT / "configs" / "fleet_tasks.yaml"
@@ -76,6 +88,7 @@ TASK_PREFIX = "fleet-"
 DEFAULTS = {
     "speed_mps": 0.5,           # Nav2 max_velocity x (configs/nav2_params.yaml)
     "failed_backoff_s": 60.0,
+    "pose_stale_s": 5.0,        # no TF this long -> we don't know where we are: no bids
     "reannounce_s": 5.0,
     "gateway_status_hz": 1.0,
     "battery": {"sim_start_pct": None},
@@ -131,7 +144,8 @@ class FleetTasks:
     """The protocol side of the node, without ROS: feed it messages and the
     clock, read actions back from `drain()`. Actions are tuples:
         ("publish", raw)         -> /fleet/tasks
-        ("dispatch", payload)    -> /<robot>/dispatch_task (JSON dict)
+        ("dispatch", payload)    -> /<robot>/dispatch_task (JSON dict;
+                                    "carrying": true = item already on board)
         ("cancel", task_id_str)  -> /<robot>/cancel_task
         ("alloc", payload)       -> /<robot>/task_alloc, on change
         ("log", text)
@@ -147,7 +161,13 @@ class FleetTasks:
         self.stations = stations
         self.speed = float(cfg["speed_mps"])
         self.pose: tuple[float, float] | None = None
+        self._pose_at: float | None = None
+        self.grid: GridDistance | None = None
         self.battery_pct: float | None = None
+        # Committed tasks whose dropoff leg failed: re-dispatch (carrying) at
+        # this time. Releasing them would send another robot to an empty shelf.
+        self._retry: dict[int, float] = {}
+        self._synced = False  # task_manager's latched status seen (restart adoption)
         self.names: dict[int, tuple[str, str]] = {}
         # (pickup, dropoff) -> steady time until which we do not bid on it
         # again. Without it a robot that cannot do a task (no arm, a pick it
@@ -166,21 +186,32 @@ class FleetTasks:
 
     # ---- inputs -----------------------------------------------------------
 
+    def set_pose(self, xy: tuple[float, float], now: float) -> None:
+        self.pose, self._pose_at = xy, now
+
+    def _path_m(self, a, b) -> float:
+        """Drive distance a -> b: along the fused map's free cells when we
+        have one, else straight line. Not the Nav2 path: asking
+        planner_server here would preempt the path request of whatever Nav2
+        is executing (ComputePathToPose takes one goal at a time)."""
+        if self.grid is not None:
+            d = self.grid.path_length(a, b)
+            if d is not None:
+                return d
+        return math.dist(a, b)
+
     def _cost(self, pickup, dropoff=None, start=None):
         if self.pose is None:
             return None  # no localization yet: we cannot say how far it is
         until = self.failed.get((tuple(pickup), tuple(dropoff or ())))
         if until is not None and self.now < until:
             return None
-        # Straight line, not the Nav2 path. Asking planner_server for a path
-        # here would preempt the path request of whatever Nav2 is executing
-        # (ComputePathToPose takes one goal at a time), and a rack between
-        # robot and shelf makes the line an underestimate. Known limitation.
         # `start` is the last dropoff of what we already own (the allocator
         # bids with the backlog): task_manager works its queue in order.
-        d = math.dist(start if start is not None else self.pose, pickup)
-        leg = math.dist(pickup, dropoff) if dropoff is not None else 0.0
-        return d / self.speed, d, (d + leg) / self.speed
+        origin = start if start is not None else self.pose
+        d = self._path_m(origin, pickup)
+        leg = self._path_m(pickup, dropoff) if dropoff is not None else 0.0
+        return d / self.speed, math.dist(origin, pickup), (d + leg) / self.speed
 
     def on_wire(self, raw: str, now: float) -> None:
         self.now = now
@@ -210,6 +241,15 @@ class FleetTasks:
             self.alloc.on_status(num, [], now)
             self._flush()
 
+    @staticmethod
+    def _fleet_tid(tid_s) -> int | None:
+        if not isinstance(tid_s, str) or not tid_s.startswith(TASK_PREFIX):
+            return None
+        try:
+            return int(tid_s[len(TASK_PREFIX):])
+        except ValueError:
+            return None
+
     def on_task_status(self, raw: str, now: float) -> None:
         """task_manager's /<robot>/task_status for an auctioned task."""
         self.now = now
@@ -218,28 +258,68 @@ class FleetTasks:
             tid_s, state = st.get("task_id"), st.get("state")
         except (json.JSONDecodeError, AttributeError):
             return
-        if not isinstance(tid_s, str) or not tid_s.startswith(TASK_PREFIX):
-            return
-        try:
-            tid = int(tid_s[len(TASK_PREFIX):])
-        except ValueError:
+        if not self._synced:
+            self._synced = True
+            self._adopt(st, now)
+        tid = self._fleet_tid(tid_s)
+        if tid is None:
             return
         t = self.alloc.tasks.get(tid)
         if t is None or t.state != CLAIMED or t.owner != self.num:
             return  # we no longer own it (cancelled, out-bid): not ours to report
-        if state == "DONE":
+        if state in ("NAV_TO_DROPOFF", "PLACING") and not self.alloc.committed(tid):
+            self.alloc.commit(tid, now)
+            self._log(f"task {tid}: item picked up, committed")
+        elif state == "DONE":
+            self._retry.pop(tid, None)
             self.alloc.complete(tid, now)
             self._log(f"task {tid} done")
         elif state == "FAILED":
             until = now + float(self.cfg["failed_backoff_s"])
-            self.failed[(t.pickup, t.dropoff)] = until
-            self.alloc.release(tid, now)
-            # Our own view is now OPEN with no rebid round pending. Schedule
-            # one for when the backoff ends, or a task only we can do would
-            # stay open forever once the other robots have stopped bidding.
-            t.rebid_at = until
-            self._log(f"task {tid} failed here; released for another robot")
+            if self.alloc.committed(tid):
+                # The item is on us: nobody else can finish this. Try the
+                # dropoff leg again after the backoff, keeping ownership.
+                self._retry[tid] = until
+                self._log(f"task {tid} failed with the item on board; "
+                          f"retrying the dropoff in {until - now:.0f} s")
+            else:
+                self.failed[(t.pickup, t.dropoff)] = until
+                self.alloc.release(tid, now)
+                # Our own view is now OPEN with no rebid round pending.
+                # Schedule one for when the backoff ends, or a task only we
+                # can do would stay open forever once the other robots have
+                # stopped bidding.
+                t.rebid_at = until
+                self._log(f"task {tid} failed here; released for another robot")
         self._flush()
+
+    def _adopt(self, st: dict, now: float) -> None:
+        """First task_status after OUR start: task_manager may have kept
+        working through a restart of this node. A task with the item on
+        board is ours again (committed: peers accept the claim whatever they
+        think). Anything else it holds is cancelled; the fleet re-auctions
+        it and we bid fresh."""
+        tid = self._fleet_tid(st.get("task_id"))
+        state = st.get("state")
+        if tid is not None and state in ("NAV_TO_DROPOFF", "PLACING"):
+            pick, drop = st.get("pickup"), st.get("dropoff")
+            t = TaskView(tid, state=CLAIMED, owner=self.num, owner_cost=COMMITTED_COST,
+                         last_renew=now, claimed_at=now)
+            if pick in self.stations and drop in self.stations:
+                self.names[tid] = (pick, drop)
+                t.pickup, t.dropoff = self._xy(pick), self._xy(drop)
+            self.alloc.tasks[tid] = t
+            self.alloc.out.append({"type": "Claim", "task_id": tid, "cost": COMMITTED_COST,
+                                   "lease_s": self.alloc.p.task_lease_s})
+            self._log(f"adopted task {tid} after restart: item on board")
+        elif tid is not None and state not in ("DONE", "FAILED", "CANCELLED", "IDLE"):
+            self._actions.append(("cancel", f"{TASK_PREFIX}{tid}"))
+            self._log(f"cancelled task {tid} after restart; the fleet re-auctions it")
+        for q in st.get("queue") or []:
+            qt = self._fleet_tid(q)
+            if qt is not None:
+                self._actions.append(("cancel", f"{TASK_PREFIX}{qt}"))
+                self._log(f"cancelled queued task {qt} after restart")
 
     def drive(self, dt: float, moving: bool) -> None:
         """Simulated battery (configs/fleet_tasks.yaml battery.sim_start_pct)
@@ -290,7 +370,21 @@ class FleetTasks:
 
     def tick(self, now: float) -> None:
         self.now = now
+        if self.pose is not None and self._pose_at is not None \
+                and now - self._pose_at > float(self.cfg["pose_stale_s"]):
+            self.pose = None  # lost localization: a bid from the old pose would be a lie
+            self._log("pose stale; not bidding until TF is back")
+        for tid, due in list(self._retry.items()):
+            if now >= due and self.alloc.committed(tid) and tid in self.names:
+                del self._retry[tid]
+                pick, drop = self.names[tid]
+                self._actions.append(("dispatch", {"task_id": f"{TASK_PREFIX}{tid}",
+                                                   "pickup": pick, "dropoff": drop,
+                                                   "carrying": True}))
+                self._log(f"retrying dropoff of task {tid}")
         self.alloc.tick(now)
+        if len(self.names) > len(self.alloc.tasks):  # the allocator pruned finished tasks
+            self.names = {k: v for k, v in self.names.items() if k in self.alloc.tasks}
         if self.gateway:
             if now >= self._next_heartbeat:
                 # Robots with no peer in range hear nobody but us; without a
@@ -345,10 +439,14 @@ class FleetTasks:
             self._log(f"won task {tid} ({pick} -> {drop}), cost {e.get('cost'):.1f}")
         elif kind in ("task_yielded", "stop_task"):
             self._actions.append(("cancel", f"{TASK_PREFIX}{tid}"))
+            self._retry.pop(tid, None)
             why = e.get("reason") or f"out-bid by {robot_name(e.get('to'))}"
+            if e.get("committed"):
+                why += " WITH THE ITEM ON BOARD: unload it by hand"
             self._log(f"stopped task {tid}: {why}")
         elif kind in ("isolated", "rejoined", "hold_safe", "lease_expired",
-                      "robot_silent", "robot_back", "battery_gated", "declined"):
+                      "robot_silent", "robot_back", "battery_gated", "declined",
+                      "committed", "owner_missing"):
             detail = {k: v for k, v in e.items() if k not in ("event", "robot_id", "t")}
             self._log(f"{kind} {detail}" if detail else kind)
 
@@ -372,7 +470,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     import rclpy
-    from nav_msgs.msg import Odometry
+    from nav_msgs.msg import OccupancyGrid, Odometry
     from rclpy.clock import Clock, ClockType
     from rclpy.executors import ExternalShutdownException
     from rclpy.node import Node
@@ -437,6 +535,9 @@ def main(argv=None):
                                          self._on_battery, 10)
                 if self.sim_battery:
                     self.create_subscription(Odometry, f"/{rid}/odom", self._on_odom, 10)
+                # The fused world map (nodes/map_merge.py), latched; bids
+                # measure drive distance along it instead of a straight line.
+                self.create_subscription(OccupancyGrid, "/map", self._on_map, LATCHED)
             # Steady clock: see the module docstring. Under use_sim_time a
             # node-clock timer would stretch the 1 s bid window by the
             # real-time factor (CLAUDE.md, "A ROS timer follows use_sim_time").
@@ -471,6 +572,12 @@ def main(argv=None):
                 self.sim_battery = False  # a real battery overrides the simulated one
                 self.core.battery_pct = 100.0 * float(msg.percentage)
 
+        def _on_map(self, msg):
+            info = msg.info
+            self.core.grid = GridDistance(
+                info.width, info.height, info.resolution,
+                (info.origin.position.x, info.origin.position.y), msg.data)
+
         def _on_odom(self, msg):
             tw = msg.twist.twist
             self._moving = abs(tw.linear.x) > 0.02 or abs(tw.angular.z) > 0.05
@@ -497,7 +604,7 @@ def main(argv=None):
             except Exception:
                 return  # keep the last pose; None until localized -> no bids
             t = tr.transform.translation
-            self.core.pose = (t.x, t.y)
+            self.core.set_pose((t.x, t.y), time.monotonic())
 
         def _tick(self):
             now = time.monotonic()

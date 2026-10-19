@@ -70,6 +70,7 @@ from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from std_msgs.msg import String
 
 from explorer_handoff import ExplorerHandoff
@@ -86,10 +87,14 @@ PICK_TIMEOUT_SEC = 30.0
 
 
 class Task:
-    def __init__(self, pickup: str, dropoff: str, task_id: str | None = None):
+    def __init__(self, pickup: str, dropoff: str, task_id: str | None = None,
+                 carrying: bool = False):
         self.task_id = task_id or uuid.uuid4().hex[:8]
         self.pickup = pickup
         self.dropoff = dropoff
+        # The item is already on the robot (a retry after a failed dropoff
+        # leg, fleet_tasks.py): skip the pickup, drive straight to dropoff.
+        self.carrying = carrying
 
 
 class TaskManager(Node):
@@ -111,7 +116,13 @@ class TaskManager(Node):
         self.pick_request_pub = self.create_publisher(
             String, f"/{robot_id}/pick_request", 10
         )
-        self.status_pub = self.create_publisher(String, f"/{robot_id}/task_status", 10)
+        # Latched: fleet_tasks.py reads the last status on start-up to learn
+        # what this node is still doing after a restart of its own (a task
+        # with the item on board is adopted, anything else is cancelled).
+        self.status_pub = self.create_publisher(
+            String, f"/{robot_id}/task_status",
+            QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
+                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
         self.explore_cmd_pub = self.create_publisher(String, f"/{robot_id}/explore_cmd", 10)
 
         self.create_subscription(
@@ -144,6 +155,7 @@ class TaskManager(Node):
                 pickup=payload["pickup"],
                 dropoff=payload["dropoff"],
                 task_id=payload.get("task_id"),
+                carrying=bool(payload.get("carrying", False)),
             )
         except (json.JSONDecodeError, KeyError) as exc:
             self.get_logger().error(f"bad dispatch payload: {msg.data!r} ({exc})")
@@ -176,6 +188,12 @@ class TaskManager(Node):
         if self.current_task is None or self.current_task.task_id != task_id:
             return
         self.get_logger().warn(f"cancelling active task {task_id} in {self.state}")
+        if self.state in ("NAV_TO_DROPOFF", "PLACING"):
+            # Only a gateway cancel gets here (fleet_tasks never yields a
+            # task once the item is picked): the item stays on the robot.
+            self.get_logger().error(
+                f"task {task_id} cancelled with its item still on the robot — "
+                "unload it by hand before the next pick")
         if self._nav_goal_handle is not None:
             self._nav_goal_handle.cancel_goal_async()
         # The cancelled goal still reports a result later; current_task is
@@ -204,7 +222,10 @@ class TaskManager(Node):
     def _tick(self) -> None:
         if self.state == "IDLE" and self.queue and self.explorer.may_start_task():
             self.current_task = self.queue.popleft()
-            self._start_nav(self.current_task.pickup, next_state="NAV_TO_PICKUP")
+            if self.current_task.carrying:
+                self._start_nav(self.current_task.dropoff, next_state="NAV_TO_DROPOFF")
+            else:
+                self._start_nav(self.current_task.pickup, next_state="NAV_TO_PICKUP")
         elif self.state == "IDLE" and self.explorer.on_idle(not self.queue):
             self._explore_cmd("start")
             self.get_logger().info("task queue empty — resumed the exploration a task interrupted")
@@ -306,10 +327,14 @@ class TaskManager(Node):
 
     def _set_state(self, state: str) -> None:
         self.state = state
+        cur = self.current_task
         status = {
-            "task_id": self.current_task.task_id if self.current_task else None,
+            "task_id": cur.task_id if cur else None,
             "state": state,
+            "pickup": cur.pickup if cur else None,
+            "dropoff": cur.dropoff if cur else None,
             "queue_depth": len(self.queue),
+            "queue": [t.task_id for t in self.queue],
         }
         msg = String()
         msg.data = json.dumps(status)

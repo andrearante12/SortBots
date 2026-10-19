@@ -458,6 +458,8 @@ class Robot:
         self.route = lay.route(self.pos, t.pickup)[1:] + lay.route(t.pickup, t.dropoff)[1:]
         self.leg = len(lay.route(self.pos, t.pickup)) - 1  # waypoints until pickup reached
         self.replanned = True
+        if self.leg <= 0:  # already standing at the pickup
+            self.alloc.commit(tid, self.sim.now)
 
     def stop_task(self, tid=None):
         """Drop one task (queued or in progress), or everything if tid is None."""
@@ -490,6 +492,9 @@ class Robot:
             if d <= step:
                 self.pos, step = tgt, step - d
                 self.route.pop(0)
+                self.leg -= 1
+                if self.leg == 0:  # at the pickup: the item is on board from here
+                    self.alloc.commit(self.task, self.sim.now)
             else:
                 f = step / d
                 self.pos = (self.pos[0] + f * (tgt[0] - self.pos[0]),

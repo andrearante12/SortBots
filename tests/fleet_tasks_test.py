@@ -16,6 +16,8 @@ sys.path.insert(0, str(REPO / "nodes"))
 
 import fleet_radio as fr  # noqa: E402
 import fleet_tasks as ft  # noqa: E402
+from commsim.core import fleet as F  # noqa: E402
+from commsim.core import timers  # noqa: E402
 from commsim.core.protocol import Params  # noqa: E402
 from stations import load_stations  # noqa: E402
 
@@ -32,8 +34,9 @@ class Bus:
         self.nodes = {"gateway": self.gw}
         for rid, pose in robots.items():
             n = ft.FleetTasks(rid, self.params, STATIONS, cfg=cfg, can_bid=rid not in no_bid)
-            n.pose = pose
+            n.set_pose(pose, 0.0)
             self.nodes[rid] = n
+        self.poses_live = True  # the TF timer keeps every pose fresh (False: it stopped)
         self.status_dt = 1.0 / status_hz
         self._next_status = 0.0
         self.dispatched: dict[str, list] = {rid: [] for rid in robots}
@@ -43,7 +46,7 @@ class Bus:
 
     def add(self, rid, pose):
         n = ft.FleetTasks(rid, self.params, STATIONS, cfg=CFG, now=self.t)
-        n.pose = pose
+        n.set_pose(pose, self.t)
         self.nodes[rid] = n
         self.dispatched[rid], self.cancelled[rid] = [], []
         return n
@@ -81,6 +84,8 @@ class Bus:
                         if other_name not in self.down:
                             other.on_peer_status(rid, self.t)
             for n in self.nodes.values():
+                if self.poses_live and n.pose is not None:
+                    n.set_pose(n.pose, self.t)
                 n.tick(self.t)  # a cut-off robot's clock keeps running
             self._pump()
 
@@ -89,9 +94,9 @@ class Bus:
         self._pump()
         return tid
 
-    def report(self, rid, tid, state):
+    def report(self, rid, tid, state, **extra):
         self.nodes[rid].on_task_status(
-            json.dumps({"task_id": f"{ft.TASK_PREFIX}{tid}", "state": state}), self.t)
+            json.dumps({"task_id": f"{ft.TASK_PREFIX}{tid}", "state": state, **extra}), self.t)
         self._pump()
 
     def board(self, tid):
@@ -292,3 +297,108 @@ def test_robot_queues_up_to_three_tasks_then_takes_the_next_when_one_is_done():
     bus.run(3.0)
     assert bus.board(tids[3])["owner"] == "robot_0"
     assert bus.dispatched["robot_0"][-1]["task_id"] == f"fleet-{tids[3]}"
+
+
+# ---- the item is on the robot (commsim protocol.py "Committed ownership")
+
+def test_picked_up_task_survives_a_failed_dropoff_and_is_retried_carrying():
+    bus = Bus({"robot_0": near(0.5), "robot_1": near(3.0)}, failed_backoff_s=2.0)
+    bus.run(1.0)
+    tid = bus.request()
+    bus.run(3.0)
+    assert bus.board(tid)["owner"] == "robot_0"
+    bus.report("robot_0", tid, "NAV_TO_DROPOFF")
+    assert bus.nodes["robot_0"].alloc.committed(tid)
+    bus.report("robot_0", tid, "FAILED")  # nav to the dropoff failed, item on board
+    bus.run(4.0)
+    assert bus.board(tid)["owner"] == "robot_0"  # not released, not re-auctioned
+    assert bus.dispatched["robot_1"] == []
+    assert bus.dispatched["robot_0"][-1] == {
+        "task_id": f"fleet-{tid}", "pickup": "shelf_a", "dropoff": "zone_a", "carrying": True}
+    bus.report("robot_0", tid, "DONE")
+    bus.run(1.0)
+    assert {n.alloc.tasks[tid].state for n in bus.nodes.values()} == {"done"}
+
+
+def test_cut_off_robot_with_the_item_keeps_the_task_and_nobody_else_is_sent():
+    bus = Bus({"robot_0": near(1.0), "robot_1": near(5.0)})
+    bus.run(1.0)
+    tid = bus.request()
+    bus.run(3.0)
+    bus.report("robot_0", tid, "NAV_TO_DROPOFF")
+    bus.run(1.0)
+    bus.down = {"robot_0"}
+    bus.run(30.0)
+    assert bus.dispatched["robot_1"] == []
+    assert bus.cancelled["robot_0"] == []
+    assert bus.board(tid)["owner"] == "robot_0"
+    assert any(n == "gateway" and "owner_missing" in m for n, m in bus.log)
+    bus.down = set()
+    bus.run(2.0)
+    bus.report("robot_0", tid, "DONE")
+    bus.run(1.0)
+    assert {n.alloc.tasks[tid].state for n in bus.nodes.values()} == {"done"}
+
+
+def test_gateway_cancel_of_a_carried_task_stops_the_robot_and_says_so():
+    bus = Bus({"robot_0": near(1.0)})
+    bus.run(1.0)
+    tid = bus.request()
+    bus.run(3.0)
+    bus.report("robot_0", tid, "NAV_TO_DROPOFF")
+    bus.gw.cancel(tid, bus.t)
+    bus.run(1.0)
+    assert bus.cancelled["robot_0"] == [f"fleet-{tid}"]
+    assert any(n == "robot_0" and "ITEM ON BOARD" in m for n, m in bus.log)
+
+
+def test_restarted_fleet_tasks_adopts_the_carried_task_and_cancels_the_rest():
+    bus = Bus({"robot_0": near(0.5)})
+    bus.run(1.0)
+    t1, t2 = bus.request(), bus.request()
+    bus.run(4.0)
+    assert [d["task_id"] for d in bus.dispatched["robot_0"]] == [f"fleet-{t1}", f"fleet-{t2}"]
+    # fleet_tasks restarts; task_manager kept driving t1 with the item on
+    # board and still has t2 queued. The latched status replays first.
+    bus.nodes["robot_0"] = fresh = ft.FleetTasks("robot_0", bus.params, STATIONS, cfg=CFG,
+                                                 now=bus.t)
+    fresh.set_pose(near(0.5), bus.t)
+    bus.report("robot_0", t1, "NAV_TO_DROPOFF", pickup="shelf_a", dropoff="zone_a",
+               queue=[f"fleet-{t2}"])
+    assert fresh.alloc.committed(t1)
+    assert bus.cancelled["robot_0"] == [f"fleet-{t2}"]
+    bus.add("robot_1", near(3.0))
+    bus.run(20.0)  # past lease + margin: the fleet re-auctions t2, never t1
+    assert bus.board(t1)["owner"] == "robot_0"
+    assert bus.board(t2)["owner"] == "robot_1"
+    assert not any("owner_missing" in m or "lease_expired" in m
+                   for n, m in bus.log if n == "gateway" and str(t1) in m)
+    bus.report("robot_0", t1, "DONE")
+    bus.run(1.0)
+    assert bus.board(t1)["state"] == "done"
+
+
+def test_stale_pose_stops_bidding_until_tf_is_back():
+    bus = Bus({"robot_0": near(1.0)})
+    bus.poses_live = False
+    bus.run(CFG["pose_stale_s"] + 1.0)
+    tid = bus.request()
+    bus.run(3.0)
+    assert bus.dispatched["robot_0"] == []
+    assert any("pose stale" in m for _, m in bus.log)
+    bus.poses_live = True
+    bus.nodes["robot_0"].set_pose(near(1.0), bus.t)
+    bus.run(6.0)  # the gateway re-announces; a rebid round picks it up
+    assert bus.board(tid)["owner"] == "robot_0"
+
+
+def test_robot_timers_match_the_measured_commsim_config():
+    # configs/fleet_tasks.yaml mirrors commsim/configs/base.yaml by hand.
+    # The timer ordering in commsim/core/timers.py was measured against
+    # base.yaml; the robots must not drift from it unnoticed.
+    base = F.load_config(REPO / "commsim" / "configs" / "base.yaml")
+    for k in ("status_timeout_s", "task_lease_s", "reclaim_margin_s", "bid_window_s",
+              "lease_beacon_hz", "max_open_bids"):
+        assert CFG["protocol"][k] == base["protocol"][k], k
+    merged = {**base, "protocol": {**base["protocol"], **CFG["protocol"]}}
+    assert timers.check(merged) == []

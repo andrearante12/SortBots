@@ -275,26 +275,27 @@ def _make_per_robot_actions(
                 "python3",
                 os.path.join(REPO_ROOT, "nodes", "fleet_tasks.py"),
                 "--robot-id", rid,
-            ] + ([] if rid == primary_robot_id else ["--no-bid"]),
+            ],
             output="screen",
             condition=IfCondition(task_manager),
         ))
 
         # The other half of the dispatch loop: task_manager publishes
         # pick_request and blocks on pick_result, so without this every task
-        # stalls in PICKING until PICK_TIMEOUT_SEC. Primary robot only —
-        # spawn_warehouse.py only applies arm commands to robot_0, so starting
-        # it for a secondary robot would publish into a void.
-        if rid == primary_robot_id:
-            actions.append(ExecuteProcess(
-                cmd=[
-                    "python3",
-                    os.path.join(REPO_ROOT, "nodes", "scripted_pick.py"),
-                    "--robot-id", rid,
-                ],
-                output="screen",
-                condition=IfCondition(scripted_pick),
-            ))
+        # stalls in PICKING until PICK_TIMEOUT_SEC. spawn_warehouse.py only
+        # animates robot_0's arm and package, so a secondary robot runs the
+        # node in --mock (picks succeed without moving anything). Every robot
+        # therefore bids and can finish a task: until 2026-10-19 secondaries
+        # were --no-bid, and no auction in the sim ever had two bidders.
+        actions.append(ExecuteProcess(
+            cmd=[
+                "python3",
+                os.path.join(REPO_ROOT, "nodes", "scripted_pick.py"),
+                "--robot-id", rid,
+            ] + ([] if rid == primary_robot_id else ["--mock"]),
+            output="screen",
+            condition=IfCondition(scripted_pick),
+        ))
 
         # Every robot in robot_ids explores, not just the primary — with
         # /map fused across robots (nodes/map_merge.py) and fleet mesh

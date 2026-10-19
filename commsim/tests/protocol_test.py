@@ -1,6 +1,6 @@
 """Auction + lease correctness over the in-memory fleet (no radio model)."""
 from commsim.core.loopback import LoopbackNet
-from commsim.core.protocol import Allocator, Params, CLAIMED, OPEN, DONE
+from commsim.core.protocol import Allocator, Params, CLAIMED, OPEN, DONE, deliver
 
 GW = 0
 
@@ -341,3 +341,74 @@ def test_backlog_counts_toward_the_battery_gate():
     net.run(3.0)
     assert net.self_owners(2) == []
     assert net.events("battery_gated")
+
+
+# ---- committed ownership: the item is on the robot (protocol.py docstring)
+
+def test_committed_owner_keeps_working_while_isolated_and_is_not_reclaimed():
+    net = fleet({1: (1, 0), 2: (5, 0)})
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.robots[1].alloc.commit(1, net.robots[1].now(net.t))
+    net.run(1.0)
+    net.isolate(1)
+    net.run(30.0)  # well past lease + margin on every side
+    assert net.self_owners(1) == [1]
+    assert not [e for e in net.events("stop_task")]
+    assert not net.events("lease_expired")
+    # the others know the owner is gone but do not send anyone to an empty shelf
+    assert [e["robot_id"] for e in net.events("owner_missing")] == [GW, 2] or \
+        sorted(e["robot_id"] for e in net.events("owner_missing")) == [GW, 2]
+    assert len(net.events("owner_missing")) == 2  # reported once per peer
+    assert all(r.alloc.tasks[1].owner == 1 for r in net.robots.values())
+    net.heal()
+    net.run(2.0)
+    net.robots[1].alloc.complete(1, net.robots[1].now(net.t))
+    net.run(1.0)
+    assert {r.alloc.tasks[1].state for r in net.robots.values()} == {DONE}
+
+
+def test_committed_owner_beats_a_cheaper_claim():
+    net = fleet({1: (1, 0), 2: (5, 0)})
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    net.robots[1].alloc.commit(1, net.robots[1].now(net.t))
+    net.run(1.0)
+    # A peer that believes it owns the task more cheaply (what a partition
+    # heal looks like) must lose, and we must not yield.
+    deliver(net.robots[1].alloc, 2, {"type": "Claim", "task_id": 1, "cost": 0.01},
+            net.robots[1].now(net.t))
+    net.run(1.0)
+    assert net.self_owners(1) == [1]
+    assert not net.events("task_yielded")
+    assert net.robots[2].alloc.tasks[1].owner == 1
+
+
+def test_cancel_still_stops_a_committed_owner():
+    net = fleet({1: (1, 0), 2: (5, 0)})
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    net.robots[1].alloc.commit(1, net.robots[1].now(net.t))
+    net.run(1.0)
+    net.robots[GW].alloc.cancel(1, net.robots[GW].now(net.t))
+    net.run(1.0)
+    stops = net.events("stop_task")
+    assert [(e["robot_id"], e["reason"], e["committed"]) for e in stops] == [(1, "cancelled", True)]
+
+
+def test_finished_tasks_are_forgotten_after_retention():
+    net = fleet({1: (1, 0)}, finished_retention_s=5.0)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.announce(GW, 2, (0, 0), (1, 1))
+    net.run(3.0)
+    net.robots[1].alloc.complete(1, net.robots[1].now(net.t))
+    net.robots[GW].alloc.cancel(2, net.robots[GW].now(net.t))
+    net.run(1.0)
+    assert all(set(r.alloc.tasks) == {1, 2} for r in net.robots.values())
+    net.run(10.0)
+    assert all(not r.alloc.tasks for r in net.robots.values())
