@@ -1,4 +1,6 @@
-# Prompt: Plan a simulation of our robot fleet communication system
+# Brief: plan a simulation of the fleet communication system
+
+*The original brief, kept as written. The plan it produced is [`plan.md`](plan.md); what was built and found is [`sim_log.md`](sim_log.md).*
 
 You are helping a university capstone team plan a simulation of the communication system for a fleet of autonomous warehouse robots. **Produce a plan only; do not write implementation code yet.** Work in plan mode. Where a decision depends on information you do not have, list it as an open question instead of assuming. Mark every number below that is labeled "placeholder" or "estimate" as a parameter to be replaced by measurement, never as a fact.
 
@@ -18,6 +20,7 @@ The headline outputs are (a) a chart of channel busy time and latency vs n for e
 ## 2. System under test (simulate this design faithfully)
 
 ### Purpose
+
 Robots autonomously choose tasks from a shared list, path to a package, and carry it to a drop-off, coordinating with each other with **no central coordinator**. A gateway with an operator GUI only injects tasks and displays status.
 
 ### Layers (top to bottom)
@@ -32,11 +35,13 @@ Robots autonomously choose tasks from a shared list, path to a package, and carr
 | Physical | Two radios per router: 2.4 GHz and 5 GHz, OFDM, 20 MHz channels | Mesh router | Radio transmission |
 
 ### Nodes
+
 - **Each robot:** a Jetson (ROS 2 + its own Zenoh router) connected by Ethernet to its own dual-band mesh router. The Jetson runs no mesh software; the router's Ethernet port is bridged with `bat0`, and batman-adv's translation table maps the Jetson's MAC to its router.
 - **Gateway:** a mesh router with the same configuration, mounted high, with the operator laptop attached by Ethernet. The laptop runs its own `zenohd` and the GUI.
 - The router model is **not yet chosen**; any dual-band router that runs vanilla OpenWrt with mesh-point mode on both radios qualifies.
 
 ### Network isolation: our own network, not school Wi-Fi
+
 - The fleet runs on **its own dedicated network that the team controls**: our own mesh routers and gateway, our own SSID/mesh ID, our own subnet and static addresses. **Nothing depends on the school's Wi-Fi (eduroam)** for operation, discovery, time sync or testing.
 - No DHCP, DNS, NTP or internet dependency on the campus network. The gateway laptop is the time source (chrony) for the fleet.
 - If the operator laptop is also connected to eduroam for internet, Zenoh must listen and connect **only on the mesh (Ethernet) interface**, so no robot traffic ever crosses the campus network. The plan should include a check that enforces this.
@@ -44,12 +49,14 @@ Robots autonomously choose tasks from a shared list, path to a package, and carr
 - eduroam and other campus networks appear in the simulation **only as background interference**: a configurable share of channel busy time on 2.4 GHz and 5 GHz, plus the option to model a congested 2.4 GHz channel. Include sweeps of this background load (for example 0%, 15%, 30%) because it directly reduces the airtime the fleet can use.
 
 ### Mesh routing details
+
 - batman-adv B.A.T.M.A.N. IV, originator interval 500 ms (default 1000 ms; make it a parameter), hop penalty default.
 - Both radios' mesh interfaces belong to the same `bat0`. batman-adv scores each link separately and can alternate bands along a multi-hop path, so a relay can receive on one band while forwarding on the other.
 - MTU 1532 on mesh interfaces (32-byte batman-adv header); multicast rate raised to 12 Mbps; legacy 802.11b rates off.
 - batman-adv floods ordinary broadcasts mesh-wide.
 
 ### Middleware details (Zenoh)
+
 - `RMW_IMPLEMENTATION=rmw_zenoh_cpp`. One `zenohd` per machine started before ROS nodes; nodes connect only to `tcp/localhost:7447`.
 - Routers peer with explicit `connect` endpoints to every other robot and the gateway (generated from one fleet list); multicast scouting off; listen only on the mesh address.
 - Router-to-router transport is TCP. Each subscriber router gets its own copy of each message (unicast fan-out). Zenoh batches small queued messages.
@@ -57,6 +64,7 @@ Robots autonomously choose tasks from a shared list, path to a package, and carr
 - Fallback middleware for comparison: Cyclone DDS with multicast off and a fixed peer list.
 
 ### Interface contract (messages)
+
 Every message has a header: `version` (uint8), `robot_id` (uint8), `seq` (uint32), `stamp` (synchronized time).
 
 | Message | Payload (approx.) | Sent when | Delivery | Receivers |
@@ -75,6 +83,7 @@ Every message has a header: `version` (uint8), `robot_id` (uint8), `seq` (uint32
 Topic layout: `fleet/tasks/…`, `fleet/status/<cell>` (robots subscribe to their own cell, neighboring cells and cells on their path; cell size is a placeholder), `fleet/obstacles` (fleet-wide), `fleet/map/<region>`, `fleet/emergency`, `fleet/link_health`.
 
 ### Task allocation protocol
+
 - States per task: Open → Bidding → Claimed → Done (Release or lease expiry returns it to Open).
 - Auction: on TaskAnnounce, robots within a set distance of the pickup bid their estimated travel time; bidding window 1 s; lowest cost wins, ties to lowest robot ID; winner publishes Claim with a lease (10 s).
 - The owner renews the lease by listing the task in every Status message. Each robot measures lease time on its **own clock** from the last time it heard the owner.
@@ -83,12 +92,14 @@ Topic layout: `fleet/tasks/…`, `fleet/status/<cell>` (robots subscribe to thei
 - If the gateway is down, robots keep trading tasks already in the pool; they only stop receiving new ones.
 
 ### Obstacles and maps
+
 - One owner per obstacle (closest robot); events, not timers; each dynamic obstacle carries velocity and expiry; static obstacles sent once plus a "cleared" event.
 - Requires a shared lab coordinate frame and synchronized clocks. **The SLAM package is not yet chosen; do not assume one.** Model each robot's pose as ground truth plus configurable noise and drift.
 - Camera images and point clouds never cross the mesh.
 - Map updates share changes only, with per-region sequence numbers, MapResync on gaps, and periodic full refresh.
 
 ### Safety boundary
+
 Network data is for planning only. Collision avoidance and emergency stop are local to each robot. The simulation does not need to model collisions physically, but must flag any case where a robot's planning view of another robot is staler than a configurable threshold.
 
 ---
@@ -110,6 +121,7 @@ Network data is for planning only. Collision avoidance and emergency stop are lo
 Required ordering: **batman-adv reroute time < Zenoh transport lease < status timeout (~3 s) < task lease (10 s)**, plus a reclaim margin after lease expiry. All values are parameters; reroute time will come from hardware measurement.
 
 Latency requirement (robot to robot, control messages = status, bids, claims, obstacle events):
+
 - 95% within 150 ms and 99% within 500 ms,
 - across up to 3 hops, at 10 robots, with channel busy time under 50% per band,
 - excluding reroute windows, which are measured separately.
@@ -128,6 +140,7 @@ Evaluate and recommend a toolchain. The team's working assumption, to confirm or
 - **Calibration from hardware:** the lab testbed (2 robots + gateway, lab mock-up with metal wire shelving, all on our own network) supplies measured parameters: signal vs distance per band, packet loss, throughput, reroute time, background busy time from `iw dev <iface> survey dump`. The plan must say which simulation parameters each measurement replaces.
 
 Also address:
+
 - Host requirements (Linux kernel with `mac80211_hwsim`, root, CPU/RAM per emulated robot), and whether it runs on a team laptop, a lab desktop or a VM.
 - How robots are represented: ROS 2 stub nodes that publish the message types in section 2 at configured rates and run the real auction and lease logic, without real SLAM, navigation or perception.
 - Mobility: robots moving on a 2D floor map (lab mock-up layout and a larger warehouse layout with aisles and racks), with link quality driven by distance and obstruction. Racks attenuate strongly; wire shelving attenuates mildly. Use published attenuation figures for loaded racks, cited, rather than invented ones.
@@ -193,6 +206,7 @@ Each scenario runs at several fleet sizes and design variants; the plan should p
 ## 9. Metrics and outputs
 
 Per run, log to files (CSV or Parquet) with a run ID, seed and full configuration:
+
 - Per band: channel busy time, overall and per neighborhood.
 - Per message type: end-to-end latency (send stamp to receive time), delivery ratio, hop count.
 - batman-adv: route changes, reroute time after each failure.

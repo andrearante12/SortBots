@@ -1,8 +1,23 @@
 # commsim — fleet communication simulation: results and run log
 
+**Results** (what was tested, the answers, the recommended configuration,
+what is still open) are first. The **run log** below them is the
+chronological record of what was done, why, and what came out, including
+the mistakes and how they were found.
+
+| Section | |
+|---|---|
+| [Results](#results) | the answers to the brief's four questions, with every caveat |
+| [Decisions since the sweeps](#decisions-since-the-sweeps) | protocol changes made on the robots after the simulation work |
+| [Still open](#still-open) | what the simulation could not settle |
+| [Session 1 — 2026-10-03](#session-1--2026-10-03) | steps 1–15: model, emulation, calibration, first sweeps and failure scenarios |
+| [Session 2 — 2026-10-03 to 2026-10-04](#session-2--2026-10-03-to-2026-10-04) | steps 16–24: the fixes, re-testing, UDP Status, code review |
+| [Session 3 — 2026-10-19](#session-3--2026-10-19) | steps 25–27: the protocol on the robots |
+
 ## Results
 
 ### What was tested
+
 The SortBots fleet communication design (from [`brief.md`](brief.md)):
 robots coordinate with no central coordinator over a 2.4 + 5 GHz Wi-Fi mesh
 (802.11s links, batman-adv routing), Zenoh middleware (`rmw_zenoh`), and a
@@ -10,6 +25,7 @@ decentralized auction + lease protocol for task ownership. A gateway with
 an operator GUI only injects tasks and shows status.
 
 Two ways of testing, cross-checked against each other:
+
 - **Emulation (real software):** in an Ubuntu 24.04 VM, each robot runs in
   its own network namespace with the real 802.11s, batman-adv, zenohd and
   ROS 2 stacks over simulated radios (`mac80211_hwsim` + `wmediumd`). Used
@@ -32,6 +48,7 @@ most of its 3 random seeds break any of these; "supports N" below means N
 is the largest size tested before that happens.
 
 **Important caveats** — read before using any number below:
+
 - **No real hardware has been measured yet.** Rack attenuation (industry
   guidance only), path loss, link rates and router behavior are
   placeholders until the 2-robot lab testbed measures them.
@@ -42,16 +59,19 @@ is the largest size tested before that happens.
   with the faster rates assumed in the tables below.
 
 ### The answers
+
 **1. Does the design work as originally written? No.** The intended
 design (V3/V4, neighbor-only Status) failed at every fleet size tested, and
 the simpler all-to-all versions worked only up to 8 (V1) and 12 (V2)
 robots. Four problems, none of them about raw capacity:
+
 | problem found | effect | fix (now the default) |
 |---|---|---|
 | Task leases were renewed only by Status, but neighbor-only Status never reaches robots outside the owner's area | those robots reclaim tasks still being carried → two robots on one task, from 10 robots up | **LeaseBeacon**: owners announce their tasks fleet-wide once a second |
 | Both Zenoh routers of every robot pair dial each other | two TCP sessions per pair, one idling on keepalives → **a third to a half of the airtime wasted** (emulation at 10 robots: 31% → 21% busy; model: about half) | only the lower robot ID dials |
 | Status timeout 3 s vs. a rerouting mesh | one broken link → Status gap of 3.5–4 s → healthy robots declared silent | status timeout **6 s**, Zenoh lease **4 s** |
 | Status subscriber queue depth 1 ("newest wins") | **15% of Status lost** even on a clean link (measured) | depth 32 |
+
 Testing also found three protocol bugs that are now fixed: a robot could
 win and "own" more tasks than it can carry (and never work the extra
 ones); a burst of new tasks caused a bid storm (now ≤ 3 open bids per
@@ -61,6 +81,7 @@ isolated robot's "am I connected?" check needed to use real receptions.
 **2. How many robots does it support (fixed design)?**
 Largest fleet before most seeds fail (DES, placeholder warehouse, sizes
 tested in steps of 2):
+
 | design | no campus Wi-Fi | 15% campus background | 30% campus background |
 |---|---|---|---|
 | V4 — neighbor-only Status, dual band (**recommended**) | **22** | **18** | **14** |
@@ -69,6 +90,7 @@ tested in steps of 2):
 | V2 as originally written | 12 | – | – |
 | V1 naive (separate messages to everyone) | 8 | – | – |
 | V3 / V4 as originally written | **0** (lease bug) | – | – |
+
 (*the sweep stopped at 10 robots: two seeds drove into coverage holes,
 which is a coverage failure, not a capacity one.) V3/V4 numbers assume each
 robot knows which robots listen to its area (see **Still open**); today
@@ -96,12 +118,14 @@ Each run is judged by the scenario's own pass condition from the plan:
 e.g. a link loss must reroute without any robot being declared silent; a
 dead or isolated robot's task must be reclaimed only after lease + margin;
 a burst must not starve control traffic.
+
 | configuration | runs passed |
 |---|---|
 | as originally written | 18 / 120 |
 | fixed, Status over TCP, batman OGM 500 ms | 71 / 120 |
 | fixed, Status over TCP, OGM 250 ms | 100 / 120 |
 | **fixed, Status over UDP, OGM 250 ms (current default)** | **110 / 120** |
+
 What holds: an isolated robot always stops before others reclaim its task
 (~10 s vs ~12.5 s); a dead robot's task is reclaimed only after lease +
 margin; robots keep working when the gateway is down and its view rebuilds
@@ -112,6 +136,7 @@ network split both halves may work the same task** (accepted by design; it
 resolves within ~2 s of the split healing in most runs).
 
 **4. Timing requirements (measured on the real stack in emulation):**
+
 | quantity | measured | limit / design value |
 |---|---|---|
 | Status latency, 1–2 hops | p50 2.4 ms, p95 4.3 ms | p95 ≤ 150 ms |
@@ -120,11 +145,13 @@ resolves within ~2 s of the split healing in most runs).
 | worst Status gap after a link loss (UDP, OGM 250 ms) | 3.0 s | status timeout 6 s |
 | Status delivery through a link loss | 98.7% | ≥ 95% |
 | memory / CPU per emulated robot node | ~82 MB / ~4–7% | — |
+
 The required order now holds with margin: **reroute (≤ 3.0 s) < Zenoh
 lease (4 s) < status timeout (6 s) < task lease (10 s)**, and the config
 generator refuses settings that break it.
 
 **5. Which design choices matter most?** In order of effect:
+
 1. one TCP session per robot pair (a third to a half of the airtime);
 2. neighbor-only Status (V3/V4) — but only together with the lease beacon;
 3. Status over UDP instead of TCP (+2 robots, far better under overload:
@@ -140,6 +167,7 @@ Not worth pursuing in a racked layout: **one-hop Status broadcast (phases
 each other.
 
 ### Recommended configuration (now the defaults in `configs/base.yaml`)
+
 V4 dual-band mesh · batman-adv OGM 250 ms · 802.11b rates off, multicast
 12 Mb/s · Zenoh routers: lower ID dials, lease 4 s, explicit peers, no
 multicast scouting, no shared memory · **Status over UDP** (port 7450,
@@ -149,6 +177,7 @@ bids per robot. `configs/spec_original.yaml` restores the original design
 for comparison.
 
 ### For the 2-robot + gateway demo
+
 Capacity is not a concern (~1% channel busy, 2–5 ms latency, measured on
 this exact 3-node setup). The risks are **coverage** and **antenna
 placement**: walk the demo route first, mount the gateway antenna high and
@@ -161,7 +190,17 @@ newer; can run from robot power. **Antenna minimum:** ordinary 2–3 dBi
 dual-band omni dipoles are enough at lab scale — placement matters more
 than gain (`Step 23` has the link-budget table).
 
+### Decisions since the sweeps
+
+Protocol changes made after the simulation work, each logged as a step in
+session 3:
+
+- **2026-10-19 — up to 3 tasks per robot**, bids include the backlog (step 25).
+- **2026-10-19 — committed ownership**: once the item is on the robot the task cannot move (step 26). DES partition duplicates at n = 10 fell from 4–5 to 1–2 per run.
+- **2026-10-19 — every sim robot bids**: until then no Isaac auction had two bidders (step 27).
+
 ### Still open
+
 - Measure on the real router: link rate and loss vs distance through the
   shelving, and reroute time when a link is pulled (replaces the biggest
   placeholders).
@@ -169,47 +208,30 @@ than gain (`Step 23` has the link-budget table).
   announcement before scaling past ~10 robots (currently Status goes to
   every robot, which is right for 2).
 - Decide whether duplicate work during a network split is acceptable long
-  term, and whether a 2.4 GHz outage needs a fallback.
-- Decided 2026-10-19: each task goes to one robot (the auction winner), and
-  a robot may hold up to 3 (`max_owned_tasks: 3` on the robots; the DES
-  baseline stays at 1). A bid now includes the backlog — time to finish
-  what the robot owns plus the drive from its last dropoff — and the
-  battery gate sees the whole promise. 30-task burst, V2, n = 6 and 10,
-  2 seeds: PASS at 1 and at 3; auction max 1.1–2.2 s → 1.2–1.6 s (fewer
-  "won at capacity, step aside" rounds). Each robot still works one task at
-  a time; the others wait in claim order (task_manager's queue).
-- 2026-10-19, review finding: a robot that had picked the item up could
-  still lose the task (partition heal tie-break, lease lost while isolated,
-  nav failure on the dropoff leg), sending the next owner to an empty
-  shelf. `Allocator.commit` (the owner claims at COMMITTED_COST once
-  task_manager reports NAV_TO_DROPOFF) makes the task immovable; peers
-  whose lease on it expires log `owner_missing` instead of reclaiming.
-  DES partition, n = 10, seeds 1–3: duplicate episodes V2 4/4/5 → 2/1/1,
-  V4 2/3/1 → 2/1/0. V2 seed 1 still fails (baseline: 6 false silents; now:
-  a reclaim 3 s after heal, before the route to the real owner was back,
-  resolved by tie-break at 10 s). All other scenarios unchanged.
+  term (`plan.md` question 11), and whether a 2.4 GHz outage needs a
+  fallback.
+- A two-robot Isaac run with both robots bidding (step 27).
 
 ### Where the details are
-Everything below this section is the chronological run log (what was done,
-why, and what came out, including mistakes and how they were found). Key
-steps: 6–9 emulation measurements · 16–17 fixes and bugs found · 18 reroute
-by OGM interval · 20 final comparison · 22 UDP Status · 23 link budget ·
-24 code review fixes. Reproduce: `commsim/scripts/fix_sweep.sh` (DES),
-`commsim/emu/*.py` (emulation, inside the VM), raw results in
-`commsim/results/` (gitignored). Steps 13–15 predate fixes to the model
-and are superseded by step 20.
+
+Key steps: 6–9 emulation measurements · 16–17 fixes and bugs found · 18
+reroute by OGM interval · 20 final comparison · 22 UDP Status · 23 link
+budget · 24 code review fixes · 25–27 the protocol on the robots.
+Reproduce: `commsim/scripts/fix_sweep.sh` (DES), `commsim/emu/*.py`
+(emulation, inside the VM), raw results in `commsim/results/` (gitignored).
+Steps 13–15 predate fixes to the model and are superseded by step 20.
 
 ---
 
-# Run log (chronological)
+## Run log
 
-Running log of what was done, why, and what came out. Until the lab testbed
-(M5) replaces the placeholders in `configs/base.yaml`, every result here is
-a *model* result, not a measurement of the real fleet.
+Until the lab testbed (M5) replaces the placeholders in `configs/base.yaml`,
+every result here is a *model* result, not a measurement of the real fleet.
 
-## 2026-10-03 — session 1
+## Session 1 — 2026-10-03
 
 ### Starting state
+
 - VM `commsim` exists (multipass, Ubuntu 24.04.5, kernel 6.8.0-142-generic,
   12 vCPU, 9.7 GiB), repo mounted at `~/SortBots`. Not yet provisioned: no
   ROS, no Mininet-WiFi, and `mac80211_hwsim` missing (needs
@@ -218,6 +240,7 @@ a *model* result, not a measurement of the real fleet.
 - Passwordless sudo works inside the VM (`sudo -n true`); host sudo is not used.
 
 ### Step 1 — provision the VM
+
 Why: the emulation (real 802.11s + batman-adv + zenohd per robot) needs
 hwsim, batman-adv, Mininet-WiFi/wmediumd and ROS 2 Jazzy with rmw_zenoh.
 Ran `sudo ./commsim/vm/provision_vm.sh` inside the VM.
@@ -226,11 +249,13 @@ Result: exit 0. `hwsim radios: OK`, batctl/batman-adv 2024.0, ROS 2 Jazzy
 Mininet-WiFi is still on `master` (pin after M0 passes).
 
 ### Step 2 — build the scale model (DES) first
+
 Why: with 9.7 GiB the VM can hold roughly 10–15 emulated robots (plan
 estimate), and the failure points the plan asks for are likely above that.
 The DES is what reaches failure; the emulation calibrates it at small n.
 
 Built `commsim/des/` (radio.py, layout.py, sim.py, run.py):
+
 - Medium: slotted CSMA/CA per band — DIFS, frozen backoff counters, CW
   doubling, 7 retries, ACK timing, 802.11n HT timing **without A-MPDU**.
   **One contention domain per band** (everyone defers to everyone): overstates
@@ -249,6 +274,7 @@ Built `commsim/des/` (radio.py, layout.py, sim.py, run.py):
   **hypothetical** (no cited figure yet).
 
 Medium sanity checks (`commsim/tests/des_test.py`, all pass):
+
 - Airtime arithmetic matches hand calculation (100 B @ MCS0 = 214 µs).
 - 1 saturated sender, 1500 B @ 65 Mbps → 32.5 Mbps goodput = textbook DCF
   without aggregation (370 µs/frame). My first expectation (~45) wrongly
@@ -257,7 +283,9 @@ Medium sanity checks (`commsim/tests/des_test.py`, all pass):
 - Background interferer realizes its target share (30% ± 4%).
 
 ### Design findings while modeling (before any sweep)
+
 These come from reading the spec into code, not from a run:
+
 1. **V3 neighbor-only Status breaks lease renewal.** Leases are renewed only
    by Status, and V3 sends Status only to neighbor cells, so robots outside
    the owner's neighborhood never see a renewal → lease expires at them →
@@ -278,8 +306,10 @@ DES run length: 20 s warm-up + 60 s steady (plan said 60 + 300 for
 emulation); a length-sensitivity check follows.
 
 ### Step 3 — first runs exposed three model bugs (fixed before sweeping)
+
 First n=20 runs (V1/V2/V3) all failed, so I added an airtime breakdown by
 traffic type before believing anything:
+
 1. **Fixed 200 ms TCP RTO → spurious-retransmission storm.** Instrumented:
    8,704 of 11,279 retransmissions were for segments already delivered (ACK
    just late under queueing). Real Linux adapts RTO (SRTT + 4·RTTVAR, floor
@@ -300,6 +330,7 @@ V3 29% (fails only `ownership` — the lease bug, finding 1).
 **Airtime finding (model, needs emulation confirmation):** in V3 the payload
 is the minority of airtime. n=15: TCP ACKs 36%, Status 25%, zenoh keepalives
 17%, map 17%, OGMs 3%. Two design choices drive this:
+
 - every tiny Status is its own TCP segment and gets its own ACK frame;
 - the short zenoh lease (2 s, forced by the timer ordering) means keepalives
   every 0.5 s on each of the n(n+1) full-mesh sessions that are otherwise idle.
@@ -307,7 +338,9 @@ Both are directly measurable with tcpdump in the emulation (M1) — top
 calibration priority.
 
 ### Step 4 — first spec-faithful DES sweep (pre-calibration; superseded by step 7)
+
 `des.run --until-fail`, 3 seeds, warehouse, no background load:
+
 - V1 fails at n=15 (n=10: 31% busy, passes). V2 fails at n=20 (n=15: 32%,
   passes) — a cliff, not a slope: 32% → 86% busy between 15 and 20.
 - V3, V4, V5, V6 and phase0 fail at **n=10** — the smallest n swept — every
@@ -315,6 +348,7 @@ calibration priority.
   `status_delivery`.
 
 ### Step 5 — rack attenuation: cited values replace the hypothetical 10 dB
+
 Searched for published figures. Only integrator/vendor guidance found (not
 peer-reviewed): 15–20 dB through 20-ft steel racks
 (https://www.2mtechnology.net/unifi-warehouse-wifi-design/), 15–25 dB per
@@ -328,6 +362,7 @@ conn 0.33–0.99 (robots behind racks with nobody to relay); n=10 had 1.000
 everywhere. Scale sweeps therefore start at n=10, coverage is swept apart.
 
 ### Step 6 — emulation M0 and M1 (real stack, in the VM)
+
 Built `commsim/emu/mesh.py` (hwsim radios in namespaces, real 802.11s with
 mesh_fwding 0, batman-adv IV at 500 ms OGM, wmediumd SNR matrix — driven
 directly, not via Mininet-WiFi) and `commsim/emu/m1.py` (rmw_zenohd per
@@ -339,11 +374,13 @@ RTT avg 3.1 ms, TQ 253/197. Note: ARP/translation-table needs > 15 s after
 bring-up; the first ping attempt failed only because of that.
 
 **M1 (3-node line, Status 3 Hz all-to-all, 90 s):**
+
 | | depth 1 | depth 10 |
 |---|---|---|
 | samples | 1026 | 1244 |
 | latency p50 / p95 / p99 | 3.7 / 5.1 / 6.0 ms | 4.2 / 6.6 / 7.6 ms |
 | delivery | **0.85** | **1.00** |
+
 - 1-hop p50/p95 3.89/5.67 ms; 2-hop 4.89/7.21 ms → ~2.9 ms fixed stack
   delay + ~1.0 ms per hop (per-hop includes wmediumd userspace forwarding).
 - Status CDR = 64 B (144 B with 10 waypoints); TCP payload 136 B → **72 B
@@ -352,6 +389,7 @@ bring-up; the first ping attempt failed only because of that.
 - 82 MB RSS and 3.6% CPU per emulated node → the VM's RAM is not the cap.
 
 Emulation findings (real software, not model):
+
 5. **KEEP_LAST(1) loses other robots' Status.** "Best-effort, newest wins"
    as depth 1 on a shared topic dropped 15% of statuses — the queue is per
    subscription, not per publisher. Depth 10: 100%. Spec needs depth ≥
@@ -366,28 +404,34 @@ Emulation findings (real software, not model):
    cost of the design, not of zenoh defaults.
 
 ### Step 7 — DES recalibrated from M1, cross-checked
+
 Applied: 72 B per-message overhead, measured CDR sizes, stack delay 2.4 ms +
 Exp(0.7 ms), 0.75 ms per-hop processing, duplicate idle session per pair.
 `python3 -m commsim.des.crosscheck` (DES reproducing the M1 setup):
+
 | metric | emulation | DES |
 |---|---|---|
 | 1-hop p50 / p95 | 3.89 / 5.67 ms | 3.99 / 5.78 ms |
 | 2-hop p50 / p95 | 4.89 / 7.21 ms | 4.84 / 6.61 ms |
 | delivery | 1.00 | 1.00 |
 | pure ACKs per data segment | 0.91 | 1.00 |
+
 Within plan tolerance (±20% p95) at n=3. This only validates the stack
 model at low load — contention at large n is still unvalidated (needs a
 larger emulated fleet; next).
 Pre-calibration sweep results were moved to `results/old_*_precal`.
 
 ### Step 8 — emulation at n=10 (warehouse SNR matrix), and two emulation bugs
+
 Status-only, 3 Hz all-to-all, 10 nodes, wmediumd SNR matrix from the DES
 propagation model (same placeholders). Each run 120 s, ~25,000 latency samples.
+
 | run | busy | p50 / p95 / p99 | delivery |
 |---|---|---|---|
 | a. 11b rates ON (bug) | 36.6% | 11.1 / 24.5 / 33.2 ms | 0.998 |
 | b. 11b off, wmediumd interference OFF (bug) | 26.2% | 4.6 / 10.0 / 14.9 ms | 0.999 |
 | c. 11b off, interference ON (correct) | 30.9% | 7.1 / 15.0 / 27.2 ms | 0.999 |
+
 - (a) `mesh.py` never applied the design's "legacy 802.11b rates off";
   minstrel sent ~40% of frames at 5.5/1 Mb/s. Fixed (`iw set bitrates`).
 - (b) wmediumd's `enable_interference` was off, so stations never deferred
@@ -397,10 +441,12 @@ propagation model (same placeholders). Each run 120 s, ~25,000 latency samples.
 - hwsim's rate control lands on **legacy 9–24 Mb/s**, not HT MCS.
 
 DES on the same SNR matrix (`python3 -m commsim.des.crosscheck n10`):
+
 | | emulation (c) | DES legacy rates | DES HT rates |
 |---|---|---|---|
 | busy | 30.9% | 18.6% | 21.6% |
 | p50 / p95 / p99 | 7.1 / 15.0 / 27.2 | 6.5 / 20.0 / 33.9 | 6.8 / 22.6 / 37.6 ms |
+
 Latency agrees within ~10% (p50) and ~30% (tail). Busy time is ~40% lower
 in the DES: the emulation's rate control picks slower rates than the DES's
 SNR thresholds. **Link rate is the biggest unresolved lever** — the lab's
@@ -408,8 +454,10 @@ throughput-vs-distance measurement fixes it. Bracketed below with a
 legacy-rate sensitivity sweep.
 
 ### Step 9 — reroute time measured; link loss breaks the timer budget
+
 `commsim/emu/reroute.py`: diamond 0-(1|2)-3, ping every 10 ms, block the
 active first hop with `iw ... plink_action block` (spec's method).
+
 - OGM 500 ms: outage **1.92–1.98 s** (6 trials, median 1.95 s).
 - OGM 250 ms: **1.94 s** (4 trials) — not OGM-bound in this emulation, so
   halving the OGM interval buys nothing here (hardware may differ).
@@ -424,9 +472,11 @@ single link loss makes healthy robots look silent. The spec's ordering
 must also exceed reroute + one TCP backoff step (≈ 2 × reroute).
 
 ### Step 10 — calibrated scale sweeps (DES, warehouse, HT rates, 3 seeds)
+
 Variants: spec-faithful; `+LB` = fleet-wide lease beacon 1 Hz (fix for
 finding 1); `+SC` = single TCP session per pair (fix for finding 6).
 Largest n where all seeds pass / first n where seeds fail; first criterion:
+
 | design | bg 0% | bg 15% | bg 30% | first criterion |
 |---|---|---|---|---|
 | V1 spec | (see step 12) / 10 | | | busy |
@@ -439,6 +489,7 @@ Largest n where all seeds pass / first n where seeds fail; first criterion:
 | V4+LB+SC | 18 / 19 | 14 / 16 | 10 / 12 | busy |
 | V5/V6 +LB(+SC) | — / fail at 10 | | | status_delivery |
 | phase0 | — / fail at 10 | | | coverage (conn 0.53) |
+
 - **Airtime is the bottleneck for every design that survives the protocol
   bugs**; latency only fails after busy > 50%, and then collapses (a cliff:
   44% → 60–70% busy by adding one robot; queues + TCP retransmissions).
@@ -461,9 +512,11 @@ Below n≈8 the warehouse is coverage-limited (conn < 1), so failures there
 are coverage, not scale.
 
 ### Step 11 — why the DES under-counted airtime vs emulation (n=10)
+
 Frame rates agree (emulation 1,457 data frames/s, DES ~1,600 tx/s); the gap
 is airtime per frame: emulation 212 µs vs DES 133 µs. Under wmediumd
 interference the emulation's minstrel falls back to 9–24 Mb/s legacy rates.
+
 - A "legacy rates" DES run was *faster* than HT (short legacy preamble +
   lower SNR thresholds) — so it did not bracket the emulation. Replaced by a
   rate cap: DES capped at 12 Mb/s legacy reproduces the emulation point:
@@ -473,6 +526,7 @@ interference the emulation's minstrel falls back to 9–24 Mb/s legacy rates.
   15, V4 at 18 (pre-session-fix code; final numbers in step 13).
 
 ### Step 12 — DES model bug: zenoh sessions never closed
+
 The first full scenario pass showed 40–60 s Status gaps — longer than any
 reroute. Cause: the DES's TCP never gave up, so a receiver could wait behind
 a lost sequence number indefinitely; real zenoh closes a session after one
@@ -491,6 +545,7 @@ Because steps 10–11 ran on the pre-fix DES, the headline sweep was re-run on
 the final code: `commsim/scripts/final_sweep.sh` (step 13).
 
 ### Step 13 — headline results (final code, `scripts/final_sweep.sh`)
+
 DES, placeholder warehouse (50 × 32 m, 5 rack rows), HT rates, 3 seeds per
 point, 20 s warm-up + 60 s steady. "Supports" = last n before a majority of
 seeds fail; below n = 10 the floor is coverage-limited (open markers at
@@ -514,6 +569,7 @@ Raw rows: `results/FINAL/runs.jsonl`, `results/FINAL_bg/runs.jsonl`.
 | V4 +LB | 12–14 | busy > 50% | 23% | 27 ms |
 | V4 +LB+SC | 18 / 16 / 12 | busy > 50% | 13% | 8 ms |
 | V5/V6 +LB+SC | fails at 10 | status delivery (0.75–0.82) | 12% | 4–5 ms |
+
 Sensitivity on V4+LB+SC: emulation-like slow rates (≤12 Mb/s legacy) → 15
 (V3: 14, V2: coverage-limited at 8); near-free-space path loss (exponent
 2.0) → 22.
@@ -527,8 +583,10 @@ grow slower but still super-linearly because the n² session keepalives and
 OGMs scale with the fleet, not with neighbors.
 
 ### Step 14 — failure scenarios (DES, V3/V4 +LB+SC, n = 10 and 15, 3 seeds)
+
 Injection at t = 40 s, measured to t = 100 s; reroute 1.95 s (measured).
 Pass counts out of 6 runs per row (2 fleet sizes × 3 seeds), per timer set:
+
 | scenario | spec timers (lease 2 s, status 3 s) V3 / V4 | status 5 s V3 / V4 | lease 4 s + status 6 s V3 / V4 |
 |---|---|---|---|
 | single link loss (both bands) | 0 / 0 | 4 / 5 | 4 / 6 |
@@ -543,7 +601,9 @@ Pass counts out of 6 runs per row (2 fleet sizes × 3 seeds), per timer set:
 | reboot | 6 / 6 | 6 / 6 | not run |
 | burst (30 tasks + 10× obstacles) | n=10: 3/3, 2/3; n=15: 0/3, 0/3 | n=10: 3/3, 3/3; n=15: 0/3, 0/3 | not run |
 | timer misordering (negative control: status 1.5 s) | false silents fire as intended in 6 / 5 runs ✔ | | |
+
 What holds regardless of timers:
+
 - **Isolated owner is safe:** stops at 9.9–10.1 s, peers reclaim at
   12.6–13.1 s (lease 10 + margin 2 + detection), no duplicate ownership.
 - **Dead owner's task is reclaimed only after lease + margin** (13.0 s).
@@ -555,6 +615,7 @@ What holds regardless of timers:
   replay of open tasks is NOT modeled (the rebooted robot re-learns tasks
   from Claims/Status only).
 What fails:
+
 - **Every routing disruption with the spec's timers** (link loss, flapping,
   relay death): reroute 1.95 s + TCP backoff + zenoh session churn opens 4 s
   Status gaps → false "robot silent". Confirmed on the real stack (step 9).
@@ -565,20 +626,24 @@ What fails:
   TCP, so repeated disruptions keep stacking backoff.
 
 ### Step 15 — the cliff, checked on the real stack
+
 Emulation, Status-only 3 Hz all-to-all, both TCP sessions per pair (spec
 connect), same SNR matrices for both models:
+
 | n | emulation busy / p50 / delivery | DES (≤12 Mb/s) | DES (HT) |
 |---|---|---|---|
 | 10 | 31% / 7.1 ms / 1.00 | 29% / 7.8 ms / 1.00 | 22% / 6.8 ms / 1.00 |
 | 15 | **94% / 6.5 s / 0.20** | **84% / 3.4 s / 0.41** | 52% / 11 ms / 1.00 |
 | 20 | 116%* / 7.6 s / 0.16 | 86% / 4.6 s / 0.10 | 80% / 5.7 s / 0.21 |
+
 (*summed airtime incl. overlapping collisions.) Emulation VM CPU ~4% per
 node, load < 1.2 — the collapse is the emulated medium, not the host.
 **The real stack and the DES put the cliff in the same place (10–15) at the
 same link rates.** With HT rates the cliff moves to 15–20. Which applies is
 decided by the rate the real radios settle at — the lab throughput test.
 
-## Conclusions after session 1 (superseded by **Results** at the top)
+### Conclusions after session 1 (superseded by **Results**)
+
 1. **Fix before building:** (a) lease renewal must reach robots outside the
    owner's neighborhood — the 1 Hz fleet-wide lease beacon works and costs
    little; (b) one TCP session per robot pair (only the lower id dials);
@@ -605,7 +670,8 @@ decided by the rate the real radios settle at — the lab throughput test.
 6. **5 GHz is under-used** by batman-adv's TQ metric (2–8% busy); band
    steering or a throughput-aware metric (B.A.T.M.A.N. V) is worth testing.
 
-## Not done / limits (as of session 1)
+### Not done / limits (as of session 1)
+
 - No hardware data: rack attenuation (industry guidance only), path-loss
   exponent, link rates, reroute on real radios, survey busy time — all
   placeholders; the lab testbed (plan M5) replaces them.
@@ -618,7 +684,8 @@ decided by the rate the real radios settle at — the lab throughput test.
   medium); SAE not enabled in emulation.
 - Jetson not used (not needed); its stack delay is still x86-VM-measured.
 
-## Open questions raised by session 1 (answered in session 2)
+### Open questions raised by session 1 (answered in session 2)
+
 1. Partition semantics (plan q11): duplicate work during a partition is
    inherent to "isolated = heard nobody". Accept, or add quorum?
 2. Which status transport: TCP (current) vs UDP/best-effort for Status?
@@ -628,9 +695,11 @@ decided by the rate the real radios settle at — the lab throughput test.
 
 ---
 
-## 2026-10-03 — session 2: fixing the bugs, then re-testing
+## Session 2 — 2026-10-03 to 2026-10-04
 
-Decisions taken with the user before changing anything architectural:
+Fixing the bugs, then re-testing. Decisions taken with the user before
+changing anything architectural:
+
 - lease renewal → **fleet-wide LeaseBeacon** message (new type);
 - Status transport → keep TCP + new timers, **prototype UDP for Status**, test,
   user decides;
@@ -638,6 +707,7 @@ Decisions taken with the user before changing anything architectural:
 - partitions → **accept duplicate work during a split, resolve on heal**.
 
 ### Step 16 — fixes applied (no architecture change needed for these)
+
 | fix | where |
 |---|---|
 | LeaseBeacon: owner sends its owned-task list fleet-wide at 1 Hz | `core/protocol.py` (emitted by the protocol core itself), `commsim_msgs/LeaseBeacon.msg` (32 B CDR, measured) |
@@ -647,12 +717,15 @@ Decisions taken with the user before changing anything architectural:
 | isolation from transport liveness, using the time data was *received* | `Allocator.heard_network` |
 | 802.11b off, wmediumd interference on (emulation) | `emu/mesh.py` (done in session 1) |
 | startup check that refuses timer values the measurements contradict | `core/timers.py`, run by `fleet gen` |
+
 `configs/spec_original.yaml` restores the design exactly as first written,
 for before/after runs. Regression tests: the far-robot lease case fails
 without the beacon and passes with it.
 
 ### Step 17 — bugs found while re-testing (all fixed, all with tests)
+
 Protocol (real bugs in `core/protocol.py`):
+
 1. **A robot could win and hold more tasks than `max_owned_tasks`.** It bid
    on several tasks at once and every window it won, it claimed; it then
    worked only the newest. Seen in a heavy-load run (robot 6 "owned" tasks
@@ -664,6 +737,7 @@ Protocol (real bugs in `core/protocol.py`):
    (bursts 40/40 pass; identical task throughput and travel cost at normal
    and 3.3× load). This changes the bidding rule slightly; `0` reverts it.
 DES model (my bugs; results before these fixes are superseded):
+
 3. **Non-deterministic for a given seed** — CSMA contenders kept in a `set`
    of objects iterate in memory order. Now insertion-ordered; test runs two
    fresh interpreters and compares.
@@ -685,13 +759,16 @@ judged by the spec's own condition ("auctions complete, control traffic not
 starved"), not the steady-state 1.5 s auction threshold.
 
 ### Step 18 — reroute is not one number (emulation)
+
 Blocking a *direct* link whose detour is 3 hops (UDP Status, so the gap is
 batman alone), worst per-direction recovery, 3 trials each:
+
 | OGM interval | recovery |
 |---|---|
 | 1000 ms (batman default) | 8.7–10.3 s |
 | 500 ms (design) | 2.7–5.7 s |
 | 250 ms | 1.7–3.0 s |
+
 The 1.95 s measured in session 1 was the easy case (equally short detour).
 The OGM interval matters for longer detours, and 500 ms leaves Status at
 5.7 s against a 6 s timeout. **Adopted `orig_interval_ms: 250`** (a design
@@ -700,23 +777,28 @@ Real stack at 250 ms, longer detour, worst Status gap: **TCP 3.52–3.54 s,
 UDP 3.0 s** (3 trials each) — inside the 6 s timeout either way.
 
 ### Step 19 — emulation of the fixed config (real stack)
+
 | test | spec config | fixed config |
 |---|---|---|
 | 3-node line: idle keepalive segments at gateway | 384 | **3** |
 | 3-node line: delivery / p95 | 0.85 (depth 1) | **1.00 / 4.3 ms** |
 | n = 10 warehouse, Status only: channel busy | 31% | **21%** |
 | n = 15 warehouse, Status to ALL robots: delivery | 0.20 | TCP 0.35 / **UDP 0.89** |
+
 n = 15 all-to-all still overloads the emulated channel at its slow (9–24
 Mb/s) rates — the neighbor-only designs (V3/V4) are what scale; UDP Status
 degrades far more gracefully when overloaded (p50 0.68 s vs 3.9 s).
 
 ### Step 20 — final comparison (DES, final code, worst-case reroute)
+
 `commsim/scripts/fix_sweep.sh` → `results/FINAL_FIX/`. Reroute delay in
 every run = the measured worst case for its OGM interval (5.67 s / 3.0 s).
 Failure scenarios, V3 + V4, n = 10 and 15, 3 seeds (120 runs per column):
+
 | | spec as written | fixed, TCP, OGM 500 | fixed, UDP, OGM 500 | **fixed, TCP, OGM 250 (default)** | fixed, UDP, OGM 250 |
 |---|---|---|---|---|---|
 | passes | 18 | 71 | 96 | **100** | **110** |
+
 Per scenario at the default (TCP/250) → UDP/250: link loss 7/12 → 11/12,
 relay dies 11/12 → 11/12, isolated 11/12 → 12/12, partition 8/12 →
 10/12, flapping 12/12 → 11/12, gateway loss 8/12 → 10/12, burst 12/12 →
@@ -724,6 +806,7 @@ relay dies 11/12 → 11/12, isolated 11/12 → 12/12, partition 8/12 →
 (3/6, 3/6): **5 GHz alone does not cover a racked floor**.
 
 Capacity (first n where most seeds fail; supported = previous step):
+
 | design | bg 0% | bg 15% | bg 30% |
 |---|---|---|---|
 | V1 spec | 10 | – | – |
@@ -732,6 +815,7 @@ Capacity (first n where most seeds fail; supported = previous step):
 | V2 fixed (TCP / UDP) | 16 / 18 | – | – |
 | V3 fixed (TCP / UDP) | 20 / 22 | 18 / (coverage)* | 14 / 14 |
 | V4 fixed (TCP / UDP) | 22 / **24** | 18 / 20 | 14 / 16 |
+
 (*two n = 10 seeds drove into coverage holes: conn 0.92–0.95, same seeds
 were fully connected over TCP because assignment timing differed.)
 OGM 250 vs 500 costs ≤ 2 robots of capacity (V3 TCP 22 → 20).
@@ -743,6 +827,7 @@ OGM 250 vs 500 costs ≤ 2 robots of capacity (V3 TCP 22 → 20).
 superseded by this step.)
 
 ### Step 21 — UDP Status: recommendation (user's decision)
+
 Evidence: scenario passes 100 → 110 / 120; capacity +2 robots (V4 22 → 24,
 bg 15% 18 → 20, bg 30% 14 → 16); worst link-loss Status gap on the real
 stack 3.5 → 3.0 s; at overload, emulated delivery 0.35 → 0.89. Costs:
@@ -753,13 +838,15 @@ port to keep on the mesh interface only (`check_isolation.sh` should cover
 7450 if adopted). **Recommended, not yet adopted** — `status_transport: tcp`
 remains the default.
 
-### Still open at the end of session 2 (superseded by **Results → Still open**)
+### Open at the end of session 2 (superseded by **Results → Still open**)
+
 - Partition: duplicate work during a split is still possible by design
   (accepted); V3/V4 at n = 15 resolve it in ~2 s in most but not all runs.
 - Band loss: a 2.4 GHz outage is a fleet outage on a racked floor.
 - Link rates of the real routers remain the biggest unknown for capacity.
 
 ### Step 22 — Status moved to UDP (user decision, 2026-10-04)
+
 - `protocol.status_transport: udp` (port `status_udp_port: 7450`) is now the
   default; `spec_original.yaml` keeps TCP for comparisons.
 - `fleet gen` writes each robot's `status_udp.json`: bind = its **mesh IP
@@ -779,23 +866,28 @@ remains the default.
   results assumed that knowledge for free.
 
 ### Step 23 — radio link budget (model numbers, for router/antenna sizing)
+
 20 dBm tx, noise −95 dBm (20 MHz), thresholds from `des/radio.py`, no fade
 margin. Max hop distance holding 24 Mb/s (the rate the capacity results
 assume), path-loss exponent 3.0 (pessimistic indoor):
+
 | | open | 1 wire shelf | 1 loaded rack |
 |---|---|---|---|
 | 2.4 GHz, 2 dBi each end | 134 m | 106 m | 42 m |
 | 2.4 GHz, 5 dBi each end | 212 m | 169 m | 67 m |
 | 5 GHz, 2 dBi each end | 81 m | 65 m | 18 m |
 | 5 GHz, 5 dBi each end | 129 m | 102 m | 28 m |
+
 Subtract ~10 dB for multipath fading on moving robots (≈ ×0.46 on
 distance) and whatever the robot's own metal costs if the antenna sits
 below it. Range is not what limits a lab-scale fleet; link *rate* (rate
 control) and antenna *placement* are.
 
 ### Step 24 — code review fixes (2026-10-04)
+
 A code review found 8 issues in the uncommitted tree; all fixed, with tests
 (42 offline tests pass; each new test fails on the old code).
+
 | # | issue | fix |
 |---|---|---|
 | 1 | `LEGACY_RATES` deleted by the step-17 `per()` rewrite → any legacy-rate run crashed | restored; test runs an ht=0 sim |
@@ -806,6 +898,7 @@ A code review found 8 issues in the uncommitted tree; all fixed, with tests
 | 6 | emulation delivery computed from received rows only — a Status nobody got vanished from the denominator | stubs log every send; delivery = received / (sent × peers) |
 | 7 | `fleet gen` printed timer violations but still wrote configs | exits 2 unless `--allow-timer-violations` |
 | 8 | lease-vs-reroute check used the 1.95 s best case | uses the worst measured reroute for the configured OGM interval |
+
 Every DES result row now records the settings it ran with (OGM interval,
 transport, lease beacon, single connect, bid cap, reroute delay).
 
@@ -816,3 +909,59 @@ dies) **56/60 — identical to step 20**; capacity V3 fails at 22, V4 at 24 —
 identical; crosschecks unchanged. Real stack, corrected delivery: clean
 line 1.000; link loss **0.987** (Status sent during the reroute is lost —
 expected with UDP, and inside the 6 s status timeout).
+
+---
+
+## Session 3 — 2026-10-19
+
+The protocol core is now the one running on the robots
+(`nodes/fleet_tasks.py` imports `core/protocol.py`), so these steps changed
+the protocol for the robots' sake and re-ran the DES to see what moved.
+
+### Step 25 — up to 3 tasks per robot, bids include the backlog
+
+Team decision: each task goes to one robot (the auction winner) and a robot
+may hold up to 3 (`max_owned_tasks: 3` in `configs/fleet_tasks.yaml`; the
+DES baseline stays at 1). A bid for a further task now includes the
+backlog — the time to finish what the robot already owns plus the drive
+from its last dropoff — and the battery gate sees the whole promise;
+measured from where the robot stands, a loaded robot beside a pickup beat
+an idle one across the aisle and the task waited behind its queue. The
+robot still works one task at a time; the others wait in claim order
+(task_manager's queue). 30-task burst, V2, n = 6 and 10, 2 seeds: PASS at
+1 and at 3; auction max 1.1–2.2 s → 1.2–1.6 s (fewer "won at capacity,
+step aside" rounds).
+
+### Step 26 — committed ownership
+
+Review finding: a robot that had picked the item up could still lose the
+task (partition heal tie-break, lease lost while isolated, nav failure on
+the dropoff leg), sending the next owner to an empty shelf. The protocol
+had no state for "the item is on board". Fix: `Allocator.commit` — once
+task_manager reports NAV_TO_DROPOFF the owner claims at `COMMITTED_COST`
+(below any real bid), so it wins every tie-break, keeps working while
+isolated, and peers whose lease on it expires log `owner_missing` instead
+of reclaiming; a failed dropoff is retried by the same robot ("carrying");
+only completion or a cancel ends it. DES robots commit on reaching the
+pickup.
+
+DES partition, n = 10, seeds 1–3, duplicate episodes per run:
+
+| | seed 1 | seed 2 | seed 3 |
+|---|---|---|---|
+| V2 before → after | 4 → 2 | 4 → 1 | 5 → 1 |
+| V4 before → after | 2 → 2 | 3 → 1 | 1 → 0 |
+
+V2 seed 1 still fails: before, on 6 false silents; after, on a reclaim 1 s
+after heal (a side's lease on the real owner expired before its route back
+was up), resolved by tie-break 10 s later. All other scenarios unchanged.
+
+### Step 27 — every sim robot bids
+
+Found while reviewing: the Isaac bringup gave every secondary robot
+`--no-bid` because `spawn_warehouse.py` only animates robot_0's arm and
+package, so no auction in the sim had ever had two bidders. Secondary
+robots now run `scripted_pick.py --mock` (picks reported successful without
+moving an arm) and bid. Not yet run: a two-robot Isaac run needs ~10 GB and
+the laptop fits one robot (measured 2026-10-09); it is the next
+thing to do on the workstation.

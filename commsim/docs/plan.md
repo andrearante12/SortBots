@@ -5,6 +5,7 @@
 [`brief.md`](brief.md) (the original brief) asks for a plan to simulate the SortBots fleet **communication** system: a dual-band 802.11s + batman-adv mesh, Zenoh middleware (`rmw_zenoh`), decentralized auction/lease task allocation, and obstacle/map sharing. The questions are: how many robots before it fails, does it recover correctly from link/node failures, does it meet the latency and timer requirements, and how much does each design choice move the failure point.
 
 The simulation is **fully separate from the Isaac Sim / ROS 2 track**. It shares no code, shell, ROS install or launch files with it. Agreed decisions:
+
 - It lives in a new top-level dir, `commsim/`, with its own README, environment and tests (the same arrangement as the ManiSkill track).
 - Emulation runs in an **Ubuntu 24.04 VM on this laptop**. The host is Ubuntu 25.10 with no apt ROS, and Mininet-WiFi doesn't support 25.10. The VM keeps root and kernel-module work away from the Isaac setup.
 - The scale extension is a **Python discrete-event simulation (SimPy)**.
@@ -13,6 +14,7 @@ The simulation is **fully separate from the Isaac Sim / ROS 2 track**. It shares
 **Jetson access is not needed.** Every emulated robot's `zenohd`, `rmw_zenoh` and ROS 2 stubs run in their own network namespace inside the x86 VM. A Jetson appears only in the 2-robot lab testbed, as an *optional* calibration input (zenohd/stack processing delay on Orin Nano). It is listed under open questions and is not on the critical path.
 
 Host facts (checked read-only):
+
 - 20 cores, 15 GB RAM, kernel 6.17.
 - `mac80211_hwsim` and `batman-adv` modules are present (they'll be used inside the VM's own 24.04 kernel).
 - ROS 2 is a source build in `~/ros2_jazzy` with no rmw_zenoh. It is not used.
@@ -34,6 +36,7 @@ All numbers below marked *placeholder* or *estimate* are parameters, not facts.
 | App | rclpy stub nodes running the **real** auction/lease code | Imports the **same** pure-Python protocol code |
 
 Rejected alternatives:
+
 - **ns-3 only:** it has no batman-adv or Zenoh model, so the most important parts would be re-implemented.
 - **Physical-only testing:** only 2 robots exist.
 - **Mininet without hwsim (wired links + tc netem):** it can't produce shared-medium airtime or busy time, which is the main failure mode being studied.
@@ -100,7 +103,7 @@ Rejected alternatives:
   5. There are no DHCP/DNS dependencies in the generated network config.
   - Optional nftables rule on the laptop: drop 7447 on every interface except the mesh one.
 
-## 4. Parameter table (abridged; the full table goes in `commsim/configs/base.yaml` comments + `commsim/docs/parameters.md`)
+## 4. Parameter table (abridged; the full table is the commented `commsim/configs/base.yaml`)
 
 | Parameter | Default | Source | Replaced by |
 |---|---|---|---|
@@ -149,6 +152,7 @@ Rejected alternatives:
 ## 6. Failure criteria and metrics (proposed thresholds)
 
 Failure is the smallest n where any of these holds in steady state:
+
 - Busy time > 50% on any band in any neighborhood.
 - Control-message latency p95 > 150 ms or p99 > 500 ms. Control messages are status, bid, claim and obstacle; up to 3 hops; reroute windows are excluded. Every run reports sample counts, and a p99 with fewer than 1000 samples is marked "insufficient".
 - **Status delivery ratio** < 95% fleet-wide, or < 85% for any single subscribed pair over 10 s windows (proposed).
@@ -210,6 +214,7 @@ commsim/
 ## 9. Milestones (two semesters)
 
 **Semester 1**
+
 - **M0 (wk 1–2):**
   - Provision the VM.
   - 2 namespaces, 802.11s + batman-adv over hwsim, ping across.
@@ -229,6 +234,7 @@ commsim/
   - First scale curves for V1–V3 + Phase 0.
 
 **Semester 2**
+
 - **M4:** Phase 2 (V4, dual band); band-loss, partition, timer-misordering scenarios; Cyclone middleware check.
 - **M5:** Lab testbed calibration (signal/loss/throughput/reroute/survey) → parameter table updated; re-run sweeps.
 - **M6:** Phase 3 (V5 beacon) and Phase 4 (V6 reliable broadcast); remaining scenarios.
