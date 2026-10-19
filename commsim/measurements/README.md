@@ -1,12 +1,19 @@
-# Emulation reference measurements
+# commsim/measurements — emulation reference measurements
 
 Small JSON results from the real-software emulation (802.11s + batman-adv +
-zenohd + ROS 2 stubs in the VM, `commsim/emu/`). They are kept in the repo
-because the discrete-event model is calibrated and cross-checked against
-them (`python3 -m commsim.des.crosscheck n10` reads `spec_config/`), and
-because they are the evidence behind numbers quoted in
-[`../docs/sim_log.md`](../docs/sim_log.md). Bigger raw outputs
-(captures, per-message CSVs, sweeps) stay in the gitignored `commsim/results/`.
+zenohd + ROS 2 stubs in the VM, `../emu/`). They are kept in the repo for
+two reasons:
+
+- the discrete-event model is **calibrated and cross-checked against them** — `python3 -m commsim.des.crosscheck n10` reads `spec_config/`;
+- they are the **evidence behind the numbers** quoted in [`../docs/sim_log.md`](../docs/sim_log.md).
+
+Bigger raw outputs (captures, per-message CSVs, sweeps) stay in the
+gitignored `commsim/results/`.
+
+```bash
+/usr/bin/python3 -m commsim.des.crosscheck        # 3-node line vs spec_config
+/usr/bin/python3 -m commsim.des.crosscheck n10    # 10-node warehouse vs spec_config
+```
 
 ## `spec_config/` — the design as first written (session 1)
 
@@ -34,9 +41,12 @@ Lower id dials, Zenoh lease 4 s, status timeout 6 s, queue depth 32.
 | `reroute_by_direction.jsonl` | per-direction recovery on a longer detour, OGM 1000/500/250 ms | 18 |
 | `linkloss_ogm250.jsonl` | worst Status gap, OGM 250 ms, TCP vs UDP | 18 |
 
-Field names: `p50_ms`/`p95_ms`/`p99_ms` = one-way Status latency (namespaces
-share one clock, so it is exact); `delivery` = received ÷ (sent × peers)
-in newer runs — older files carry only `delivery_lower_bound`, computed from
-received messages alone, which overstates delivery (log step 24);
-`air_busy_frac` = channel airtime from the `hwsim0` capture; `cap_*` = TCP
-segment counts from the gateway capture.
+## Field names
+
+| Field | Meaning |
+|---|---|
+| `p50_ms`, `p95_ms`, `p99_ms` | One-way Status latency. Namespaces share one clock, so it is exact |
+| `delivery` | received ÷ (sent × peers), in newer runs |
+| `delivery_lower_bound` | Older files only: computed from received messages alone, which overstates delivery (log step 24) |
+| `air_busy_frac` | Channel airtime from the `hwsim0` capture |
+| `cap_*` | TCP segment counts from the gateway capture |

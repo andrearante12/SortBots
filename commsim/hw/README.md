@@ -1,19 +1,34 @@
-# commsim/hw — moving the design onto real routers
+# commsim/hw — the design on real routers
 
-The simulation fixed a configuration (`configs/base.yaml`) and measured why
-each value is what it is. This folder puts **that same configuration** on
-real OpenWrt routers and Jetsons, then measures what the simulation could
-only assume. The measurements go back into the configs.
+The simulation fixed a configuration (`../configs/base.yaml`) and measured
+why each value is what it is. This folder puts **that same configuration**
+on real OpenWrt routers and Jetsons, then measures what the simulation could
+only assume. The measurements go back into the configs, and the generator
+refuses any configuration the measured timers would break.
 
-| File | What it does |
+| Tool | What it does |
 |---|---|
-| `deploy.py` | Fleet list → one bundle per node: `router-setup.sh` (OpenWrt), host network, Zenoh env, UDP Status endpoint, chrony |
-| `probe.py` | UDP round-trip probe: latency, loss and the longest outage (= reroute time). Standard library only, no ROS |
 | `firmware.py` | Builds the OpenWrt images with the mesh packages baked in (step 1) |
-| `router_stats.sh` | Run on a router over ssh: neighbors, link quality, bitrates, channel busy % |
+| `deploy.py` | Fleet list → one bundle per node: `router-setup.sh` (OpenWrt), host network, Zenoh env, UDP Status endpoint, chrony (step 3) |
+| `probe.py` | UDP round-trip probe: latency, loss and the longest outage (= reroute time). Standard library only, no ROS (step 8) |
+| `router_stats.sh` | Run on a router over ssh: neighbours, link quality, bitrates, channel busy % (step 8) |
 | `../../scripts/fleet_bridge.sh` | Runs zenoh-bridge-ros2dds from a bundle: the robots' `/fleet/*` topics onto the mesh (step 7) |
 
-## How many routers
+Offline tests: `../tests/hw_test.py` (generated files, shell syntax,
+addressing, isolation).
+
+## The procedure
+
+1. [Build the images](#1-build-the-images-laptop-once) — laptop, once
+2. [Flash](#2-flash-each-router) — each router
+3. [Generate the bundles](#3-generate-the-bundles-laptop) — laptop
+4. [Configure each router](#4-configure-each-router)
+5. [Configure each host](#5-configure-each-host-jetson--laptop) — Jetson / laptop
+6. [Bring-up checks](#6-bring-up-checks)
+7. [Run the SortBots stack over the mesh](#7-run-the-sortbots-stack-over-the-mesh)
+8. [Calibrate](#8-calibration-what-to-measure-and-what-it-replaces) — what to measure and what it replaces
+
+## What you need
 
 **One router per mesh node.** Each robot carries its own router and the
 gateway laptop has one, so the 2-robot demo needs **3**. A single router
@@ -24,28 +39,28 @@ task protocol, but not 802.11s, batman-adv or rerouting.
 | Routers | What you can test |
 |---|---|
 | 2 | Mesh bring-up, SAE, signal/rate/loss vs distance and through shelving, latency, channel busy time, Zenoh + task protocol between 2 hosts |
-| 3 | All of the above, plus **rerouting**: block the direct link, traffic goes through the third router. This is the minimum for the demo and for the reroute measurement |
+| 3 | All of the above, plus **rerouting**: block the direct link and traffic goes through the third router. The minimum for the demo and for the reroute measurement |
 
-**2.4 GHz only is fine to start.** `configs/hw_lab.yaml` is the 2.4 GHz-only
-lab config. At 3 nodes the channel is ~1% busy (sim_log Results), so capacity
-isn't the issue. What you give up is the fallback: if 2.4 GHz is jammed (busy
-campus channel, microwave) there is no second band. Buy dual-band routers
-anyway and turn 5 GHz on after step 6 works.
+**2.4 GHz only is fine to start.** `../configs/hw_lab.yaml` is the
+2.4 GHz-only lab config. At 3 nodes the channel is ~1 % busy (sim_log
+Results), so capacity isn't the issue. What you give up is the fallback: if
+2.4 GHz is jammed (busy campus channel, microwave) there is no second band.
+Buy dual-band routers anyway and turn 5 GHz on after step 6 works.
 
-Router minimum (sim_log Results): runs stock OpenWrt 23.05 or newer;
-802.11s mesh on its radios (MediaTek mt76 or Qualcomm ath9k/ath10k; avoid
-Broadcom); dual band for later; ≥ 16 MB flash, ≥ 128 MB RAM; an Ethernet
-port for the Jetson; runs from robot power. Antennas: ordinary 2–3 dBi
-omnis, mounted vertical and above the robot's metal frame.
+**Router minimum** (sim_log Results): stock OpenWrt 23.05 or newer; 802.11s
+mesh on its radios (MediaTek mt76 or Qualcomm ath9k/ath10k; avoid Broadcom);
+dual band for later; ≥ 16 MB flash, ≥ 128 MB RAM; an Ethernet port for the
+Jetson; runs from robot power. **Antennas:** ordinary 2–3 dBi omnis, mounted
+vertical and above the robot's metal frame.
 
-## The lab routers
+### The lab routers
 
 | Router | Chip | Power | Role |
 |---|---|---|---|
 | GL.iNet GL-MT6000 (Flint 2) | MT7986, mt76 | 12 V wall | **gateway**, wired to the laptop |
-| GL.iNet GL-MT3000 (Beryl AX) ×2 | MT7981, mt76 | 5 V USB-C | **robot_1**, **robot_2**, one per robot, from its power bank |
+| GL.iNet GL-MT3000 (Beryl AX) × 2 | MT7981, mt76 | 5 V USB-C | **robot_1**, **robot_2**, one per robot, from its power bank |
 
-Both are upstream OpenWrt `mediatek/filogic` targets. mt76 supports 802.11s
+Both are upstream OpenWrt `mediatek/filogic` targets; mt76 supports 802.11s
 and SAE. Label each one with its role before flashing.
 
 ## 1. Build the images (laptop, once)
@@ -54,16 +69,16 @@ and SAE. Label each one with its role before flashing.
 /usr/bin/python3 -m commsim.hw.firmware --out ~/sortbots-firmware
 ```
 
-This builds stock OpenWrt 25.12.5 plus `wpad-mesh-mbedtls`, `kmod-batman-adv`,
+Builds stock OpenWrt 25.12.5 plus `wpad-mesh-mbedtls`, `kmod-batman-adv`,
 `batctl-default` and LuCI on OpenWrt's own build service, then checks each
 download's sha256. It sends only the model and package list, never anything
-from a bundle. Reproducible: the 2026-10-15 builds were
-`gl-mt3000…` sha256 `1a76bdea…8e2b` and `gl-mt6000…` `b214ce48…d2b9`.
+from a bundle. Reproducible: the 2026-10-15 builds were `gl-mt3000…` sha256
+`1a76bdea…8e2b` and `gl-mt6000…` `b214ce48…d2b9`.
 
 ## 2. Flash (each router)
 
-From GL.iNet's stock firmware, over its own Wi-Fi (the SSID and password are
-on the label):
+From GL.iNet's stock firmware, over its own Wi-Fi (SSID and password are on
+the label):
 
 1. Browse to `http://192.168.8.1` and set an admin password if asked.
 2. **System → Upgrade → Local Upgrade**: upload the `.bin` for that model.
@@ -71,16 +86,18 @@ on the label):
    firmware.
 3. Wait about 3 minutes, until the LED settles. Don't unplug it during this.
 
-Stock OpenWrt then boots with **Wi-Fi off**, LAN at `192.168.1.1` and DHCP on
-the LAN port. From here on you need an **Ethernet cable** into a LAN port
-(not WAN; on the MT3000 the LAN port is the 1 GbE one). The mesh packages are
-already in the image, so the routers never need internet.
+Stock OpenWrt then boots with **Wi-Fi off**, LAN at `192.168.1.1` and DHCP
+on the LAN port. From here on you need an **Ethernet cable** into a LAN port
+(not WAN; on the MT3000 the LAN port is the 1 GbE one). The mesh packages
+are already in the image, so the routers never need internet.
 
-If the router won't boot, use U-Boot recovery. Unplug it, hold reset, power
+If the router won't boot, use U-Boot recovery: unplug it, hold reset, power
 it on, and keep holding until the LED blinks. Set your Ethernet to
 `192.168.1.2/24`, browse to `http://192.168.1.1` and upload the same `.bin`.
 
-## 3. Generate the bundles (laptop, from the repo root)
+## 3. Generate the bundles (laptop)
+
+From the repo root:
 
 ```bash
 /usr/bin/python3 -m commsim.hw.deploy commsim/configs/base.yaml commsim/configs/hw_lab.yaml \
@@ -98,14 +115,14 @@ robot_2    host 10.42.0.3       router 10.42.0.252
 ```
 
 The generator refuses to write:
+
 - a config whose timers the measurements say will misfire (`core/timers.py`);
 - an isolation violation: any listener or peer off the fleet subnet, scouting on (`core/fleet.py check`);
 - a bundle into a tracked repo path, because the bundle holds the mesh key and the repo is public.
 
-Interface names are placeholders in `base.yaml` `hardware:`. Check
-`ip link` on each host and pass `--robot-iface` / `--gateway-iface` if they
-differ. A USB-Ethernet adapter on the gateway laptop is usually
-named `enx<mac>`.
+Interface names are placeholders in `base.yaml` `hardware:`. Check `ip link`
+on each host and pass `--robot-iface` / `--gateway-iface` if they differ. A
+USB-Ethernet adapter on the gateway laptop is usually named `enx<mac>`.
 
 ## 4. Configure each router
 
@@ -114,16 +131,16 @@ with the MT3000's stock config: all `uci` steps apply, the stock open APs are
 removed, the 5 GHz radio stays off, and bat0 joins `br-lan`. Not yet checked
 on the router itself.
 
-Label the routers first. Then, from a laptop plugged into that router's LAN port:
+From a laptop plugged into that router's LAN port:
 
 ```bash
 scp -O commsim/results/hw/robot_1/router-setup.sh root@192.168.1.1:/tmp/
 ssh root@192.168.1.1 'sh /tmp/router-setup.sh && reboot'
 ```
 
-The script fails early, before changing anything, if a package is missing
-or OpenWrt is too old. It finds the radios by band, so it doesn't depend on
-the router model. What it sets, and why:
+The script fails early, before changing anything, if a package is missing or
+OpenWrt is too old. It finds the radios by band, so it doesn't depend on the
+router model. What it sets, and why:
 
 | Setting | Why |
 |---|---|
@@ -133,8 +150,8 @@ the router model. What it sets, and why:
 | Stock AP interfaces removed, WAN off, NTP off | Nothing on a robot bridges the fleet to another network |
 | 802.11b rates off, multicast at 12 Mb/s | 1–11 Mb/s frames were the biggest airtime cost in emulation (sim_log step 8) |
 
-After the reboot the router answers on its fleet address, for example `10.42.0.253`,
-and no longer on 192.168.1.1.
+After the reboot the router answers on its fleet address, for example
+`10.42.0.253`, and no longer on `192.168.1.1`.
 
 ## 5. Configure each host (Jetson / laptop)
 
@@ -150,26 +167,27 @@ stays on whatever it already uses, and fleet traffic never leaves the mesh.
 ## 6. Bring-up checks
 
 ```bash
-ssh root@10.42.0.253 batctl n          # every other router listed as a neighbor
+ssh root@10.42.0.253 batctl n          # every other router listed as a neighbour
 ssh root@10.42.0.253 'iw dev mesh-g24 station dump | grep -E "Station|plink|signal|tx bitrate"'
                                        # mesh plink: ESTAB; tx bitrate never 1/2/5.5/11 Mb/s
 ping -c 5 10.42.0.3                    # host to host across the mesh
 commsim/scripts/check_isolation.sh --subnet 10.42.0.0/24 --configs commsim/results/hw
 ```
 
-When this works on 2.4 GHz, set `fleet.bands: [g24, g5]` in `hw_lab.yaml`.
-Then regenerate the bundles and rerun step 4.
+When this works on 2.4 GHz, set `fleet.bands: [g24, g5]` in `hw_lab.yaml`,
+regenerate the bundles and rerun step 4.
 
 ## 7. Run the SortBots stack over the mesh
 
 Each robot's own ROS graph (RealSense, RTAB-Map, Nav2) stays on local Fast
-DDS, which only looks for other nodes on the same machine (`scripts/jetson.sh`).
-**zenoh-bridge-ros2dds** is the only thing that crosses the mesh, and it
-carries exactly `/fleet/status`, `/fleet/intent` and `/fleet/tasks`
-(`hardware.ros_bridge` in `base.yaml`). It uses the zenoh endpoints, lease
-and scouting settings from step 3, so the timer ordering still holds. A camera
-or map topic on the radio would swamp a channel sized for ~1% busy, which is
-why the bridge refuses to be generated without its allow list.
+DDS, which only looks for other nodes on the same machine
+(`scripts/jetson.sh`). **zenoh-bridge-ros2dds** is the only thing that
+crosses the mesh, and it carries exactly `/fleet/status`, `/fleet/intent`
+and `/fleet/tasks` (`hardware.ros_bridge` in `base.yaml`). It uses the zenoh
+endpoints, lease and scouting settings from step 3, so the timer ordering
+still holds. A camera or map topic on the radio would swamp a channel sized
+for ~1 % busy, which is why the bridge refuses to be generated without its
+allow list.
 
 | Bundle | Runs as | ROS domain |
 |---|---|---|
@@ -180,7 +198,7 @@ why the bridge refuses to be generated without its allow list.
 The names are off by one, but the wire ids agree: `robot_N` is N+1 and the
 gateway is 0. `fleet.env` in each bundle states the id and domain.
 
-**Robot (Jetson).** Rebuild the image once (`scripts/jetson.sh build`; it now
+**Robot (Jetson).** Rebuild the image once (`scripts/jetson.sh build`; it
 contains the pinned bridge). Copy the bundle under `~/.ros/`, since the
 container can only see that and the repo. Then:
 
@@ -195,7 +213,7 @@ with `task_manager`, which `run_robot.sh` keeps off until there is a base
 driver. To test the auction before that, start it by hand in
 `scripts/jetson.sh shell` with `python3 nodes/fleet_tasks.py --robot-id robot_0`.
 
-**Gateway (laptop).** Run these from a plain shell, not one with the sim:
+**Gateway (laptop).** From a plain shell, not one with the sim:
 
 ```bash
 scripts/fleet_bridge.sh install                             # once: pinned binary, sha256-checked
@@ -205,13 +223,15 @@ bash -c 'source ~/ros2_jazzy/install/setup.bash
   python3 nodes/fleet_tasks.py --gateway'
 ```
 
-Request a task from the same domain:
-`ros2 topic pub --once /fleet/task_request std_msgs/String '{data: "{\"pickup\": \"shelf_a\", \"dropoff\": \"zone_a\"}"}'`
-Then watch `/fleet/task_board`.
+Request a task from the same domain, then watch `/fleet/task_board`:
+
+```bash
+ros2 topic pub --once /fleet/task_request std_msgs/String '{data: "{\"pickup\": \"shelf_a\", \"dropoff\": \"zone_a\"}"}'
+```
 
 Checked offline 2026-10-15 with real generated bundles on loopback addresses
-and one ROS domain per "host". Both robots' Status reached the gateway, and
-the nearer robot won and was the only one dispatched. A `/robot_0/camera`
+and one ROS domain per "host": both robots' Status reached the gateway, the
+nearer robot won and was the only one dispatched, and a `/robot_0/camera`
 topic and a `/fleet/status_debug` topic did not cross.
 
 **One condition before trusting bids on hardware:** a bid is a distance in
@@ -238,16 +258,16 @@ python3 commsim/stubs/status_stub.py --robot-id 1 --transport udp --bind 10.42.0
     --peers 10.42.0.1,10.42.0.3 --duration 120 --out /tmp/status_r1.csv --sent-out /tmp/sent_r1.csv
 ```
 
-`--bind` and `--peers` come from that node's `status_udp.json`. The router and
-the nodes need separate env files: one shared override would make every node
-try to listen on the router's mesh port. Stop the bridge first, because both
-listen on the same zenoh port.
+`--bind` and `--peers` come from that node's `status_udp.json`. The router
+and the nodes need separate env files: one shared override would make every
+node try to listen on the router's mesh port. Stop the bridge first, because
+both listen on the same zenoh port.
 
 ## 8. Calibration: what to measure and what it replaces
 
 Run `probe.py echo --bind <far host>` on one host and
-`probe.py ping --bind <near host> --to <far host>` on another.
-Run `router_stats.sh` on the routers.
+`probe.py ping --bind <near host> --to <far host>` on another. Run
+`router_stats.sh` on the routers.
 
 | Measure | How | Replaces |
 |---|---|---|
@@ -257,7 +277,7 @@ Run `router_stats.sh` on the routers.
 | **Reroute time** | 3 routers in a triangle. While `probe.py` runs between robot_1 and robot_2, block their direct link on both ends: `iw dev mesh-g24 station set <peer MAC> plink_action block` (peer MAC from `station dump`). Read "longest outage". Undo with `plink_action open` | `measured.reroute_worst_s` (now emulation only: 3.0 s at 250 ms) |
 | Status gap on the real stack | `status_stub.py` on all 3 hosts, same link block | `measured.status_gap_worst_s.udp` |
 | Background channel busy | `router_stats.sh 30` with the fleet idle, on the channel you'll use | `background.busy_share` |
-| Battery-powered router behavior | Run 30 min on robot power | Not in the model; checks brownouts |
+| Battery-powered router behaviour | Run 30 min on robot power | Not in the model; checks brownouts |
 
 Put the numbers into a new `configs/hw_measured.yaml` (same keys as
 `base.yaml` `measured:` and `radio`). Then rerun
@@ -266,14 +286,13 @@ real reroute time. Rerun the model with `--configs .../hw_measured.yaml` to
 re-predict capacity. If the real reroute is slower than the 4 s Zenoh lease,
 the generator refuses, which is the point.
 
-## What is untested on real hardware
+## Status
 
 Everything in this folder is checked offline: generated files, shell
-syntax, addressing and isolation (`commsim/tests/hw_test.py`). None of it
-has run on a router yet. The parts most likely to need a fix on first
-contact:
-- The bridge inside the Jetson container: its Cyclone DDS pinned to `lo`
-  finding the robot's Fast DDS (checked on a laptop, not on a Jetson).
+syntax, addressing and isolation (`../tests/hw_test.py`). **None of it has
+run on a router yet.** The parts most likely to need a fix on first contact:
+
+- The bridge inside the Jetson container: its Cyclone DDS pinned to `lo` finding the robot's Fast DDS (checked on a laptop, not on a Jetson).
 - The 802.11b-rate hotplug hook. Check `tx bitrate` in step 6.
 - `mcast_rate` in mesh mode on your driver.
 - The host interface names.
