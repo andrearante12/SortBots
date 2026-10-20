@@ -55,7 +55,13 @@ protocol:
   rebid_delay_s: [0.2, 1.0]     # uniform random delay before a no-winner rebid
   rebid_radius_growth: 2.0      # placeholder: each no-winner round widens the radius
   rebid_max_rounds: 3           # after this, radius is unlimited
-  max_owned_tasks: 1
+  # Up to 3 tasks per robot (team decision 2026-10-19), as on the robots
+  # (configs/fleet_tasks.yaml). The sweeps before 2026-10-20 ran with 1.
+  max_owned_tasks: 3
+  # Majority quorum (team decision 2026-10-20: no duplicate ownership, even
+  # across a split). The DES sets Params.quorum_nodes = n + 1; the robots set
+  # it in configs/fleet_tasks.yaml. core/protocol.py has the rule.
+  quorum: true
   lease_beacon_hz: 1.0          # fleet-wide lease renewal (0 = spec as written)
   # At most this many open bids per robot. 0 = unlimited (spec). In a 30-task
   # burst at n=15 unlimited bidding stormed the channel (control p95 up to

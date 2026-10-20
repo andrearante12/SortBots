@@ -23,6 +23,13 @@ way it leaves the owner is `complete`, the owner's own `release`, or a
 cancel. On the wire a committed owner claims with COMMITTED_COST, below any
 real travel cost, so the existing tie-break does the rest.
 
+Majority quorum (Params.quorum_nodes > 0): a robot claims new tasks and
+reclaims expired leases only while it hears a majority of the fleet, itself
+counted. An owner that has gone a task lease without a majority stops its
+uncommitted tasks, which is before the majority side's lease + margin runs
+out. At most one side of a split holds a majority, so a split can no longer
+put two robots on one task: the cut-off side waits instead of reclaiming.
+
 Trust: every peer on the fleet topic is trusted. Any sender may complete or
 cancel any task, and anything on the gateway's request topic is a task.
 The mesh key (commsim/hw) is the boundary; nothing here authenticates.
@@ -77,6 +84,13 @@ class Params:
     # idle robot bid on every task; configs/base.yaml and the robots
     # (configs/fleet_tasks.yaml) set 3 — sim_log step 17.
     max_open_bids: int = 0
+    # Every node in the fleet list, gateway included; 0 = no quorum (spec, and
+    # this default so spec_original.yaml reproduces it). Team decision
+    # 2026-10-20: no duplicate ownership, even across a network split — the
+    # accepted alternative let both halves work a task until the split healed
+    # (docs/plan.md question 11). Must match the real fleet: too small and a
+    # minority can reclaim; too large and a healthy fleet cannot claim.
+    quorum_nodes: int = 0
     # Battery. Only applies to robots given a battery_fn; without one a robot
     # bids on travel time alone. Two effects:
     #  - gate: no bid if driving the WHOLE task (to pickup, then dropoff) would
@@ -114,6 +128,7 @@ class TaskView:
     claimed_at: float = 0.0  # when WE claimed it: the order we work our backlog
     finished_at: Optional[float] = None  # DONE/CANCELLED at: pruned after retention
     owner_missing: bool = False  # committed owner's lease expired; reported once
+    reclaim_blocked: bool = False  # lease expired without a quorum; reported once
 
 
 # cost_fn(pickup, dropoff[, start]) -> (travel time to pickup s, straight-line
@@ -146,6 +161,7 @@ class Allocator:
         self.last_status: dict[int, float] = {}
         self.silent: set[int] = set()
         self.last_peer_heard: Optional[float] = None
+        self.peer_heard: dict[int, float] = {}  # per peer, for the quorum
         self.isolated = False
         self.holding = False
         self.out: list[dict] = []
@@ -190,9 +206,23 @@ class Allocator:
             return math.inf
         return self.p.bid_radius_m * self.p.rebid_radius_growth ** rnd
 
-    def _can_take_new(self) -> bool:
+    def _can_take_new(self, now: float) -> bool:
         return (not self.is_gateway and not self.isolated and self.cost_fn is not None
-                and len(self.owned()) < self.p.max_owned_tasks)
+                and len(self.owned()) < self.p.max_owned_tasks and self.has_quorum(now))
+
+    def _quorum_at(self) -> float:
+        """When we last heard a majority (ourselves counted): the time of the
+        most recent message from the k-th most recently heard peer. No
+        start-up grace, unlike isolation: until a majority has been heard
+        there is no evidence this side is the one allowed to claim."""
+        need = self.p.quorum_nodes // 2
+        if need == 0:
+            return math.inf
+        heard = sorted(self.peer_heard.values(), reverse=True)
+        return heard[need - 1] if len(heard) >= need else -math.inf
+
+    def has_quorum(self, now: float) -> bool:
+        return now - self._quorum_at() <= self.p.status_timeout_s
 
     def _backlog(self) -> tuple[Optional[tuple], float]:
         """(where we will be, how many seconds from now) once every task we
@@ -228,8 +258,9 @@ class Allocator:
     def _heard(self, sender: int, now: float) -> None:
         if sender != self.id:
             self.last_peer_heard = now
+            self.peer_heard[sender] = now
 
-    def heard_network(self, now: float) -> None:
+    def heard_network(self, now: float, peer: Optional[int] = None) -> None:
         """Connectivity evidence that isn't a message — e.g. the local zenohd
         still holds a live session. With neighbor-only status (V3+) a robot
         with no neighbors hears no Status at all; without this it would call
@@ -237,9 +268,15 @@ class Allocator:
 
         Pass the time data was last actually RECEIVED, not the time liveness
         was checked: the latter adds up to one transport lease of lag, and an
-        isolated owner then stops after its lease instead of within it."""
+        isolated owner then stops after its lease instead of within it.
+
+        `peer`, when the evidence is a session to one known peer, also counts
+        toward the quorum: with neighbor-only Status that is the only way to
+        hear a distant robot that owns nothing."""
         if self.last_peer_heard is None or now > self.last_peer_heard:
             self.last_peer_heard = now
+        if peer is not None and peer != self.id and now > self.peer_heard.get(peer, -math.inf):
+            self.peer_heard[peer] = now
 
     def forget(self, peer: int) -> None:
         """Stop silence-tracking a peer we unsubscribed from (it left our
@@ -253,7 +290,7 @@ class Allocator:
         t.state, t.bids, t.rebid_at = BIDDING, {}, None
         t.owner, t.owner_cost = None, math.inf
         t.window_end = now + self.p.bid_window_s
-        if not self._can_take_new() or t.pickup is None:
+        if not self._can_take_new(now) or t.pickup is None:
             return
         start, ahead = self._backlog()
         est = self.cost_fn(t.pickup, t.dropoff) if start is None else \
@@ -312,13 +349,15 @@ class Allocator:
             return
         winner, cost = min(((rid, c) for rid, c in t.bids.items()),
                            key=lambda rc: (rc[1], rc[0]))
-        if winner == self.id and len(self.owned()) >= self.p.max_owned_tasks:
+        if winner == self.id and (len(self.owned()) >= self.p.max_owned_tasks
+                                  or not self.has_quorum(now)):
             # Won while already at capacity (we bid on several tasks at once and
             # another window closed first). Claiming anyway left robots "owning"
             # tasks they never worked — renewed forever, never done (found in a
             # heavy-load DES run, 2026-10-03). Decline: peers holding us as the
             # provisional winner reopen on the Release instead of waiting out a
-            # lease.
+            # lease. Same if the quorum went during the window: a claim from the
+            # minority side of a split is exactly the duplicate it prevents.
             self.out.append({"type": "TaskEvent", "task_id": t.task_id, "kind": RELEASE})
             self._event("declined", now, task_id=t.task_id)
             self._open_bidding(t, now)
@@ -355,7 +394,7 @@ class Allocator:
         t.state, t.owner, t.owner_cost, t.last_renew = CLAIMED, sender, cost, now
         t.window_end = t.rebid_at = None
         t.bids = {}
-        t.owner_missing = False
+        t.owner_missing = t.reclaim_blocked = False
 
     def on_claim(self, sender: int, task_id: int, cost: float, now: float) -> None:
         self._heard(sender, now)
@@ -459,7 +498,10 @@ class Allocator:
                 # peers wait lease + margin from when they last heard us, and
                 # we stop at lease from when we last heard anyone. Not once
                 # committed: the item is on board, nobody else can do it.
-                if quiet > self.p.task_lease_s and t.owner_cost > COMMITTED_COST:
+                # Without a majority for a lease the majority side may reclaim
+                # at lease + margin, so the same deadline applies.
+                if (quiet > self.p.task_lease_s or now - self._quorum_at() > self.p.task_lease_s) \
+                        and t.owner_cost > COMMITTED_COST:
                     t.state, t.owner, t.owner_cost = OPEN, None, math.inf
                     self._event("stop_task", now, task_id=t.task_id, reason="lease_lost")
             elif t.state == CLAIMED and now - t.last_renew > expiry:
@@ -470,6 +512,13 @@ class Allocator:
                     if not t.owner_missing:
                         t.owner_missing = True
                         self._event("owner_missing", now, task_id=t.task_id, owner=t.owner)
+                    continue
+                if not self.has_quorum(now):
+                    # Minority side of a split: the owner may be working it on
+                    # the majority side. Wait; a renewal or the heal settles it.
+                    if not t.reclaim_blocked:
+                        t.reclaim_blocked = True
+                        self._event("reclaim_blocked", now, task_id=t.task_id, owner=t.owner)
                     continue
                 self._event("lease_expired", now, task_id=t.task_id, owner=t.owner)
                 self._open_bidding(t, now)

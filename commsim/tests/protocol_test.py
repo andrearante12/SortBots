@@ -130,6 +130,61 @@ def test_partition_heal_converges_by_tie_break():
     assert net.events("task_yielded")
 
 
+def test_quorum_minority_side_does_not_reclaim():
+    # Same split as above, with the majority quorum: {GW, 1, 2} is 3 of 5, so
+    # only that side may reclaim, and the owner is on it.
+    net = fleet({1: (1, 0), 2: (5, 0), 3: (2, 0), 4: (9, 0)}, quorum_nodes=5)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.partition({GW, 1, 2}, {3, 4})
+    assert_single_owner_throughout(net, 1, 20.0)
+    assert net.self_owners(1) == [1]
+    assert net.events("reclaim_blocked") and not net.events("lease_expired")
+    net.heal()
+    assert_single_owner_throughout(net, 1, 5.0)
+
+
+def test_quorum_minority_owner_stops_before_majority_reclaims():
+    net = fleet({1: (1, 0), 2: (5, 0), 3: (2, 0), 4: (9, 0)}, quorum_nodes=5)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.partition({1, 4}, {GW, 2, 3})
+    assert_single_owner_throughout(net, 1, 20.0)
+    assert [e for e in net.events("stop_task") if e.get("reason") == "lease_lost"]
+    assert net.self_owners(1) in ([2], [3])  # the majority side took it over
+    net.heal()
+    assert_single_owner_throughout(net, 1, 5.0)
+    assert len(net.self_owners(1)) == 1
+
+
+def test_quorum_demo_fleet_survives_one_lost_node():
+    # 2 robots + gateway: either robot plus the gateway, or both robots, is a
+    # majority, so one dead node never stops the fleet.
+    net = fleet({1: (1, 0), 2: (5, 0)}, quorum_nodes=3)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.robots[1].alive = False
+    net.run(20.0)
+    assert net.self_owners(1) == [2]
+    net.robots[GW].alive = False  # robot 2 is now alone: 1 of 3
+    net.run(10.0)
+    assert not net.robots[2].alloc.has_quorum(net.robots[2].now(net.t))
+
+
+def test_no_quorum_no_claim():
+    net = fleet({1: (1, 0), 2: (5, 0)}, quorum_nodes=7)  # fleet list says 7, only 3 up
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(5.0)
+    assert net.self_owners(1) == []
+
+
 def test_clock_offset_and_rate_skew_do_not_expire_leases():
     net = LoopbackNet(Params())
     net.add(GW, gateway=True)

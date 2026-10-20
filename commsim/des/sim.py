@@ -522,6 +522,8 @@ class Sim:
         self.v = dict(VARIANTS[variant], **(overrides or {}))
         self.rng = random.Random(seed)
         self.params = Params.from_config(cfg)
+        if cfg["protocol"].get("quorum"):
+            self.params.quorum_nodes = n + 1  # every robot plus the gateway
         self.rp = R.RadioParams.from_config(cfg)
         self.layout = LAYOUTS[layout]()
         pc = cfg["protocol"]
@@ -1120,6 +1122,8 @@ class Sim:
                 last = max(last, fl.last_rx)
                 if now - fl.last_rx <= self.lease_s:
                     live = True
+                    if self.transport_liveness:
+                        r.alloc.heard_network(fl.last_rx, peer=p)
             if live and self.transport_liveness:
                 r.alloc.heard_network(last)
 

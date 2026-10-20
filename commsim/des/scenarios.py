@@ -168,6 +168,7 @@ def run_one(spec):
     if spec.get("lease_ms"):
         cfg["zenoh"]["transport_lease_ms"] = spec["lease_ms"]
     sim = Sim(cfg, spec["variant"], spec["n"], seed=spec["seed"], warmup_s=20.0,
+              layout=spec.get("layout", "warehouse"),
               steady_s=T_END - 20.0, status_transport=spec.get("status_transport"),
               track_gaps=True)
     if spec["scenario"] == "timer_misorder":
@@ -382,13 +383,15 @@ def main(argv=None):
     ap.add_argument("--ogm-ms", type=int, default=None, help="batman originator interval")
     ap.add_argument("--reroute-s", type=float, default=None,
                     help="DES reroute delay (measured worst case: 5.67 s @500 ms, 3.0 s @250 ms)")
+    ap.add_argument("--layout", default="warehouse",
+                    help="open_floor stands in for the lab until its layout is known")
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) - 4))
     ap.add_argument("--out", type=Path, required=True)
     a = ap.parse_args(argv)
     specs = [{"scenario": sc, "variant": v, "n": n, "seed": s, "status_timeout": a.status_timeout,
               "lease_ms": a.lease_ms, "status_transport": a.status_transport,
               "configs": a.configs, "tag": a.tag, "max_open_bids": a.max_open_bids,
-              "ogm_ms": a.ogm_ms, "reroute_s": a.reroute_s}
+              "ogm_ms": a.ogm_ms, "reroute_s": a.reroute_s, "layout": a.layout}
              for sc in a.scenarios for v in a.variants for n in a.n for s in a.seeds
              if not (sc in ("band_loss", "link_loss_g24") and v in ("V3", "V2", "V1", "phase0"))]
     a.out.mkdir(parents=True, exist_ok=True)

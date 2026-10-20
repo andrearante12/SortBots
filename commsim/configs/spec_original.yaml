@@ -14,3 +14,5 @@ protocol:
   status_qos_depth: 1
   status_transport: tcp
   max_open_bids: 0
+  max_owned_tasks: 1
+  quorum: false
