@@ -139,12 +139,58 @@ def up(n: int, line: bool, layout: str, seed: int, orig_ms: int, band: str = "g2
         sh(f"batctl meshif bat0 orig_interval {orig_ms}", ns)
         sh("ip link set bat0 up", ns)
         sh(f"ip addr add 10.42.0.{i + 1}/24 dev bat0", ns)
+        # bat0's MAC is random: the inner Ethernet of every batman frame
+        # carries it, so a capture decoder needs it to name the node.
+        bat0_mac = sh("cat /sys/class/net/bat0/address", ns).strip()
         nodes.append({"ns": ns, "phy": phy, "dev": dev, "ip": f"10.42.0.{i + 1}",
-                      "mac": radio_mac(i), "pos": pos[i]})
+                      "mac": radio_mac(i), "bat0_mac": bat0_mac, "pos": pos[i]})
     state = {"n": n, "interference": interference, "wmediumd_pid": wm.pid, "nodes": nodes,
-             "snr": m, "band": band}
+             "snr": m, "band": band,
+             # how the floor was made, so commsim/viz can draw it without argv
+             "topology": {"line": line, "links": links, "layout": layout, "seed": seed,
+                          "orig_ms": orig_ms}}
     (RUN / "state.json").write_text(json.dumps(state, indent=2))
     return state
+
+
+def set_link(state: dict, i: int, j: int, action: str, out: Path | None = None) -> None:
+    """Block or reopen the 802.11s peer link i-j on BOTH ends (the spec's
+    injection: `plink_action block`); logs it to <out>/links.jsonl so a
+    replay knows when the link went and came back."""
+    a, b = state["nodes"][i], state["nodes"][j]
+    act = "block" if action == "block" else "open"
+    sh(f"iw dev {a['dev']} station set {b['mac']} plink_action {act}", a["ns"])
+    sh(f"iw dev {b['dev']} station set {a['mac']} plink_action {act}", b["ns"])
+    if out is not None:
+        with open(Path(out) / "links.jsonl", "a") as f:
+            f.write(json.dumps({"t_ns": time.time_ns(), "a": i, "b": j,
+                                "action": "block" if act == "block" else "unblock"}) + "\n")
+
+
+def poll_start(state: dict, out: Path, period_s: float = 0.5) -> list:
+    """One shell loop per namespace sampling `batctl o` (routes) and
+    `iw station dump` (per-peer tx/retries/failed, plink state) to
+    <out>/poll_<i>.txt. Raw text on purpose: nothing is parsed while the
+    run is hot, and if the format surprises us the data is still there
+    (commsim/viz/build_trace.py parses it). Station dump every other tick:
+    at n=15 the two commands together are ~0.6 core-seconds per second."""
+    procs = []
+    for i, nd in enumerate(state["nodes"]):
+        loop = (f"k=0; while :; do echo \"--- $(date +%s%N)\"; batctl meshif bat0 o; echo '+++'; "
+                f"if [ $((k % 2)) -eq 0 ]; then iw dev {nd['dev']} station dump; fi; "
+                f"k=$((k + 1)); sleep {period_s}; done")
+        procs.append(subprocess.Popen(f"ip netns exec {nd['ns']} sh -c '{loop}'", shell=True,
+                                      stdout=open(Path(out) / f"poll_{i}.txt", "w"),
+                                      stderr=subprocess.DEVNULL, start_new_session=True))
+    return procs
+
+
+def poll_stop(procs: list) -> None:
+    for p in procs:
+        try:
+            os.killpg(p.pid, 15)
+        except ProcessLookupError:
+            pass
 
 
 def down(quiet=False) -> None:

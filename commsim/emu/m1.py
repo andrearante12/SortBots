@@ -145,6 +145,10 @@ def main(argv=None) -> int:
     ap.add_argument("--block-at", type=float, default=None,
                     help="seconds into the stub run: block n0's link to its active next hop "
                          "toward the last node")
+    ap.add_argument("--unblock-at", type=float, default=None,
+                    help="seconds into the stub run: reopen the link --block-at blocked")
+    ap.add_argument("--poll-s", type=float, default=0.5,
+                    help="route/station poller period for the replay trace (0 = off)")
     a = ap.parse_args(argv)
     if os.geteuid() != 0:
         print("run as root inside the commsim VM", file=sys.stderr)
@@ -178,15 +182,36 @@ def main(argv=None) -> int:
                            {"RMW_IMPLEMENTATION": "rmw_zenoh_cpp", "ZENOH_CONFIG_OVERRIDE": ov},
                            a.out / f"zenohd_{i}.log"))
     time.sleep(5)
+
+    def mark(text: str) -> None:
+        with open(a.out / "marks.jsonl", "a") as f:
+            f.write(json.dumps({"t_ns": time.time_ns(), "text": text}) + "\n")
+    polls = mesh.poll_start(state, a.out, a.poll_s) if a.poll_s > 0 else []
     cap = subprocess.Popen(f"ip netns exec n0 tcpdump -nn -i bat0 -w {a.out}/gw_bat0.pcap",
                            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            start_new_session=True)
     # hwsim0 sees every frame any hwsim radio transmits (radiotap: rate, length)
     # -> channel busy time computed with the DES's own 802.11 timing.
+    # Full snaplen: the replay (commsim/viz) joins hops by the (robot, seq)
+    # inside each Status, and the old -s 64 cut a batman unicast header after
+    # 2 bytes. Cost is file size only: ~25 MB at n=10, ~50 MB at n=15, on a
+    # 994 MB tmpfs — the driver script copies and deletes each run.
     subprocess.run("ip link set hwsim0 up", shell=True)
-    air = subprocess.Popen(f"tcpdump -nn -e -i hwsim0 -s 64 -w {a.out}/hwsim0.pcap",
+    air = subprocess.Popen(f"tcpdump -nn -e -i hwsim0 -s 0 -w {a.out}/hwsim0.pcap",
                            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            start_new_session=True)
+    # Per-receiver captures: the ground truth for "did this hop arrive".
+    # hwsim0's ACK records name only the transmitter, and with n-1 copies of
+    # a Status queued within 20 µs one lost copy mis-pairs every later ACK
+    # (viz smoke run 2026-10-20: ACK-TX median 10 ms instead of 0.5 ms). A
+    # frame that reached node i is on its mesh interface, Ethernet-framed
+    # with the transmitter as source. `ether dst` keeps only unicast to us.
+    rx_caps = [subprocess.Popen(
+        f"ip netns exec {nd['ns']} tcpdump -nn -i {nd['dev']} -s 0 -w {a.out}/rx_{i}.pcap "
+        f"ether dst {nd['mac']}", shell=True, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, start_new_session=True)
+        for i, nd in enumerate(state["nodes"])] if a.poll_s > 0 else []
+    mark("captures_started")
     node_env = {"RMW_IMPLEMENTATION": "rmw_zenoh_cpp",
                 # nodes talk only to their own router; never let SHM cross namespaces
                 "ZENOH_CONFIG_OVERRIDE": "transport/shared_memory/enabled=false"}
@@ -199,29 +224,38 @@ def main(argv=None) -> int:
                    f"--peers {','.join(x.ip for x in fleet if x != nd)}",
                    node_env, a.out / f"stub_{i}.log")
              for i, nd in enumerate(fleet)]
+    mark("stubs_started")
+    t_stubs = time.monotonic()
+    relay = None
     if a.block_at is not None:
         time.sleep(a.block_at)
         last = state["nodes"][-1]
         o = mesh.sh("batctl meshif bat0 o", "n0")
         line = [ln for ln in o.splitlines() if last["mac"] in ln and ln.strip().startswith("*")][0]
         hop = re.findall(r"02:00:00:00:[0-9a-f]{2}:00", line)[1]
-        relay = next(nd for nd in state["nodes"] if nd["mac"] == hop)
-        mesh.sh(f"iw dev {state['nodes'][0]['dev']} station set {hop} plink_action block", "n0")
-        mesh.sh(f"iw dev {relay['dev']} station set {state['nodes'][0]['mac']} plink_action block",
-                relay["ns"])
-        (a.out / "block.json").write_text(
-            json.dumps({"t_ns": time.time_ns(), "relay": relay["ns"]}))
-        print(f"blocked n0-{relay['ns']}", flush=True)
-        time.sleep(max(0, a.duration / 2 - a.block_at))
-    else:
-        time.sleep(a.duration / 2)
+        relay = next(i for i, nd in enumerate(state["nodes"]) if nd["mac"] == hop)
+        mesh.set_link(state, 0, relay, "block", a.out)
+        (a.out / "block.json").write_text(  # kept for older readers (crosscheck, fix_emu.sh)
+            json.dumps({"t_ns": time.time_ns(), "relay": state["nodes"][relay]["ns"]}))
+        mark(f"block n0-n{relay}")
+        print(f"blocked n0-n{relay}", flush=True)
+    if a.unblock_at is not None and relay is not None:
+        time.sleep(max(0, a.unblock_at - (time.monotonic() - t_stubs)))
+        mesh.set_link(state, 0, relay, "unblock", a.out)
+        mark(f"unblock n0-n{relay}")
+        print(f"unblocked n0-n{relay}", flush=True)
+    time.sleep(max(0, a.duration / 2 - (time.monotonic() - t_stubs)))
     # CPU/RAM per emulated robot, sampled mid-run while everything is up
     mem = subprocess.run("ps -C rmw_zenohd,python3 -o rss=,pcpu=,comm=", shell=True, text=True,
                          capture_output=True).stdout
     for s in stubs:
         s.wait()
+    mark("stubs_ended")
     os.killpg(cap.pid, 2)
     os.killpg(air.pid, 2)
+    for p in rx_caps:
+        os.killpg(p.pid, 2)
+    mesh.poll_stop(polls)
     time.sleep(1)
     res = analyze(a.out, a.n, a.hz, a.duration, a.warmup)
     res.update(airtime(a.out / "hwsim0.pcap", a.duration))

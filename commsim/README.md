@@ -79,6 +79,7 @@ launch files. The only link is `core/protocol.py`, which
 | `measurements/` | Emulation measurements the model is checked against |
 | `scripts/` | `fix_sweep.sh` reproduces the final comparison; `check_isolation.sh` proves traffic stays on the fleet subnet |
 | `vm/` | Creating and provisioning the emulation VM |
+| `viz/` | **Packet-transfer replay:** every frame of an emulation run animated hop by hop over the floor, with routes, link blocks and each robot's view of who is silent (`viz/README.md`) |
 | `tests/` | Offline tests: protocol, config generation, hardware bundles, model sanity |
 | `docs/` | `brief.md` (the question), `plan.md` (the approach), `sim_log.md` (results, then the full run log), `figures/` |
 
@@ -131,7 +132,17 @@ sudo python3 -m commsim.emu.mesh down
 
 `multipass exec` joins its arguments into one remote shell string, so put
 multi-step VM commands in a script under the gitignored `commsim/results/`
-(mounted in the VM) and run that.
+(mounted in the VM) and run that. Every `m1` run also records what the
+replay needs (per-receiver captures, route poller, link log); `--unblock-at`
+reopens the link `--block-at` pulled.
+
+### Replay a run (host)
+
+```bash
+/usr/bin/python3 -m commsim.viz.build_trace commsim/results/<run>   # -> <run>/trace.json + a sanity report
+python3 -m http.server 8000 --bind 127.0.0.1                        # then open
+# http://127.0.0.1:8000/commsim/viz/index.html?trace=/commsim/results/<run>/trace.json
+```
 
 ### Real routers (laptop)
 
