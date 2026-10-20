@@ -158,6 +158,15 @@ def test_build_trace_from_the_synthetic_run(tmp_path):
     assert [(e["k"], e["t"], e["gap_us"]) for e in ev if e["k"] == "robot_silent" and e["obs"] == 1] == [
         ("robot_silent", 7_000_000, None)]
 
+    # the guided tour: first delivery, the pull, the route that answers it, the restore, silence
+    titles = [s["title"] for s in h["tour"]]
+    assert titles[0] == "first Status delivered"
+    assert "link the gateway–robot 1 pulled" in titles and "link the gateway–robot 1 restored" in titles
+    assert "route moved" in titles and "the gateway declares robot 2 silent" in titles
+    assert [s["t"] for s in h["tour"]] == sorted(s["t"] for s in h["tour"])
+    moved = next(s for s in h["tour"] if s["title"] == "route moved")
+    assert moved["t"] == 9_500_000 and "via robot 2" in moved["text"]
+
 
 def test_ack_pairing_fallback_when_no_receiver_captures(tmp_path):
     M.write_synthetic_dir(tmp_path)

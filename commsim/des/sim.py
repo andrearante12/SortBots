@@ -1307,8 +1307,9 @@ class Sim:
 
     # ---- run ---------------------------------------------------------------
 
-    def run(self) -> dict:
-        t_wall = time.time()
+    def start(self) -> None:
+        """Schedule every periodic process. run() does this and steps to
+        self.end; commsim/viz/demo.py does it and steps in wall time."""
         rng = self.rng
         self.topo()
         self.every(TOPO_DT, self.topo, TOPO_DT)
@@ -1337,20 +1338,26 @@ class Sim:
                 self.ch[self.bands[0]].enqueue(self.st[(GW, self.bands[0])],
                                                Frame("ogm", 150, GW))
             self.every(0.1024, beacon, 0.01)
-        if not self.status_only:
+        if not self.status_only and self.task_rate > 0:  # 0 = tasks only on request (demo)
             self.at(rng.uniform(0, 2), self.task_arrival)
         if self.bg_share > 0:
             for b in self.bands:
                 self.at(0.0, self.background, b)
 
+    def step(self, until: float) -> int:
+        """Run every event due at or before `until`; returns how many ran."""
         events = 0
-        while self._q:
+        while self._q and self._q[0][0] <= until:
             t, _, fn, a = heapq.heappop(self._q)
-            if t > self.end:
-                break
             self.now = t
             fn(*a)
             events += 1
+        return events
+
+    def run(self) -> dict:
+        t_wall = time.time()
+        self.start()
+        events = self.step(self.end)
         return self.results(events, time.time() - t_wall)
 
     def results(self, events, wall) -> dict:

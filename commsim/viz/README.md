@@ -1,11 +1,60 @@
-# commsim/viz — packet-transfer replay
+# commsim/viz — the fleet mesh, visibly
 
-Watch the emulated fleet talk: every frame the radios sent, hop by hop, over
-the warehouse floor — which relay a Status crossed, where it was dropped, how
-batman re-routed after a link was pulled, and what each robot believed about
-who was alive. A replay of one recorded run, not a live view.
+Two pages, one renderer:
+
+- **Live demo** (`demo.html`, served by `demo.py`): the real simulation model
+  running in real time. Drag robots around the floor, post a task and watch
+  the auction, make a robot see an obstacle, pull a link, switch a robot off,
+  send a message from one robot to another and watch it route — through the
+  gateway when the two cannot hear each other.
+- **Replay** (`index.html`): one recorded emulation run (the real 802.11s +
+  batman-adv + ROS 2 stack in the VM), every frame the radios sent, hop by
+  hop, with a guided tour of the moments that matter.
 
 ![three-node line replay](../docs/figures/viz_diamond.png)
+
+## Live demo
+
+```bash
+/usr/bin/python3 -m commsim.viz.demo          # Windows: py -3 -m commsim.viz.demo
+# open http://127.0.0.1:8765/
+```
+
+Standard library only; nothing to install beyond the repo and Python 3.
+Options: `--n 4` robots, `--variant V3` (2.4 GHz mesh; `V4` = dual band),
+`--layout warehouse|open_floor`, `--range-m 22` (open-air radio range to
+start with; the slider changes it live).
+
+What is real: the radio range model, carrier-sense contention, batman-style
+routing with link quality, every message's size and timing, the task
+auction, leases, committed ownership and silence detection are
+`commsim/des/sim.py` and `core/protocol.py` — the code the sweeps and the
+robots use. The demo only changes who decides *when*: tasks and obstacles
+arrive when you click, robots stand where you put them (a robot that wins a
+task still drives to it), the clock is paced to the wall.
+
+Things to try, in order:
+
+1. **Route through the AP.** Drag robot 1 to the west end of an aisle and
+   robot 2 to the east end with the gateway between them. The link between
+   them fades out, the green arrows show both routing via the gateway, and
+   *send A → B* animates the message 1 → gateway → 2 (the feed reports
+   "2 hops"). Raise the range slider and the direct link comes back.
+2. **＋ task.** The gateway announces (yellow TASK), robots bid (orange BID,
+   the bid is seconds of driving), the winner claims (green CLAIM) and
+   drives to the pickup, then the dropoff; lease beacons (green) tick while
+   it owns the task. Post two tasks and see the backlog in the bids.
+3. **Obstacle.** Pick a robot: it shares the obstacle with the whole fleet
+   (pink OBST, reliable, every robot gets it).
+4. **Pull link** between a relay and the gateway: frames queued for it die
+   (red X), batman notices (~2–3 s, the measured reroute) and the arrows
+   move. **Kill robot**: the others declare it silent after 6 s and its task
+   is re-auctioned after the lease (10 s) + margin.
+
+Hidden by default (checkboxes): OGMs (routing beacons, 4/s per node),
+keepalives, ACKs — they are most of the airtime and none of the story.
+
+## Replay
 
 | What you see | Where it comes from |
 |---|---|
@@ -53,7 +102,11 @@ runs, which have no floor).
 Page: space plays/pauses, ←/→ step 1 s (shift: 10 s), ⏮/⏭ jump between
 link and silence events, click a node for its view of the fleet, the
 checkboxes hide kinds (OGMs, management, ACK-only TCP are hidden by default
-— they are most of the frames and none of the story).
+— they are most of the frames and none of the story). The **tour bar** at
+the bottom lists the moments worth seeing (first delivery, link pulled, the
+route that answered it, the hop that was lost, silence declared and lifted)
+with a one-line caption each; while playing, the caption appears as the
+replay passes the moment.
 
 ## The trace format (`commsim-viz/1`)
 
@@ -116,9 +169,10 @@ VM, so nothing needs aligning). Event kinds:
 ## Tests
 
 ```bash
-/usr/bin/python3 -m pytest commsim/tests/viz_test.py        # decoders (incl. a real captured frame), trace builder, fixture
-node --experimental-websocket commsim/viz/tests/viz_test.mjs # the page, headless Chrome (see the file header)
-/usr/bin/python3 -m commsim.viz.testdata.make_fixture        # regenerate testdata/trace_small.json after format changes
+/usr/bin/python3 -m pytest commsim/tests/viz_test.py         # decoders (incl. a real captured frame), trace builder, tour, fixture
+node --experimental-websocket commsim/viz/tests/viz_test.mjs  # the replay page, headless Chrome (see the file header)
+node --experimental-websocket commsim/viz/tests/demo_test.mjs # the live demo: routes through the AP, a message 1→2, an auction, a pull, a kill
+/usr/bin/python3 -m commsim.viz.testdata.make_fixture         # regenerate testdata/trace_small.json after format changes
 ```
 
 ## Layout
@@ -127,6 +181,7 @@ node --experimental-websocket commsim/viz/tests/viz_test.mjs # the page, headles
 |---|---|
 | `pcap.py` | pure-Python decoders: pcap, radiotap, 802.11(+mesh control), LLC/SNAP, batman-adv IV, Ethernet/IPv4/UDP/TCP/ICMP, the Status CDR header |
 | `build_trace.py` | run directory → trace: hop join, ACK fallback, outcomes, silence, route/linkstat deltas |
-| `index.html`, `viz.js` | the page; `window.__viz` is the test hook |
+| `index.html`, `demo.html`, `viz.js` | the replay and live pages, one renderer; `window.__viz` is the test hook |
+| `demo.py` | the live demo server: the DES stepped in wall time, Server-Sent Events out, JSON commands in; stdlib only |
 | `testdata/make_fixture.py` | byte builders mirroring the decoders + a synthetic 3-node run; writes `trace_small.json` |
 | `tests/viz_test.mjs` | headless page test |

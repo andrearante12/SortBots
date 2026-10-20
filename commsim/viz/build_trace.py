@@ -489,6 +489,54 @@ def derive_silence(tx: list, rx: list, n: int, timeout_us: int) -> list:
     return ev
 
 
+def derive_tour(events: list, n: int) -> list:
+    """Captions for a newcomer: the moments worth jumping to, in order.
+    Each is {t, title, text}. Built from the run's own events: link pulls,
+    the route change that answers them, the first hop lost on the pulled
+    link, silence declared and lifted, the start of traffic."""
+    tour = []
+    name = lambda i: "the gateway" if i == 0 else f"robot {i}"  # noqa: E731
+    first_rx = next((e for e in events if e["k"] == "app_rx"), None)
+    if first_rx:
+        tour.append({"t": first_rx["t"], "title": "first Status delivered",
+                     "text": f"{name(first_rx['dst'])} received the first Status from {name(first_rx['src'])}"
+                             f" ({first_rx['lat_us'] / 1000:.1f} ms after it was sent). Every robot sends one"
+                             " 3 times a second; the gateway must hear each within 6 s."})
+    routes_by_t = [e for e in events if e["k"] == "route"]
+    for lk in [e for e in events if e["k"] == "link"]:
+        a, b = lk["a"], lk["b"]
+        if lk["action"] == "block":
+            tour.append({"t": lk["t"], "title": f"link {name(a)}–{name(b)} pulled",
+                         "text": f"The radio link between {name(a)} and {name(b)} is cut (802.11s peer link blocked)."
+                                 " Frames still queued for it will be lost; batman-adv has not noticed yet."})
+            moved = next((r for r in routes_by_t if r["t"] > lk["t"] and r["node"] in (a, b)
+                          and r["nh"] not in (-1, a if r["node"] == b else b)), None)
+            if moved:
+                tour.append({"t": moved["t"], "title": "route moved",
+                             "text": f"{(moved['t'] - lk['t']) / 1e6:.1f} s after the cut, {name(moved['node'])} reaches "
+                                     f"{name(moved['dst'])} via {name(moved['nh'])} instead. That is the reroute:"
+                                     " the gateway relays when it is the best path."})
+            lost = next((e for e in events if e["k"] == "air" and e["t"] > lk["t"] and e.get("ack") is False
+                         and {e["ta"], e["ra"]} == {a, b}), None)
+            if lost:
+                tour.append({"t": lost["t"], "title": "a hop is lost",
+                             "text": f"{name(lost['ta'])} tried the cut link to {name(lost['ra'])}: no delivery (red X)."})
+        else:
+            tour.append({"t": lk["t"], "title": f"link {name(a)}–{name(b)} restored",
+                         "text": "The link is back. batman-adv keeps the working route until the direct one"
+                                 " proves better — it may take a while to move back."})
+    for e in events:
+        if e["k"] == "robot_silent" and e["t"] > 0:
+            tour.append({"t": e["t"], "title": f"{name(e['obs'])} declares {name(e['peer'])} silent",
+                         "text": f"No Status from {name(e['peer'])} for 6 s: {name(e['obs'])} would now stop trusting"
+                                 " its leases. If the peer is in fact reachable, this is a false alarm."})
+        elif e["k"] == "robot_back":
+            tour.append({"t": e["t"], "title": f"{name(e['peer'])} is heard again",
+                         "text": f"{name(e['obs'])} received a Status from {name(e['peer'])}; silence lifted."})
+    tour.sort(key=lambda s: s["t"])
+    return tour[:14]
+
+
 # ---- build ------------------------------------------------------------------------
 
 def build(d: Path, *, name: Optional[str] = None, max_inflight_ms: float = 200.0,
@@ -544,6 +592,7 @@ def build(d: Path, *, name: Optional[str] = None, max_inflight_ms: float = 200.0
                   "zenoh_lease_ms": cfg["zenoh"]["transport_lease_ms"],
                   "batadv_ttl": P.BATADV_TTL, "snr_link_min_db": 4.0,
                   "max_inflight_ms": max_inflight_ms},
+        "tour": derive_tour(events, n),
         "counts": {"air_by_kind": dict(counts), "app_tx": n_tx, "app_rx": n_rx,
                    "unacked": sum(1 for e in air if e.get("ack") is False),
                    "outcomes": report.get("outcomes", {}),

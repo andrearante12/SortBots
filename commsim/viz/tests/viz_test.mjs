@@ -133,8 +133,9 @@ async function main() {
   check('a Status hop is active and drawn in the status colour', (s1.active.status || 0) >= 1 && statusPx > 10, `active=${JSON.stringify(s1.active)} px=${statusPx}`);
   check('OGMs are hidden by default', !s1.active.ogm, JSON.stringify(s1.active));
 
-  // the lost hop of Status (2, seq 8) at 1.333 s: red X flash right after its (modelled) end
-  await page.eval('window.__viz.seek(1.3335)');
+  // the lost hop of Status (2, seq 8) at 1.333 s: its animation is stretched to
+  // 140 ms of wall time at 1x, then a red X flashes where it should have landed
+  await page.eval('window.__viz.seek(1.49)');
   await sleep(50);
   const s2 = await page.eval('window.__viz.state()');
   const redPx = await page.eval(COUNT([0xff, 0x4d, 0x4d], 30));

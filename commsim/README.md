@@ -136,9 +136,11 @@ multi-step VM commands in a script under the gitignored `commsim/results/`
 replay needs (per-receiver captures, route poller, link log); `--unblock-at`
 reopens the link `--block-at` pulled.
 
-### Replay a run (host)
+### Live demo and replay (host, no VM)
 
 ```bash
+/usr/bin/python3 -m commsim.viz.demo                                # the model live: drag robots, post tasks, pull links
+# open http://127.0.0.1:8765/
 /usr/bin/python3 -m commsim.viz.build_trace commsim/results/<run>   # -> <run>/trace.json + a sanity report
 python3 -m http.server 8000 --bind 127.0.0.1                        # then open
 # http://127.0.0.1:8000/commsim/viz/index.html?trace=/commsim/results/<run>/trace.json

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>commsim live demo</title>
+<!--
+  Live demonstration of the fleet mesh: the real DES (commsim/des/sim.py)
+  runs behind this page (commsim/viz/demo.py) in real time. Drag robots to
+  place them; the links, routes and every message follow. Post a task and
+  watch the auction; make a robot see an obstacle; pull a link; switch a
+  robot off; send a message from one robot to another and watch it route.
+
+      python3 -m commsim.viz.demo        # then open http://127.0.0.1:8765/
+-->
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0e1013; color: #cde; font: 13px/1.4 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  #bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid #2a2e35; flex-wrap: wrap; }
+  #bar h1 { font-size: 14px; margin: 0 6px 0 0; font-weight: 600; }
+  #name { font-family: monospace; color: #9aa; }
+  button, select, input { background: #1c1f24; color: #cde; border: 1px solid #2a2e35; border-radius: 4px; padding: 4px 9px; font: inherit; }
+  button:hover { background: #262a31; }
+  button.act { border-color: #4cc9f0; }
+  #time { font-family: monospace; min-width: 8ch; margin-left: auto; }
+  #main { flex: 1 1 auto; display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
+  #floorwrap { position: relative; min-height: 0; }
+  #floor { width: 100%; height: 100%; display: block; }
+  #legend { position: absolute; left: 10px; bottom: 8px; display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: #9aa; pointer-events: none; }
+  #legend span::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 4px; background: var(--c); vertical-align: -1px; }
+  #pick-hint { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); background: #1c1f24; border: 1px solid #4cc9f0; border-radius: 4px; padding: 4px 12px; font-size: 12px; pointer-events: none; }
+  #pick-hint:empty { display: none; }
+  #hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #556; font-size: 14px; pointer-events: none; }
+  #side { border-left: 1px solid #2a2e35; display: flex; flex-direction: column; min-height: 0; }
+  #side-top { padding: 8px 10px; overflow: auto; flex: 0 0 auto; max-height: 45%; font-size: 12px; }
+  #side h2 { font-size: 12px; margin: 6px 0 4px; color: #9aa; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  #side table { border-collapse: collapse; width: 100%; font-family: monospace; font-size: 11px; }
+  #side td, #side th { padding: 2px 4px; text-align: left; border-bottom: 1px solid #1c1f24; white-space: nowrap; }
+  #side th { color: #778; font-weight: 600; }
+  #side tr.silent td { color: #f77; }
+  #side .limits { color: #778; font-size: 11px; white-space: pre-wrap; }
+  #feedwrap { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; border-top: 1px solid #2a2e35; }
+  #feedwrap h2 { font-size: 12px; margin: 8px 10px 4px; color: #9aa; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  #feed { flex: 1 1 auto; overflow: auto; padding: 0 10px 8px; font-family: monospace; font-size: 11px; line-height: 1.5; }
+  #feed div { border-bottom: 1px solid #16191e; padding: 2px 0; }
+  #feed .ft { color: #556; margin-right: 8px; }
+  #feed .f-task { color: #ffd166; } #feed .f-obst { color: #ff5d8f; } #feed .f-fleet { color: #fb7; } #feed .f-rx { color: #9ab; } #feed .f-sys { color: #7bf; } #feed .f-error { color: #f55; }
+  #controls { display: flex; align-items: center; gap: 12px; padding: 4px 10px; border-top: 1px solid #2a2e35; flex-wrap: wrap; font-size: 12px; color: #9aa; }
+  #controls label { display: inline-flex; align-items: center; gap: 3px; }
+  #timeline { width: 100%; height: 44px; display: block; }
+  @media (max-width: 900px) { #main { grid-template-columns: 1fr; } #side { border-left: 0; border-top: 1px solid #2a2e35; max-height: 40vh; } }
+</style>
+</head>
+<body data-live="/events">
+  <div id="bar">
+    <h1>commsim live</h1>
+    <span id="name">connecting…</span>
+    <label>robots <select id="d-n" title="rebuilds the fleet">
+      <option>2</option><option>3</option><option value="4" selected>4</option><option>5</option><option>6</option><option>8</option><option>10</option><option>12</option>
+    </select></label>
+    <button id="d-task" title="the operator posts a task: announce → bids → claim → the winner drives">＋ task</button>
+    <button id="d-obstacle" title="a robot sees an obstacle and shares it">obstacle</button>
+    <button id="d-send" title="send a message from one robot to another and watch it route">send A → B</button>
+    <input id="d-size" type="number" value="200" min="20" max="1400" step="20" style="width:6em" title="message size, bytes">
+    <button id="d-link" title="pull a radio link between two nodes">pull link</button>
+    <button id="d-kill" title="switch a robot off / on">kill robot</button>
+    <button id="d-reset" title="start over">reset</button>
+    <label title="open-air radio range; racks shorten real links">range <input id="d-range" type="range" min="8" max="120" value="22" step="1" style="width:90px"> <span id="d-range-v">22 m</span></label>
+    <button id="play" title="space">⏸</button>
+    <select id="speed" title="speed">
+      <option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option><option value="5">5×</option>
+    </select>
+    <span id="time">0.0 s</span>
+  </div>
+  <div id="main">
+    <div id="floorwrap">
+      <canvas id="floor"></canvas>
+      <div id="hint">waiting for the simulation…</div>
+      <div id="pick-hint"></div>
+      <div id="legend"></div>
+    </div>
+    <div id="side">
+      <div id="side-top"><h2>Fleet</h2><div id="side-body">—</div></div>
+      <div id="feedwrap"><h2>What is happening</h2><div id="feed"></div></div>
+    </div>
+  </div>
+  <div id="controls">
+    <span>routes:</span>
+    <select id="routes">
+      <option value="gateway" selected>every robot → gateway</option>
+      <option value="selected">from selected node</option>
+      <option value="none">none</option>
+    </select>
+    <span>show:</span><span id="filters"></span>
+  </div>
+  <canvas id="timeline"></canvas>
+  <script src="viz.js"></script>
+</body>
+</html>
