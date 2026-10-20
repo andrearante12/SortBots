@@ -166,7 +166,7 @@ window.addEventListener("unhandledrejection", (e) => window.__pageErrors.push(St
       case "pos": { const nd = trace.header.nodes[e.id]; if (nd && !(drag && drag.id === e.id)) nd.pos = e.pos; staticLayer = null; return; }
       case "snr": trace.header.snr = e.snr; if (e.range_m) trace.header.range_m = e.range_m; staticLayer = null; return;
       case "task": {
-        tasks.set(e.task_id, { ...(tasks.get(e.task_id) || {}), ...e });
+        applyState(e);
         const who = e.owner != null ? name(e.owner) : "";
         const txt = { announced: `task ${e.task_id} announced by the gateway`, claimed: `${who} won task ${e.task_id}${e.cost != null ? ` (bid ${Number(e.cost).toFixed(1)} s)` : ""}`,
                       carrying: `${who} picked up task ${e.task_id} — committed, it cannot move now`, done: `task ${e.task_id} delivered`,
@@ -212,7 +212,7 @@ window.addEventListener("unhandledrejection", (e) => window.__pageErrors.push(St
   }
 
   // ---------------------------------------------------------------- replay state
-  function resetState() { routes = new Map(); blocked = new Set(); silent = new Map(); dead = new Set(); si = 0; }
+  function resetState() { routes = new Map(); blocked = new Set(); silent = new Map(); dead = new Set(); si = 0; if (!live) tasks = new Map(); }
   function applyState(e) {
     switch (e.k) {
       case "route": { let m = routes.get(e.node); if (!m) routes.set(e.node, (m = new Map())); if (e.nh < 0) m.delete(e.dst); else m.set(e.dst, { nh: e.nh, tq: e.tq }); break; }
@@ -220,6 +220,7 @@ window.addEventListener("unhandledrejection", (e) => window.__pageErrors.push(St
       case "robot_silent": { let s = silent.get(e.obs); if (!s) silent.set(e.obs, (s = new Set())); s.add(e.peer); break; }
       case "robot_back": { const s = silent.get(e.obs); if (s) s.delete(e.peer); break; }
       case "node": if (e.action === "kill") dead.add(e.id); else dead.delete(e.id); break;
+      case "task": tasks.set(e.task_id, { ...(tasks.get(e.task_id) || {}), ...e }); break;
       case "linkstat": if (e.failed > 0) flashes.push({ t: e.t, kind: "fail", a: e.a, b: e.b }); break;
       case "drop": flashes.push({ t: e.t, kind: "drop", a: e.src }); break;
       default: break;

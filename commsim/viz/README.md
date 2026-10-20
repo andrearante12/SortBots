@@ -77,7 +77,7 @@ emulation itself runs in the VM ([`../vm/README.md`](../vm/README.md)).
 cat > commsim/results/myrun.sh <<'EOF'
 cd /home/ubuntu/SortBots
 python3 -m commsim.emu.m1 --n 4 --links 0-1,0-2,1-3,2-3 --duration 60 --transport udp \
-    --orig-ms 250 --block-at 20 --unblock-at 40 --out /run/commsim/diamond
+    --orig-ms 250 --block-at 20 --unblock-at 40 --alloc --task-every 8 --out /run/commsim/diamond
 mkdir -p commsim/results/diamond && cp -r /run/commsim/diamond/. commsim/results/diamond/ && rm -rf /run/commsim/diamond
 EOF
 multipass exec commsim -- sudo bash /home/ubuntu/SortBots/commsim/results/myrun.sh
@@ -142,11 +142,14 @@ VM, so nothing needs aligning). Event kinds:
 
 ## What it cannot show (yet)
 
-- **Only Status traffic.** The emulation runs Status stubs, not the task
-  allocator, so there are no TaskAnnounce/Bid/Claim/LeaseBeacon frames and
-  no owned-task state. `robot_silent` is derived from receive gaps with the
-  same rule `core/protocol.py` applies; when a stub runs the Allocator,
-  `build_trace --protocol-log` is the hook to read its events instead.
+- **Task traffic only with `--alloc`.** By default the emulation stubs send
+  Status alone and `robot_silent` is derived from receive gaps with the
+  same rule `core/protocol.py` applies. With `m1.py --alloc` (UDP only) the
+  stubs run the real allocator: the gateway announces a task every
+  `--task-every` seconds, robots bid with their drive time from where they
+  stand, the winner claims and "works" the task in time only (no motion in
+  the emulation), lease beacons renew it, and every allocator decision —
+  including silence — comes from the robots' own logs (`alloc_<i>.jsonl`).
 - **Retries are invisible.** wmediumd retries inside itself; hwsim0 shows one
   TX per frame. `dur` of a delivered hop includes that queueing.
 - **Hop delivery is exact only with receiver captures** (`rx_<i>.pcap`, every

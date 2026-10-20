@@ -1035,3 +1035,38 @@ Findings while building it, all on the real stack:
 
 ![diamond replay, 0.9 s after the block](figures/viz_diamond.png)
 ![n=10 warehouse replay](figures/viz_warehouse_n10.png)
+
+### Step 30 — live demo on the real model; the allocator on the real stack
+
+Two things the replay could not do: let someone *try* the mesh, and show
+anything but heartbeats.
+
+**Live demo** (`commsim/viz/demo.py` + `demo.html`): the DES stepped in wall
+time behind a page (Server-Sent Events out, JSON commands in, standard
+library only, runs on Windows). The viewer drags robots, posts tasks, makes
+a robot see an obstacle, pulls links, switches robots off, sends a message
+A → B. Nothing is scripted: range, contention, routing, auction, leases and
+silence are `des/sim.py` + `core/protocol.py`. Two things had to change for
+it: `Sim.run()` split into `start()` + `step(until)` (and the demo leaves
+`now` at `until`, since the model's clock only moves on events — a loop
+targeting `now + dt` ran nothing, found live), and a **range control**: the
+placeholder 20 dBm reaches ~210 m in free space, so on a 50 m floor no two
+robots were ever out of range except through racks. The demo starts at
+22 m open-air range; robots 1 and 2 at the two ends of an aisle with the
+gateway between them route through it and a message goes 1 → gateway → 2
+in ~6 ms (headless test `viz/tests/demo_test.mjs`).
+
+**Allocator in the emulation stubs** (`--alloc`): the stubs run
+`core/protocol.py` over the same UDP prototype (topic ids 2–6, commsim_msgs
+CDR), the gateway announcing a task on a timer, robots bidding with the
+drive time from where they stand, winners "working" a task in time only.
+First runs, 2026-10-20: diamond 60 s — 8 announced, 7 claimed, 5 completed,
+no false silence across the link pull (reroute 1.4 s by the poller);
+n = 10 warehouse 120 s — 20 announced, 18 claimed, 15 completed, 95–100 %
+of unicast hops delivered per node. `no_winner` rounds cluster in the first
+~8 s (the ARP start-up transient of step 29: nobody can bid before unicast
+flows). Silence in these traces is the robots' own verdict, not a
+derivation. The replay's guided tour now captions tasks as well as link
+events.
+
+![live demo: robots 1 and 2 routing through the gateway](figures/viz_demo.png)

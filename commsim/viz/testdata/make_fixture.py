@@ -136,6 +136,32 @@ def arp_request(sender_mac: str, sender_ip: str, target_ip: str) -> bytes:
 
 # ---- UDP Status prototype ------------------------------------------------------
 
+def fleet_payload(topic: int, robot_id: int, seq: int, stamp_ns: int, task_id: int = 0,
+                  cost: float = 0.0) -> bytes:
+    """A task-protocol message on the prototype wire: topic 2 TaskAnnounce,
+    3 Bid, 4 Claim, 6 TaskEvent — FleetHeader then `uint32 task_id` at CDR
+    offset 20 (Bid/Claim: `float32 cost` after it)."""
+    cdr = (b"\x00\x01\x00\x00"
+           + struct.pack("<BBxxIiI", 1, robot_id, seq, stamp_ns // 10**9, stamp_ns % 10**9)
+           + struct.pack("<I", task_id))
+    if topic in (3, 4):
+        cdr += struct.pack("<f", cost)
+    if topic == 4:
+        cdr += struct.pack("<f", 10.0)
+    if topic == 6:
+        cdr += b"\x00\x00\x00\x00"
+    return struct.pack("!HHI", 0x5342, topic, len(cdr)) + cdr
+
+
+def fleet_hop(topic: int, src: int, dst: int, ta: int, ra: int, seq: int, ttl: int, stamp_ns: int,
+              mseq: int, task_id: int, cost: float = 0.0) -> bytes:
+    inner = ether("fe:ed:00:00:00:%02x" % dst, "fe:ed:00:00:00:%02x" % src, 0x0800,
+                  ipv4_udp(ip_of(src), ip_of(dst), 7450, 7450,
+                           fleet_payload(topic, src, seq, stamp_ns, task_id, cost)))
+    return dot11_unicast(radio_mac(ra), radio_mac(ta), radio_mac(ra), radio_mac(ta), mseq, 31, mseq,
+                         0x4305, batman_unicast(radio_mac(dst), ttl) + inner)
+
+
 def status_payload(robot_id: int, seq: int, stamp_ns: int, battery: int = 90) -> bytes:
     """`struct.pack("!HHI", 0x5342, 1, len)` + the 64-byte CDR_LE Status the
     stub sends (one owned task, no path, no obstacles) — same field layout

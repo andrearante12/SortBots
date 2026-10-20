@@ -63,7 +63,8 @@ REPO = Path(__file__).resolve().parents[2]
 BASE_CFG = REPO / "commsim/configs/base.yaml"
 FORMAT = "commsim-viz/1"
 GROUP = -1          # `ra` of a broadcast / multicast frame
-KINDS = ("status", "zenoh", "tcp_ack", "icmp", "ogm", "bcast", "arp", "mgmt", "frag", "other")
+FLEET_KINDS = ("status", "announce", "bid", "claim", "lease", "event")
+KINDS = FLEET_KINDS + ("zenoh", "tcp_ack", "icmp", "ogm", "bcast", "arp", "mgmt", "frag", "other")
 _MAC_RE = re.compile(r"([0-9a-f]{2}(?::[0-9a-f]{2}){5})")
 
 
@@ -121,7 +122,7 @@ def read_csvs(d: Path, t0: int) -> tuple[list, list]:
                        "src": int(r["src"]), "seq": int(r["seq"])})
     for f in sorted(d.glob("stub_*.csv")):
         for r in csv.DictReader(open(f)):
-            rx.append({"t": (int(r["recv_ns"]) - t0) // 1000, "k": "app_rx",
+            rx.append({"t": (int(r["recv_ns"]) - t0) // 1000, "k": "app_rx", "type": "Status",
                        "src": int(r["src"]), "dst": int(r["dst"]), "seq": int(r["seq"]),
                        "lat_us": (int(r["recv_ns"]) - int(r["send_ns"])) // 1000})
     return tx, rx
@@ -193,6 +194,44 @@ def read_polls(d: Path, t0: int, by_mac: dict) -> list:
     return ev
 
 
+def read_alloc(d: Path, t0: int) -> tuple[list, bool]:
+    """alloc_<i>.jsonl (stubs running the real allocator): task markers for
+    the page, the fleet's OWN silence verdicts, and app-level receptions of
+    protocol messages. Returns (events, found)."""
+    ev, found = [], False
+    tasks: dict = {}
+    for f in sorted(d.glob("alloc_*.jsonl")):
+        found = True
+        for line in f.read_text().splitlines():
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            t, me, k = (int(r["t_ns"]) - t0) // 1000, int(r["robot"]), r["ev"]
+            tid = r.get("task_id")
+            if k == "announce":
+                tasks[tid] = {"pickup": r["pickup"], "dropoff": r["dropoff"]}
+                ev.append({"t": t, "k": "task", "task_id": tid, "state": "announced", "owner": None,
+                           "pickup": r["pickup"], "dropoff": r["dropoff"]})
+            elif k == "claimed":
+                ev.append({"t": t, "k": "task", "task_id": tid, "state": "claimed", "owner": me,
+                           "cost": r.get("cost"), **tasks.get(tid, {})})
+                ev.append({"t": t, "k": "fleet", "node": me, "event": "claimed", "task_id": tid, "cost": r.get("cost")})
+            elif k == "committed":
+                ev.append({"t": t, "k": "task", "task_id": tid, "state": "carrying", "owner": me, **tasks.get(tid, {})})
+            elif k == "complete":
+                ev.append({"t": t, "k": "task", "task_id": tid, "state": "done", "owner": None, **tasks.get(tid, {})})
+            elif k in ("robot_silent", "robot_back"):
+                ev.append({"t": t, "k": k, "obs": me, "peer": int(r["peer"]), "observed": True})
+            elif k == "rx":
+                ev.append({"t": t, "k": "app_rx", "src": int(r["src"]), "dst": me, "seq": int(r["seq"]),
+                           "type": r["type"], "lat_us": int(r.get("lat_us", 0)), "task_id": tid})
+            elif k in ("task_yielded", "stop_task", "lease_expired", "owner_missing", "isolated",
+                       "rejoined", "no_winner", "declined", "battery_gated"):
+                ev.append({"t": t, "k": "fleet", "node": me, "event": k,
+                           **{kk: vv for kk, vv in r.items() if kk not in ("t_ns", "robot", "ev")}})
+    return ev, found
+
+
 def read_links(d: Path, t0: int, st: dict) -> list:
     ev = []
     if (d / "links.jsonl").exists():
@@ -247,9 +286,12 @@ def classify(d: P.Dot11, f: bytes) -> tuple[str, dict]:
     x["ip_src"], x["ip_dst"] = inner.ip_src, inner.ip_dst
     if inner.proto == 17 and inner.dport == P.STATUS_UDP_PORT:
         st = P.status_cdr(f, inner.l4_payload, inner.l4_len)
-        if st is not None:
-            x["src"], x["seq"] = st.robot_id, st.seq
-        return "status", x
+        if st is None:
+            return "status", x
+        x["src"], x["seq"], x["topic"] = st.robot_id, st.seq, st.topic
+        if st.task_id is not None:
+            x["task_id"] = st.task_id
+        return st.kind, x
     if inner.proto == 6 and P.ZENOH_TCP_PORT in (inner.sport, inner.dport):
         x["l4"] = (inner.sport, inner.dport, inner.tcp_seq, inner.l4_len)
         return ("zenoh" if inner.l4_len > 0 else "tcp_ack"), x
@@ -262,8 +304,8 @@ def classify(d: P.Dot11, f: bytes) -> tuple[str, dict]:
 def hop_key(kind: str, ta_mac: str, ra_mac: str, x: dict) -> Optional[tuple]:
     """What identifies one hop of one packet in both the air and a receiver
     capture. None for kinds without a usable identity (OGMs, mgmt, frags)."""
-    if kind == "status" and "seq" in x:
-        return ("s", ta_mac, ra_mac, x.get("src"), x["seq"], x.get("ttl"))
+    if kind in FLEET_KINDS and "seq" in x:
+        return ("s", x.get("topic", 1), ta_mac, ra_mac, x.get("src"), x["seq"], x.get("ttl"))
     if kind == "icmp" and "ip_src" in x:
         return ("i", ta_mac, ra_mac, x["ip_src"], x["ip_dst"], x.get("seq"), x.get("ttl"))
     if kind in ("zenoh", "tcp_ack") and "l4" in x:
@@ -306,8 +348,8 @@ def read_rx(d: Path, t0: int, by_ip: dict) -> tuple[dict, list]:
                     st = P.status_cdr(b, inner.l4_payload, inner.l4_len)
                     if st is None:
                         continue
-                    kind = "status"
-                    x["src"], x["seq"] = st.robot_id, st.seq
+                    kind = st.kind
+                    x["src"], x["seq"], x["topic"] = st.robot_id, st.seq, st.topic
                 elif inner.proto == 6:
                     kind = "zenoh" if inner.l4_len > 0 else "tcp_ack"
                     x["l4"] = (inner.sport, inner.dport, inner.tcp_seq, inner.l4_len)
@@ -388,6 +430,8 @@ def read_air(path: Path, t0: int, by_mac: dict, by_ip: dict, max_inflight_us: in
             e["src"] = x["src"]
         if "seq" in x:
             e["seq"] = x["seq"]
+        if "task_id" in x:
+            e["task_id"] = x["task_id"]
         if x.get("trunc"):
             report["truncated"] = report.get("truncated", 0) + 1
         ev.append(e)
@@ -526,6 +570,18 @@ def derive_tour(events: list, n: int) -> list:
                          "text": "The link is back. batman-adv keeps the working route until the direct one"
                                  " proves better — it may take a while to move back."})
     for e in events:
+        if e["k"] == "task" and e["state"] == "announced":
+            tour.append({"t": e["t"], "title": f"task {e['task_id']} announced",
+                         "text": "The gateway announces a task (yellow TASK) to every robot. Each robot that can"
+                                 " reach it bids with its drive time (orange BID); the lowest bid claims it (green CLAIM)."})
+        elif e["k"] == "task" and e["state"] == "claimed":
+            tour.append({"t": e["t"], "title": f"{name(e['owner'])} won task {e['task_id']}",
+                         "text": f"{name(e['owner'])} claimed task {e['task_id']} with a bid of {e.get('cost', 0):.1f} s of"
+                                 " driving; its lease beacons (green) now renew the ownership every second."})
+        elif e["k"] == "task" and e["state"] == "done":
+            tour.append({"t": e["t"], "title": f"task {e['task_id']} delivered",
+                         "text": "The owner reported completion fleet-wide (TaskEvent); every robot forgets the task."})
+    for e in events:
         if e["k"] == "robot_silent" and e["t"] > 0:
             tour.append({"t": e["t"], "title": f"{name(e['obs'])} declares {name(e['peer'])} silent",
                          "text": f"No Status from {name(e['peer'])} for 6 s: {name(e['obs'])} would now stop trusting"
@@ -534,7 +590,15 @@ def derive_tour(events: list, n: int) -> list:
             tour.append({"t": e["t"], "title": f"{name(e['peer'])} is heard again",
                          "text": f"{name(e['obs'])} received a Status from {name(e['peer'])}; silence lifted."})
     tour.sort(key=lambda s: s["t"])
-    return tour[:14]
+    # keep the first of each title family so a long run does not list 40 tasks
+    seen: dict = {}
+    out = []
+    for s in tour:
+        fam = s["title"].split(" ")[0] + ("task" if "task" in s["title"] else "")
+        seen[fam] = seen.get(fam, 0) + 1
+        if seen[fam] <= 3:
+            out.append(s)
+    return out[:20]
 
 
 # ---- build ------------------------------------------------------------------------
@@ -562,10 +626,13 @@ def build(d: Path, *, name: Optional[str] = None, max_inflight_ms: float = 200.0
     air = read_air(air_path, t0, by_mac, by_ip, int(max_inflight_ms * 1000), report,
                    rx_seen, rx_nodes) if air_path.exists() else []
     drops = join_delivery(air, tx, rx, n, report)
-    silence = derive_silence(tx, rx, n, int(tmo_s * 1e6))
+    alloc_ev, alloc_found = read_alloc(d, t0)
+    # with the allocator running, silence is what the robots actually
+    # decided (their own logs), not a derivation from receive gaps
+    silence = [] if alloc_found else derive_silence(tx, rx, n, int(tmo_s * 1e6))
     polls = read_polls(d, t0, by_mac)
     links = read_links(d, t0, st)
-    events = air + tx + rx + drops + silence + polls + links
+    events = air + tx + rx + drops + silence + alloc_ev + polls + links
     if kinds:
         events = [e for e in events if e["k"] != "air" or e["kind"] in kinds]
     if window:
@@ -598,7 +665,9 @@ def build(d: Path, *, name: Optional[str] = None, max_inflight_ms: float = 200.0
                    "outcomes": report.get("outcomes", {}),
                    "delivery": (n_rx / (n_tx * (n - 1))) if n_tx and n > 1 else None},
         "limits": [
-            "only Status stubs ran: no TaskAnnounce/Bid/Claim/LeaseBeacon on the wire",
+            ("the stubs ran the real task allocator (core/protocol.py) over UDP; tasks were announced by "
+             "the gateway on a timer and 'worked' in time only (no motion in the emulation)") if alloc_found
+            else "only Status stubs ran: no TaskAnnounce/Bid/Claim/LeaseBeacon on the wire",
             ("hop delivery from the receivers' own captures (rx_<i>.pcap) on nodes "
              f"{rx_nodes}; other hops from hwsim0 ACK pairing, best effort: no ACK within "
              f"{max_inflight_ms:g} ms = lost") if rx_nodes else
@@ -608,8 +677,9 @@ def build(d: Path, *, name: Optional[str] = None, max_inflight_ms: float = 200.0
             "`rate` is the kernel's requested rate at handoff, not what wmediumd used; 0 = unknown",
             "zenoh (TCP) payloads are opaque: hops carry IPs only, no (src, seq) join",
             "`dur` of an acked frame includes wmediumd queueing and backoff",
-            "robot_silent/robot_back are derived from the stubs' receive logs with "
-            f"status_timeout_s = {tmo_s:g}, not observed from an Allocator",
+            ("robot_silent/robot_back are the allocators' own verdicts (alloc_<i>.jsonl)") if alloc_found else
+            ("robot_silent/robot_back are derived from the stubs' receive logs with "
+             f"status_timeout_s = {tmo_s:g}, not observed from an Allocator"),
         ],
     }
     if (d / "hwsim0.pcap").exists() and report.get("truncated"):

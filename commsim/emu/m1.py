@@ -149,7 +149,14 @@ def main(argv=None) -> int:
                     help="seconds into the stub run: reopen the link --block-at blocked")
     ap.add_argument("--poll-s", type=float, default=0.5,
                     help="route/station poller period for the replay trace (0 = off)")
+    ap.add_argument("--alloc", action="store_true",
+                    help="stubs also run the task allocator (core/protocol.py) over UDP; the gateway "
+                         "announces a task every --task-every s")
+    ap.add_argument("--task-every", type=float, default=10.0)
     a = ap.parse_args(argv)
+    if a.alloc and a.transport == "zenoh":
+        print("--alloc needs the UDP transport", file=sys.stderr)
+        return 1
     if os.geteuid() != 0:
         print("run as root inside the commsim VM", file=sys.stderr)
         return 1
@@ -215,13 +222,25 @@ def main(argv=None) -> int:
     node_env = {"RMW_IMPLEMENTATION": "rmw_zenoh_cpp",
                 # nodes talk only to their own router; never let SHM cross namespaces
                 "ZENOH_CONFIG_OVERRIDE": "transport/shared_memory/enabled=false"}
+    alloc_args = ""
+    if a.alloc:
+        from commsim.des.layout import LAYOUTS
+        lay = LAYOUTS[a.layout]()
+        floor = f"{lay.width},{lay.height}" if not (a.line or a.links) else f"{5.0 * a.n},10"
+        # a file, not inline JSON: nsrun wraps the command in bash -c "..." and
+        # the JSON's own quotes would end that string
+        (a.out / "params.json").write_text(json.dumps({"protocol": cfg["protocol"]}))
+        alloc_args = (f"--alloc --floor {floor} --task-every {a.task_every} "
+                      f"--params {a.out}/params.json ")
     stubs = [nsrun(f"n{i}",
                    f"python3 {REPO}/commsim/stubs/status_stub.py --robot-id {nd.robot_id} "
                    f"--hz {a.hz} --duration {a.duration} --depth {a.depth} --out {a.out}/stub_{i}.csv "
                    f"--sent-out {a.out}/sent_{i}.csv "
                    f"--transport {a.transport} --bind {nd.ip} "
                    f"--udp-port {cfg['protocol'].get('status_udp_port', 7450)} "
-                   f"--peers {','.join(x.ip for x in fleet if x != nd)}",
+                   f"--peers {','.join(x.ip for x in fleet if x != nd)} "
+                   + (alloc_args + f"--pos {state['nodes'][i]['pos'][0]},{state['nodes'][i]['pos'][1]} "
+                      f"--alloc-log {a.out}/alloc_{i}.jsonl" if a.alloc else ""),
                    node_env, a.out / f"stub_{i}.log")
              for i, nd in enumerate(fleet)]
     mark("stubs_started")

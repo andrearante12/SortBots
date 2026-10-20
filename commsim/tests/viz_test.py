@@ -180,6 +180,52 @@ def test_ack_pairing_fallback_when_no_receiver_captures(tmp_path):
     assert report["ack_match"][2] == {"unicast": 3, "acked": 2, "orphan_acks": 0}
 
 
+def test_task_protocol_frames_and_allocator_logs(tmp_path):
+    """Stubs running the allocator: Bid/Claim/... frames decode by topic id
+    and join hops like Status; alloc_<i>.jsonl becomes task markers, app-level
+    receptions and the robots' OWN silence verdicts (the derived ones go)."""
+    M.write_synthetic_dir(tmp_path)
+    T = lambda s: M.T0_S * 10**9 + int(round(s * 1e6)) * 1000  # noqa: E731
+    # a Bid from robot 2 for task 77 reaching the gateway via robot 1, plus a TaskEvent
+    frames = [(T(5.000), M.fleet_hop(3, 2, 0, 2, 1, 40, 50, T(5.0), 500, 77, 12.5)),
+              (T(5.001), M.fleet_hop(3, 2, 0, 1, 0, 40, 49, T(5.0), 600, 77, 12.5)),
+              (T(6.000), M.fleet_hop(6, 2, 0, 2, 1, 41, 50, T(6.0), 501, 77))]
+    import struct as S
+    raw = (tmp_path / "hwsim0.pcap").read_bytes()
+    (tmp_path / "hwsim0.pcap").write_bytes(raw + b"".join(
+        S.pack("<IIII", t // 10**9, (t % 10**9) // 1000, len(b), len(b)) + b for t, b in frames))
+    st = P.status_cdr(M.fleet_payload(3, 2, 40, T(5.0), 77, 12.5), 0, 40)
+    assert (st.topic, st.type, st.kind, st.robot_id, st.seq, st.task_id) == (3, "Bid", "bid", 2, 40, 77)
+    (tmp_path / "alloc_0.jsonl").write_text("\n".join(json.dumps(r) for r in [
+        {"t_ns": T(4.0), "robot": 0, "ev": "announce", "task_id": 77, "pickup": [1.0, 2.0], "dropoff": [3.0, 4.0]},
+        {"t_ns": T(5.002), "robot": 0, "ev": "rx", "type": "Bid", "src": 2, "seq": 40, "task_id": 77, "lat_us": 2000},
+        {"t_ns": T(7.003), "robot": 0, "ev": "robot_silent", "peer": 2},
+        {"t_ns": T(15.003), "robot": 0, "ev": "robot_back", "peer": 2},
+    ]) + "\n")
+    (tmp_path / "alloc_2.jsonl").write_text("\n".join(json.dumps(r) for r in [
+        {"t_ns": T(5.5), "robot": 2, "ev": "claimed", "task_id": 77, "cost": 12.5},
+        {"t_ns": T(7.5), "robot": 2, "ev": "committed", "task_id": 77},
+        {"t_ns": T(12.0), "robot": 2, "ev": "complete", "task_id": 77},
+    ]) + "\n")
+    report = {}
+    tr = build(tmp_path, report=report)
+    ev, h = tr["events"], tr["header"]
+    assert h["counts"]["air_by_kind"]["bid"] == 2 and h["counts"]["air_by_kind"]["event"] == 1
+    bids = [e for e in ev if e["k"] == "air" and e["kind"] == "bid"]
+    assert [(e["ta"], e["ra"], e["hop"], e["src"], e["dst"], e["seq"], e["task_id"]) for e in bids] == [
+        (2, 1, 0, 2, 0, 40, 77), (1, 0, 1, 2, 0, 40, 77)]
+    tasks = [(e["t"], e["state"], e["owner"]) for e in ev if e["k"] == "task"]
+    assert tasks == [(3_000_000, "announced", None), (4_500_000, "claimed", 2), (6_500_000, "carrying", 2),
+                     (11_000_000, "done", None)]
+    assert all(e["pickup"] == [1.0, 2.0] for e in ev if e["k"] == "task")
+    assert [(e["t"], e["k"], e["obs"], e["peer"]) for e in ev if e["k"] in ("robot_silent", "robot_back")] == [
+        (6_003_000, "robot_silent", 0, 2), (14_003_000, "robot_back", 0, 2)]  # observed, not derived
+    assert any(e["k"] == "app_rx" and e["type"] == "Bid" and e["src"] == 2 and e["dst"] == 0 for e in ev)
+    assert "real task allocator" in h["limits"][0]
+    titles = [s["title"] for s in h["tour"]]
+    assert "task 77 announced" in titles and "robot 2 won task 77" in titles and "task 77 delivered" in titles
+
+
 def test_build_trace_window_and_kinds_filter(tmp_path):
     M.write_synthetic_dir(tmp_path)
     tr = build(tmp_path, kinds={"status"}, window=(0.5, 3.0))

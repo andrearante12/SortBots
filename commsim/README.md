@@ -134,7 +134,9 @@ sudo python3 -m commsim.emu.mesh down
 multi-step VM commands in a script under the gitignored `commsim/results/`
 (mounted in the VM) and run that. Every `m1` run also records what the
 replay needs (per-receiver captures, route poller, link log); `--unblock-at`
-reopens the link `--block-at` pulled.
+reopens the link `--block-at` pulled; `--alloc --task-every 8` makes the
+stubs run the real task allocator over UDP so auctions happen on the real
+stack.
 
 ### Live demo and replay (host, no VM)
 

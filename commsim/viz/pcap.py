@@ -366,6 +366,9 @@ def ethernet(b: bytes, off: int) -> Inner:
 STATUS_MAGIC = 0x5342
 STATUS_UDP_PORT = 7450
 ZENOH_TCP_PORT = 7447
+# prototype topic ids (stubs/status_stub.py TOPICS) -> message type and page kind
+FLEET_TOPICS = {1: ("Status", "status"), 2: ("TaskAnnounce", "announce"), 3: ("Bid", "bid"),
+                4: ("Claim", "claim"), 5: ("LeaseBeacon", "lease"), 6: ("TaskEvent", "event")}
 
 
 @dataclass
@@ -374,19 +377,34 @@ class Status:
     robot_id: int
     seq: int
     stamp_ns: int
+    topic: int = 1
+    task_id: Optional[int] = None   # TaskAnnounce / Bid / Claim / TaskEvent
+
+    @property
+    def type(self) -> str:
+        return FLEET_TOPICS.get(self.topic, ("?", "other"))[0]
+
+    @property
+    def kind(self) -> str:
+        return FLEET_TOPICS.get(self.topic, ("?", "other"))[1]
 
 
 def status_cdr(b: bytes, off: int, n: int) -> Optional[Status]:
-    """`struct.pack("!HHI", 0x5342, 1, len)` + CDR_LE Status: encapsulation
-    `00 01 00 00`, then FleetHeader{version u8 @4, robot_id u8 @5, pad 2,
-    seq u32 @8, stamp.sec i32 @12, stamp.nanosec u32 @16}. Verified against
-    a captured frame (robot 0, seq 20) on 2026-10-20."""
+    """`struct.pack("!HHI", 0x5342, topic, len)` + a CDR_LE commsim_msgs
+    message: encapsulation `00 01 00 00`, then FleetHeader{version u8 @4,
+    robot_id u8 @5, pad 2, seq u32 @8, stamp.sec i32 @12, stamp.nanosec u32
+    @16} — common to every fleet message — then the body at @20: for
+    TaskAnnounce / Bid / Claim / TaskEvent a `uint32 task_id` first. Verified
+    against a captured Status (robot 0, seq 20) on 2026-10-20."""
     if n < 28 or len(b) < off + 28:
         return None
     magic, topic, ln = struct.unpack("!HHI", b[off:off + 8])
-    if magic != STATUS_MAGIC or topic != 1 or b[off + 8:off + 10] != b"\x00\x01":
+    if magic != STATUS_MAGIC or topic not in FLEET_TOPICS or b[off + 8:off + 10] != b"\x00\x01":
         return None
     c = off + 8
     version, robot_id = b[c + 4], b[c + 5]
     seq, sec, nsec = struct.unpack("<IiI", b[c + 8:c + 20])
-    return Status(version, robot_id, seq, sec * 1_000_000_000 + nsec)
+    st = Status(version, robot_id, seq, sec * 1_000_000_000 + nsec, topic)
+    if topic in (2, 3, 4, 6) and len(b) >= c + 24:
+        st.task_id = struct.unpack("<I", b[c + 20:c + 24])[0]
+    return st
