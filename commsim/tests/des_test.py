@@ -80,6 +80,53 @@ def test_tiny_fleet_run_is_clean():
     assert r["failed"] == [] and r["ctl_samples"] > 100
 
 
+def test_gateway_relays_between_robots_that_cannot_hear_each_other():
+    # The GUI access point is a mesh router like the robots' (hw/: same image;
+    # gw_mode=off there is about internet, not forwarding). Robots 1 and 2 out
+    # of each other's range, both in the gateway's: the route must be
+    # 1 -> 0 -> 2 and a frame must physically cross the gateway's radio.
+    cfg = load_config(BASE)
+    sim = Sim(cfg, "V3", n=2, warmup_s=0.0, steady_s=5.0, layout="open_floor",
+              fixed_snr={(0, 1): 25.0, (0, 2): 25.0, (1, 2): -20.0},
+              positions=[(5, 0), (0, 0), (10, 0)])
+    sim.topo()
+    assert sim.hop(1, 2) == (0, "g24") and sim.hop(2, 1) == (0, "g24")  # 0 = gateway
+    seen = []
+    orig = sim.on_frame_rx
+    sim.on_frame_rx = lambda node, f: (seen.append(node), orig(node, f))
+    msg = {"type": "Status", "src": 1, "t0": 0.0, "data": {"owned": []},
+           "reliable": False, "wire": 0}
+    sim.net_send(1, Frame("udp", 200, 1, final=2, msg=msg))
+    while sim._q and 2 not in seen:
+        t, _, fn, a = __import__("heapq").heappop(sim._q)
+        if t > 1.0:
+            break
+        sim.now = t
+        fn(*a)
+    assert seen == [0, 2]
+
+
+def test_gateway_hears_every_reachable_robot_within_the_status_timeout():
+    # Requirement (2026-10-20): battery, heartbeat and owned tasks of every
+    # robot reach the operator GUI at the gateway no matter who else the robot
+    # talks to. V4 is neighbor-only Status, so this rides the 1 Hz gateway copy.
+    cfg = load_config(BASE)
+    r = Sim(cfg, "V4", n=6, warmup_s=5, steady_s=30, layout="open_floor").run()
+    assert r["gw_view_violations"] == 0 and r["gw_view_max_s"] < r["status_timeout_s"]
+    assert "gateway_view" not in r["failed"]
+    # Negative: a design that never sends Status to the gateway must FAIL it.
+    sim = Sim(cfg, "V4", n=4, warmup_s=5, steady_s=25, layout="open_floor")
+    orig = sim.publish
+
+    def without_gateway(pub_id, typ, size, dsts, data=None, reliable=None):
+        if typ == "Status":
+            dsts = [d for d in dsts if d != 0]  # 0 = gateway
+        return orig(pub_id, typ, size, dsts, data, reliable)
+    sim.publish = without_gateway
+    r = sim.run()
+    assert r["gw_view_violations"] > 0 and "gateway_view" in r["failed"]
+
+
 def test_same_seed_same_result_across_processes():
     # Station objects in a set iterated in memory order -> results changed
     # between processes for one seed. Run in two fresh interpreters.

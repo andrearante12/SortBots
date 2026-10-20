@@ -432,6 +432,7 @@ class Robot:
         self.heard_since: dict = {}
         self.subs_cells: set = set()
         self.status_n = 0
+        self.alive_since = 0.0  # last revive; grace before the gateway-view check applies
         self.battery_pct = None  # set by Sim when commsim_des.battery_pct is configured
         self.alloc = self.new_allocator(random.Random(sim.seed * 7919 + rid))
 
@@ -585,6 +586,12 @@ class Sim:
         self.seen_flood: set = set()
         self.conn = [0, 0]
         self.claim_costs: list = []
+        # The operator GUI's view of the fleet lives at the gateway: battery,
+        # heartbeat and owned tasks of EVERY robot must reach it, whoever else
+        # a robot talks to (requirement 2026-10-20). [max age seen, samples
+        # older than status_timeout_s while a route to the gateway existed].
+        self.gw_view = [0.0, 0]
+        self.gw_alive_since = 0.0
 
         rng = random.Random(seed + 1)
         self.nodes = {GW: Robot(self, GW, self.layout.gateway_pos)}
@@ -758,6 +765,9 @@ class Sim:
     def revive(self, rid, fresh=False):
         r = self.nodes[rid]
         r.alive = True
+        r.alive_since = self.now
+        if rid == GW:
+            self.gw_alive_since = self.now
         if fresh:  # reboot: empty allocator; tasks re-learned from the fleet
             r.alloc = r.new_allocator(random.Random(self.seed * 7919 + rid + 1))
             r.stop_task()
@@ -1239,6 +1249,23 @@ class Sim:
                 if i != j:
                     self.conn[1] += 1
                     self.conn[0] += self.hop(i, j) is not None
+        # Gateway view (the GUI): every robot the gateway can currently reach
+        # must have been heard within status_timeout_s. Same route test as the
+        # Status-gap judge, so a partitioned or relay-less robot is an outage,
+        # not a fault; a robot or gateway that just came back gets one timeout
+        # of grace, which is what the fleet's own silence rule allows it.
+        gw, tmo = self.nodes[GW], self.params.status_timeout_s
+        if gw.alive and self.now - self.gw_alive_since > tmo:
+            for r in self.nodes.values():
+                if r.is_gw or not r.alive or self.now - r.alive_since < tmo \
+                        or self.hop(r.id, GW) is None:
+                    continue
+                if any(t > self.now - tmo for t in self.unreach.get((r.id, GW), ())):
+                    continue
+                age = self.now - gw.last_pose_rx.get(r.id, self.gw_alive_since)
+                self.gw_view[0] = max(self.gw_view[0], age)
+                if age > tmo:
+                    self.gw_view[1] += 1
         thr = self.cfg["protocol"]["staleness_threshold_s"]
         for r in self.nodes.values():
             if r.is_gw or not r.alive:
@@ -1359,6 +1386,7 @@ class Sim:
                                   if self.claim_costs else math.nan),
             "claims": len(self.claim_costs),
             "tasks_done": sum(1 for t in self.tasks.values() if t["done"]),
+            "gw_view_max_s": self.gw_view[0], "gw_view_violations": self.gw_view[1],
         }
         for b in ("g24", "g5"):
             res[f"busy_{b}"] = self.ch[b].busy_acc / span if b in self.ch else math.nan
@@ -1392,4 +1420,6 @@ def failures(r: dict) -> list:
         f.append("auction")
     if r["map_lag_p95"] > 2:
         f.append("map_divergence")
+    if r["gw_view_violations"] > 0:
+        f.append("gateway_view")
     return f

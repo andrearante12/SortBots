@@ -251,6 +251,7 @@ def run_one(spec):
         "ctl_p95_ms": res["ctl_p95_ms"], "ctl_p99_ms": res["ctl_p99_ms"],
         "auction_p95_s": res["auction_p95_s"], "auction_max_s": res["auction_max_s"],
         "session_drops": res["session_drops"],
+        "gw_view_violations": res["gw_view_violations"], "gw_view_max_s": res["gw_view_max_s"],
     }
     vt = ctx.get("victim_tasks") or []
     if vt:
@@ -308,6 +309,19 @@ def dup_persisting_connected(log, hold_s=3.0):
 
 
 def judge(sc, o):
+    """The scenario's own pass condition, plus the fleet-wide requirement that
+    the gateway (the operator GUI) heard every reachable robot within
+    status_timeout_s throughout (sim.py sample_tick, 2026-10-20). The negative
+    control is exempt: it is meant to break liveness."""
+    ok, why = _judge(sc, o)
+    v = o.get("gw_view_violations", 0)
+    if sc != "timer_misorder" and v:
+        ok = False
+        why += f" gw_view_stale={v} (max {o.get('gw_view_max_s', 0):.1f}s)"
+    return ok, why
+
+
+def _judge(sc, o):
     gap = o["max_status_gap_s"] or 0
     if sc in ("link_loss", "link_loss_g24", "flapping", "band_loss"):
         ok = o["false_silent"] == 0 and o["lease_expired_reachable"] == 0
