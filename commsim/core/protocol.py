@@ -162,6 +162,8 @@ class Allocator:
         self.silent: set[int] = set()
         self.last_peer_heard: Optional[float] = None
         self.peer_heard: dict[int, float] = {}  # per peer, for the quorum
+        self._quorum_since = -math.inf  # when the quorum last came back
+        self._had_quorum = False
         self.isolated = False
         self.holding = False
         self.out: list[dict] = []
@@ -474,6 +476,11 @@ class Allocator:
             self.holding = True
             self._event("hold_safe", now)
 
+        q = self.has_quorum(now)
+        if q and not self._had_quorum:
+            self._quorum_since = now
+        self._had_quorum = q
+
         owned = self.owned()
         if self.p.lease_beacon_hz > 0 and owned:
             if self._next_beacon is None or now >= self._next_beacon:
@@ -513,12 +520,18 @@ class Allocator:
                         t.owner_missing = True
                         self._event("owner_missing", now, task_id=t.task_id, owner=t.owner)
                     continue
-                if not self.has_quorum(now):
+                if not q:
                     # Minority side of a split: the owner may be working it on
                     # the majority side. Wait; a renewal or the heal settles it.
                     if not t.reclaim_blocked:
                         t.reclaim_blocked = True
                         self._event("reclaim_blocked", now, task_id=t.task_id, owner=t.owner)
+                    continue
+                if t.reclaim_blocked and now - self._quorum_since < self.p.reclaim_margin_s:
+                    # Just healed: the owner's lease beacon may be a second
+                    # away. Reclaiming first re-auctioned tasks the owner had
+                    # committed during the split (DES partition, n=10,
+                    # 2026-10-20); the beacon's committed cost settles it.
                     continue
                 self._event("lease_expired", now, task_id=t.task_id, owner=t.owner)
                 self._open_bidding(t, now)

@@ -161,6 +161,22 @@ def test_quorum_minority_owner_stops_before_majority_reclaims():
     assert len(net.self_owners(1)) == 1
 
 
+def test_quorum_heal_does_not_reclaim_task_committed_during_split():
+    net = fleet({1: (1, 0), 2: (5, 0), 3: (2, 0), 4: (9, 0)}, quorum_nodes=5)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.partition({GW, 1, 2}, {3, 4})
+    net.run(5.0)
+    net.robots[1].alloc.commit(1, net.robots[1].now(net.t))  # {3, 4} never hear it
+    net.run(20.0)
+    net.heal()
+    assert_single_owner_throughout(net, 1, 10.0)
+    assert not [e for e in net.events("lease_expired") if e.get("task_id") == 1]
+    assert {r.alloc.tasks[1].owner for r in net.robots.values()} == {1}
+
+
 def test_quorum_demo_fleet_survives_one_lost_node():
     # 2 robots + gateway: either robot plus the gateway, or both robots, is a
     # majority, so one dead node never stops the fleet.

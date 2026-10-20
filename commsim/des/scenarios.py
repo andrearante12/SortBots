@@ -99,6 +99,15 @@ def scen_partition(sim, ctx):
 
     def heal():
         ctx["t_heal"] = sim.now
+        # Tasks two robots each believe they own at the heal: the duplicates
+        # the heal has to resolve. A yield on any other task after the heal is
+        # an ordinary auction race (two windows closing together, settled in
+        # one message), which counted as a partition failure until 2026-10-20.
+        owners = {}
+        for r in sim.nodes.values():
+            for tid, _ in (r.alloc.owned() if r.alive else []):
+                owners.setdefault(tid, []).append(r.id)
+        ctx["dup_at_heal"] = {tid for tid, rs in owners.items() if len(rs) > 1}
         for x in a:
             for y in b:
                 sim.unblock_link(x, y)
@@ -261,7 +270,8 @@ def run_one(spec):
         stops = [e for e in after if e["event"] == "stop_task" and e["robot_id"] == ctx["victim"]]
         out["victim_stop_after_s"] = (min(e["t"] for e in stops) - T_INJ) if stops else None
     if "t_heal" in ctx:
-        dups_after = [e for e in after if e["event"] == "task_yielded" and e["t"] >= ctx["t_heal"]]
+        dups_after = [e for e in after if e["event"] == "task_yielded" and e["t"] >= ctx["t_heal"]
+                      and e["task_id"] in ctx["dup_at_heal"]]
         out["yields_after_heal"] = len(dups_after)
         out["last_yield_after_heal_s"] = max((e["t"] - ctx["t_heal"] for e in dups_after),
                                              default=None)
