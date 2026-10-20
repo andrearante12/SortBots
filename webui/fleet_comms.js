@@ -1,9 +1,17 @@
-// SortBots dashboard — Fleet mesh tab. Monitors /fleet/status + /fleet/intent.
+// SortBots dashboard — Fleet mesh tab. Monitors /fleet/status + /fleet/intent
+// and renders the gateway's /fleet/task_board as the operator's annunciator.
 //
 // Own rosbridge connection (same pattern as arm.js): independent of app.js's
 // ~15 topic subscriptions, so opening this tab does not require the live
 // view's robot picker state. Autonomy nodes use this same radio — no TF
 // peer eavesdropping — so what you see here is what explorers hear.
+//
+// Liveness, battery and task ownership come from the BOARD, not from this
+// page's own heartbeat ages: the board is the gateway's protocol state
+// (nodes/fleet_tasks.py --gateway, same status_timeout_s the robots apply to
+// each other), so the GUI never disagrees with the fleet about who is gone.
+// The heartbeat age is still shown, as a secondary hint. Requirement
+// 2026-10-20: these three facts must reach the operator no matter what.
 //
 // View switching lives in scenarios.js (it already owns #view-mode); this
 // file only renders when #view-fleet is shown and keeps a short event log.
@@ -13,15 +21,25 @@
   const ROSBRIDGE_PORT = 9090;
   const STATUS_TOPIC = "/fleet/status";
   const INTENT_TOPIC = "/fleet/intent";
+  const BOARD_TOPIC = "/fleet/task_board";
+  const ACK_TOPIC = "/fleet/alarm_ack";
   const STATUS_FRESH_MS = 1000;
   const STATUS_AGING_MS = 2500;
+  // The gateway publishes the board at 1 Hz; older than this and the gateway
+  // itself is the thing to worry about (its alarms can no longer arrive).
+  const BOARD_STALE_MS = 5000;
+  const LOW_BATTERY_PCT = 20; // protocol battery_reserve_pct: below it a robot stops bidding
   const INTENT_TTL_FALLBACK_S = 90;
   const MAX_LOG = 80;
   const TICK_MS = 250;
 
   const viewEl = document.getElementById("view-fleet");
   const statusList = document.getElementById("fleet-status-list");
+  const tasksList = document.getElementById("fleet-tasks-list");
   const intentList = document.getElementById("fleet-intent-list");
+  const alarmsEl = document.getElementById("fleet-alarms");
+  const alarmCountEl = document.getElementById("fleet-alarm-count");
+  const boardAgeEl = document.getElementById("fleet-board-age");
   const logEl = document.getElementById("fleet-log");
   const connEl = document.getElementById("fleet-conn");
   if (!viewEl || typeof ROSLIB === "undefined") return;
@@ -30,6 +48,10 @@
   const statuses = new Map();
   /** @type {Map<string, {raw: object, recvAt: number}>} */
   const intentMap = new Map();
+  /** The last /fleet/task_board, or null before the gateway has spoken. */
+  let board = null;
+  let boardAt = 0;
+  const seenAlarms = new Set();
   const logLines = [];
   let connected = false;
   let tickTimer = null;
@@ -54,32 +76,123 @@
     }
   }
 
+  function boardRobots() {
+    const out = new Map();
+    for (const r of (board && board.robots) || []) if (r && r.id) out.set(r.id, r);
+    return out;
+  }
+
   function renderStatus() {
     const now = Date.now();
-    const rows = [...statuses.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-    if (!rows.length) {
+    const fleet = boardRobots();
+    // Every robot either this page or the gateway has heard. A robot on the
+    // board with no /fleet/status here is still a robot (e.g. the bridge is
+    // forwarding only the board), and a silent one must stay visible: an
+    // annunciator that drops the dead robot's card has hidden the alarm.
+    const ids = [...new Set([...statuses.keys(), ...fleet.keys()])].sort();
+    if (!ids.length) {
       statusList.innerHTML = '<div id="fleet-empty-status">No status yet.</div>';
       return;
     }
     statusList.innerHTML = "";
-    for (const [id, entry] of rows) {
-      const s = entry.raw;
-      const age = now - entry.recvAt;
+    for (const id of ids) {
+      const entry = statuses.get(id);
+      const s = entry ? entry.raw : {};
+      const fr = fleet.get(id);
+      const age = entry ? now - entry.recvAt : null;
       const pose = s.pose || {};
       const twist = s.twist || {};
-      const mode = s.mode || "idle";
+      const mode = (fr && fr.mode) || s.mode || "idle";
+      const dead = fr ? fr.alive === false : false;
+      const batt = fr && fr.battery_pct != null ? fr.battery_pct
+        : (typeof s.battery_pct === "number" ? s.battery_pct : null);
       const card = document.createElement("div");
-      card.className = `fleet-card ${ageClass(age)}`;
+      card.dataset.robot = id;
+      card.className = `fleet-card ${dead ? "dead" : (age == null ? "stale" : ageClass(age))}`;
+      const owned = fr ? fr.owned || [] : (s.owned || []).map((t) => t[0]);
+      const carrying = new Set(fr ? fr.carrying || [] : []);
+      const tasksStr = owned.length
+        ? owned.map((t) => `${escapeHtml(String(t))}${carrying.has(t) ? " (carrying)" : ""}`).join(", ")
+        : "—";
       card.innerHTML =
-        `<h4>${escapeHtml(id)} <span class="fleet-mode ${escapeHtml(mode)}">${escapeHtml(mode)}</span></h4>` +
+        `<h4>${escapeHtml(id)} ` +
+        `<span class="fleet-mode ${dead ? "dead" : escapeHtml(mode)}">${dead ? "SILENT" : escapeHtml(mode)}</span>` +
+        `<span class="fleet-batt ${batt != null && batt < LOW_BATTERY_PCT ? "low" : ""}">` +
+        `${batt != null ? "⚡ " + fmt(batt, 1) + " %" : "⚡ —"}</span></h4>` +
         `<dl>` +
-        `<dt>pose</dt><dd>x=${fmt(pose.x)} y=${fmt(pose.y)} yaw=${fmt(pose.yaw)}</dd>` +
-        `<dt>twist</dt><dd>vx=${fmt(twist.vx, 3)} wz=${fmt(twist.wz, 3)}</dd>` +
-        `<dt>age</dt><dd>${(age / 1000).toFixed(2)} s</dd>` +
-        `<dt>stamp</dt><dd>${fmt(s.stamp, 1)}</dd>` +
+        `<dt>fleet</dt><dd>${fr ? (dead ? "silent" : "alive") +
+          (fr.last_heard_s != null ? ` · heard ${fmt(fr.last_heard_s, 1)} s ago` : "") : "no board"}</dd>` +
+        `<dt>tasks</dt><dd>${tasksStr}</dd>` +
+        `<dt>pose</dt><dd>${entry ? `x=${fmt(pose.x)} y=${fmt(pose.y)} yaw=${fmt(pose.yaw)}` : "—"}</dd>` +
+        `<dt>twist</dt><dd>${entry ? `vx=${fmt(twist.vx, 3)} wz=${fmt(twist.wz, 3)}` : "—"}</dd>` +
+        `<dt>age</dt><dd>${age != null ? (age / 1000).toFixed(2) + " s" : "no status here"}</dd>` +
         `</dl>`;
       statusList.appendChild(card);
     }
+  }
+
+  function renderTasks() {
+    const tasks = (board && board.tasks) || [];
+    if (!tasks.length) {
+      tasksList.innerHTML = '<div id="fleet-empty-tasks">No tasks yet.</div>';
+      return;
+    }
+    const rows = tasks.map((t) => {
+      const cls = t.committed ? "carrying" : escapeHtml(String(t.state || ""));
+      const state = t.committed ? "carrying" : (t.state || "?");
+      return `<tr class="${cls}" data-task="${escapeHtml(String(t.task_id))}">` +
+        `<td>${escapeHtml(String(t.task_id))}</td>` +
+        `<td>${escapeHtml(t.pickup || "?")} → ${escapeHtml(t.dropoff || "?")}</td>` +
+        `<td class="state">${escapeHtml(state)}</td>` +
+        `<td>${escapeHtml(t.owner || "—")}</td>` +
+        `<td>${t.age_s != null ? fmt(t.age_s, 0) + " s" : "—"}</td></tr>`;
+    });
+    tasksList.innerHTML =
+      `<table id="fleet-tasks"><thead><tr><th>task</th><th>route</th><th>state</th>` +
+      `<th>owner</th><th>age</th></tr></thead><tbody>${rows.join("")}</tbody></table>`;
+  }
+
+  function renderAlarms() {
+    const alarms = (board && board.alarms) || [];
+    for (const el of alarmsEl.querySelectorAll(".fleet-alarm")) el.remove();
+    const active = alarms.filter((a) => a.active).length;
+    alarmCountEl.textContent = alarms.length
+      ? `${active} active, ${alarms.length - active} unacknowledged` : "none";
+    alarmCountEl.classList.toggle("none", !alarms.length);
+    // Active first, newest first within each group: the operator reads the
+    // top row.
+    const sorted = [...alarms].sort((a, b) => (b.active - a.active) || (b.t - a.t));
+    const t0 = board ? board.t : 0;
+    for (const a of sorted) {
+      const row = document.createElement("div");
+      row.className = `fleet-alarm ${a.active ? "" : "cleared"}`;
+      row.dataset.alarm = String(a.id);
+      row.innerHTML =
+        `<span class="kind">${escapeHtml(a.kind)}</span>` +
+        `<span>${escapeHtml(a.text || "")}</span>` +
+        `<span class="age">${fmt(Math.max(0, t0 - a.t), 0)} s ago${a.active ? "" : " · cleared"}</span>` +
+        `<button type="button" title="Acknowledge: the row leaves once the condition has also cleared.">ack</button>`;
+      row.querySelector("button").addEventListener("click", () => ackAlarm(a.id));
+      alarmsEl.appendChild(row);
+    }
+  }
+
+  function renderBoardAge() {
+    if (!board) {
+      boardAgeEl.textContent = "no board yet";
+      boardAgeEl.classList.add("stale");
+      return;
+    }
+    const age = Date.now() - boardAt;
+    boardAgeEl.textContent = `board ${(age / 1000).toFixed(1)} s ago`;
+    boardAgeEl.classList.toggle("stale", age > BOARD_STALE_MS);
+  }
+
+  let ackTopic = null;
+  function ackAlarm(id) {
+    if (!ackTopic) return;
+    ackTopic.publish(new ROSLIB.Message({ data: JSON.stringify({ id }) }));
+    pushLog("ack", `alarm ${id}`);
   }
 
   function renderIntent() {
@@ -182,6 +295,30 @@
     if (!viewEl.hidden) renderIntent();
   }
 
+  function onBoardMsg(msg) {
+    let b;
+    try {
+      b = JSON.parse(msg.data);
+    } catch (e) {
+      return;
+    }
+    if (!b || !Array.isArray(b.robots) || !Array.isArray(b.tasks)) return;
+    board = b;
+    boardAt = Date.now();
+    for (const a of b.alarms || []) {
+      if (!seenAlarms.has(a.id)) {
+        seenAlarms.add(a.id);
+        pushLog("ALARM", `${a.kind}: ${a.text || ""}`);
+      }
+    }
+    if (!viewEl.hidden) {
+      renderStatus();
+      renderTasks();
+      renderAlarms();
+      renderBoardAge();
+    }
+  }
+
   const ros = new ROSLIB.Ros({ url: `ws://${ROSBRIDGE_HOST}:${ROSBRIDGE_PORT}` });
   ros.on("connection", () => {
     connected = true;
@@ -212,22 +349,41 @@
     reconnect_on_close: true,
   }).subscribe(onIntentMsg);
 
+  // Latched at the gateway, so the current board arrives on subscribe.
+  new ROSLIB.Topic({
+    ros,
+    name: BOARD_TOPIC,
+    messageType: "std_msgs/String",
+    reconnect_on_close: true,
+  }).subscribe(onBoardMsg);
+
+  ackTopic = new ROSLIB.Topic({ ros, name: ACK_TOPIC, messageType: "std_msgs/String" });
+  if (typeof ackTopic.advertise === "function") ackTopic.advertise();
+
+  function renderAll() {
+    renderStatus();
+    renderTasks();
+    renderAlarms();
+    renderBoardAge();
+    renderIntent();
+  }
+
   function tick() {
     if (viewEl.hidden) return;
-    // Drop very old status so cards don't linger forever after a crash.
+    // Drop very old status so cards don't linger forever after a crash —
+    // unless the board still lists the robot, in which case the fleet, not
+    // this page, decides when it is gone (see renderStatus).
     const now = Date.now();
     for (const [id, e] of statuses) {
       if (now - e.recvAt > 15000) statuses.delete(id);
     }
-    renderStatus();
-    renderIntent();
+    renderAll();
   }
 
   // scenarios.js toggles [hidden] on #view-fleet; observe that.
   const obs = new MutationObserver(() => {
     if (!viewEl.hidden) {
-      renderStatus();
-      renderIntent();
+      renderAll();
       if (!tickTimer) tickTimer = setInterval(tick, TICK_MS);
     } else if (tickTimer) {
       clearInterval(tickTimer);
@@ -236,10 +392,13 @@
   });
   obs.observe(viewEl, { attributes: true, attributeFilter: ["hidden"] });
 
-  // Expose for scenarios.js / tests.
+  // Expose for scenarios.js / tests. onBoard takes a {data: json} message so
+  // a headless test can feed a board without rosbridge.
   window.__fleetComms = {
     statuses,
     intents: intentMap,
+    board: () => board,
+    onBoard: onBoardMsg,
     connected: () => connected,
   };
 })();

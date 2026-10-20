@@ -434,19 +434,47 @@
   }
   #fleet-conn.stale { color: #fb7; }
   #fleet-conn.dead { color: #f77; }
+  /* Annunciator strip: the gateway's latched alarms (/fleet/task_board).
+     Red = condition still true, amber = returned to normal but not yet
+     acknowledged; a row leaves only when both are over. */
+  #fleet-alarms { flex: none; margin-bottom: 8px; display: flex; flex-direction: column; gap: 4px; }
+  #fleet-alarms-head { display: flex; align-items: center; gap: 10px; font-size: 0.8rem; color: #9aa; font-weight: 600; }
+  #fleet-alarms-head .count { font-family: monospace; color: #f77; }
+  #fleet-alarms-head .count.none { color: #556; }
+  #fleet-board-age { margin-left: auto; font-family: monospace; font-size: 0.72rem; color: #7bf; }
+  #fleet-board-age.stale { color: #f77; }
+  .fleet-alarm {
+    display: flex; align-items: center; gap: 10px; padding: 5px 8px; border-radius: 4px;
+    border: 1px solid #622; background: #200; font-family: monospace; font-size: 0.74rem; color: #fcc;
+  }
+  .fleet-alarm.cleared { border-color: #652; background: #210; color: #fda; }
+  .fleet-alarm .kind { font-weight: 700; min-width: 10ch; }
+  .fleet-alarm .age { color: #a88; }
+  .fleet-alarm button {
+    margin-left: auto; font-size: 0.7rem; padding: 2px 8px; background: #233; color: #cde;
+    border: 1px solid #456; border-radius: 3px; cursor: pointer;
+  }
+  .fleet-alarm button:hover { background: #345; }
   #fleet-body {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;
     flex: 1 1 auto; min-height: 0;
   }
-  #fleet-status-col, #fleet-intent-col {
+  #fleet-status-col, #fleet-tasks-col, #fleet-intent-col {
     display: flex; flex-direction: column; min-height: 0; gap: 6px;
   }
-  #fleet-status-col h3, #fleet-intent-col h3 {
+  #fleet-status-col h3, #fleet-tasks-col h3, #fleet-intent-col h3 {
     margin: 0; font-size: 0.8rem; color: #9aa; font-weight: 600; flex: none;
   }
-  #fleet-status-list, #fleet-intent-list {
+  #fleet-status-list, #fleet-tasks-list, #fleet-intent-list {
     display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; flex: 1 1 auto;
   }
+  #fleet-tasks { width: 100%; border-collapse: collapse; font-family: monospace; font-size: 0.72rem; }
+  #fleet-tasks th { text-align: left; color: #778; font-weight: 600; padding: 2px 6px; border-bottom: 1px solid #2a2e35; }
+  #fleet-tasks td { padding: 3px 6px; color: #cde; border-bottom: 1px solid #1c1f24; white-space: nowrap; }
+  #fleet-tasks tr.claimed td.state { color: #7bf; }
+  #fleet-tasks tr.carrying td.state { color: #2d5; }
+  #fleet-tasks tr.open td.state, #fleet-tasks tr.bidding td.state { color: #fb7; }
+  #fleet-tasks tr.done td, #fleet-tasks tr.cancelled td { color: #667; }
   .fleet-card {
     background: #14161a; border: 1px solid #2a2e35; border-radius: 6px;
     padding: 10px; flex: none;
@@ -454,6 +482,11 @@
   .fleet-card.fresh { border-color: #2d5; }
   .fleet-card.aging { border-color: #b80; }
   .fleet-card.stale { border-color: #622; opacity: 0.7; }
+  /* The FLEET's verdict (gateway status_timeout_s), not this page's heartbeat age. */
+  .fleet-card.dead { border-color: #f33; background: #1a0c0c; opacity: 1; }
+  .fleet-mode.dead { background: #400; color: #f77; }
+  .fleet-batt { font-family: monospace; font-size: 0.7rem; color: #9c9; margin-left: auto; }
+  .fleet-batt.low { color: #f77; }
   .fleet-card h4 {
     margin: 0 0 6px; font-size: 0.88rem; font-weight: 600;
     display: flex; align-items: center; gap: 8px;
@@ -483,7 +516,7 @@
     content: "Waiting for /fleet/status and /fleet/intent… Start explore_fleet (or any multi-robot run) so fleet_radio + explorers are up.";
     color: #556;
   }
-  #fleet-empty-status, #fleet-empty-intent {
+  #fleet-empty-status, #fleet-empty-tasks, #fleet-empty-intent {
     font-size: 0.78rem; color: #667; padding: 12px; text-align: center;
   }
 
@@ -819,22 +852,37 @@
     </div>
   </div>
 
-  <!-- Fleet mesh radio monitor: /fleet/status + /fleet/intent (webui/fleet_comms.js).
-       Uses rosbridge — needs a live bringup with nodes/fleet_radio.py. -->
+  <!-- Fleet mesh radio monitor + operator annunciator (webui/fleet_comms.js):
+       /fleet/status + /fleet/intent from the robots, /fleet/task_board from the
+       gateway (nodes/fleet_tasks.py --gateway: liveness, battery, who holds
+       which task, latched alarms). Uses rosbridge — needs a live bringup. -->
   <div class="panel" id="view-fleet" hidden>
     <div id="fleet-head">
       <h2>Fleet mesh</h2>
       <span id="fleet-hint"
-            title="Self-reported status and intent broadcasts. Autonomy does not look up peer poses on /tf — this tab shows the same radio channel explorers use.">
-        /fleet/status · /fleet/intent — mesh stand-in (no TF oracle)
+            title="Self-reported status and intent broadcasts plus the gateway's task board. Autonomy does not look up peer poses on /tf — this tab shows the same radio channel explorers use.">
+        /fleet/status · /fleet/intent · /fleet/task_board — mesh stand-in (no TF oracle)
       </span>
       <span id="fleet-conn" class="dead">rosbridge: disconnected</span>
     </div>
+    <div id="fleet-alarms">
+      <div id="fleet-alarms-head">
+        <span>Alarms</span>
+        <span class="count none" id="fleet-alarm-count">none</span>
+        <span id="fleet-board-age" class="stale" title="Age of the last /fleet/task_board from the gateway.">no board yet</span>
+      </div>
+    </div>
     <div id="fleet-body">
       <div id="fleet-status-col">
-        <h3>Status (self-reported pose)</h3>
+        <h3>Robots (heartbeat · battery · tasks)</h3>
         <div id="fleet-status-list">
           <div id="fleet-empty-status">No status yet.</div>
+        </div>
+      </div>
+      <div id="fleet-tasks-col">
+        <h3>Tasks (gateway board)</h3>
+        <div id="fleet-tasks-list">
+          <div id="fleet-empty-tasks">No tasks yet.</div>
         </div>
       </div>
       <div id="fleet-intent-col">

@@ -363,15 +363,78 @@ async function main() {
         fleet: vis('view-fleet'), scenarios: vis('view-scenarios'),
         stageMode: vis('stage-mode'),
         hasStatusCol: !!document.getElementById('fleet-status-list'),
+        hasTasksCol: !!document.getElementById('fleet-tasks-list'),
+        hasAlarms: !!document.getElementById('fleet-alarms'),
         hasIntentCol: !!document.getElementById('fleet-intent-list'),
         hasLog: !!document.getElementById('fleet-log'),
       };
     })()`);
     check(`${vp.label}: fleet tab hides live and scenarios`,
           !fleet.stage && !fleet.right && fleet.fleet && !fleet.scenarios);
-    check(`${vp.label}: fleet tab has status/intent/log panels`,
-          fleet.hasStatusCol && fleet.hasIntentCol && fleet.hasLog);
+    check(`${vp.label}: fleet tab has status/tasks/intent/log panels and an alarm strip`,
+          fleet.hasStatusCol && fleet.hasTasksCol && fleet.hasIntentCol && fleet.hasLog
+          && fleet.hasAlarms);
     check(`${vp.label}: fleet tab hides live-only chrome`, !fleet.stageMode);
+
+    // The annunciator renders the gateway's /fleet/task_board (latched JSON):
+    // liveness is the FLEET's verdict, tasks list their owner, alarms latch.
+    const board = {
+      t: 100.0,
+      robots: [
+        { id: 'robot_0', alive: true, last_heard_s: 0.2, battery_pct: 81.5, mode: 'nav',
+          owned: [1001, 1002], carrying: [1001] },
+        { id: 'robot_1', alive: false, last_heard_s: 9.3, battery_pct: 14.0, mode: 'idle',
+          owned: [], carrying: [] },
+      ],
+      tasks: [
+        { task_id: 1001, pickup: 'shelf_a', dropoff: 'zone_a', state: 'claimed', owner: 'robot_0',
+          committed: true, age_s: 42.0 },
+        { task_id: 1002, pickup: 'shelf_b', dropoff: 'zone_b', state: 'claimed', owner: 'robot_0',
+          committed: false, age_s: 12.0 },
+        { task_id: 1003, pickup: 'shelf_a', dropoff: 'zone_b', state: 'open', owner: null,
+          committed: false, age_s: 35.0 },
+      ],
+      alarms: [
+        { id: 1, kind: 'robot_silent', robot: 'robot_1', task_id: null, t: 95.0, active: true,
+          acked: false, text: 'robot_1 silent for 6 s' },
+        { id: 2, kind: 'task_stalled', robot: null, task_id: 1003, t: 90.0, active: true,
+          acked: false, text: 'task 1003 unclaimed for 30 s' },
+        { id: 3, kind: 'lease_expired', robot: 'robot_1', task_id: 1002, t: 60.0, active: false,
+          acked: false, text: 'task 1002: lease of robot_1 expired, re-auctioned' },
+      ],
+    };
+    const rendered = await page.eval(`(() => {
+      window.__fleetComms.onBoard({ data: ${JSON.stringify(JSON.stringify(board))} });
+      const cards = [...document.querySelectorAll('#fleet-status-list .fleet-card')];
+      const byId = Object.fromEntries(cards.map((c) => [c.dataset.robot, c.className]));
+      return {
+        robots: Object.keys(byId).sort(),
+        r1Dead: /\\bdead\\b/.test(byId.robot_1 || ''),
+        r0Dead: /\\bdead\\b/.test(byId.robot_0 || ''),
+        r0Text: (cards.find((c) => c.dataset.robot === 'robot_0') || {}).textContent || '',
+        taskRows: document.querySelectorAll('#fleet-tasks tbody tr').length,
+        carrying: document.querySelectorAll('#fleet-tasks tr.carrying').length,
+        alarmRows: document.querySelectorAll('#fleet-alarms .fleet-alarm').length,
+        clearedRows: document.querySelectorAll('#fleet-alarms .fleet-alarm.cleared').length,
+        ackButtons: document.querySelectorAll('#fleet-alarms .fleet-alarm button').length,
+        count: document.getElementById('fleet-alarm-count').textContent,
+        boardFresh: !document.getElementById('fleet-board-age').classList.contains('stale'),
+      };
+    })()`);
+    check(`${vp.label}: board lists every robot the gateway has heard, even without /fleet/status here`,
+          rendered.robots.join(',') === 'robot_0,robot_1', rendered.robots.join(','));
+    check(`${vp.label}: a robot the fleet calls silent is marked dead, a live one is not`,
+          rendered.r1Dead && !rendered.r0Dead);
+    check(`${vp.label}: robot card shows battery and the tasks it holds`,
+          /81\.5/.test(rendered.r0Text) && /1001/.test(rendered.r0Text) && /1002/.test(rendered.r0Text),
+          rendered.r0Text.slice(0, 120));
+    check(`${vp.label}: task table lists every task, carried ones marked`,
+          rendered.taskRows === 3 && rendered.carrying === 1,
+          `rows=${rendered.taskRows} carrying=${rendered.carrying}`);
+    check(`${vp.label}: alarms latch: active and returned-to-normal both shown with ack buttons`,
+          rendered.alarmRows === 3 && rendered.clearedRows === 1 && rendered.ackButtons === 3
+          && /2 active/.test(rendered.count), `rows=${rendered.alarmRows} count=${rendered.count}`);
+    check(`${vp.label}: board age reads fresh right after a board arrives`, rendered.boardFresh);
 
     await page.eval(SHOW_SCENARIOS);
     await sleep(600);

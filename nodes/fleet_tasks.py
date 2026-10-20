@@ -51,6 +51,26 @@ Request a task:
     ros2 topic pub --once /fleet/task_request std_msgs/String \\
         '{data: "{\\"pickup\\": \\"shelf_a\\", \\"dropoff\\": \\"zone_a\\"}"}'
     ros2 topic echo /fleet/task_board
+
+The board (latched, 1 Hz) is the operator GUI's whole view of the fleet —
+requirement 2026-10-20: battery, heartbeat and which robot holds which task
+must reach the GUI no matter what. It is the gateway's OWN protocol state,
+not a second opinion: `alive` is the same silence rule the robots apply to
+each other (status_timeout_s), so the GUI and the fleet never disagree.
+
+    {"t": <steady s>,
+     "robots": [{"id": "robot_0", "alive": true, "last_heard_s": 0.3,
+                 "battery_pct": 82.0, "mode": "nav",
+                 "owned": [<task_id>...], "carrying": [<task_id>...]}],
+     "tasks":  [{"task_id", "pickup", "dropoff", "state", "owner",
+                 "committed", "age_s"}],
+     "alarms": [{"id", "kind", "robot", "task_id", "t", "active", "acked",
+                 "text"}]}
+
+Alarms latch like an annunciator: raised by the protocol (robot_silent,
+owner_missing, lease_expired) or by the gateway (task_stalled: nobody has
+claimed it for stalled_after_s), `active` while the condition holds, shown
+until acknowledged on /fleet/alarm_ack {"id": <id>}, dropped once both.
 """
 from __future__ import annotations
 
@@ -79,6 +99,7 @@ TASKS_TOPIC = "/fleet/tasks"
 REQUEST_TOPIC = "/fleet/task_request"
 CANCEL_TOPIC = "/fleet/task_cancel"
 BOARD_TOPIC = "/fleet/task_board"
+ALARM_ACK_TOPIC = "/fleet/alarm_ack"
 
 GATEWAY = 0
 # task_manager's task_id for an auctioned task; the prefix tells its
@@ -91,6 +112,7 @@ DEFAULTS = {
     "pose_stale_s": 5.0,        # no TF this long -> we don't know where we are: no bids
     "reannounce_s": 5.0,
     "gateway_status_hz": 1.0,
+    "stalled_after_s": 30.0,    # gateway: an unclaimed task this old raises an alarm
     "battery": {"sim_start_pct": None},
     "protocol": {},
 }
@@ -180,6 +202,12 @@ class FleetTasks:
         self._next_heartbeat = now
         self._last_alloc: str | None = None
         self._actions: list[tuple] = []
+        # Gateway only (the board): what each robot last told /fleet/status
+        # beyond liveness, when each task was announced, and latched alarms.
+        self.peer_info: dict[int, dict] = {}
+        self._announced: dict[int, float] = {}
+        self.alarms: list[dict] = []
+        self._alarm_seq = 0
         bids = not gateway and can_bid
         self.alloc = Allocator(self.num, params, self._cost if bids else None,
                                is_gateway=gateway, battery_fn=lambda: self.battery_pct)
@@ -230,8 +258,10 @@ class FleetTasks:
             self._log(f"dropped {m.get('type')} from {robot_name(sender)}: {exc}")
         self._flush()
 
-    def on_peer_status(self, robot_id: str, now: float) -> None:
-        """A /fleet/status heartbeat: liveness only (see module docstring)."""
+    def on_peer_status(self, robot_id: str, now: float, *, battery_pct: float | None = None,
+                       mode: str | None = None) -> None:
+        """A /fleet/status heartbeat: liveness (see module docstring), plus,
+        at the gateway, the battery and mode the board shows the operator."""
         self.now = now
         try:
             num = robot_num(robot_id)
@@ -239,6 +269,8 @@ class FleetTasks:
             return
         if num != self.num:
             self.alloc.on_status(num, [], now)
+            if self.gateway:
+                self.peer_info[num] = {"battery_pct": battery_pct, "mode": mode}
             self._flush()
 
     @staticmethod
@@ -342,6 +374,7 @@ class FleetTasks:
         # ID would make the new task invisible to them.
         tid = self._next_id = max(self._next_id + 1, int(time.time() * 10))
         self.names[tid] = (pickup, dropoff)
+        self._announced[tid] = now
         self.alloc.announce(tid, self._xy(pickup), self._xy(dropoff), now)
         self._log(f"announced task {tid}: {pickup} -> {dropoff}")
         self._flush()
@@ -354,13 +387,60 @@ class FleetTasks:
             self._log(f"cancelled task {tid}")
         self._flush()
 
-    def board(self) -> list[dict]:
-        rows = []
-        for tid, t in sorted(self.alloc.tasks.items()):
+    def board(self) -> dict:
+        """The operator's view (module docstring). Robots are everyone the
+        gateway has ever heard a heartbeat from; `alive` is the allocator's
+        own silence judgement, not a fresh age cut-off, so the GUI agrees with
+        the fleet about who is gone."""
+        a, now = self.alloc, self.now
+        tasks, robots = [], []
+        for tid, t in sorted(a.tasks.items()):
             pick, drop = self.names.get(tid, (None, None))
-            rows.append({"task_id": tid, "pickup": pick, "dropoff": drop,
-                         "state": t.state, "owner": robot_name(t.owner)})
-        return rows
+            tasks.append({"task_id": tid, "pickup": pick, "dropoff": drop,
+                          "state": t.state, "owner": robot_name(t.owner),
+                          "committed": a.committed(tid),
+                          "age_s": round(now - self._announced[tid], 1)
+                          if tid in self._announced else None})
+        for num in sorted(set(a.last_status) | set(self.peer_info)):
+            info = self.peer_info.get(num, {})
+            mine = [t for t in a.tasks.values() if t.state == CLAIMED and t.owner == num]
+            last = a.last_status.get(num)
+            robots.append({"id": robot_name(num), "alive": num not in a.silent,
+                           "last_heard_s": round(now - last, 1) if last is not None else None,
+                           "battery_pct": info.get("battery_pct"), "mode": info.get("mode"),
+                           "owned": [t.task_id for t in mine],
+                           "carrying": [t.task_id for t in mine
+                                        if t.owner_cost <= COMMITTED_COST]})
+        # An alarm leaves the board once its condition is gone AND it was
+        # acknowledged — either alone keeps it visible (annunciator rule).
+        self.alarms = [al for al in self.alarms if al["active"] or not al["acked"]][-100:]
+        return {"t": round(now, 2), "robots": robots, "tasks": tasks, "alarms": self.alarms}
+
+    def ack(self, alarm_id: int) -> None:
+        for al in self.alarms:
+            if al["id"] == alarm_id:
+                al["acked"] = True
+
+    def _raise(self, kind: str, text: str, *, robot: str | None = None,
+               task_id: int | None = None, oneshot: bool = False) -> None:
+        """Latch an alarm (gateway). A repeat of a still-active one is ignored;
+        a one-shot has no condition to clear, so it is born inactive and
+        shows only until acknowledged."""
+        if not self.gateway:
+            return
+        for al in self.alarms:
+            if al["active"] and (al["kind"], al["robot"], al["task_id"]) == (kind, robot, task_id):
+                return
+        self._alarm_seq += 1
+        self.alarms.append({"id": self._alarm_seq, "kind": kind, "robot": robot,
+                            "task_id": task_id, "t": round(self.now, 2),
+                            "active": not oneshot, "acked": False, "text": text})
+
+    def _clear(self, kind: str, *, robot: str | None = None, task_id: int | None = None) -> None:
+        for al in self.alarms:
+            if al["active"] and al["kind"] == kind and (robot is None or al["robot"] == robot) \
+                    and (task_id is None or al["task_id"] == task_id):
+                al["active"] = False
 
     def _xy(self, name: str) -> tuple[float, float]:
         x, y, _ = self.stations[name].dock_pose()
@@ -400,6 +480,20 @@ class FleetTasks:
                     if t.state in (OPEN, BIDDING) and t.pickup is not None:
                         self.alloc.out.append({"type": "TaskAnnounce", "task_id": t.task_id,
                                                "pickup": t.pickup, "dropoff": t.dropoff})
+            stalled = float(self.cfg["stalled_after_s"])
+            for t in self.alloc.tasks.values():
+                tid = t.task_id
+                if t.state in (OPEN, BIDDING) and now - self._announced.get(tid, now) > stalled:
+                    self._raise("task_stalled", f"task {tid} unclaimed for {stalled:.0f} s",
+                                task_id=tid)
+                else:
+                    self._clear("task_stalled", task_id=tid)
+                if not t.owner_missing:  # the owner renewed, finished, or was cancelled
+                    self._clear("owner_missing", task_id=tid)
+            for tid in [tid for tid in self._announced if tid not in self.alloc.tasks]:
+                del self._announced[tid]
+                self._clear("task_stalled", task_id=tid)
+                self._clear("owner_missing", task_id=tid)
         self._flush()
 
     # ---- outputs ------------------------------------------------------------
@@ -449,6 +543,20 @@ class FleetTasks:
                       "committed", "owner_missing"):
             detail = {k: v for k, v in e.items() if k not in ("event", "robot_id", "t")}
             self._log(f"{kind} {detail}" if detail else kind)
+            peer = robot_name(e.get("peer"))
+            if kind == "robot_silent":
+                self._raise("robot_silent", f"{peer} silent for "
+                            f"{self.alloc.p.status_timeout_s:.0f} s", robot=peer)
+            elif kind == "robot_back":
+                self._clear("robot_silent", robot=peer)
+            elif kind == "owner_missing":
+                self._raise("owner_missing", f"task {tid}: owner {robot_name(e.get('owner'))} "
+                            f"silent with the item on board", robot=robot_name(e.get("owner")),
+                            task_id=tid)
+            elif kind == "lease_expired":
+                self._raise("lease_expired", f"task {tid}: lease of "
+                            f"{robot_name(e.get('owner'))} expired, re-auctioned",
+                            robot=robot_name(e.get("owner")), task_id=tid, oneshot=True)
 
     def drain(self) -> list[tuple]:
         actions, self._actions = self._actions, []
@@ -522,6 +630,7 @@ def main(argv=None):
                 self.board_pub = self.create_publisher(String, BOARD_TOPIC, LATCHED)
                 self.create_subscription(String, REQUEST_TOPIC, self._on_request, 10)
                 self.create_subscription(String, CANCEL_TOPIC, self._on_cancel, 10)
+                self.create_subscription(String, ALARM_ACK_TOPIC, self._on_ack, 10)
             else:
                 self.tf_buffer = tf2_ros.Buffer()
                 self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -560,8 +669,15 @@ def main(argv=None):
         def _on_status(self, msg):
             st = fleet_radio.parse_status(msg.data)
             if st is not None:
-                self.core.on_peer_status(st["robot_id"], time.monotonic())
+                self.core.on_peer_status(st["robot_id"], time.monotonic(),
+                                         battery_pct=st["battery_pct"], mode=st["mode"])
                 self._act()
+
+        def _on_ack(self, msg):
+            try:
+                self.core.ack(int(json.loads(msg.data)["id"]))
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                self.get_logger().error(f"bad alarm ack {msg.data!r}: {exc}")
 
         def _on_task_status(self, msg):
             self.core.on_task_status(msg.data, time.monotonic())

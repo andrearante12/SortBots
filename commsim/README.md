@@ -168,6 +168,8 @@ launch starts the robot side with `task_manager:=true`. Tuning is
 - **Restart:** `fleet_tasks` reads task_manager's latched status; a carried task is adopted, anything else is cancelled and re-auctioned
 - **Between hosts**, `scripts/fleet_bridge.sh` carries `/fleet/*` and nothing else over the mesh ([`hw/README.md`](hw/README.md), step 7)
 
+- **The operator's board (2026-10-20):** the gateway publishes `/fleet/task_board` (latched, 1 Hz): every robot it has heard with `alive` (its own `status_timeout_s` verdict, so the GUI and the fleet agree), `last_heard_s`, `battery_pct`, `owned` and `carrying` task ids; every task with owner and `committed`; and latched alarms (`robot_silent`, `owner_missing`, `lease_expired`, `task_stalled`) that stay until acknowledged on `/fleet/alarm_ack`. The dashboard's Fleet tab renders it. In the model the same guarantee is a judged check: the gateway must hear every reachable robot within `status_timeout_s` (`gateway_view` failure, `des/sim.py`), which the 1 Hz gateway copy of Status satisfies at every tested size
+
 Offline tests: `tests/fleet_tasks_test.py`, `tests/fleet_bridge_test.py`,
 `tests/grid_dist_test.py`. Request a task with `/fleet/task_request`, watch
 `/fleet/task_board`.

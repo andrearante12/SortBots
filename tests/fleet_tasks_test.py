@@ -82,7 +82,8 @@ class Bus:
                         continue
                     for other_name, other in self.nodes.items():
                         if other_name not in self.down:
-                            other.on_peer_status(rid, self.t)
+                            other.on_peer_status(rid, self.t,
+                                                 battery_pct=self.nodes[rid].battery_pct)
             for n in self.nodes.values():
                 if self.poses_live and n.pose is not None:
                     n.set_pose(n.pose, self.t)
@@ -100,7 +101,14 @@ class Bus:
         self._pump()
 
     def board(self, tid):
-        return next(r for r in self.gw.board() if r["task_id"] == tid)
+        return next(r for r in self.gw.board()["tasks"] if r["task_id"] == tid)
+
+    def robot(self, rid):
+        return next(r for r in self.gw.board()["robots"] if r["id"] == rid)
+
+    def alarms(self, kind=None, active=None):
+        return [a for a in self.gw.board()["alarms"]
+                if (kind is None or a["kind"] == kind) and (active is None or a["active"] == active)]
 
 
 def shelf_a():
@@ -390,6 +398,78 @@ def test_stale_pose_stops_bidding_until_tf_is_back():
     bus.nodes["robot_0"].set_pose(near(1.0), bus.t)
     bus.run(6.0)  # the gateway re-announces; a rebid round picks it up
     assert bus.board(tid)["owner"] == "robot_0"
+
+
+# ---- the operator's board (requirement 2026-10-20: battery, heartbeat and
+# task ownership reach the GUI; alarms latch until acknowledged)
+
+def test_board_shows_every_robot_with_battery_liveness_and_tasks():
+    bus = Bus({"robot_0": near(0.5), "robot_1": near(5.0)})
+    bus.nodes["robot_0"].battery_pct = 73.0
+    bus.run(1.0)
+    tid = bus.request()
+    bus.run(3.0)
+    bus.report("robot_0", tid, "NAV_TO_DROPOFF")
+    bus.run(1.0)
+    b = bus.gw.board()
+    assert {r["id"] for r in b["robots"]} == {"robot_0", "robot_1"}
+    r0, r1 = bus.robot("robot_0"), bus.robot("robot_1")
+    assert r0["alive"] and r1["alive"] and r0["last_heard_s"] < 0.5
+    assert r0["battery_pct"] == 73.0 and r1["battery_pct"] is None
+    assert r0["owned"] == [tid] and r0["carrying"] == [tid] and r1["owned"] == []
+    assert bus.board(tid)["committed"] and bus.board(tid)["age_s"] > 3
+    assert b["alarms"] == []
+
+
+def test_silent_robot_raises_a_latched_alarm_that_clears_on_return():
+    bus = Bus({"robot_0": near(1.0), "robot_1": near(4.0)})
+    bus.run(1.0)
+    bus.down.add("robot_1")
+    bus.run(CFG["protocol"]["status_timeout_s"] + 1.0)
+    assert not bus.robot("robot_1")["alive"] and bus.robot("robot_0")["alive"]
+    (al,) = bus.alarms("robot_silent")
+    assert al["robot"] == "robot_1" and al["active"] and not al["acked"]
+    bus.down.clear()
+    bus.run(1.0)
+    assert bus.robot("robot_1")["alive"]
+    (al,) = bus.alarms("robot_silent")
+    assert not al["active"] and not al["acked"]  # returned to normal, still unacked
+    bus.gw.ack(al["id"])
+    assert bus.alarms() == []  # cleared AND acked: gone
+    bus.down.add("robot_1")
+    bus.run(CFG["protocol"]["status_timeout_s"] + 1.0)
+    assert bus.alarms("robot_silent", active=True)[0]["id"] != al["id"]  # a new episode
+
+
+def test_carried_task_with_a_silent_owner_alarms_until_it_is_finished():
+    bus = Bus({"robot_0": near(1.0), "robot_1": near(5.0)})
+    bus.run(1.0)
+    tid = bus.request()
+    bus.run(3.0)
+    bus.report("robot_0", tid, "NAV_TO_DROPOFF")
+    bus.down = {"robot_0"}
+    bus.run(30.0)
+    (al,) = bus.alarms("owner_missing")
+    assert al["task_id"] == tid and al["robot"] == "robot_0" and al["active"]
+    bus.down = set()
+    bus.run(2.0)
+    bus.report("robot_0", tid, "DONE")
+    bus.run(2.0)
+    assert bus.alarms("owner_missing", active=True) == []
+
+
+def test_unclaimed_task_alarms_as_stalled_until_someone_takes_it():
+    bus = Bus({"robot_0": near(1.0)}, stalled_after_s=5.0, failed_backoff_s=20.0)
+    bus.run(1.0)
+    tid = bus.request()
+    bus.run(3.0)
+    bus.report("robot_0", tid, "FAILED")  # the only robot refuses it for 20 s
+    bus.run(8.0)
+    (al,) = bus.alarms("task_stalled", active=True)
+    assert al["task_id"] == tid
+    bus.run(15.0)  # backoff over: robot_0 takes it again
+    assert bus.board(tid)["owner"] == "robot_0"
+    assert bus.alarms("task_stalled", active=True) == []
 
 
 def test_robot_timers_match_the_measured_commsim_config():
