@@ -131,7 +131,8 @@ def test_build_trace_from_the_synthetic_run(tmp_path):
     icmp = next(e for e in air if e["kind"] == "icmp")
     assert (icmp["ta"], icmp["ra"], icmp["dest"], icmp["ack"], icmp["via"]) == (1, 2, 2, True, "ack")
     assert icmp["dur"] == 400  # ACK pairing: n2 has no rx capture
-    assert report["ack_match"][1] == {"unicast": 1, "acked": 1, "orphan_acks": 2}
+    # orphan ACKs are not counted when receiver captures exist (they would all be)
+    assert report["ack_match"][1] == {"unicast": 1, "acked": 1, "orphan_acks": 0}
 
     tx = [e for e in ev if e["k"] == "app_tx"]
     rx = [e for e in ev if e["k"] == "app_rx"]

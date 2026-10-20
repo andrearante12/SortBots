@@ -105,6 +105,13 @@ VM, so nothing needs aligning). Event kinds:
 - **Zenoh runs:** TCP payloads are opaque, so hops carry IPs only and
   delivery/silence come from the stub logs alone.
 - Positions are static: the emulation does not move nodes.
+- **The first ~8 s are a start-up transient**, not a finding about the
+  design: no unicast flows on the mesh until ARP resolves, so every Status
+  the stubs send in that window shows as `unroutable` (red rings at the
+  senders). `m1.py`'s 20 s warmup hides it from the measurements; a trace
+  judged over its whole length reports delivery accordingly (A/B-checked:
+  identical with the replay captures off). Open question for the hardware
+  runbook — a robot joining the mesh may be mute for that long.
 
 ## Tests
 

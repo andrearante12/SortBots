@@ -363,7 +363,10 @@ def read_air(path: Path, t0: int, by_mac: dict, by_ip: dict, max_inflight_us: in
                 e["dur"] = max(1, t - e["t"])
                 if ta is not None:
                     per_node[ta][1] += 1
-            elif ta is not None:
+            elif ta is not None and not rx_nodes:
+                # only meaningful without receiver captures: with them, hops
+                # into covered nodes never enter the queue, so every ACK for
+                # them would count here and say nothing
                 per_node[ta][2] += 1
             continue
         expire(t)

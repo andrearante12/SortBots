@@ -965,3 +965,73 @@ robots now run `scripted_pick.py --mock` (picks reported successful without
 moving an arm) and bid. Not yet run: a two-robot Isaac run needs ~10 GB and
 the laptop fits one robot (measured 2026-10-09); it is the next
 thing to do on the workstation.
+
+## Session 4 — 2026-10-20
+
+### Step 28 — full rerun; the gateway's view is now a judged requirement
+
+Everything rerun on the committed code. Offline: 69 commsim tests, 224 repo
+tests. DES: `fix_sweep.sh` → 108/120 scenarios at the default design
+(reference 110; the two-run difference is victim selection shifting with the
+2026-10-19 allocator changes, not timing), capacity unchanged (V4 UDP 24,
+bg 15 % 20, bg 30 % 16). Emulation: the first batch failed at `modprobe
+batman-adv` — the VM's kernel had moved to 6.8.0-147 with `linux-modules-extra`
+only for -142; after installing it: reroute 1.90 / 1.91 s (OGM 500 / 250),
+link-loss Status gaps 3.5 / 3.5 / 2.0 s (TCP) and 0.7 / 2.7 / 1.7 s (UDP),
+n=15 overload reproduced (UDP delivery 0.95 vs TCP 0.70). The n=10 numbers
+were noisier than the reference (busy 0.31–0.53) because a stale 4-node mesh
+was still up in the VM; rerun cleanly in step 29 (busy 0.37).
+
+Requirement (team, 2026-10-20): the operator GUI must receive battery,
+heartbeat and task ownership from every robot no matter what, and the GUI's
+access point is a mesh router like any other. The design already carried a
+1 Hz copy of Status to the gateway in neighbour-only mode (step 14), but
+nothing judged it. Now `sim.py` samples the gateway's view every second:
+a robot the gateway can route to must have been heard within
+`status_timeout_s`, else `gateway_view` fails the run (partitioned robots
+excluded by the same route test as the Status-gap judge; one timeout of
+grace after a revive). Scenarios: still 108/120 — the new check only added
+to three runs already failing on `false_silent` (the same 6.7 s gap).
+Capacity sweep: zero gateway-view failures to n = 22, max staleness 1.6 s.
+`des_test.py` also pins that two robots out of each other's range route
+through the gateway (1 → 0 → 2). On the robots, `/fleet/task_board` grew
+robots (`alive` = the gateway allocator's own silence verdict, battery,
+owned, carrying), `committed` per task, and latched alarms (`robot_silent`,
+`owner_missing`, `lease_expired`, `task_stalled`) acknowledged on
+`/fleet/alarm_ack`; the dashboard's Fleet tab is the annunciator.
+
+### Step 29 — packet-transfer replay (`commsim/viz`)
+
+A page that replays one emulation run frame by frame
+([`../viz/README.md`](../viz/README.md)): robots on the floor, SNR links,
+batman next hops, every frame as a dot on its hop, drops flashed, link
+blocks, each robot's view of who is silent. `m1.py` now also records what
+it needs: full-snaplen hwsim0, a capture on every receiver's mesh
+interface, a `batctl o` + station-dump poller (0.5 s), and every
+`plink_action` with its time; `--unblock-at` reopens a blocked link.
+
+Findings while building it, all on the real stack:
+
+- **hwsim0's ACK records cannot attribute delivery.** They name only the
+  transmitter, and the n − 1 copies of one Status are queued within 20 µs,
+  so one lost copy mis-pairs every following ACK (median ACK − TX came out
+  as 10 ms; the true hop time is 0.5–1 ms). The receivers' own captures are
+  the oracle (`rx_<i>.pcap`); ACK pairing stays as the fallback for old runs.
+- **Reroute on the diamond, seen directly:** n0–n2 blocked at 20.01 s; by
+  the 21.32 s poll n0's route to n3 had moved to relay 1 (≤ 1.3 s, poll
+  limited; the ping method measured 1.9 s). After the unblock at 40 s
+  batman kept the working route for 17 s before flipping back — equal TQ,
+  no reason to move. No false silence. 2738 / 2738 Status hops judged from
+  receiver captures, hop time p50 0.96 ms, p99 4.3 ms.
+- **The first ~8 s after the stubs start carry no unicast at all** — no
+  ARP replies, so every Status is `unroutable`. `gateway_reaches_all` has
+  been False in every run ever recorded (the ping check runs inside that
+  window) and the 20 s warmup hides it from every measurement. A/B with
+  the replay captures off: identical. Open question for the hardware
+  runbook: a robot joining the mesh may be mute for that long.
+- n = 10 with all captures on: busy 0.37, CPU 19.3 %/node (20.8 % this
+  morning without them) — the captures do not perturb the run. Trace
+  22.6 MB (168k events), replays at 60 fps.
+
+![diamond replay, 0.9 s after the block](figures/viz_diamond.png)
+![n=10 warehouse replay](figures/viz_warehouse_n10.png)
