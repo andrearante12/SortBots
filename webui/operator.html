@@ -326,10 +326,10 @@
     <div id="console-warning" hidden></div>
     <p id="scenario-hint"></p>
     <form id="launch-form" autocomplete="off">
-        <div class="lf-row">
-          <span class="lf-k">Quick start</span>
-          <select id="lf-preset" title="Presets from configs/scenarios/ — picking one fills the form in"></select>
-        </div>
+        <!-- No Quick start row here: the form is the launcher, "custom" every time.
+             scenarios.js still drives #lf-preset, so it stays in the DOM, hidden;
+             presets remain one command away (scripts/sim_ctl.sh start NAME). -->
+        <select id="lf-preset" hidden></select>
         <p id="lf-preset-note" class="lf-note"></p>
         <div class="lf-row" data-field="scene">
           <span class="lf-k">Environment</span>

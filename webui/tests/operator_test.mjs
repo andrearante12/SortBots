@@ -229,7 +229,7 @@ async function main() {
     check(`${vp.label}: launch form is filled from the API`, await page.eval(`document.querySelectorAll('#lf-preset option').length > 1`));
     check(`${vp.label}: Start is wired (not disabled by a missing console)`, await page.eval(`!document.getElementById('lf-start').disabled`));
     check(`${vp.label}: with no session the panel is just the form`, await visible('#launch-form') && !(await visible('#session-pane')) && !(await visible('#lf-command')));
-    check(`${vp.label}: the Fleet demo is a Quick start preset`, await page.eval(`[...document.querySelectorAll('#lf-preset option')].some((o) => o.value === 'fleet_demo')`));
+    check(`${vp.label}: no Quick start row: the form is custom`, !(await visible('#lf-preset')) && (await page.eval(`document.getElementById('lf-preset').value`)) === '');
     await shot(`${vp.label}-session-panel`);
     await page.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
     await sleep(200);
