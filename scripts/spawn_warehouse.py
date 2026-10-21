@@ -14,8 +14,14 @@ Both robots curve gently in the warehouse, each one publishing:
     /<robot>/camera/chase/depth sensor_msgs/Image (32FC1, meters; first N robots)
     /<robot>/tf                tf2_msgs/TFMessage  (full articulation tree)
 
+plus, once for the whole sim (see _WorldRuntime):
+
+    /sim/ground_truth          std_msgs/String JSON, 10 Hz sim: true robot + actor poses
+    /sim/world                 std_msgs/String JSON, latched: the --world layout
+
 and subscribing:
 
+    /sim/world_cmd             std_msgs/String JSON {"cmd": "reset"|"start"|"pause"}
     /<robot>/cmd_vel           geometry_msgs/Twist  (--drive cmd_vel; holonomic x/y/yaw)
     /<robot>/pick_cmd          std_msgs/String      ("attach"/"detach"; robot_0 only,
                                                       see nodes/task_manager.py)
@@ -345,10 +351,38 @@ def parse_args() -> argparse.Namespace:
             "RTX 4070 laptop (scripts/bench_sim.sh, 2026-10-06)."
         ),
     )
+    p.add_argument(
+        "--world",
+        default=None,
+        metavar="NAME",
+        help=(
+            "A configs/worlds/NAME.yaml layout to add to the scene: static "
+            "props (colliders) and scripted movers (visual only, driven on a "
+            "resettable world clock — see simtest/world.py). By name only, "
+            "never a path."
+        ),
+    )
     return p.parse_args()
 
 
 args = parse_args()
+
+# Validate --world BEFORE SimulationApp: a typo'd name or a bad layout should
+# cost a second, not Isaac's 60 s startup plus an asset stream.
+WORLD = None
+if args.world:
+    sys.path.insert(0, str(REPO_ROOT))
+    from simtest import world as world_lib  # noqa: E402
+
+    try:
+        WORLD = world_lib.load(args.world)
+    except world_lib.WorldError as e:
+        print(f"ERROR: --world {args.world}: {e}", file=sys.stderr, flush=True)
+        sys.exit(1)
+    if args.scene not in WORLD["scenes"]:
+        print(f"ERROR: --world {args.world} is laid out for scenes {WORLD['scenes']}, "
+              f"not --scene {args.scene}", file=sys.stderr, flush=True)
+        sys.exit(1)
 
 # 0 would render nothing at all (and divide the modulo by zero); negatives are
 # meaningless. Clamp rather than exit — this is a perf knob, not a correctness
@@ -1060,6 +1094,230 @@ def _place_package_on_surface(stage, package_prim_path: str, decks) -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# --world: props + scripted movers (configs/worlds/*.yaml, simtest/world.py)
+# ---------------------------------------------------------------------------
+
+WORLD_ROOT = "/World/SimTest"
+GROUND_TRUTH_EVERY = 6  # physics steps -> 10 Hz in sim time
+
+
+def _world_color_material(stage, cache: dict, rgb):
+    """One OmniPBR colour material per distinct colour, shared across prims."""
+    from build_warehouse import _make_color_material
+
+    key = tuple(round(c, 3) for c in rgb)
+    if key not in cache:
+        cache[key] = _make_color_material(
+            stage, f"{WORLD_ROOT}/Looks/c{len(cache)}", key)
+    return cache[key]
+
+
+def _author_world_shape(stage, path: str, item: dict, *, collider: bool):
+    """The item's geometry under `path`, standing on the floor at the parent's
+    origin — so moving an actor is just its parent Xform's translate/yaw."""
+    from build_warehouse import _author_box, _author_cylinder
+
+    if item["shape"] == "box":
+        sx, sy, sz = item["size"]
+        return _author_box(stage, f"{path}/geom", (sx, sy, sz), (0.0, 0.0, sz / 2.0),
+                           collider=collider)
+    return _author_cylinder(stage, f"{path}/geom", item["radius"], item["height"],
+                            (0.0, 0.0, item["height"] / 2.0), collider=collider)
+
+
+def _spawn_world(stage, w: dict) -> dict:
+    """Author a world's props and actors. Returns {actor_id: (translate_op, rotate_op)}.
+
+    Props are static colliders (CollisionAPI, no RigidBodyAPI — they never move
+    and cost the solver nothing), so a robot that drives into a crate stops.
+
+    Actors are VISUAL ONLY. They still show up in RGB and depth, which is all
+    perception sees, but a kinematic collider pushing an articulation around
+    would make the robot's trajectory depend on contact solver details and
+    turn a fixed-path test into a different run every time. Contact with an
+    actor is scored from ground truth instead (simtest clearance metric).
+    Moved by authoring their parent Xform's ops each physics step — the same
+    USD-attribute route the mock-pick package already rides on.
+    """
+    import math
+
+    from pxr import Gf, UsdGeom
+
+    UsdGeom.Scope.Define(stage, WORLD_ROOT)
+    UsdGeom.Scope.Define(stage, f"{WORLD_ROOT}/Looks")
+    materials: dict = {}
+    from build_warehouse import _bind
+
+    for prop in w["props"]:
+        path = f"{WORLD_ROOT}/props/{prop['id']}"
+        x, y, yaw = prop["pose"]
+        if prop["shape"] == "usd":
+            ok = _spawn_usd_prop(stage, path, x, y, yaw, ref=prop["ref"], scale=prop["scale"])
+            if not ok:
+                # Asset root unreachable: keep the obstacle where the metrics
+                # think it is, as a plain box of the declared footprint.
+                emit(f"  world prop {prop['id']}: asset root unreachable, using a box")
+                fx, fy = prop["footprint"]
+                prop = {**prop, "shape": "box", "size": (fx, fy, prop["height"])}
+            else:
+                emit(f"  world prop {prop['id']}: {prop['ref']} at ({x}, {y})")
+                continue
+        xf = UsdGeom.Xform.Define(stage, path)
+        xf.ClearXformOpOrder()
+        xf.AddTranslateOp().Set(Gf.Vec3d(x, y, 0.0))
+        xf.AddRotateXYZOp().Set(Gf.Vec3f(0.0, 0.0, math.degrees(yaw)))
+        geom = _author_world_shape(stage, path, prop, collider=prop["collider"])
+        _bind(geom, _world_color_material(stage, materials, prop["color"]))
+        emit(f"  world prop {prop['id']}: {prop['shape']} at ({x}, {y})")
+
+    actors = {}
+    for actor in w["actors"]:
+        path = f"{WORLD_ROOT}/actors/{actor['id']}"
+        xf = UsdGeom.Xform.Define(stage, path)
+        xf.ClearXformOpOrder()
+        t_op = xf.AddTranslateOp()
+        r_op = xf.AddRotateXYZOp()
+        geom = _author_world_shape(stage, path, actor, collider=False)
+        _bind(geom, _world_color_material(stage, materials, actor["color"]))
+        actors[actor["id"]] = (t_op, r_op)
+        emit(f"  world actor {actor['id']}: {actor['shape']}, {actor['path']['mode']} over "
+             f"{len(actor['path']['waypoints'])} waypoints at {actor['path']['speed_mps']} m/s")
+    return actors
+
+
+class _WorldRuntime:
+    """The world clock, the actors it drives, and the ground-truth topics.
+
+    Runs with or without --world: /sim/ground_truth always carries the true
+    robot poses, which is what lets a test score clearance or goal error
+    against where a robot actually IS rather than where its own SLAM thinks it
+    is. Robot pose = spawn + the base's world-frame prismatic joints (root_x,
+    root_y sit before root_z_rotation in the chain — see the cmd_vel comment
+    in the step loop), so it costs one get_joint_positions per robot, no
+    USD/Fabric read.
+
+    The world clock is NOT sim time: it advances with sim time only while
+    running, and /sim/world_cmd resets/starts/pauses it, so a test can put an
+    actor's path and a robot's goal on the same t=0 (simtest/world.py's
+    "ACTOR TIME"). Commands are applied on the next ground-truth tick.
+    """
+
+    def __init__(self, w: dict | None, actor_ops: dict, spawn_positions: dict):
+        import json
+
+        import rclpy
+        from rclpy.node import Node
+        from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+        from std_msgs.msg import String
+
+        try:
+            rclpy.init()
+        except RuntimeError:
+            pass  # already initialized (the bridge, or _start_extra_ros_subscribers)
+        self._json = json
+        self._String = String
+        self.world = w
+        self.actor_ops = actor_ops
+        self.spawn = spawn_positions
+        self.running = bool(w and w["autostart"])
+        self.wt = 0.0                 # world clock, seconds
+        self.last_sim = None
+        self.pending: list[str] = []
+
+        self.node = Node("sim_world")
+        latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             reliability=ReliabilityPolicy.RELIABLE)
+        self.gt_pub = self.node.create_publisher(String, "/sim/ground_truth", 10)
+        self.world_pub = self.node.create_publisher(String, "/sim/world", latched)
+        self.node.create_subscription(String, "/sim/world_cmd", self._on_cmd, 10)
+        self.world_pub.publish(String(data=json.dumps(self._describe())))
+
+    def _describe(self) -> dict:
+        """/sim/world: the static half — what to draw, and the shapes the
+        metrics use. Footprints via simtest.world so both agree exactly."""
+        if not self.world:
+            return {"world": None, "props": [], "actors": []}
+        from simtest import world as wl
+
+        def common(i):
+            return {"id": i["id"], "label": i["label"], "shape": i["shape"],
+                    "color": list(i["color"]),
+                    "height": i.get("height") or (i.get("size") or (0, 0, 1.0))[2]}
+        return {
+            "world": self.world["name"], "title": self.world["title"],
+            "props": [{**common(p), "footprint": wl.prop_footprint(p)}
+                      for p in self.world["props"]],
+            "actors": [{**common(a), "radius": a.get("radius"),
+                        "size": a.get("size"), "path": list(a["path"]["waypoints"]),
+                        "mode": a["path"]["mode"]} for a in self.world["actors"]],
+        }
+
+    def _on_cmd(self, msg) -> None:
+        try:
+            cmd = self._json.loads(msg.data).get("cmd")
+        except (ValueError, AttributeError):
+            cmd = msg.data.strip()
+        if cmd in ("reset", "start", "pause", "restart"):
+            self.pending.append(cmd)
+
+    def _apply(self, cmd: str) -> None:
+        if cmd in ("reset", "restart"):
+            self.wt = 0.0
+            self.running = cmd == "restart"
+        elif cmd == "start":
+            self.running = True
+        elif cmd == "pause":
+            self.running = False
+        emit(f"  world clock: {cmd} -> wt={self.wt:.2f} running={self.running}")
+
+    def step(self, sim_t: float) -> None:
+        """Every physics step: advance the clock and move the actors."""
+        if self.running and self.last_sim is not None:
+            self.wt += max(0.0, sim_t - self.last_sim)
+        self.last_sim = sim_t
+        if not self.actor_ops:
+            return
+        import math
+
+        from pxr import Gf
+        from simtest import world as wl
+
+        for actor in self.world["actors"]:
+            p = wl.pose_at(actor["path"], self.wt)
+            t_op, r_op = self.actor_ops[actor["id"]]
+            t_op.Set(Gf.Vec3d(p["x"], p["y"], 0.0))
+            r_op.Set(Gf.Vec3f(0.0, 0.0, math.degrees(p["yaw"])))
+
+    def tick(self, sim_t: float, robots: dict) -> None:
+        """Every GROUND_TRUTH_EVERY steps: take commands, publish ground truth."""
+        import rclpy
+
+        rclpy.spin_once(self.node, timeout_sec=0.001)  # see _start_extra_ros_subscribers
+        while self.pending:
+            self._apply(self.pending.pop(0))
+        out = {"t": round(sim_t, 4), "wt": round(self.wt, 4), "running": self.running,
+               "world": self.world["name"] if self.world else None,
+               "robots": {}, "actors": {}}
+        for name, (robot, *_rest) in robots.items():
+            q = robot.get_joint_positions()
+            sx, sy = self.spawn[name][:2]
+            out["robots"][name] = {"x": round(sx + float(q[0]), 4),
+                                   "y": round(sy + float(q[1]), 4),
+                                   "yaw": round(float(q[2]), 4)}
+        if self.world:
+            from simtest import world as wl
+
+            for actor in self.world["actors"]:
+                p = wl.pose_at(actor["path"], self.wt)
+                out["actors"][actor["id"]] = {k: (round(v, 4) if isinstance(v, float) else v)
+                                              for k, v in p.items()}
+        self.gt_pub.publish(self._String(data=self._json.dumps(out)))
+
+    def close(self) -> None:
+        self.node.destroy_node()
+
+
 def main() -> int:
     import numpy as np
     import omni.timeline
@@ -1289,6 +1547,14 @@ def main() -> int:
             emit(f"  WARNING: gripper link {gripper_path} NOT FOUND — the mock "
                  f"pick will silently do nothing. /World/robot_0 children: {names}")
 
+    actor_ops = {}
+    if WORLD is not None:
+        emit(f"  world={WORLD['name']}: {len(WORLD['props'])} prop(s), "
+             f"{len(WORLD['actors'])} actor(s), autostart={WORLD['autostart']}")
+        actor_ops = _spawn_world(stage, WORLD)
+    world_rt = _WorldRuntime(WORLD, actor_ops, spawn_positions)
+    emit("  /sim/ground_truth + /sim/world publishers started")
+
     # Global /clock publisher so external ROS 2 nodes can `use_sim_time:=true`.
     # Bridges sim time → /clock at every playback tick.
     import omni.graph.core as og  # noqa: E402
@@ -1428,8 +1694,15 @@ def main() -> int:
         # obvious: the OnPlaybackTick graphs (/clock, odom, TF, cmd_vel)
         # evaluate on app update, not on the physics step, so a large N stops
         # publishing time itself.
+        # Actors move BEFORE the step so the frame rendered below already has
+        # them at this step's pose. world.current_time is the same clock
+        # /clock publishes (IsaacReadSimulationTime), so ground-truth stamps
+        # line up with every other sim-time message.
+        world_rt.step(world.current_time)
         world.step(render=(step % args.render_every == 0))
         step += 1
+        if step % GROUND_TRUTH_EVERY == 0:
+            world_rt.tick(world.current_time, robots)
         if step % 60 == 0:
             elapsed = step * dt
             pose = " ".join(
@@ -1449,6 +1722,7 @@ def main() -> int:
 
     if extra_ros_node is not None:
         extra_ros_node.destroy_node()  # not rclpy.shutdown() — Isaac's own bridge may share the context
+    world_rt.close()
 
     emit(f"spawn_warehouse: ran {step} steps ({step * dt:.1f} sim seconds)")
     emit("spawn_warehouse: OK")

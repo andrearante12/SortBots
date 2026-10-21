@@ -21,7 +21,7 @@
 #                       [--no-headless] [--teleop] [--localize | --resume]
 #                       [--no-chase-cam | --chase-cam-robots N]
 #                       [--render-every N] [--lite-render]
-#                       [--map PATH] [--explore] [--keep-console]
+#                       [--map PATH] [--explore] [--world NAME] [--keep-console]
 #   scripts/run_demo.sh stop [--keep-console]   # tear the pipeline down
 #
 # --robots N spawns N robots in Isaac (configs/robots.yaml order) AND brings
@@ -33,6 +33,10 @@
 # so robots explore collaboratively rather than as independent single-robot
 # runs sharing a warehouse. --robot-id (singular) still names which ONE
 # robot --localize/--resume/--map/--teleop apply to.
+#
+# --world NAME adds configs/worlds/NAME.yaml to the scene: static props and
+# scripted movers (see simtest/world.py). Validated by name in
+# spawn_warehouse.py before Isaac boots, so a bad name fails in a second.
 #
 # Default is --robots 2: SortBots is a fleet project, so the plain demo comes
 # up as a collaborative fleet. Pass --robots 1 for the single-robot case
@@ -189,7 +193,7 @@ CHASE_CAM_ARGS=""
 # CPU-bound one much less — measure with scripts/bench_sim.sh before relying
 # on either (numbers in its header).
 RENDER_ARGS=""
-LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false
+LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false; WORLD_ARGS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
@@ -208,11 +212,15 @@ while [[ $# -gt 0 ]]; do
     --resume)   RESUME=true; shift;;
     --map)      MAP_DB="$2";  shift 2;;
     --explore)  EXPLORE=true; shift;;
+    # Bare name only: spawn_warehouse.py resolves it under configs/worlds/ and
+    # rejects anything that isn't simtest.world.NAME_RX.
+    --world)    [[ "$2" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]] || { echo "[run_demo] bad --world name: $2"; exit 2; }
+                WORLD_ARGS="--world $2"; shift 2;;
     # Set by webui/session.py when the Scenarios tab launches a run: the
     # dashboard console is already up and owns rosbridge/web_video_server, so
     # don't kill it on teardown and don't start a second copy in the bringup.
     --keep-console) KEEP_CONSOLE=true; shift;;
-    -h|--help) sed -n '2,57p' "$0"; exit 0;;
+    -h|--help) sed -n '2,61p' "$0"; exit 0;;
     *) echo "[run_demo] unknown arg: $1"; exit 2;;
   esac
 done
@@ -285,7 +293,7 @@ echo "[run_demo] launching Isaac Sim ($SCENE, $ROBOTS robot(s), $HEADLESS)..."
 rm -f "$SIM_RESULT"
 setsid bash -c "source '$REPO_ROOT/scripts/activate_isaac.sh' >/dev/null 2>&1; \
   exec python '$REPO_ROOT/scripts/spawn_warehouse.py' $HEADLESS --forever \
-       --robots $ROBOTS --scene $SCENE --drive cmd_vel $CHASE_CAM_ARGS $RENDER_ARGS" \
+       --robots $ROBOTS --scene $SCENE --drive cmd_vel $CHASE_CAM_ARGS $RENDER_ARGS $WORLD_ARGS" \
   >"$SIM_LOG" 2>&1 &
 
 echo "[run_demo] waiting for the warehouse to load"
@@ -371,6 +379,7 @@ cat <<EOF
 $( [[ $EXPLORE == "true" ]] && echo "    * Explorer          : autonomous frontier exploration — no human input needed" \
                              || echo "    * Explorer          : idle — the dashboard's Explore button (or X+click) starts it" )
 $( [[ $TELEOP -eq 1 ]] && echo "    * WASD teleop       : w/s fwd-back  a/d turn  q/e strafe  space stop  k quit" )
+$( [[ -n "$WORLD_ARGS" ]] && echo "    * World             : ${WORLD_ARGS#--world } (configs/worlds/; true poses on /sim/ground_truth)" )
   Logs : $SIM_LOG
          $BRINGUP_LOG
   Stop : scripts/run_demo.sh stop

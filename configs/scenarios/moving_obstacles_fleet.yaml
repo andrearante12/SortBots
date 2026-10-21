@@ -1,0 +1,34 @@
+# Scenario definition for the dashboard's Scenarios tab — see the header of
+# configs/scenarios/explore_fresh.yaml for the schema. `world:` names a layout
+# in configs/worlds/ (simtest/world.py has that schema).
+
+name: moving_obstacles_fleet
+
+title: Moving obstacles — fleet exploring a cluttered floor
+description: >
+  Both robots exploring collaboratively (as explore_fleet) while the open
+  floor is cluttered with crates and crossed by two walkers. A demo of the
+  whole stack under traffic: dynamic_obstacle_filter has to keep the walkers
+  out of the fused /map while Nav2 still steers around them, and the
+  explorers have to keep making progress around both.
+
+status: ready
+
+run:
+  scene: nvidia
+  robots: 2
+  robot_id: robot_0
+  headless: true
+  chase_cam: false
+  chase_cam_robots: 1
+  explore: true
+  resume: false
+  localize: false
+  teleop: false
+  map: null
+  world: cluttered_floor
+
+overrides: [world, headless, chase_cam]
+
+capture:
+  bag: false
