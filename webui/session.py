@@ -139,6 +139,15 @@ def _int_range(flag: str, lo: int, hi: int):
     return build
 
 
+def _omit_at(default, build):
+    """Wrap a builder so the stock value emits no flag at all — keeps the
+    logged run_demo.sh argv of every pre-existing scenario unchanged."""
+    def wrapped(value):
+        argv = build(value)
+        return [] if argv[1:] == [str(default)] else argv
+    return wrapped
+
+
 def _pattern(flag: str, rx: re.Pattern):
     def build(value):
         if not isinstance(value, str) or not rx.match(value):
@@ -244,6 +253,10 @@ RUN_FLAGS = {
     "headless": _switch("--no-headless", when=False),
     "chase_cam": _switch("--no-chase-cam", when=False),
     "chase_cam_robots": _chase_cam_robots("--chase-cam-robots"),
+    # Render-cost knobs (spawn_warehouse.py --help). Capped at 4: past that
+    # /clock, odom and TF drop below Nav2's 20 Hz controller in sim time.
+    "render_every": _omit_at(1, _int_range("--render-every", 1, 4)),
+    "lite_render": _switch("--lite-render", when=True),
     "teleop": _switch("--teleop", when=True),
     "localize": _switch("--localize", when=True),
     "resume": _switch("--resume", when=True),
@@ -259,6 +272,8 @@ RUN_DEFAULTS = {
     "headless": True,
     "chase_cam": True,
     "chase_cam_robots": None,
+    "render_every": 1,
+    "lite_render": False,
     "teleop": False,
     "localize": False,
     "resume": False,
@@ -484,13 +499,15 @@ def apply_overrides(scenario: dict, overrides: dict | None) -> dict:
 #         "readonly"-> --localize (Mem/IncrementalMemory=false)
 
 CONFIG_SIM_KEYS = {"scene", "robots", "map", "mode", "explore", "waypoints",
-                   "headless", "chase_cam", "chase_cam_robots", "teleop", "bag", "demo"}
+                   "headless", "chase_cam", "chase_cam_robots", "teleop", "bag", "demo",
+                   "render_every", "lite_render"}
 CONFIG_REAL_KEYS = {"map", "mode", "waypoints", "bag", "demo"}
 CONFIG_KEYS = {"sim": CONFIG_SIM_KEYS, "real": CONFIG_REAL_KEYS}
 CONFIG_DEFAULTS = {
     "scene": "nvidia", "robots": 1, "map": "new", "mode": "extend",
     "explore": True, "waypoints": "map", "headless": True, "chase_cam": False,
     "chase_cam_robots": 1, "teleop": False, "bag": False, "demo": False,
+    "render_every": 1, "lite_render": False,
 }
 MODES = ("extend", "readonly")
 
@@ -552,6 +569,9 @@ def config_to_run(config: dict, platform: str = "sim") -> dict:
         run["headless"] = _as_bool(cfg["headless"])
         run["chase_cam"] = _as_bool(cfg["chase_cam"])
         run["teleop"] = _as_bool(cfg["teleop"])
+        # Range-checked by build_argv below (1..4), like every other key.
+        run["render_every"] = cfg["render_every"]
+        run["lite_render"] = _as_bool(cfg["lite_render"])
         if run["chase_cam"]:
             run["chase_cam_robots"] = int(cfg["chase_cam_robots"])
     run["waypoints"] = cfg["waypoints"]
@@ -588,8 +608,9 @@ def run_to_config(run: dict, platform: str = "sim", bag: bool = False) -> dict:
     if platform == "sim":
         cfg["scene"] = run.get("scene", "nvidia")
         cfg["robots"] = int(run.get("robots") or 1)
-        for key in ("explore", "headless", "chase_cam", "teleop"):
+        for key in ("explore", "headless", "chase_cam", "teleop", "lite_render"):
             cfg[key] = bool(run.get(key, RUN_DEFAULTS[key]))
+        cfg["render_every"] = int(run.get("render_every") or 1)
         cfg["chase_cam_robots"] = int(run.get("chase_cam_robots") or 1)
     return {"config": cfg}
 
@@ -608,6 +629,12 @@ def describe_config(cfg: dict, platform: str = "sim") -> str:
                 else f"{where} ({'read-only' if full['mode'] == 'readonly' else 'extend'})")
     if platform == "sim":
         bits.append("exploring from start" if _as_bool(full["explore"]) else "explorer idle")
+        # Render-cost knobs change what the run costs, not what it does —
+        # only worth a word when they're off their stock values.
+        if int(full["render_every"]) != 1:
+            bits.append(f"render every {int(full['render_every'])}")
+        if _as_bool(full["lite_render"]):
+            bits.append("lite render")
     # Waypoints are an Advanced setting: only mention a non-default choice
     # (the default is the map's own set for a saved map, else keep current).
     default_wp = "keep" if full["map"] in ("new", "working") else "map"

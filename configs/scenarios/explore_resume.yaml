@@ -21,6 +21,8 @@ run:
   robot_id: robot_0
   headless: true
   chase_cam: false       # off by default for speed — see explore_fresh.yaml
+  render_every: 1        # 2 halves render cost; see run_demo.sh --render-every
+  lite_render: false     # RTX effects SLAM doesn't need, off
   explore: true
   resume: true
   localize: false        # mutually exclusive with resume (read-only vs. keep-mapping)
@@ -29,7 +31,7 @@ run:
 
 # `resume` is deliberately NOT overridable here — turning it off would silently
 # wipe the map this scenario exists to extend. Use explore_fresh for that.
-overrides: [headless, robots, chase_cam]
+overrides: [headless, robots, chase_cam, render_every, lite_render]
 
 capture:
   bag: false

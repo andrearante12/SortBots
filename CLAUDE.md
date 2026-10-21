@@ -74,8 +74,12 @@ Node tuning is plain YAML loaded by the node itself, not ROS params. Nodes take
   real-time factor. It depends almost entirely on how many camera render
   products are in the scene: ~0.47× for a 2-robot run, ~0.33× once a chase cam
   is added, ~0.25× with the full ROS stack alongside. `scripts/bench_sim.sh`
-  measures it, and its header carries the table. Rendering is ~85% of the cost
-  but rendering LESS OFTEN doesn't help — only fewer render products do.
+  measures it, and its header carries the table. Rendering is ~85% of the cost,
+  and what helps depends on which wall the machine hits: CPU-bound (16-core
+  desktop) — only fewer render products help, rendering less often doesn't;
+  GPU-bound (RTX 4070 laptop) — `render_every=2` + `lite_render=true` took a
+  full `explore_fleet` 0.38× → 0.81×. Both are scenario overrides and launch
+  form Advanced settings; measure before assuming which machine you're on.
 - **A ROS timer follows `use_sim_time`.** `create_timer` runs off the node
   clock, so enabling sim time silently stretches every control period by the
   real-time factor — a 2 s explorer tick became 11 s of wall clock and looked

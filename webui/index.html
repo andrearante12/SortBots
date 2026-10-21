@@ -354,10 +354,12 @@
   .lf-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .lf-row[hidden], #launch-form [data-field][hidden] { display: none; }
   .lf-k { width: 92px; flex: none; font-size: 0.78rem; color: #9aa; }
-  #launch-form select, #launch-form > .lf-row > button {
+  #launch-form select, #launch-form input[type="number"], #launch-form > .lf-row > button {
     background: #0f1114; color: #e6e6e6; border: 1px solid #2a2e35;
     border-radius: 4px; padding: 4px 7px; font-size: 0.8rem;
   }
+  #lf-render_every { width: 4.5em; }
+  .lf-unit { margin-left: -8px; font-size: 0.8rem; color: #cdd; }
   #lf-preset, #lf-map { flex: 1 1 180px; min-width: 0; max-width: 100%; }
   #launch-form > .lf-row > button { cursor: pointer; }
   #launch-form > .lf-row > button:hover { background: #222831; }
@@ -791,6 +793,11 @@
             <select id="lf-chase_cam_robots" data-field="chase_cam_robots" title="How many robots get a chase cam"></select>
             <label class="lf-check" data-field="teleop"><input type="checkbox" id="lf-teleop"> teleop</label>
             <label class="lf-check" data-field="bag" title="Record a rosbag into the session directory for the life of the run (large)"><input type="checkbox" id="lf-bag"> record bag</label>
+          </div>
+          <div class="lf-row" data-field="render_every">
+            <span class="lf-k" title="Render the cameras on every Nth 60 Hz physics step (1-4; 1 = every step). 2 matches the D435's 30 Hz, so the head cams lose no frames, while /clock, odom and TF drop to 30 Hz sim-time. ~2x real-time factor on a GPU-bound machine, little on a CPU-bound one (scripts/bench_sim.sh).">Render every</span>
+            <input type="number" id="lf-render_every" min="1" max="4" step="1" value="1"> <span class="lf-unit" id="lf-render_every-unit">frames</span>
+            <label class="lf-check" data-field="lite_render" title="Turn off reflections, translucency, indirect light and AO in the RTX renderer. Depth is unchanged and direct light/shadows stay; ~+55% real-time factor when the GPU is the bottleneck (scripts/bench_sim.sh)."><input type="checkbox" id="lf-lite_render"> lite render</label>
           </div>
           <div class="lf-row" data-field="waypoints">
             <span class="lf-k">Waypoints</span>
