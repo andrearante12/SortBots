@@ -92,6 +92,15 @@ NAV_WAYPOINTS_FILE = (
 # not stretch with the real-time factor (CLAUDE.md, on timers vs sim time).
 DWELL_SEC = 2.0
 
+# Nav2's action server exists (server_is_ready() is true) from configure, but it
+# REJECTS goals until bt_navigator is active, which on a fresh 2-robot session can
+# be a minute after the robot is visible ("Action server is inactive. Rejecting the
+# goal.", 2026-10-21: the whole first demo phase failed on it). So a task whose
+# first leg is rejected within this window goes back to the head of the queue and
+# is retried every NAV_RETRY_SEC; after it, a rejection is a real failure.
+NAV_STARTUP_GRACE_SEC = 90.0
+NAV_RETRY_SEC = 3.0
+
 
 class Waypoint:
     def __init__(self, spec: dict):
@@ -143,6 +152,7 @@ class Task:
         self.task_id = task_id or uuid.uuid4().hex[:8]
         self.kind = kind
         self.stops = stops
+        self.first_try: float | None = None   # monotonic; see NAV_STARTUP_GRACE_SEC
 
     def summary(self) -> dict:
         if self.kind == "goto":
@@ -166,6 +176,7 @@ class TaskManager(Node):
         self.state = "IDLE"
         self.current_task: Task | None = None
         self._dwell_deadline: float | None = None
+        self._hold_until = 0.0   # monotonic; set while Nav2 is still rejecting goals
         self._explorer_active = False
 
         self.nav_client = ActionClient(
@@ -263,8 +274,10 @@ class TaskManager(Node):
         # outright in _start_nav's wait — which made the first demo phase fail
         # on a fresh session. Holding the queue lets it start the moment Nav2 does.
         if (self.state == "IDLE" and self.queue and not self._explorer_active
-                and self.nav_client.server_is_ready()):
+                and self.nav_client.server_is_ready() and time.monotonic() >= self._hold_until):
             self.current_task = self.queue.popleft()
+            if self.current_task.first_try is None:
+                self.current_task.first_try = time.monotonic()
             first = "NAV_TO_GOAL" if self.current_task.kind == "goto" else "NAV_TO_PICKUP"
             self._start_nav(self.current_task.stops[0], next_state=first)
         elif self._dwell_deadline is not None and time.monotonic() >= self._dwell_deadline:
@@ -309,6 +322,18 @@ class TaskManager(Node):
                 goal_handle.cancel_goal_async()   # cancelled before Nav2 answered
             return
         if not goal_handle.accepted:
+            first_leg = self.state in ("NAV_TO_PICKUP", "NAV_TO_GOAL")
+            if first_leg and time.monotonic() - task.first_try < NAV_STARTUP_GRACE_SEC:
+                self.get_logger().warn(
+                    f"nav goal rejected for task {task.task_id} — Nav2 not active yet? "
+                    f"requeued, retrying in {NAV_RETRY_SEC:.0f}s",
+                    throttle_duration_sec=15.0,
+                )
+                self.queue.appendleft(task)
+                self.current_task = None
+                self._hold_until = time.monotonic() + NAV_RETRY_SEC
+                self._set_state("IDLE")
+                return
             self.get_logger().error(f"nav goal rejected for task {task.task_id}")
             self._end_task("FAILED")
             return
