@@ -790,6 +790,16 @@
             <label class="lf-check" data-field="teleop"><input type="checkbox" id="lf-teleop"> teleop</label>
             <label class="lf-check" data-field="bag" title="Record a rosbag into the session directory for the life of the run (large)"><input type="checkbox" id="lf-bag"> record bag</label>
           </div>
+          <div class="lf-row" data-field="render_every">
+            <span class="lf-k" title="Render the cameras on every Nth 60 Hz physics step. 2 matches the D435's 30 Hz, so the head cams lose no frames, while /clock, odom and TF drop to 30 Hz sim-time. ~2x real-time factor on a GPU-bound machine, little on a CPU-bound one (scripts/bench_sim.sh).">Render every</span>
+            <select id="lf-render_every">
+              <option value="1">frame</option>
+              <option value="2">2nd frame</option>
+              <option value="3">3rd frame</option>
+              <option value="4">4th frame</option>
+            </select>
+            <label class="lf-check" data-field="lite_render" title="Turn off reflections, translucency, indirect light and AO in the RTX renderer. Depth is unchanged and direct light/shadows stay; ~+55% real-time factor when the GPU is the bottleneck (scripts/bench_sim.sh)."><input type="checkbox" id="lf-lite_render"> lite render</label>
+          </div>
           <div class="lf-row" data-field="waypoints">
             <span class="lf-k">Waypoints</span>
             <div class="segmented lf-seg" id="lf-waypoints">

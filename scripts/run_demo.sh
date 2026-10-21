@@ -20,6 +20,7 @@
 #                       [--scene nvidia]
 #                       [--no-headless] [--teleop] [--localize | --resume]
 #                       [--no-chase-cam | --chase-cam-robots N]
+#                       [--render-every N] [--lite-render]
 #                       [--map PATH] [--explore] [--keep-console]
 #   scripts/run_demo.sh stop [--keep-console]   # tear the pipeline down
 #
@@ -183,6 +184,11 @@ ROBOT_ID=robot_0; ROBOTS=2; ROBOT_IDS=""; SCENE=nvidia; HEADLESS="--headless"; T
 # drops all of them; --chase-cam-robots N keeps them on the first N robots
 # only (dashboard only shows robot_id's feed, so fleet runs usually want 1).
 CHASE_CAM_ARGS=""
+# Render-cost knobs, passed straight to spawn_warehouse.py. Both default off:
+# on a GPU-bound machine they're worth ~2x real-time factor together, on a
+# CPU-bound one much less — measure with scripts/bench_sim.sh before relying
+# on either (numbers in its header).
+RENDER_ARGS=""
 LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -194,6 +200,8 @@ while [[ $# -gt 0 ]]; do
     --no-headless) HEADLESS="--no-headless"; shift;;
     --no-chase-cam) CHASE_CAM_ARGS="--no-chase-cam"; shift;;
     --chase-cam-robots) CHASE_CAM_ARGS="--chase-cam-robots $2"; shift 2;;
+    --render-every) RENDER_ARGS+=" --render-every $2"; shift 2;;
+    --lite-render)  RENDER_ARGS+=" --lite-render"; shift;;
     --teleop)    TELEOP=1; shift;;
     --no-teleop) TELEOP=0; shift;;  # accepted for back-compat (already the default)
     --localize) LOCALIZE=true; shift;;
@@ -260,7 +268,7 @@ echo "[run_demo] launching Isaac Sim ($SCENE, $ROBOTS robot(s), $HEADLESS)..."
 rm -f "$SIM_RESULT"
 setsid bash -c "source '$REPO_ROOT/scripts/activate_isaac.sh' >/dev/null 2>&1; \
   exec python '$REPO_ROOT/scripts/spawn_warehouse.py' $HEADLESS --forever \
-       --robots $ROBOTS --scene $SCENE --drive cmd_vel $CHASE_CAM_ARGS" \
+       --robots $ROBOTS --scene $SCENE --drive cmd_vel $CHASE_CAM_ARGS $RENDER_ARGS" \
   >"$SIM_LOG" 2>&1 &
 
 echo "[run_demo] waiting for the warehouse to load"

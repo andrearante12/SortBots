@@ -71,6 +71,10 @@ NVIDIA_WAREHOUSE_REL = "Isaac/Environments/Simple_Warehouse/full_warehouse.usd"
 NVIDIA_WAREHOUSE_FALLBACK_REL = "Isaac/Environments/Simple_Warehouse/warehouse.usd"
 
 D435_CONFIG = REPO_ROOT / "configs" / "sensors" / "d435.json"
+# Perf experiments: point at an alternate intrinsics file (e.g. a lower
+# resolution with K scaled to match) without editing the canonical one.
+if os.environ.get("SORTBOTS_D435_CONFIG"):
+    D435_CONFIG = Path(os.environ["SORTBOTS_D435_CONFIG"])
 MPU6050_CONFIG = REPO_ROOT / "configs" / "sensors" / "mpu6050.json"
 WAYPOINTS_CONFIG = REPO_ROOT / "configs" / "waypoints.yaml"
 ROBOTS_CONFIG = REPO_ROOT / "configs" / "robots.yaml"
@@ -314,14 +318,24 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Render (and therefore evaluate every OnPlaybackTick OmniGraph) "
             "only on every Nth physics step; physics always steps at 60 Hz "
-            "regardless. Diagnostic knob, NOT a speedup — see the measured "
-            "numbers in scripts/bench_sim.sh's header. Default 1 (render "
-            "every step) because decimating buys almost nothing: N=2 moved "
-            "real-time factor 0.33x -> 0.36x, because the per-render cost "
-            "roughly doubles when you halve the rate, while it does halve "
-            "/clock, odom, TF and cmd_vel, which all ride OnPlaybackTick. A "
-            "huge N (600) renders essentially never and isolates physics "
-            "from rendering, which is what it's genuinely useful for."
+            "regardless. Whether it's a speedup depends on the machine — see "
+            "scripts/bench_sim.sh's header: N=2 bought 0.33x -> 0.36x on a "
+            "CPU-bound 16-core desktop, but 0.47x -> 0.91x on a GPU-bound "
+            "RTX 4070 laptop (2026-10-06). It always halves /clock, odom, TF "
+            "and cmd_vel, which ride OnPlaybackTick; at N=2 the D435's 30 Hz "
+            "still gets a render every frame. A huge N (600) renders "
+            "essentially never and isolates physics from rendering."
+        ),
+    )
+    p.add_argument(
+        "--lite-render",
+        action="store_true",
+        help=(
+            "Turn off the RTX effects SLAM doesn't need (reflections, "
+            "translucency, indirect diffuse, AO, sampled lighting; DLSS to "
+            "performance). Direct light and shadows stay, so the head cams "
+            "still look like a lit warehouse. 0.47x -> 0.73x on a GPU-bound "
+            "RTX 4070 laptop (scripts/bench_sim.sh, 2026-10-06)."
         ),
     )
     return p.parse_args()
@@ -339,8 +353,24 @@ if args.render_every < 1:
 # SimulationApp MUST be constructed before any other isaacsim / omni / pxr imports.
 from isaacsim import SimulationApp  # noqa: E402
 
+# --lite-render's preset. Each of these is a render pass per camera per frame;
+# none of them changes depth, and the RGB that RTAB-Map extracts features from
+# keeps its direct lighting and shadows.
+LITE_RENDER_KIT_ARGS = [
+    "--/rtx/reflections/enabled=false",
+    "--/rtx/translucency/enabled=false",
+    "--/rtx/indirectDiffuse/enabled=false",
+    "--/rtx/ambientOcclusion/enabled=false",
+    "--/rtx/directLighting/sampledLighting/enabled=false",
+    "--/rtx-transient/dlssg/enabled=false",
+    "--/rtx/post/dlss/execMode=0",
+]
+# SORTBOTS_KIT_ARGS: extra Kit settings, whitespace-separated, appended after
+# the preset — for render-cost experiments without another flag.
 simulation_app = SimulationApp(
-    {"headless": args.headless, "renderer": "RayTracedLighting"}
+    {"headless": args.headless, "renderer": "RayTracedLighting",
+     "extra_args": (LITE_RENDER_KIT_ARGS if args.lite_render else [])
+                   + os.environ.get("SORTBOTS_KIT_ARGS", "").split()}
 )
 
 # The ROS 2 bridge does NOT auto-load on pip-install Isaac Sim 5.1 — enable
@@ -1040,6 +1070,7 @@ def main() -> int:
     emit(f"  duration={'forever' if args.forever else args.duration}")
     emit(f"  render_every={args.render_every} (physics 60Hz -> "
          f"{60.0 / args.render_every:.0f}Hz render/OnPlaybackTick)")
+    emit(f"  lite_render={args.lite_render}")
 
     d435, mpu = _load_sensor_configs()
     emit(f"  d435: {d435['width']}x{d435['height']}@{d435['fps']}Hz")
