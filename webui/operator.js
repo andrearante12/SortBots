@@ -906,7 +906,10 @@
     $("#s-dot").className = "dot " + (s && s.state === "running" ? "" : s && ["starting", "stopping"].includes(s.state) ? "busy" : "idle");
     const card = $("#session .card");
     card.classList.toggle("live", sessionActive());
-    card.classList.toggle("has-session", !!s && s.state !== "idle");
+    // The console keeps reporting the LAST session after it ends ("stopped"), which
+    // read as a live one ("fleet_demo · stopped · running"). Show the strip only
+    // while a run is live, or when one failed and its reason is worth reading.
+    card.classList.toggle("has-session", !!s && (sessionActive() || s.state === "failed"));
     // A failed run's log is the only place its reason is; open it for that case.
     if (s && s.state === "failed") $("#sp-log").open = true;
     renderEmpty();

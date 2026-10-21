@@ -492,6 +492,14 @@ async function main() {
     check(`${vp.label}: a demo session runs the task demo by itself`, await page.eval(`localStorage.getItem('sortbots.autoDemo.s-demo') === '1'`));
     check(`${vp.label}: ...and only once per session`, await page.eval(`(() => { const n = document.getElementById('tk-demo').textContent; return n === 'Run demo' || n === 'Stop demo'; })()`));
     if ((await $text('#tk-demo')) === 'Stop demo') await click('#tk-demo');
+    await page.eval(`window.__fakeSession = { ...window.__fakeSession, state: 'stopped', phase: 'running' }`);
+    await sleep(3400);
+    await click('#session-chip'); await sleep(300);
+    check(`${vp.label}: a stopped session leaves just the form`, await visible('#launch-form') && !(await visible('#session-pane')));
+    await page.eval(`window.__fakeSession = { ...window.__fakeSession, state: 'failed', error: 'Isaac Sim failed to start' }`);
+    await sleep(3400);
+    check(`${vp.label}: a failed session shows its status and log`, await visible('#session-pane') && await page.eval(`document.getElementById('sp-log').open`));
+    await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
     await page.eval(`window.__fakeSession = null`);
   }
 
