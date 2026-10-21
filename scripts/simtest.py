@@ -51,6 +51,9 @@ from pathlib import Path
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# Repo root FIRST: this file shares the simtest package's name, and scripts/
+# is sys.path[0] when it runs, so `import simtest` would otherwise find this
+# file. (Run it as a script; don't import it.)
 sys.path.insert(0, str(REPO_ROOT))
 
 from simtest import events as ev_lib  # noqa: E402
