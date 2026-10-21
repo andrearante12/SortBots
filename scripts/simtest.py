@@ -172,7 +172,11 @@ def _sim_ctl(*args, timeout=None) -> subprocess.CompletedProcess:
 
 
 def _pipeline_alive() -> bool:
-    return subprocess.run(["pgrep", "-f", r"spawn_warehouse\.py"],
+    # Anchored to the interpreter at the start of argv: a bare pattern also
+    # matches any shell whose command line merely MENTIONS the script (an
+    # editor, a grep, a wrapper running this very file), and refused a run
+    # with nothing running (2026-10-21).
+    return subprocess.run(["pgrep", "-f", r"^\S*python[0-9.]* \S*spawn_warehouse\.py"],
                           capture_output=True).returncode == 0
 
 
