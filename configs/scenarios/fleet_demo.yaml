@@ -1,0 +1,37 @@
+# Scenario definition for the dashboard's Scenarios tab — see the header of
+# configs/scenarios/explore_fresh.yaml for the schema and the rationale behind
+# the `run:` allowlist.
+
+name: fleet_demo
+
+title: Fleet demo — premapped warehouse, 2 robots
+description: >
+  The demo setup in one click: the saved warehouse map, read-only, two robots,
+  and the task demo (configs/demo_tasks.yaml) started automatically by the
+  operator view once both robots are up — each robot driving on its own, then
+  both together. Read-only on purpose: a localize-only RTAB-Map doesn't grow,
+  where two exploring robots in extend mode ran the box out of memory in about
+  half an hour (2026-10-21). Nav2 can come up a little after the robots appear;
+  task_manager holds its queue until the action server answers, so the first
+  phase just waits for it.
+
+status: ready
+
+run:
+  scene: nvidia
+  robots: 2
+  robot_id: robot_0
+  headless: true
+  chase_cam: false       # every render product costs real-time factor
+  explore: false         # read-only: exploring would drive without mapping
+  resume: false          # mutually exclusive with localize
+  localize: true
+  teleop: false
+  map: warehouse         # maps/warehouse; the demo's waypoint names are its pins
+  waypoints: map         # load the map's own pins, which the demo names
+  demo: true
+
+overrides: [headless, chase_cam]
+
+capture:
+  bag: false

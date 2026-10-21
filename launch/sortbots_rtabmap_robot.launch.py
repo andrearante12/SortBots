@@ -159,6 +159,7 @@ def generate_launch_description():
     rviz = LaunchConfiguration("rviz")
     localization = LaunchConfiguration("localization")
     database_path = LaunchConfiguration("database_path")
+    initial_pose = LaunchConfiguration("initial_pose")
     delete_db_on_start = LaunchConfiguration("delete_db_on_start")
     rtabmap_args = LaunchConfiguration("rtabmap_args")
     camera_odometry = LaunchConfiguration("camera_odometry")
@@ -249,6 +250,18 @@ def generate_launch_description():
             # naming or clearing the file.
             default_value=["~/.ros/sortbots_", robot_id, ".db"],
             description="Where the map is saved to / loaded from.",
+        ),
+        DeclareLaunchArgument(
+            "initial_pose",
+            default_value="",
+            description=(
+                "Localization mode only: where the robot starts on the loaded map, "
+                "\"x y z roll pitch yaw\". Empty = RTAB-Map's default, the LAST pose "
+                "saved in the database (where its mapping session ended) — right "
+                "for the robot that built the map only by luck, and metres off for "
+                "any other (2026-10-21: robot_1 came up 3 m and 16 deg off on a "
+                "shared map). See nodes/map_handoff.py."
+            ),
         ),
         DeclareLaunchArgument(
             "delete_db_on_start",
@@ -384,6 +397,7 @@ def generate_launch_description():
                 # there was no way to reopen a map once built.
                 "localization":       localization,
                 "database_path":      database_path,
+                "initial_pose":       initial_pose,
                 # `args` is upstream's current name; `rtabmap_args` is its
                 # deprecated alias (rtabmap.launch.py:47 defaults one to the
                 # other). --delete_db_on_start is a flag *inside* this string,

@@ -453,7 +453,7 @@ async function main() {
     await page.send('Emulation.setDeviceMetricsOverride', {
       width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile,
     });
-    await page.send('Page.navigate', { url: `http://127.0.0.1:${HTTP_PORT}/` });
+    await page.send('Page.navigate', { url: `http://127.0.0.1:${HTTP_PORT}/index.html` });
     await sleep(1800);
 
     if (vp.full) await runFullAssertions(page);
