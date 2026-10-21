@@ -345,36 +345,30 @@ async function main() {
     await shot(`${vp.label}-fleet`);
 
     // -- demo ----------------------------------------------------------------------------------------------
-    // configs/demo_tasks.yaml (served live by serve.py) runs in phases: phase 2 must not
-    // be queued until every task of phase 1 has finished. Its waypoint names are the
-    // warehouse map's, so swap those in for the duration.
-    const demo = (await (await fetch(`http://127.0.0.1:${PORT}/api/demo_tasks`)).json()).phases || [];
-    check(`${vp.label}: the demo is served as phases`, demo.length >= 2 && demo.every((ph) => ph.title && ph.tasks.length), `${demo.length} phases`);
+    // configs/demo_tasks.yaml (served live by serve.py) is one list, queued all at once so
+    // the robots run in parallel. Its waypoint names are the warehouse map's, so swap
+    // those in for the duration.
+    const demo = (await (await fetch(`http://127.0.0.1:${PORT}/api/demo_tasks`)).json()).tasks || [];
+    check(`${vp.label}: the demo covers more than one robot`, new Set(demo.map((t) => t.robot)).size >= 2, `${demo.length} tasks`);
     const savedWps = await page.eval(`JSON.stringify(window.__navWps)`);
-    const demoNames = [...new Set(demo.flatMap((ph) => ph.tasks.flatMap((t) => [t.goto, t.pickup, t.dropoff]).filter(Boolean)))];
+    const demoNames = [...new Set(demo.flatMap((t) => [t.goto, t.pickup, t.dropoff]).filter(Boolean))];
     await page.eval(`window.__navWps = ${JSON.stringify(demoNames.map((name, i) => ({ name, x: i, y: 1, yaw: 0 })))}; window.__operator.loadWaypoints()`);
     await sleep(200);
-    const dispatched = async () => JSON.parse(await page.eval(`JSON.stringify(window.__published)`)).filter((x) => /\/dispatch_task$/.test(x.topic));
     await page.eval(`window.__published.length = 0`);
     await click('#tk-demo');
     await sleep(300);
-    const ph1 = await dispatched();
-    check(`${vp.label}: Run demo queues only the first phase`, ph1.length === demo[0].tasks.length, `${ph1.length}/${demo[0].tasks.length}`);
-    check(`${vp.label}: each demo task goes to the robot it names`, ph1.every((x, i) => x.topic === `/${demo[0].tasks[i].robot}/dispatch_task`), ph1.map((x) => x.topic).join(','));
-    check(`${vp.label}: the demo says which phase is running`, (await $text('#demo-status')) === `Demo 1/${demo.length}: ${demo[0].title}` && (await $text('#tk-demo')) === 'Stop demo', await $text('#demo-status'));
-    const ids1 = ph1.map((x) => [x.topic.split('/')[1], JSON.parse(x.msg.data).task_id]);
-    await emit(`/${ids1[0][0]}/task_status`, { data: JSON.stringify({ task_id: ids1[0][1], state: 'DONE', queue_depth: 1, queue: ids1.slice(1).map(([, id]) => ({ task_id: id, kind: 'goto', goto: 'x' })) }) });
-    await sleep(2200);
-    check(`${vp.label}: the next phase waits for the whole current one`, (await dispatched()).length === ph1.length);
-    for (const [rid, id] of ids1.slice(1)) await emit(`/${rid}/task_status`, { data: JSON.stringify({ task_id: id, state: 'DONE', queue_depth: 0, queue: [] }) });
-    await sleep(2200);
-    const ph2 = (await dispatched()).slice(ph1.length);
-    check(`${vp.label}: once a phase is done the next one starts`, ph2.length === demo[1].tasks.length && ph2.every((x, i) => x.topic === `/${demo[1].tasks[i].robot}/dispatch_task`), ph2.map((x) => x.topic).join(','));
-    check(`${vp.label}: the status moves to phase 2`, (await $text('#demo-status')).startsWith(`Demo 2/${demo.length}`), await $text('#demo-status'));
+    const dem = JSON.parse(await page.eval(`JSON.stringify(window.__published)`)).filter((x) => /\/dispatch_task$/.test(x.topic));
+    check(`${vp.label}: Run demo queues every task at once`, dem.length === demo.length, `${dem.length}/${demo.length}`);
+    check(`${vp.label}: each demo task goes to the robot it names, in order`, dem.every((x, i) => x.topic === `/${demo[i].robot}/dispatch_task`), dem.map((x) => x.topic).join(','));
+    check(`${vp.label}: the banner counts the demo's tasks`, (await $text('#demo-status')) === `Demo running: ${demo.length} of ${demo.length} tasks left` && (await $text('#tk-demo')) === 'Stop demo', await $text('#demo-status'));
+    const ids = dem.map((x) => [x.topic.split('/')[1], JSON.parse(x.msg.data).task_id]);
+    await emit(`/${ids[0][0]}/task_status`, { data: JSON.stringify({ task_id: ids[0][1], state: 'DONE', queue_depth: 0 }) });
+    await sleep(200);
+    check(`${vp.label}: the banner counts down as tasks finish`, (await $text('#demo-status')).startsWith(`Demo running: ${demo.length - 1} of`), await $text('#demo-status'));
     await page.eval(`window.__published.length = 0`);
     await click('#tk-demo');
     const cancels = JSON.parse(await page.eval(`JSON.stringify(window.__published)`)).filter((x) => /\/cancel_task$/.test(x.topic) && x.msg.data === 'all');
-    check(`${vp.label}: Stop demo cancels every robot it used`, new Set(cancels.map((x) => x.topic)).size === new Set([...ph1, ...ph2].map((x) => x.topic.split('/')[1])).size, cancels.map((x) => x.topic).join(','));
+    check(`${vp.label}: Stop demo cancels every robot it used`, new Set(cancels.map((x) => x.topic)).size === new Set(demo.map((t) => t.robot)).size, cancels.map((x) => x.topic).join(','));
     check(`${vp.label}: stopping clears the demo status`, !(await visible('#demo-status')) && (await $text('#tk-demo')) === 'Run demo');
     await page.eval(`window.__navWps = ${savedWps}; window.__operator.loadWaypoints()`);
     await sleep(200);

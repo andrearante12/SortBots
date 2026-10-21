@@ -811,16 +811,12 @@
   });
 
   // -- demo -----------------------------------------------------------------------------------------------
-  // Runs configs/demo_tasks.yaml (served at /api/demo_tasks): a list of phases,
-  // each queued only once every task of the one before has finished, so the demo
-  // can show one robot moving alone and then several in parallel. Within a phase
-  // each robot runs its own tasks in order (task_manager's per-robot FIFO).
-  // Entries are checked against the live waypoints and roster first, so a stale
-  // name in the YAML is skipped with a warning rather than queued to fail.
-  // The sequencing lives in this tab; "Stop demo" cancels what it queued.
-  const DEMO_PAUSE_MS = 1500;        // breather between phases, so they read as separate
-  const DEMO_PHASE_TIMEOUT_MS = 15 * 60 * 1000; // wall clock; a stuck phase mustn't hang the demo
-  let demo = null; // {phases, i, ids, robots, startedAt, timer, skipped}
+  // Runs configs/demo_tasks.yaml (served at /api/demo_tasks) in one click: every task
+  // is queued at once, so each robot works through its own list (task_manager's
+  // per-robot FIFO) while the others do the same. Entries are checked against the
+  // live waypoints and roster first, so a stale name in the YAML is skipped with a
+  // warning rather than queued to fail. "Stop demo" cancels what it queued.
+  let demo = null; // {ids, robots}
 
   function demoStatus(text) {
     $("#demo-status").hidden = !text;
@@ -828,64 +824,45 @@
     $("#tk-demo").textContent = demo ? "Stop demo" : "Run demo";
   }
 
-  function startDemoPhase() {
-    const ph = demo.phases[demo.i];
-    const roster = [...robots.values()].map((r) => r.id), known = new Set(waypoints.map((w) => w.name));
-    let rr = 0;
-    demo.ids = []; demo.timer = null;
-    for (const t of ph.tasks) {
-      const spec = t.goto ? { goto: t.goto } : { pickup: t.pickup, dropoff: t.dropoff };
-      const names = spec.goto ? [spec.goto] : [spec.pickup, spec.dropoff];
-      if (!names.every((n) => n && known.has(n)) || (!spec.goto && spec.pickup === spec.dropoff)) { demo.skipped++; continue; }
-      const who = t.robot && t.robot !== "auto" ? (roster.includes(t.robot) ? t.robot : null) : roster[rr++ % roster.length];
-      if (!who) { demo.skipped++; continue; }
-      queueTask(spec, who);
-      demo.ids.push(tasks[tasks.length - 1].id);
-      demo.robots.add(who);
-    }
-    demo.startedAt = Date.now();
-    demoStatus(`Demo ${demo.i + 1}/${demo.phases.length}: ${ph.title}`);
-    renderTasks();
-    if (!demo.ids.length) nextDemoPhase(); // nothing runnable here: don't wait on it
-  }
-  function nextDemoPhase() {
-    demo.i++;
-    if (demo.i >= demo.phases.length) {
-      const skipped = demo.skipped;
-      demo = null;
-      demoStatus("");
-      return toast(skipped ? `Demo finished (skipped ${skipped} task(s) naming a missing waypoint or robot)` : "Demo finished");
-    }
-    demo.timer = setTimeout(startDemoPhase, DEMO_PAUSE_MS);
-  }
-  // Called on every status update and on a slow interval (the timeout needs a clock).
+  // Called on every status update: the banner counts down, and clears when all are done.
   function demoTick() {
-    if (!demo || !demo.ids || !demo.ids.length) return; // between phases
-    const done = demo.ids.every((id) => { const t = tasks.find((x) => x.id === id); return !t || FINISHED.includes(t.state); });
-    if (done || Date.now() - demo.startedAt > DEMO_PHASE_TIMEOUT_MS) {
-      if (!done) toast("A demo phase took too long; moving on");
-      demo.ids = [];
-      nextDemoPhase();
-    }
+    if (!demo) return;
+    const left = demo.ids.filter((id) => { const t = tasks.find((x) => x.id === id); return t && !FINISHED.includes(t.state); }).length;
+    if (left) return demoStatus(`Demo running: ${left} of ${demo.ids.length} tasks left`);
+    demo = null;
+    demoStatus("");
+    toast("Demo finished");
   }
 
   async function runDemo() {
-    if (demo) { // Stop: drop the rest, and cancel what the demo put on the robots
-      clearTimeout(demo.timer);
+    if (demo) { // Stop: cancel everything the demo put on the robots
       for (const id of demo.robots) publishString(`/${id}/cancel_task`, "all");
       demo = null;
       demoStatus("");
       return toast("Demo stopped");
     }
-    let phases = [];
-    try { phases = ((await (await fetch("/api/demo_tasks")).json()) || {}).phases || []; } catch (e) { console.error("failed to load the demo", e); return toast("Couldn't load the demo."); }
-    if (!phases.length) return toast("No demo configured (configs/demo_tasks.yaml).");
-    if (!robots.size) return toast("No robots to run the demo on.");
-    demo = { phases, i: 0, ids: null, robots: new Set(), startedAt: 0, timer: null, skipped: 0 };
-    startDemoPhase();
+    let list = [];
+    try { list = ((await (await fetch("/api/demo_tasks")).json()) || {}).tasks || []; } catch (e) { console.error("failed to load the demo", e); return toast("Couldn't load the demo."); }
+    if (!list.length) return toast("No demo configured (configs/demo_tasks.yaml).");
+    const roster = [...robots.values()].map((r) => r.id), known = new Set(waypoints.map((w) => w.name));
+    const next = { ids: [], robots: new Set() };
+    let rr = 0, skipped = 0;
+    for (const t of list) {
+      const spec = t.goto ? { goto: t.goto } : { pickup: t.pickup, dropoff: t.dropoff };
+      const names = spec.goto ? [spec.goto] : [spec.pickup, spec.dropoff];
+      if (!names.every((n) => n && known.has(n)) || (!spec.goto && spec.pickup === spec.dropoff)) { skipped++; continue; }
+      const who = t.robot && t.robot !== "auto" ? (roster.includes(t.robot) ? t.robot : null) : roster[rr++ % roster.length];
+      if (!who) { skipped++; continue; }
+      queueTask(spec, who);
+      next.ids.push(tasks[tasks.length - 1].id);
+      next.robots.add(who);
+    }
+    if (!next.ids.length) return toast(`Nothing to run: all ${skipped} demo task(s) name a missing waypoint or robot`);
+    demo = next;
+    renderTasks(); demoTick();
+    toast(`Demo: ${next.ids.length} tasks on ${next.robots.size} robot(s)${skipped ? `, skipped ${skipped}` : ""}`);
   }
   $("#tk-demo").addEventListener("click", runDemo);
-  setInterval(demoTick, 2000);
 
   // -- session / header ----------------------------------------------------------------------------------------
 

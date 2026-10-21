@@ -4,13 +4,9 @@
 # /<robot>/dispatch_task path a hand-queued task takes, so once queued a demo
 # task is indistinguishable from a manual one (no separate code path to rot).
 #
-# PHASES run one after another: the dashboard queues a phase's tasks, waits
-# until every one of them has finished (done, failed or cancelled), pauses a
-# moment, then starts the next. Within a phase each robot's tasks run in order
-# on its own queue and different robots run at the same time — so a phase with
-# one robot shows it moving alone, and a phase with two shows them in parallel.
-# The sequencing lives in the browser tab: close it mid-demo and the phase
-# already queued finishes, but no further phases start.
+# Everything is queued at once: each robot runs ITS tasks in order on its own
+# queue (task_manager's per-robot FIFO), and the robots run at the same time.
+# The demo is "done" when every task has finished; Stop demo cancels them.
 #
 # A task is either {goto: W} (drive there and stop) or {pickup: W, dropoff: W}
 # (drive, pause, drive, pause). Every W MUST name a waypoint in the working set
@@ -20,23 +16,13 @@
 # can resolve. `robot` is optional: omit it or use "auto" to round-robin.
 #
 # Written for the warehouse map's pins (tables near the spawn, Aisles 1-3 along
-# the north wall). Parallel phases send the robots AWAY from each other: two
-# robots routed through the same aisle at once is a demo of the collision
-# monitor, not of the fleet.
-phases:
-  - title: Robot 0 on its own
-    tasks:
-      - {robot: robot_0, goto: Aisle 3}
-      - {robot: robot_0, goto: Aisle 2}
-  - title: Robot 1 on its own
-    tasks:
-      - {robot: robot_1, goto: tables}
-      - {robot: robot_1, goto: Aisle 1}
-  - title: Both robots at once
-    tasks:
-      - {robot: robot_0, goto: Aisle 3}
-      - {robot: robot_1, goto: tables}
-  - title: Pick and drop, in parallel
-    tasks:
-      - {robot: robot_0, pickup: Aisle 3, dropoff: Aisle 2}
-      - {robot: robot_1, pickup: tables, dropoff: Aisle 1}
+# the north wall). Each robot keeps to its own side — robot_0 the west aisles,
+# robot_1 the east aisle and the tables — so running them together shows the
+# fleet, not the collision monitor.
+tasks:
+  - {robot: robot_0, goto: Aisle 3}
+  - {robot: robot_0, goto: Aisle 2}
+  - {robot: robot_0, pickup: Aisle 2, dropoff: Aisle 3}
+  - {robot: robot_1, goto: Aisle 1}
+  - {robot: robot_1, goto: tables}
+  - {robot: robot_1, pickup: tables, dropoff: Aisle 1}
