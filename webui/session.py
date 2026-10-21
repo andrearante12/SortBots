@@ -857,7 +857,7 @@ def _ros_service_call(service: str, srv_type: str, request: str, *,
     )
     try:
         proc = subprocess.run(
-            ["bash", "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
+            [ROS_BASH, "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired as e:
@@ -885,7 +885,7 @@ def _publish_recon_reset(rid: str) -> None:
         f"{shlex.quote('{data: clear}')}"
     )
     try:
-        proc = subprocess.run(["bash", "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
+        proc = subprocess.run([ROS_BASH, "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
                               capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired as e:
         raise maps_lib.MapError("recon_reset timed out (is recon_cloud_relay up?)") from e
