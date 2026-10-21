@@ -235,6 +235,23 @@ fi
 source "$SCRIPT_DIR/_map_db.sh"
 prepare_map_db "[run_demo]" || exit $?
 
+# Shared map: on an existing map (--localize / --resume) EVERY robot gets its own
+# copy of it, so the whole fleet localizes on what was already mapped and, in
+# resume mode, extends it — rather than only the primary using it while the
+# others map from empty (or, before 2026-10-21, resumed their own stale DB).
+# Copies, never one shared file: two RTAB-Maps writing one sqlite DB crash
+# (see launch/sortbots_bringup.launch.py's database_path comment). The frame
+# handling is in nodes/map_handoff.py.
+SHARED_MAP=false
+if [[ "$LOCALIZE" == "true" || "$RESUME" == "true" ]] && [[ "$ROBOT_IDS" == *,* ]]; then
+  SHARED_MAP=true
+  for rid in ${ROBOT_IDS//,/ }; do
+    [[ "$rid" == "$ROBOT_ID" ]] && continue
+    echo "[run_demo] shared map: $(basename "$MAP_DB") -> ~/.ros/sortbots_${rid}.db for $rid"
+    cp -f -- "$MAP_DB" "$HOME/.ros/sortbots_${rid}.db" || exit 1
+  done
+fi
+
 # --resume passes delete_db_on_start:=false explicitly below (bringup's
 # default is true otherwise) — mapping mode (RTAB-Map keeps growing the pose
 # graph, unlike --localize's read-only Mem/IncrementalMemory=false), started
@@ -306,7 +323,7 @@ setsid bash -c "source '$ROS_SETUP'; \
        use_sim_time:=true rviz:=false \
        webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
-       delete_db_on_start:=$DELETE_DB_ON_START \
+       delete_db_on_start:=$DELETE_DB_ON_START shared_map:=$SHARED_MAP \
        explore:=true explore_autostart:=$EXPLORE" \
   >"$BRINGUP_LOG" 2>&1 &
 sleep 12

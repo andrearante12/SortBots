@@ -813,6 +813,19 @@ Both bit real test runs before being fixed — worth knowing if you extend
 
 ## Map lifecycle: build a map once, navigate on it later
 
+**Several robots on one saved map.** With 2+ robots and `--localize` / `--resume`,
+`run_demo.sh` copies the map to every robot (`~/.ros/sortbots_<rid>.db`) and passes
+`shared_map:=true`. Every robot's map frame is then the primary's (the map was built
+from robot_0's spawn), so all are anchored at robot_0's spawn and each RTAB-Map gets
+`initial_pose` = its spawn relative to robot_0's. They start read-only;
+`nodes/map_handoff.py` switches an extend session to mapping per robot, but only after
+a real visual match, because `set_mode_mapping` drops the seeded pose otherwise (robot_1
+jumped 8.6 m to the map origin when switched on the seed alone, 2026-10-21). A robot
+with no match yet still drives and explores read-only on its seed, which tracks truth to
+centimetres in sim. Caveats: each robot extends its OWN copy, and `maps.sh save` keeps
+robot_0's, so what robot_1 adds is visible in the fused `/map` during the run but not
+saved; and two copies of a 2.4 GB map cost two RTAB-Maps' worth of RAM (~18 GB together).
+
 By default every run builds a **fresh** map — RTAB-Map starts from an empty
 database, so a mapping run always means what it says. The map persists after
 shutdown, and `--localize` reopens it read-only instead of rebuilding:
