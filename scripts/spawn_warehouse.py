@@ -161,8 +161,15 @@ def _load_station_props():
     """
     import yaml
 
+    # configs/waypoints.yaml was retired 2026-10-15 when stations merged into
+    # plain nav waypoints (nav-only tasks, no arm pick). A layout that still
+    # ships one gets its shelves; its absence just means no station props, same
+    # as --no-station-props — the package-placement fallback at the call site
+    # (and task_manager) handles an empty list.
+    if not WAYPOINTS_CONFIG.exists():
+        return []
     with open(WAYPOINTS_CONFIG) as f:
-        stations = yaml.safe_load(f)["stations"]
+        stations = (yaml.safe_load(f) or {}).get("stations") or {}
     out = []
     for name, spec in stations.items():
         prop = spec.get("prop")
@@ -1213,22 +1220,28 @@ def main() -> int:
 
         pickup = next((p for p in props if p[1] == "pickup"), None)
         package_prim_path = "/World/package_0"
+        pkg_pose = None
         if pickup is not None:
             _, _, pkg_x, pkg_y, _, pkg_prop = pickup
-            pkg_z = _package_z(float(pkg_prop["deck_height_m"]))
-        else:
-            # No prop'd pickup station (e.g. --no-station-props): fall back to
-            # the first pickup pose with the box on the floor, so the mock pick
-            # still has something to grab.
+            pkg_pose = (pkg_x, pkg_y, _package_z(float(pkg_prop["deck_height_m"])))
+        elif WAYPOINTS_CONFIG.exists():
+            # No prop'd pickup station (e.g. --no-station-props) but a stations
+            # file is present: fall back to the first pickup pose with the box
+            # on the floor, so the mock pick still has something to grab.
             import yaml
 
-            with open(WAYPOINTS_CONFIG) as f:
-                stations = yaml.safe_load(f)["stations"]
-            first = next(s for s in stations.values() if s["kind"] == "pickup")
-            pkg_x, pkg_y = float(first["pose"]["x"]), float(first["pose"]["y"])
-            pkg_z = PACKAGE_SIZE_M / 2.0
-        _spawn_package(stage, package_prim_path, pkg_x, pkg_y, pkg_z)
-        emit(f"  package_0 spawned at ({pkg_x}, {pkg_y}, {pkg_z:.3f})")
+            stations = (yaml.safe_load(WAYPOINTS_CONFIG.read_text()) or {}).get("stations") or {}
+            first = next((s for s in stations.values() if s.get("kind") == "pickup"), None)
+            if first is not None:
+                pkg_pose = (float(first["pose"]["x"]), float(first["pose"]["y"]),
+                            PACKAGE_SIZE_M / 2.0)
+        # else: stations retired (nav-only tasks, 2026-10-15) — there is no pick,
+        # so no package to spawn. The mock-pick subscribers below are harmless
+        # with nothing to grab; task_manager never sends a pick request now.
+        if pkg_pose is not None:
+            pkg_x, pkg_y, pkg_z = pkg_pose
+            _spawn_package(stage, package_prim_path, pkg_x, pkg_y, pkg_z)
+            emit(f"  package_0 spawned at ({pkg_x}, {pkg_y}, {pkg_z:.3f})")
 
         extra_ros_node, pick_cmd_state, head_cmd_state = _start_extra_ros_subscribers("robot_0")
         emit("  pick_cmd/head_cmd rclpy subscriber started")

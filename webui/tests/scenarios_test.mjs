@@ -343,7 +343,7 @@ async function main() {
     await page.send('Emulation.setDeviceMetricsOverride', {
       width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile,
     });
-    await page.send('Page.navigate', { url: `http://127.0.0.1:${CONTROL_PORT}/` });
+    await page.send('Page.navigate', { url: `http://127.0.0.1:${CONTROL_PORT}/index.html` });
     await sleep(1500);
 
     const initial = await page.eval(`(() => {
@@ -461,7 +461,7 @@ async function main() {
   await page.send('Emulation.setDeviceMetricsOverride', {
     width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false,
   });
-  await page.send('Page.navigate', { url: `http://127.0.0.1:${READONLY_PORT}/` });
+  await page.send('Page.navigate', { url: `http://127.0.0.1:${READONLY_PORT}/index.html` });
   await sleep(1500);
   await page.eval(SHOW_SCENARIOS);
   await sleep(600);
@@ -488,7 +488,7 @@ async function main() {
   // Quick start must FILL the form (explore_fleet -> 2 robots), and picking a
   // saved map must turn into --resume/--map in the server's own command line.
   // Reads the preview the Start button would launch, never posts the start.
-  await page.send('Page.navigate', { url: `http://127.0.0.1:${CONTROL_PORT}/` });
+  await page.send('Page.navigate', { url: `http://127.0.0.1:${CONTROL_PORT}/index.html` });
   await sleep(1500);
   await page.eval(SHOW_SCENARIOS);
   await sleep(600);

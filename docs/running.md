@@ -813,6 +813,19 @@ Both bit real test runs before being fixed — worth knowing if you extend
 
 ## Map lifecycle: build a map once, navigate on it later
 
+**Several robots on one saved map.** With 2+ robots and `--localize` / `--resume`,
+`run_demo.sh` copies the map to every robot (`~/.ros/sortbots_<rid>.db`) and passes
+`shared_map:=true`. Every robot's map frame is then the primary's (the map was built
+from robot_0's spawn), so all are anchored at robot_0's spawn and each RTAB-Map gets
+`initial_pose` = its spawn relative to robot_0's. They start read-only;
+`nodes/map_handoff.py` switches an extend session to mapping per robot, but only after
+a real visual match, because `set_mode_mapping` drops the seeded pose otherwise (robot_1
+jumped 8.6 m to the map origin when switched on the seed alone, 2026-10-21). A robot
+with no match yet still drives and explores read-only on its seed, which tracks truth to
+centimetres in sim. Caveats: each robot extends its OWN copy, and `maps.sh save` keeps
+robot_0's, so what robot_1 adds is visible in the fused `/map` during the run but not
+saved; and two copies of a 2.4 GB map cost two RTAB-Maps' worth of RAM (~18 GB together).
+
 By default every run builds a **fresh** map — RTAB-Map starts from an empty
 database, so a mapping run always means what it says. The map persists after
 shutdown, and `--localize` reopens it read-only instead of rebuilding:
@@ -1080,6 +1093,38 @@ tailscale status                          # phone + workstation both online?
 ufw status                                # inactive, or tailscale0 allowed?
 curl -s -o /dev/null -w '%{http_code}\n' http://<tailnet-ip>:8081/   # expect 200
 ```
+
+## The operator view (the default page, `/`)
+
+`http://<host>:8081/` serves the operator view (`webui/operator.html`). The old per-robot
+dashboard (`index.html` + `app.js`) is **deprecated**: it stays reachable at `/?robot=ID` (each
+open robot card links it as "Engineering view") for the panels the operator view doesn't have
+yet (drive pad, head aim, SLAM internals, splats), but new work goes into the operator view.
+
+- **Header.** Map / 3D cloud picks what the stage shows. The mode tile only reports how the
+  session was started (Mapping, or Premapped plus the map name): changing it restarts the stack
+  (RTAB-Map cannot go from extend to read-only mid-run), so that lives in **Session**, which
+  opens the launch form (`scenarios.js` unchanged). **Stop all** stops exploring, cancels every
+  navigation goal (including task_manager's) and zeroes cmd_vel on every robot.
+- **Robots (left).** Any number of cards can be open. Each shows a camera tile with a
+  Camera / Depth toggle (`/snapshot` polls of `camera/rgb` / `camera/depth_color`), a task tile
+  coloured by activity (blue moving, amber picking/placing, purple exploring, red failed), and
+  position, heading, speed / turn rate (from `/<id>/odom`) and distance left on the Nav2 plan.
+  The card opened or clicked into last has control: map sends and waypoint chips go to it.
+- **Stage (centre).** 2D: the fused `/map`, robot poses (composed from `/tf`), Nav2 plans, and a
+  select / waypoint / send-robot toolbar (drag on a click to set the heading). 3D:
+  `/fleet/recon_cloud` as points with a cone per robot, subscribed only while showing and
+  throttled to one cloud per 8 s (each is ~4 MB of base64 through rosbridge).
+- **Tasks (right).** task_manager keeps one FIFO per robot and reports the running task plus
+  the waiting ones on every change, so the list shows tasks queued from anywhere, and any
+  unfinished one can be cancelled (×, `/<id>/cancel_task`). Waypoints rename in place (the
+  pencil on a chip); queued tasks are unaffected, since task_manager resolves names to poses at
+  dispatch. **Queue tasks**: *Moves* builds an ordered list of stops and queues one `goto` task
+  per stop on one robot; *Pick & drop* queues a pickup -> dropoff task.
+- **Run demo** runs `configs/demo_tasks.yaml` in phases: each phase is queued only once every
+  task of the previous one has finished, so it shows each robot moving alone and then both in
+  parallel. The sequencing lives in the browser tab; Stop demo cancels what it queued.
+- Offline test: `node webui/tests/operator_test.mjs [--screenshot DIR]`.
 
 ## Testing the dashboard without the sim (recorded data)
 
