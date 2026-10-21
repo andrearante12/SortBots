@@ -228,7 +228,7 @@ async function main() {
     check(`${vp.label}: Start a session opens the session panel`, await visible('#session') && await visible('#launch-form'));
     check(`${vp.label}: launch form is filled from the API`, await page.eval(`document.querySelectorAll('#lf-preset option').length > 1`));
     check(`${vp.label}: Start is wired (not disabled by a missing console)`, await page.eval(`!document.getElementById('lf-start').disabled`));
-    check(`${vp.label}: with no session the panel is just the form`, await visible('#launch-form') && !(await visible('#session-pane')) && !(await visible('#lf-command')));
+    check(`${vp.label}: with no session the panel is just the form`, await visible('#launch-form') && !(await visible('#session-pane')) && !(await visible('#lf-command')) && !(await visible('#lf-summary')));
     check(`${vp.label}: no Quick start row: the form is custom`, !(await visible('#lf-preset')) && (await page.eval(`document.getElementById('lf-preset').value`)) === '');
     await shot(`${vp.label}-session-panel`);
     await page.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
@@ -258,8 +258,7 @@ async function main() {
     await mapPointer(4, -2); // click robot 1 on the map
     await sleep(300);
     check(`${vp.label}: clicking a robot on the map selects it`, (await page.eval(`window.__operator.robots && document.querySelector('#fleet .robot.sel .name').textContent`)) === 'Robot 1');
-    const href = await page.eval(`document.querySelector('#fleet .robot.sel a.eng').getAttribute('href')`);
-    check(`${vp.label}: live view link is the per-robot dashboard`, href === `/?robot=${r1}`, href);
+    check(`${vp.label}: no link out to the old dashboard`, await page.eval(`!document.querySelector('#fleet a[href^="/?robot"]')`));
     check(`${vp.label}: camera slot is in the selected card`, await page.eval(`!!document.querySelector('#fleet .robot.sel .cam')`));
     await shot(`${vp.label}-selected`);
 
@@ -283,15 +282,16 @@ async function main() {
     check(`${vp.label}: the card shows position`, (await f0('pos')) === '-3.00, 2.00 m', await f0('pos'));
     check(`${vp.label}: the card shows heading`, (await f0('heading')) === '29°', await f0('heading'));
     check(`${vp.label}: the card shows speed and turn rate from odom`, (await f0('speed')) === '0.50 m/s' && (await f0('turn')) === '45°/s', `${await f0('speed')} ${await f0('turn')}`);
-    const tile = await page.eval(`(() => { const t = document.querySelector('#fleet .robot[data-id="${r0}"] .tile'); return t.className + '|' + t.textContent.replace(/\s+/g, ' '); })()`);
-    check(`${vp.label}: the task tile names the task and is coloured as moving`, /\bmoving\b/.test(tile) && /Go to Dock/.test(tile) && /1 waiting/.test(tile), tile);
+    const pill = await page.eval(`(() => { const r = document.querySelector('#fleet .robot[data-id="${r0}"]'); return r.querySelector('.tag').className + '|' + r.querySelector('.l2').textContent; })()`);
+    check(`${vp.label}: the status pill is coloured as moving and the line names the task`, /\bpill\b.*\bmoving\b/.test(pill) && /Going to Dock/.test(pill) && /1 waiting/.test(pill), pill);
+    check(`${vp.label}: no separate task tile`, await page.eval(`!document.querySelector('#fleet .tile')`));
     check(`${vp.label}: a busy robot offers Clear tasks`, await page.eval(`!!document.querySelector('#fleet .robot[data-id="${r0}"] [data-act="clear"]')`));
     await page.eval(`window.__published.length = 0`);
     await click(`#fleet .robot[data-id="${r0}"] [data-act="clear"]`);
     check(`${vp.label}: Clear tasks cancels everything on that robot`, await page.eval(`window.__published.some((x) => x.topic === '/${r0}/cancel_task' && x.msg.data === 'all')`));
     await emit(`/${r0}/task_status`, { data: JSON.stringify({ task_id: null, state: 'IDLE', queue_depth: 0, queue: [] }) });
     await sleep(300);
-    check(`${vp.label}: an idle robot's tile reads No task`, /No task/.test(await page.eval(`document.querySelector('#fleet .robot[data-id="${r0}"] .tile').textContent`)));
+    check(`${vp.label}: an idle robot's pill is the idle colour`, await page.eval(`document.querySelector('#fleet .robot[data-id="${r0}"] .tag').classList.contains('idle')`));
     await shot(`${vp.label}-two-cards`);
     await click(`#fleet .robot[data-id="${r0}"] .l1`);
     await sleep(200);
@@ -474,6 +474,7 @@ async function main() {
     await page.eval(`window.__fakeSession.phase = 'ros_starting'`);
     await sleep(1400);
     check(`${vp.label}: the bar moves forward with the phase`, parseInt(await bar(), 10) > p1, `${await bar()}`);
+    check(`${vp.label}: while starting, the panel shows only the progress text`, !(await visible('#session-state')) && !(await visible('#sp-status')));
 
     // -- a premapped session in the header -------------------------------------------------------------------
     await page.eval(`window.__fakeSession = { state: 'running', phase: 'running', phase_label: 'running', session_id: 's1', scenario: 'library_localize', config: { map: 'warehouse', mode: 'readonly', robots: 2 } }`);
@@ -486,6 +487,7 @@ async function main() {
     await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
     await sleep(400);
     check(`${vp.label}: the bar is gone once the robots are up`, await page.eval(`document.getElementById('sp-boot').hidden`));
+    check(`${vp.label}: once running, a short status replaces the bar`, /^Running · /.test(await page.eval(`document.getElementById('sp-status').textContent`)) && await page.eval(`!document.getElementById('sp-status').hidden`));
     // A demo: true session (the Fleet demo preset) starts the task demo by itself, once.
     await page.eval(`window.__published.length = 0; window.__fakeSession = { ...window.__fakeSession, session_id: 's-demo', config: { ...window.__fakeSession.config, demo: true } }`);
     await sleep(3600);
@@ -498,7 +500,7 @@ async function main() {
     check(`${vp.label}: a stopped session leaves just the form`, await visible('#launch-form') && !(await visible('#session-pane')));
     await page.eval(`window.__fakeSession = { ...window.__fakeSession, state: 'failed', error: 'Isaac Sim failed to start' }`);
     await sleep(3400);
-    check(`${vp.label}: a failed session shows its status and log`, await visible('#session-pane') && await page.eval(`document.getElementById('sp-log').open`));
+    check(`${vp.label}: a failed session shows its status and log`, await visible('#session-pane') && await visible('#session-state') && await page.eval(`document.getElementById('sp-log').open`));
     await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
     await page.eval(`window.__fakeSession = null`);
   }

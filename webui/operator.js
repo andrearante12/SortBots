@@ -432,7 +432,8 @@
   let lastFleetSig = "";
   const ODOM_TTL_MS = 2000; // a stale twist reads as "—", not as the last speed forever
 
-  // The task tile: what this robot is doing, coloured by kind of activity.
+  // What this robot is doing, coloured by kind of activity: drives the status pill
+  // (cls) and the line under the name (title / sub, already HTML-escaped).
   function tileOf(r) {
     const st = statusOf(r), s = r.task;
     const waiting = r.queueDepth ? ` · ${r.queueDepth} waiting` : "";
@@ -440,6 +441,8 @@
     if (st.tag === "on a task") {
       const t = s.task ? { id: s.task_id, ...s.task } : tasks.find((x) => x.id === s.task_id) || { id: s.task_id };
       const cls = ["PICKING", "PLACING"].includes(s.state) ? "working" : "moving";
+      // A move's phase is just "Moving", which the pill already says.
+      if (t.kind === "goto" && t.goto) return { cls, title: `Going to ${esc(t.goto)}`, sub: waiting.slice(3) };
       return { cls, title: taskTitle(t), sub: (TASK_PHASE[s.state] || s.state) + waiting };
     }
     if (st.tag === "navigating") return { cls: "moving", title: `Going to ${esc(r.nav.label)}`, sub: "Direct goal" + waiting };
@@ -481,10 +484,7 @@
       const f = factsOf(r);
       for (const dd of el.querySelectorAll("dd[data-f]")) if (dd.textContent !== f[dd.dataset.f]) dd.textContent = f[dd.dataset.f];
     }
-    const rows = list.map((r) => {
-      const st = statusOf(r);
-      return { r, st, isOpen: open.has(r.id), tile: open.has(r.id) ? tileOf(r) : null };
-    });
+    const rows = list.map((r) => ({ r, st: statusOf(r), isOpen: open.has(r.id), tile: tileOf(r) }));
     const sig = JSON.stringify(rows.map((x) => [x.r.id, x.st, x.isOpen, x.r.id === selected, online(x.r), x.tile, x.r.queueDepth]));
     if (sig === lastFleetSig) return;
     lastFleetSig = sig;
@@ -494,16 +494,14 @@
       const f = isOpen ? factsOf(r) : null, busy = st.tag === "on a task" || r.queueDepth > 0;
       return `
       <div class="robot ${isOpen ? "sel" : ""} ${r.id === selected ? "active" : ""} ${online(r) ? "" : "offline"}" data-id="${esc(r.id)}" style="--c:${r.color}">
-        <div class="l1" tabindex="0" role="button" aria-expanded="${isOpen}"><span class="sw"></span><span class="name">${esc(nameOf(r.id))}</span>${r.id === selected && open.size > 1 ? `<span class="ctl" title="Map clicks and waypoint sends go to this robot">controls</span>` : ""}<span class="tag">${esc(st.tag)}</span></div>
-        <div class="l2">${esc(st.detail)}</div>
+        <div class="l1" tabindex="0" role="button" aria-expanded="${isOpen}"><span class="sw"></span><span class="name">${esc(nameOf(r.id))}</span>${r.id === selected && open.size > 1 ? `<span class="ctl" title="Map clicks and waypoint sends go to this robot">controls</span>` : ""}<span class="tag pill ${tile.cls}">${esc(st.tag)}</span></div>
+        <div class="l2">${st.tag === "on a task" ? tile.title + (tile.sub ? ` · ${tile.sub}` : "") : esc(st.detail) + (r.queueDepth ? ` · ${r.queueDepth} waiting` : "")}</div>
         ${isOpen ? `<div class="more">
           <div class="cam-slot" data-cam="${esc(r.id)}"></div>
-          <div class="tile ${tile.cls}"><span class="k">Task</span><b>${tile.title}</b><span class="s">${tile.sub}</span></div>
           <dl class="facts" data-id="${esc(r.id)}">${FACTS.map(([k, label]) => `<div${k === "pos" ? ' class="wide"' : ""}><dt>${label}</dt><dd data-f="${k}">${esc(f[k])}</dd></div>`).join("")}</dl>
           <div class="acts"><button class="btn small" data-act="stop">Stop</button>
             <button class="btn small" data-act="explore">${st.tag === "exploring" ? "Stop exploring" : "Explore"}</button>
             ${busy ? `<button class="btn small" data-act="clear" title="Cancel this robot's current task and everything queued behind it">Clear tasks</button>` : ""}</div>
-          <a class="eng" href="/?robot=${encodeURIComponent(r.id)}" target="_blank" rel="noopener" title="The old per-robot dashboard (deprecated): drive pad, head aim, SLAM internals">Engineering view</a>
         </div>` : ""}
       </div>`;
     }).join("") : `<div class="none">No robots found.</div>`;
@@ -910,6 +908,7 @@
     // read as a live one ("fleet_demo · stopped · running"). Show the strip only
     // while a run is live, or when one failed and its reason is worth reading.
     card.classList.toggle("has-session", !!s && (sessionActive() || s.state === "failed"));
+    card.classList.toggle("failed", !!s && s.state === "failed");
     // A failed run's log is the only place its reason is; open it for that case.
     if (s && s.state === "failed") $("#sp-log").open = true;
     renderEmpty();
@@ -940,6 +939,12 @@
       if (b) el.querySelector("i").style.setProperty("--p", `${Math.round(b.p * 100)}%`);
     }
     if (b) $("#sp-boot .boot-label").textContent = b.text;
+    const st = $("#sp-status"), live = !b && session && ["running", "stopping"].includes(session.state);
+    st.hidden = !live;
+    if (live) {
+      const min = Math.floor((session.elapsed_s || 0) / 60);
+      st.textContent = session.state === "stopping" ? "Stopping…" : `Running · ${min < 1 ? "under a minute" : min < 60 ? `${min} min` : `${Math.floor(min / 60)} h ${min % 60} min`}`;
+    }
     return b;
   }
 

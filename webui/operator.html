@@ -109,20 +109,16 @@
   .camsel { position: absolute; top: 6px; right: 6px; display: flex; background: rgba(10,12,16,.6); border-radius: 6px; padding: 2px; }
   .camsel button { background: none; border: none; color: #c3cad2; font-size: .72rem; padding: 2px 8px; border-radius: 4px; }
   .camsel button.on { background: rgba(255,255,255,.9); color: #15191e; font-weight: 600; }
-  /* Task tile: colour says what kind of thing the robot is doing. */
-  .tile { --tc: var(--faint); display: grid; gap: 1px; padding: 8px 10px; border-radius: 6px; border-left: 4px solid var(--tc);
-          background: color-mix(in srgb, var(--tc) 13%, var(--surface)); }
-  .tile .k { font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
-  .tile b { font-weight: 600; } .tile .s { font-size: .8rem; color: var(--muted); }
-  .tile.moving { --tc: var(--info); } .tile.working { --tc: var(--tape); } .tile.exploring { --tc: #8a5cf0; }
-  .tile.failed { --tc: var(--stop); } .tile.done { --tc: var(--go); } .tile.off { --tc: var(--border); }
+  /* Status pill: colour says what kind of thing the robot is doing. */
+  .robot .tag.pill { --tc: var(--faint); color: var(--tc); background: color-mix(in srgb, var(--tc) 14%, var(--surface));
+                     border-radius: 10px; padding: 1px 8px; font-weight: 600; font-size: .74rem; }
+  .pill.idle { --tc: var(--muted); } .pill.moving { --tc: var(--info); } .pill.working { --tc: #b88a00; }
+  .pill.exploring { --tc: #8a5cf0; } .pill.failed { --tc: var(--stop); } .pill.off { --tc: var(--faint); }
   .more .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; margin: 0; }
   .more .facts .wide { grid-column: span 2; }
   .more .facts dt { font-size: .7rem; color: var(--muted); }
   .more .facts dd { margin: 0; font-size: .84rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .more .acts { display: flex; gap: 6px; flex-wrap: wrap; }
-  .more .eng { font-size: .8rem; color: var(--muted); justify-self: start; }
-  .more .eng:hover { color: var(--ink); }
 
   #stage { position: relative; min-width: 0; min-height: 0; }
   #map { width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
@@ -229,8 +225,14 @@
      second one anyway); idle, it's just the form. The launch command, the console
      hint and an empty log are noise either way. */
   #session .card.live #launch-form, #session .card:not(.has-session) #session-pane { display: none; }
-  #lf-command, #scenario-hint, #lf-preset-note:empty, #lf-robot-ids { display: none !important; }
+  /* #lf-summary describes what Start WOULD launch, which read as a running session. */
+  #lf-command, #lf-summary, #scenario-hint, #lf-preset-note:empty, #lf-robot-ids { display: none !important; }
+  #lf-footer { grid-template-columns: 1fr auto; }
   #lf-preset-note { color: var(--muted); }
+  /* scenarios.js's status line repeats the whole launch summary; the bar's text (or
+     "Running · 12 min") says enough. Only a failed run needs it, for the error. */
+  #session .card:not(.failed) #session-state { display: none; }
+  #sp-status[hidden] { display: none; }
   #sp-log summary { cursor: pointer; color: var(--muted); font-size: .84rem; }
   #sp-log[open] summary { margin-bottom: 6px; }
   /* Startup progress: one segment per run_demo.sh phase (session.py PHASE_ORDER),
@@ -390,6 +392,7 @@
       </form>
     <div id="session-pane">
         <div class="boot" id="sp-boot" hidden><div class="bar"><i></i></div><span class="boot-label"></span></div>
+        <span class="boot-label" id="sp-status" hidden></span>
         <div id="session-strip">
           <span id="session-state">no session</span>
           <button type="button" id="session-finish" disabled
