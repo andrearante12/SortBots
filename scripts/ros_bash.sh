@@ -48,7 +48,7 @@ unset _ROS_BASH_SIGRESET
 # group, writes its pgid here, and we relay signals to that group by hand; with
 # a shared PID namespace the in-box pgid is a valid host pgid.
 PGID_FILE="$(mktemp "${TMPDIR:-/tmp}/ros_bash.XXXXXX")"
-trap 'rm -f "$PGID_FILE"' EXIT
+trap 'rm -f "$PGID_FILE" "$PGID_FILE.go"' EXIT
 
 # -T: no tty. Every non-interactive call site redirects stdout to a log, and a
 # tty would also put the in-box process in the foreground job of a terminal it
@@ -61,8 +61,14 @@ trap 'rm -f "$PGID_FILE"' EXIT
 TTY_FLAG=(-T) DETACH=(setsid)
 [[ -t 0 && -t 1 ]] && TTY_FLAG=() DETACH=()
 
+# The in-box side waits for "$PGID_FILE.go" before exec'ing the real command,
+# so the cgroup move below lands before it forks anything (children inherit
+# their parent's cgroup at fork; nothing moves them afterwards). Bounded at
+# ~10 s so a host side that never answers can't wedge the launch.
 "${DETACH[@]}" distrobox enter "${TTY_FLAG[@]}" "$BOX" -- \
-  setsid --wait bash -c 'echo $$ >"$0"; exec bash "$@"' "$PGID_FILE" "$@" &
+  setsid --wait bash -c 'echo $$ >"$0"
+    for _ in $(seq 200); do [[ -e "$0.go" ]] && break; sleep 0.05; done
+    exec bash "$@"' "$PGID_FILE" "$@" &
 CHILD=$!
 
 relay() {
@@ -77,6 +83,24 @@ relay() {
 for sig in INT TERM HUP; do
   trap "relay $sig" "$sig"
 done
+
+# `podman exec` starts the in-box process in the CONTAINER's cgroup
+# (.../libpod-<id>.scope/container), not ours — so run_demo.sh's resource
+# fence (a capped systemd scope it re-execs into) silently covered Isaac but
+# not the ROS stack. 2026-10-19: rtabmap reached 13 GB and was killed by the
+# GLOBAL OOM killer from inside libpod's cgroup while the fence sat unused.
+# With a shared PID namespace the in-box pid is a host pid, and both cgroups
+# sit under this user's delegated systemd tree, so we can simply move it into
+# whatever cgroup we're in. Best effort: if the move is refused, say so and
+# carry on unfenced rather than fail the launch.
+for _ in $(seq 600); do [[ -s "$PGID_FILE" ]] && break; sleep 0.05; done
+INBOX_PID="$(cat "$PGID_FILE" 2>/dev/null)"
+OUR_CG="/sys/fs/cgroup$(cut -d: -f3- /proc/self/cgroup 2>/dev/null)"
+if [[ -n "$INBOX_PID" && -w "$OUR_CG/cgroup.procs" ]]; then
+  echo "$INBOX_PID" >"$OUR_CG/cgroup.procs" 2>/dev/null || \
+    echo "ros_bash: couldn't move in-box pid $INBOX_PID into ${OUR_CG#/sys/fs/cgroup} — running outside its resource limits" >&2
+fi
+touch "$PGID_FILE.go"
 
 # `wait` returns early (>128) whenever a trapped signal arrives; keep waiting
 # until the child has actually gone so the exit status is the real one.
