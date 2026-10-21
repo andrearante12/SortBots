@@ -1298,6 +1298,8 @@ class _WorldRuntime:
 
     def tick(self, sim_t: float, robots: dict) -> None:
         """Every GROUND_TRUTH_EVERY steps: take commands, publish ground truth."""
+        import math
+
         import rclpy
 
         rclpy.spin_once(self.node, timeout_sec=0.001)  # see _start_extra_ros_subscribers
@@ -1309,9 +1311,12 @@ class _WorldRuntime:
         for name, (robot, *_rest) in robots.items():
             q = robot.get_joint_positions()
             sx, sy = self.spawn[name][:2]
+            # root_z_rotation is a continuous joint: wrap, or a robot that has
+            # turned twice reports yaw 12.6 (seen live as 4.22, 2026-10-21).
+            yaw = math.atan2(math.sin(float(q[2])), math.cos(float(q[2])))
             out["robots"][name] = {"x": round(sx + float(q[0]), 4),
                                    "y": round(sy + float(q[1]), 4),
-                                   "yaw": round(float(q[2]), 4)}
+                                   "yaw": round(yaw, 4)}
         if self.world:
             from simtest import world as wl
 
