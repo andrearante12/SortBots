@@ -18,7 +18,7 @@
 # Usage:
 #   scripts/run_demo.sh [--robot-id robot_0] [--robots 2] [--robot-ids IDS]
 #                       [--scene nvidia]
-#                       [--headless] [--teleop] [--localize | --resume]
+#                       [--no-headless] [--teleop] [--localize | --resume]
 #                       [--no-chase-cam | --chase-cam-robots N]
 #                       [--map PATH] [--explore] [--keep-console]
 #   scripts/run_demo.sh stop [--keep-console]   # tear the pipeline down
@@ -138,11 +138,47 @@ if [[ "${1:-}" == "stop" ]]; then
   exit 0
 fi
 
+# ---- resource fence ----
+# Diagnosed 2026-10-15: an unfenced run took the whole desktop down with it —
+# rtabmap grew to 19 GB, the box swap-stormed until the global OOM killer
+# fired, and the stall dropped every remote session (xrdp, gnome-remote-
+# desktop, SSH keepalives). So re-exec under a transient systemd user scope:
+# everything setsid'd below (Isaac AND the ROS bringup) stays in that scope's
+# cgroup after this script returns, so one budget covers the whole pipeline.
+#   MemoryHigh/Max  the sim reclaims and then OOMs inside its own cgroup, not
+#                   the machine's. Default: leave 10 GB (Max) / 14 GB (High)
+#                   for the desktop. Override: SORTBOTS_SIM_MEM_HIGH/_MAX.
+#   MemorySwapMax   a small cap — swapping the sim is what made it a storm.
+#   CPUWeight=20    the desktop wins any CPU contention (default weight 100).
+#   taskset         keeps cores 0-1 free. AllowedCPUs= would be the cgroup way
+#                   but the user manager isn't delegated cpuset (or io) here (only
+#                   cpu memory pids), so it silently no-ops.
+# systemd-run --scope execs in place, so the pid webui/session.py holds stays
+# valid. SORTBOTS_NO_FENCE=1 skips all of it.
+if [[ -z "${SORTBOTS_FENCED:-}" && "${SORTBOTS_NO_FENCE:-}" != "1" ]]; then
+  export SORTBOTS_FENCED=1
+  if systemd-run --user --scope -q true >/dev/null 2>&1; then
+    MEM_GB=$(awk '/^MemTotal:/ {print int($2 / 1048576)}' /proc/meminfo)
+    MEM_HIGH=${SORTBOTS_SIM_MEM_HIGH:-$(( MEM_GB - 14 ))G}
+    MEM_MAX=${SORTBOTS_SIM_MEM_MAX:-$(( MEM_GB - 10 ))G}
+    PIN=()
+    NCPU=$(nproc)
+    (( NCPU >= 6 )) && PIN=(taskset -c "2-$(( NCPU - 1 ))")
+    echo "[run_demo] fencing the pipeline: MemoryHigh=$MEM_HIGH MemoryMax=$MEM_MAX CPUWeight=20 ${PIN[*]}"
+    exec systemd-run --user --scope -q --unit="sortbots-sim-$$" \
+      -p MemoryHigh="$MEM_HIGH" -p MemoryMax="$MEM_MAX" -p MemorySwapMax=2G \
+      -p CPUWeight=20 \
+      "${PIN[@]}" "$0" "$@"
+  else
+    echo "[run_demo] WARNING: no systemd user manager — running UNFENCED (a runaway sim can starve the desktop)."
+  fi
+fi
+
 # ---- args ----
 # Teleop defaults OFF — the dashboard drive pad replaces the WASD window.
 # ROBOTS defaults to 2 — SortBots is a fleet project, so the bare demo comes up
 # as a collaborative fleet (fused /map, mesh radio). --robots 1 for single-robot.
-ROBOT_ID=robot_0; ROBOTS=2; ROBOT_IDS=""; SCENE=nvidia; HEADLESS="--no-headless"; TELEOP=0
+ROBOT_ID=robot_0; ROBOTS=2; ROBOT_IDS=""; SCENE=nvidia; HEADLESS="--headless"; TELEOP=0
 # Cosmetic 3rd-person cam = a second render product per robot. --no-chase-cam
 # drops all of them; --chase-cam-robots N keeps them on the first N robots
 # only (dashboard only shows robot_id's feed, so fleet runs usually want 1).
@@ -154,7 +190,8 @@ while [[ $# -gt 0 ]]; do
     --robots)   ROBOTS="$2";   shift 2;;
     --robot-ids) ROBOT_IDS="$2"; shift 2;;
     --scene)    SCENE="$2";    shift 2;;
-    --headless) HEADLESS="--headless"; shift;;
+    --headless) HEADLESS="--headless"; shift;;  # the default; kept for back-compat
+    --no-headless) HEADLESS="--no-headless"; shift;;
     --no-chase-cam) CHASE_CAM_ARGS="--no-chase-cam"; shift;;
     --chase-cam-robots) CHASE_CAM_ARGS="--chase-cam-robots $2"; shift 2;;
     --teleop)    TELEOP=1; shift;;
@@ -300,7 +337,7 @@ cat <<EOF
 
 ============================================================
   SortBots warehouse SLAM demo is UP
-    * Isaac Sim window  : NVIDIA warehouse + $ROBOT_IDS
+    * Isaac Sim         : NVIDIA warehouse + $ROBOT_IDS ($HEADLESS)
     * Web dashboard     : http://localhost:$DASHBOARD_PORT/  (or the tailnet URL above)
         - live SLAM map + trail, Nav2 path/costmap overlays, SLAM status
         - drag on the map to send a Nav2 goal; drive pad; pickup->dropoff dispatch

@@ -33,7 +33,7 @@ run:
   scene: nvidia          # nvidia | primitive
   robots: 1
   robot_id: robot_0
-  headless: false        # true drops the Isaac window (the dashboard still works)
+  headless: true        # false opens the Isaac window (costs GPU the remote desktop needs)
   chase_cam: false       # cosmetic 3rd-person view; off by default because the
                          # render product costs ~30% of real-time factor (see
                          # scripts/bench_sim.sh). Tick it in the UI to watch.
