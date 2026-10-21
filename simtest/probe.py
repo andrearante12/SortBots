@@ -482,8 +482,10 @@ def run(variant_path: Path, out_dir: Path, startup_timeout: float) -> int:
                 reason = "wall_timeout"
             if core.t0 is not None and now - last_beat > 15:
                 last_beat = now
-                log(f"t={core.elapsed():6.1f}s  goals: " + ", ".join(
-                    f"{g['id']}={g['state']}" for g in core.goals.values()))
+                parts = [f"{g['id']}={g['state']}" for g in core.goals.values()]
+                parts += [f"{t['id']}={t['state']}" for t in core.tasks.values()]
+                parts += [f"{r}:{s}" for r, s in sorted(core.explore.items())]
+                log(f"t={core.elapsed():6.1f}s  " + (", ".join(parts) or "running"))
     except KeyboardInterrupt:
         reason = "interrupted"
     wall_s = time.monotonic() - core.wall0
