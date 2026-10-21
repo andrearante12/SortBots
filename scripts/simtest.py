@@ -176,11 +176,25 @@ def _pipeline_alive() -> bool:
                           capture_output=True).returncode == 0
 
 
+def _domain() -> int:
+    """ROS_DOMAIN_ID to probe on: the caller's (default 0, like every launcher).
+
+    Inherited, never assumed: on a shared network another machine's SortBots
+    stack on domain 0 is the same /robot_0 namespace, and a probe on the wrong
+    domain would score — and send goals to — someone else's robot (seen
+    2026-10-21: a teammate's full stack visible from this laptop's Wi-Fi).
+    """
+    try:
+        return max(0, min(232, int(os.environ.get("ROS_DOMAIN_ID", "0"))))
+    except ValueError:
+        return 0
+
+
 def _ros_shell(cmd: str) -> list[str]:
     shell = str(ROS_BASH) if ROS_BASH.exists() else "bash"
     body = (f"source {shlex.quote(ROS_SETUP)}; "
             f"export PATH={shlex.quote(SYSTEM_PATH)}:\"$PATH\"; "
-            f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; "
+            f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID={_domain()}; "
             f"cd {shlex.quote(str(REPO_ROOT))}; {cmd}")
     return [shell, "-c", body]
 
@@ -248,11 +262,17 @@ def run_once(label: str, resolved: dict, streams: set[str], run_dir: Path, a,
                                                   "phase": line.split("phase ", 1)[1].strip()})
                 probe_rc = p.wait()
             except KeyboardInterrupt:
-                # The probe shares our process group and got the same SIGINT;
-                # give it time to write score.json for what it saw.
+                # Forward it explicitly: a terminal Ctrl-C reaches the whole
+                # foreground group, but a SIGINT to this process alone (pkill,
+                # a supervisor) would leave the probe running — and inside the
+                # jazzy distrobox it is in another session entirely, reachable
+                # only through ros_bash.sh's relay (found 2026-10-21: an
+                # orphaned probe outlived its sim). Then give it time to write
+                # score.json for what it saw.
                 try:
+                    p.send_signal(signal.SIGINT)
                     probe_rc = p.wait(timeout=30)
-                except subprocess.TimeoutExpired:
+                except (subprocess.TimeoutExpired, ProcessLookupError):
                     p.kill()
                 raise
         out = run_dir / "score.json"
@@ -327,7 +347,17 @@ def cmd_run(a) -> int:
                 log(f"\n[simtest] run {n}/{total}: [{label}] repeat {rep}")
                 state.update(current={"variant": label, "repeat": rep, "n": n,
                                       "phase": "queued"}, last=n == total)
-                body = run_once(label, resolved, streams, run_dir, a, state)
+                try:
+                    body = run_once(label, resolved, streams, run_dir, a, state)
+                except KeyboardInterrupt:
+                    # Keep the in-flight run in the record: a cancelled run
+                    # that silently vanished would make the report read as
+                    # fewer runs, not as a cancellation.
+                    with open(results_path, "a") as fh:
+                        fh.write(json.dumps({"variant": label, "repeat": rep,
+                                             "run_dir": run_dir.name, "ok": False,
+                                             "error": "interrupted"}) + "\n")
+                    raise
                 line = {"variant": label, "repeat": rep, "run_dir": run_dir.name}
                 if "score" in body and "error" not in body:
                     line.update(ok=body["score"]["ok"], score=body["score"], meta=body["meta"])

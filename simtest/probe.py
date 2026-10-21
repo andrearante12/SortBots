@@ -163,6 +163,18 @@ class ProbeCore:
                    "pose": g["pose"]})
 
     # -- decisions -------------------------------------------------------------
+    def missing(self) -> list[str]:
+        """What readiness is still waiting for — logged while waiting, because
+        "phase ready" for ten minutes says nothing about which input is late."""
+        out = [] if self.sim is not None else ["/clock"]
+        if not self.have["gt"]:
+            out.append("/sim/ground_truth")
+        if not self.have["map"] and "map" in self.streams:
+            out.append("/map")
+        out += [f"/{r}/navigate_to_pose" for r in sorted({g["robot"] for g in self.goals.values()})
+                if r not in self.nav_ready]
+        return out
+
     def ready(self) -> bool:
         need_nav = {g["robot"] for g in self.goals.values()}
         return (self.sim is not None and self.have["gt"]
@@ -457,11 +469,14 @@ def run(variant_path: Path, out_dir: Path, startup_timeout: float) -> int:
             if core.phase != last_phase:
                 log(f"phase {core.phase}")
                 last_phase = core.phase
+            if core.t0 is None and now - last_beat > 20:
+                last_beat = now
+                missing = core.missing()
+                log(f"waiting for: {', '.join(missing)}" if missing else
+                    f"{core.phase}: sim t={core.sim:.1f}")
             if core.t0 is None and now - core.wall0 > startup_timeout:
-                missing = [k for k, v in {"clock": core.sim is not None, **core.have}.items()
-                           if not v]
-                missing += [f"nav:{r}" for r in node.nav if r not in core.nav_ready]
-                log(f"never ready after {startup_timeout:.0f}s wall (missing: {missing})")
+                log(f"never ready after {startup_timeout:.0f}s wall "
+                    f"(missing: {', '.join(core.missing()) or 'nothing — world restart not seen'})")
                 reason = "not_ready"
             elif now > deadline:
                 reason = "wall_timeout"

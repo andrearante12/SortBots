@@ -64,6 +64,13 @@ from _isaac_utils import (  # noqa: E402
 
 guard_against_ros2()
 
+# `kill -USR1 <pid>` dumps every Python thread's stack into the sim log
+# (/tmp/sortbots_demo_sim.log). The only way to see where a stalled step loop
+# is stuck on a machine with ptrace_scope=1, where gdb/py-spy can't attach.
+import faulthandler  # noqa: E402
+
+faulthandler.register(signal.SIGUSR1, all_threads=True)
+
 REPO_ROOT = SCRIPTS_DIR.parent
 
 XLEROBOT_USD = REPO_ROOT / "assets" / "generated" / "xlerobot.usd"
