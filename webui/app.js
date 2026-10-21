@@ -1614,6 +1614,146 @@ new ROSLIB.Topic({
   reconnect_on_close: true,
 }).subscribe(onTfMessage);
 
+// -- world overlay (spawn_warehouse.py --world, configs/worlds/) -------------
+// Props and scripted movers, drawn from GROUND TRUTH (/sim/ground_truth: where
+// an actor really is), never from anything a robot perceived. That's the
+// point of drawing them: over the costmap you can see at a glance whether the
+// robot's picture of a mover matches the mover. /sim/world is the latched
+// static half (shapes, colours, paths); ground truth the 10 Hz poses. Both
+// only exist in sim, so on a real robot this whole block draws nothing.
+const worldToggle = document.getElementById("world-toggle");
+const WORLD_TRUTH_TTL_MS = 3000; // sim gone quiet -> stop drawing stale actors
+let worldLayout = null; // {world, title, props: [...], actors: [...]}
+let worldTruth = null; // last /sim/ground_truth
+let worldTruthAt = 0;
+
+new ROSLIB.Topic({
+  ros, name: "/sim/world", messageType: "std_msgs/String", reconnect_on_close: true,
+}).subscribe((msg) => {
+  try {
+    worldLayout = JSON.parse(msg.data);
+  } catch (e) {
+    return;
+  }
+  renderWorldTracker();
+});
+
+new ROSLIB.Topic({
+  ros, name: "/sim/ground_truth", messageType: "std_msgs/String",
+  reconnect_on_close: true, throttle_rate: 100,
+}).subscribe((msg) => {
+  try {
+    worldTruth = JSON.parse(msg.data);
+  } catch (e) {
+    return;
+  }
+  worldTruthAt = Date.now();
+  renderWorldTracker();
+});
+
+const worldCmdTopic = new ROSLIB.Topic({
+  ros, name: "/sim/world_cmd", messageType: "std_msgs/String",
+});
+
+function worldLive() {
+  return worldLayout && worldLayout.world && worldTruth &&
+    Date.now() - worldTruthAt < WORLD_TRUTH_TTL_MS;
+}
+
+const trkWorldRow = document.getElementById("trk-world-row");
+const trkWorld = document.getElementById("trk-world");
+const worldPauseBtn = document.getElementById("world-pause");
+function renderWorldTracker() {
+  const live = worldLive();
+  trkWorldRow.hidden = !live;
+  if (!live) return;
+  trkWorld.textContent = `${worldLayout.world} · actors t=${worldTruth.wt.toFixed(1)}s` +
+    (worldTruth.running ? "" : " (paused)");
+  worldPauseBtn.textContent = worldTruth.running ? "pause" : "resume";
+}
+document.getElementById("world-restart").addEventListener("click", () => {
+  worldCmdTopic.publish({ data: JSON.stringify({ cmd: "restart" }) });
+});
+worldPauseBtn.addEventListener("click", () => {
+  const cmd = worldTruth && worldTruth.running ? "pause" : "start";
+  worldCmdTopic.publish({ data: JSON.stringify({ cmd }) });
+});
+
+const rgb = (c, a) => `rgba(${Math.round(c[0] * 255)}, ${Math.round(c[1] * 255)}, ` +
+  `${Math.round(c[2] * 255)}, ${a})`;
+
+// A simtest.geometry shape (["circle", [x, y], r] | ["poly", [[x, y], ...]]) as a path.
+function traceWorldShape(shape) {
+  ctx.beginPath();
+  if (shape[0] === "circle") {
+    const [px, py] = worldToPixel(shape[1][0], shape[1][1]);
+    ctx.arc(px, py, Math.max(3, shape[2] * view.scale), 0, 2 * Math.PI);
+    return;
+  }
+  shape[1].forEach(([x, y], i) => {
+    const [px, py] = worldToPixel(x, y);
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  });
+  ctx.closePath();
+}
+
+function actorShape(a, p) {
+  if (a.shape === "cylinder") return ["circle", [p.x, p.y], a.radius];
+  const [sx, sy] = a.size;
+  const c = Math.cos(p.yaw), s = Math.sin(p.yaw);
+  return ["poly", [[sx / 2, sy / 2], [-sx / 2, sy / 2], [-sx / 2, -sy / 2], [sx / 2, -sy / 2]]
+    .map(([x, y]) => [p.x + c * x - s * y, p.y + s * x + c * y])];
+}
+
+function drawWorldOverlay() {
+  if (!worldToggle.checked || !worldLive()) return;
+  ctx.save();
+  for (const p of worldLayout.props) {
+    traceWorldShape(p.footprint);
+    ctx.fillStyle = rgb(p.color, 0.35);
+    ctx.strokeStyle = rgb(p.color, 0.9);
+    ctx.lineWidth = 1.5;
+    ctx.fill();
+    ctx.stroke();
+  }
+  for (const a of worldLayout.actors) {
+    // The path the actor walks: dashed, so it never reads as a Nav2 plan.
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = rgb(a.color, 0.45);
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    a.path.forEach(([x, y], i) => {
+      const [px, py] = worldToPixel(x, y);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    if (a.mode === "loop") ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const pose = worldTruth.actors[a.id];
+    if (!pose) continue;
+    traceWorldShape(actorShape(a, pose));
+    ctx.fillStyle = rgb(a.color, 0.85);
+    ctx.strokeStyle = "rgba(255,255,255,0.85)";
+    ctx.lineWidth = 1.5;
+    ctx.fill();
+    ctx.stroke();
+    const [px, py] = worldToPixel(pose.x, pose.y);
+    const r = Math.max(3, (a.radius || 0.3) * view.scale);
+    if (pose.moving) {
+      ctx.strokeStyle = rgb(a.color, 1);
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(px + r * 2 * Math.cos(pose.yaw), py - r * 2 * Math.sin(pose.yaw));
+      ctx.stroke();
+    }
+    drawRobotLabel(px, py, r, a.label || a.id, rgb(a.color, 1));
+  }
+  ctx.restore();
+}
+
 function drawFrame() {
   requestAnimationFrame(drawFrame);
   // Nothing to draw to while the map is off-stage. The subscriptions stay
@@ -1776,6 +1916,9 @@ function drawFrame() {
     ctx.lineTo(px + r * 1.8 * Math.cos(goal.yaw), py - r * 1.8 * Math.sin(goal.yaw));
     ctx.stroke();
   }
+
+  // Under the robot markers, over everything the robot itself produced.
+  drawWorldOverlay();
 
   if (lastPose) {
     const [px, py] = worldToPixel(lastPose.x, lastPose.y);

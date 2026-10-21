@@ -1,0 +1,51 @@
+# A test case: one scored, repeatable question (simtest/spec.py has the full
+# schema; docs/testing.md the how-to). Run it with:
+#
+#   scripts/simtest.py run crossing_yield
+#
+# Coordinates are the map frame (== Isaac world). Thresholds are a first cut:
+# tighten them once a few runs show where the stack actually sits.
+
+name: crossing_yield
+title: Walker crosses the aisle mouth — see it, yield, arrive
+description: >
+  robot_0 drives from its spawn pose down its aisle and out onto the open
+  floor while a walker paces back and forth across the aisle mouth. With the
+  goal sent at t0 the robot reaches the walker's line ~13-15 sim-s in, while
+  the walker crosses it at ~16 s — so on a typical run they meet. Pass = no
+  contact, the goal reached, and the walker not left painted into the map.
+
+scenario: moving_obstacles
+overrides:
+  world: aisle_crossing
+
+warmup_s: 5
+
+goals:
+  - robot: robot_0
+    pose: [-8.0, 3.0, -1.5708]   # out on the open floor, facing south
+    timeout_s: 120
+
+stop:
+  sim_s: 150
+  until: [goals_done]
+  settle_s: 3
+
+metrics:
+  - metric: clearance
+    pass:
+      contacts: {eq: 0}
+      min_m: {gt: 0.05}
+  - metric: goals
+    pass:
+      success_rate: {gte: 1.0}
+  - metric: map_contamination
+    pass:
+      occupied_frac: {lte: 0.05}
+  - metric: detection
+    pass:
+      recall: {gte: 0.3}
+  - metric: run_stats
+
+repeats: 1
+pass_rate: 1.0

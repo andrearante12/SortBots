@@ -1,0 +1,45 @@
+# A test case (simtest/spec.py has the schema; docs/testing.md the how-to).
+
+name: head_on_pass
+title: Walker comes down the aisle head-on — pass or wait, don't collide
+description: >
+  robot_0 drives up its own aisle while a walker comes down it toward the
+  robot. The aisle is ~4 m wide, so passing is possible — but the closing
+  speed is ~1.3 m/s and the walker never yields. Pass = no contact and the
+  goal reached. Variant `crossing` asks the same thing of the aisle-mouth
+  crossing world, for a side-by-side row in one report.
+
+scenario: moving_obstacles
+overrides:
+  world: aisle_head_on
+
+warmup_s: 5
+
+goals:
+  - robot: robot_0
+    pose: [-8.3, 15.0, 1.5708]   # up the aisle, beside the walker's turn point
+    timeout_s: 120
+
+stop:
+  sim_s: 150
+  until: [goals_done]
+  settle_s: 3
+
+metrics:
+  - metric: clearance
+    pass:
+      contacts: {eq: 0}
+  - metric: goals
+    pass:
+      success_rate: {gte: 1.0}
+  - metric: detection
+  - metric: run_stats
+
+variants:
+  - label: head_on
+    set: {overrides.world: aisle_head_on}
+  - label: crossing
+    set: {overrides.world: aisle_crossing}
+
+repeats: 1
+pass_rate: 1.0
