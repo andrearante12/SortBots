@@ -44,7 +44,7 @@ import session as session_mod
 import maps_lib
 
 WEBUI_DIR = Path(__file__).resolve().parent
-WAYPOINTS_CONFIG = WEBUI_DIR.parent / "configs" / "waypoints.yaml"
+DEMO_TASKS_CONFIG = WEBUI_DIR.parent / "configs" / "demo_tasks.yaml"
 ROBOTS_CONFIG = WEBUI_DIR.parent / "configs" / "robots.yaml"
 SPLAT_CONFIG = WEBUI_DIR.parent / "configs" / "splat.yaml"
 
@@ -96,9 +96,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         route = urlsplit(self.path).path
-        if route == "/api/waypoints":
-            self._serve_waypoints()
-        elif route == "/api/nav_waypoints":
+        if route == "/api/nav_waypoints":
             self._serve_json(_load_nav_waypoints())
         elif route == "/api/launch/options":
             self._serve_launch_options()
@@ -110,12 +108,21 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_maps()
         elif route.startswith("/api/maps/") and route.endswith("/db"):
             self._serve_map_db(route[len("/api/maps/"):-len("/db")])
+        elif route == "/api/demo_tasks":
+            self._serve_demo_tasks()
         elif route == "/api/splat/config":
             self._serve_splat_config()
         elif route == "/api/session":
             self._with_control(lambda: self._serve_json(SESSIONS.status()))
         elif route == "/api/session/log":
             self._with_control(self._serve_log)
+        elif route == "/" and "robot" not in parse_qs(urlsplit(self.path).query):
+            # Fleet overview is the landing page (promoted to default 2026-10-13,
+            # issue #6). The per-robot engineering dashboard stays at /?robot=ID,
+            # where operator.js links it, so a robot query param falls through to
+            # index.html below. index.html is also still reachable by its own path.
+            self.path = "/operator.html"
+            super().do_GET()
         else:
             super().do_GET()
 
@@ -144,10 +151,24 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     # -- config endpoints --------------------------------------------------
 
-    def _serve_waypoints(self):
-        with open(WAYPOINTS_CONFIG) as f:
-            stations = yaml.safe_load(f)["stations"]
-        self._serve_json(stations)
+    def _serve_demo_tasks(self):
+        # Canned demo for one-click runs (configs/demo_tasks.yaml): a list of
+        # phases the dashboard runs one after another. Read here only; the
+        # dashboard dispatches each entry through the normal
+        # /<robot>/dispatch_task path, so there is no server-side task state.
+        # A flat `tasks:` list (the original format) is served as one phase.
+        # Missing file is not an error — a deployment may simply carry no demo
+        # list; serve no phases so the button just says so.
+        raw = {}
+        if DEMO_TASKS_CONFIG.exists():
+            with open(DEMO_TASKS_CONFIG) as f:
+                raw = yaml.safe_load(f) or {}
+        phases = raw.get("phases") or []
+        if not phases and raw.get("tasks"):
+            phases = [{"title": "Demo", "tasks": raw["tasks"]}]
+        phases = [{"title": str(p.get("title") or f"Phase {i + 1}"), "tasks": p.get("tasks") or []}
+                  for i, p in enumerate(phases) if isinstance(p, dict)]
+        self._serve_json({"phases": phases})
 
     # -- launch form -------------------------------------------------------
 

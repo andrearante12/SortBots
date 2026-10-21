@@ -1,21 +1,27 @@
 #!/usr/bin/env python3
 """Per-robot task dispatch FSM for the SortBots warehouse demo.
 
-Owns one robot's task queue and drives it through:
+Owns one robot's task queue and drives it through (nav-only: a task is a drive
+to the pickup waypoint, a short pause, a drive to the dropoff waypoint, another
+pause — no arm, nothing physically picked up):
 
     IDLE -> NAV_TO_PICKUP -> PICKING -> NAV_TO_DROPOFF -> PLACING -> DONE
                  \\-> FAILED (nav abort/reject) <-/
 
-Talks to three things:
+A "goto" task is the single-leg version, used by the operator view's move
+queue: IDLE -> NAV_TO_GOAL -> DONE. Any task, queued or running, can be
+dropped with `<robot>/cancel_task` (its id, or "all"); a running one ends in
+CANCELLED.
+
+PICKING and PLACING are fixed DWELL_SEC pauses standing in for loading and
+unloading; the state names are kept so the dashboard's labels and status
+stream don't change. Pickup and dropoff are plain named waypoints — the same
+working set the operator edits on the map (data/nav_waypoints.json). Merged
+2026-10-15 from the old `stations` concept, which carried dock + prop geometry
+for a scripted arm pick (nodes/scripted_pick.py) this track no longer drives.
+
+Talks to two things:
   - Nav2 (`launch/sortbots_nav2.launch.py`) via the `navigate_to_pose` action.
-  - `nodes/scripted_pick.py` via plain String topics (not a ROS 2 service —
-    matches the subscribe-and-poll style the Isaac side already uses for
-    cmd_vel/pick_cmd): this node publishes `<robot>/pick_request`
-    ("attach"/"detach") on entering PICKING/PLACING, and scripted_pick.py
-    reports back on `<robot>/pick_result` ("picked"/"placed"/"failed")
-    once its arm motion (and Isaac's mock-weld) finishes. A fixed timeout
-    (`PICK_TIMEOUT_SEC`) is a safety net only, in case scripted_pick.py
-    isn't running — the real completion signal is the result message.
   - `nodes/explorer.py`, if it's running (optional; nothing below breaks if
     it isn't). Both nodes drive the same single-goal-at-a-time
     navigate_to_pose action server, so they arbitrate: this node subscribes
@@ -40,7 +46,10 @@ Run (system ROS 2 Jazzy sourced, NOT the Isaac venv or conda):
 Dispatch a task (Milestone 1 CLI path, no web UI needed):
 
     ros2 topic pub /robot_0/dispatch_task std_msgs/String \\
-        '{data: "{\\"pickup\\": \\"shelf_a\\", \\"dropoff\\": \\"zone_b\\"}"}' --once
+        '{data: "{\\"pickup\\": \\"A\\", \\"dropoff\\": \\"B\\"}"}' --once
+    ros2 topic pub /robot_0/dispatch_task std_msgs/String \\
+        '{data: "{\\"goto\\": \\"A\\"}"}' --once
+    ros2 topic pub /robot_0/cancel_task std_msgs/String '{data: all}' --once
 
 Watch it work:
 
@@ -51,13 +60,13 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import time
 import uuid
 from collections import deque
 from pathlib import Path
 
 import rclpy
-import yaml
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
@@ -66,79 +75,101 @@ from rclpy.node import Node
 from std_msgs.msg import String
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_WAYPOINTS = REPO_ROOT / "configs" / "waypoints.yaml"
 
-# Safety-net timeout for PICKING/PLACING: scripted_pick.py's own motion
-# sequence takes several seconds (multiple SETTLE_SEC waypoints — see its
-# module docstring), so this must be comfortably longer than that, not a
-# tight bound. Only fires if scripted_pick.py never responds at all.
-PICK_TIMEOUT_SEC = 30.0
+# Single source of named destinations, shared with the dashboard: the WORKING
+# waypoint set the operator edits live on the map, keyed by platform
+# ({"sim": [{name,x,y,yaw}, ...], "real": [...]}). Honour the same env override
+# webui/maps_lib.py uses so tests and alternate layouts stay in lockstep.
+NAV_WAYPOINTS_FILE = (
+    Path(os.environ["SORTBOTS_NAV_WAYPOINTS"])
+    if os.environ.get("SORTBOTS_NAV_WAYPOINTS")
+    else REPO_ROOT / "data" / "nav_waypoints.json"
+)
 
-
-class Station:
-    def __init__(self, name: str, spec: dict):
-        self.name = name
-        self.kind = spec["kind"]
-        self.x = float(spec["pose"]["x"])
-        self.y = float(spec["pose"]["y"])
-        self.yaw = float(spec["pose"]["yaw"])
-        self.dock_offset_m = float(spec.get("dock_offset_m", 0.0))
-        self.dock_lateral_m = float(spec.get("dock_lateral_m", 0.0))
-
-    def dock_pose(self) -> tuple[float, float, float]:
-        """Stop `dock_offset_m` short of the station, still facing it.
-
-        The station pose is the pick/place point itself (shelf edge, bin);
-        backing off along the reverse of the facing direction keeps the
-        robot's arm workspace centered on that point instead of colliding
-        with it.
-
-        `dock_lateral_m` shifts the dock sideways, +90 degrees from the facing
-        direction. The first arm is mounted off base_link's centreline (URDF:
-        `Rotation` origin y=-0.0452, and the whole arm hangs to one side), so
-        parking head-on does NOT put the station in the middle of the arm's
-        workspace. Defaults to 0.0, which is the previous behaviour exactly.
-        The sign that helps is an empirical question — jog the arm at the shelf
-        and see which way it wants to go.
-        """
-        dx = self.dock_offset_m * math.cos(self.yaw)
-        dy = self.dock_offset_m * math.sin(self.yaw)
-        lx = -self.dock_lateral_m * math.sin(self.yaw)
-        ly = self.dock_lateral_m * math.cos(self.yaw)
-        return (self.x - dx + lx, self.y - dy + ly, self.yaw)
+# Nav-only tasks (no arm): on reaching the pickup, and again at the dropoff,
+# pause this long to stand in for loading/unloading, then drive on. Steady
+# clock, NOT sim time — it's a fixed dwell, not a distance deadline, so it must
+# not stretch with the real-time factor (CLAUDE.md, on timers vs sim time).
+DWELL_SEC = 2.0
 
 
-def load_stations(path: Path) -> dict[str, Station]:
-    with open(path) as f:
-        raw = yaml.safe_load(f)
-    return {name: Station(name, spec) for name, spec in raw["stations"].items()}
+class Waypoint:
+    def __init__(self, spec: dict):
+        self.name = spec["name"]
+        self.x = float(spec["x"])
+        self.y = float(spec["y"])
+        self.yaw = float(spec.get("yaw", 0.0))
+
+
+def load_waypoints(platform: str, path: Path = NAV_WAYPOINTS_FILE) -> dict[str, Waypoint]:
+    """Named destinations for `platform` from the working set, keyed by name.
+
+    A missing/empty/malformed file yields no waypoints (tasks then fail
+    validation until the operator places some) rather than crashing the node.
+    Re-read on every dispatch, so a pin placed on the map resolves without a
+    restart — the stations file this replaced was load-once.
+    """
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    points = raw.get(platform, []) if isinstance(raw, dict) else []
+    out: dict[str, Waypoint] = {}
+    for spec in points:
+        try:
+            wp = Waypoint(spec)
+        except (KeyError, TypeError, ValueError):
+            continue   # skip a malformed entry, keep the rest
+        out[wp.name] = wp
+    return out
 
 
 class Task:
-    def __init__(self, pickup: str, dropoff: str, task_id: str | None = None):
+    """One queued job, its waypoints resolved to poses AT DISPATCH.
+
+    Snapshotting matters since the dashboard can rename or move a waypoint
+    while a task waits in the queue: looking the name up again when the task
+    starts would KeyError inside the timer callback (and take the node down)
+    for a rename, or drive somewhere the operator didn't queue for a move.
+
+    Two kinds:
+      - "pickup": pickup -> dwell -> dropoff -> dwell (the original task)
+      - "goto":   drive to one waypoint and stop. The operator view's move
+                  queue sends a route as a run of these, so each stop is its
+                  own task the operator can see and cancel.
+    """
+
+    def __init__(self, kind: str, stops: list[Waypoint], task_id: str | None = None):
         self.task_id = task_id or uuid.uuid4().hex[:8]
-        self.pickup = pickup
-        self.dropoff = dropoff
+        self.kind = kind
+        self.stops = stops
+
+    def summary(self) -> dict:
+        if self.kind == "goto":
+            return {"task_id": self.task_id, "kind": "goto", "goto": self.stops[0].name}
+        return {"task_id": self.task_id, "kind": "pickup",
+                "pickup": self.stops[0].name, "dropoff": self.stops[1].name}
 
 
 class TaskManager(Node):
-    def __init__(self, robot_id: str, waypoints_path: Path):
+    def __init__(self, robot_id: str, platform: str):
         super().__init__(f"{robot_id}_task_manager")
         self.robot_id = robot_id
-        self.stations = load_stations(waypoints_path)
-        self.get_logger().info(f"loaded {len(self.stations)} stations from {waypoints_path}")
+        self.platform = platform
+        self.waypoints = load_waypoints(platform)
+        self.get_logger().info(
+            f"loaded {len(self.waypoints)} waypoints for platform {platform!r} "
+            f"from {NAV_WAYPOINTS_FILE}"
+        )
 
         self.queue: deque[Task] = deque()
         self.state = "IDLE"
         self.current_task: Task | None = None
-        self._pick_timeout_deadline: float | None = None
+        self._dwell_deadline: float | None = None
         self._explorer_active = False
 
         self.nav_client = ActionClient(
             self, NavigateToPose, f"/{robot_id}/navigate_to_pose"
-        )
-        self.pick_request_pub = self.create_publisher(
-            String, f"/{robot_id}/pick_request", 10
         )
         self.status_pub = self.create_publisher(String, f"/{robot_id}/task_status", 10)
         self.explore_cmd_pub = self.create_publisher(String, f"/{robot_id}/explore_cmd", 10)
@@ -146,8 +177,9 @@ class TaskManager(Node):
         self.create_subscription(
             String, f"/{robot_id}/dispatch_task", self._on_dispatch, 10
         )
+        # Plain task_id, or "all" (current task + everything queued).
         self.create_subscription(
-            String, f"/{robot_id}/pick_result", self._on_pick_result, 10
+            String, f"/{robot_id}/cancel_task", self._on_cancel, 10
         )
         self.create_subscription(
             String, f"/{robot_id}/explore_status", self._on_explore_status, 10
@@ -156,9 +188,9 @@ class TaskManager(Node):
         self._nav_goal_handle = None
         self._nav_result_future = None
 
-        # Picks up the next queued task when IDLE, and enforces
-        # PICK_TIMEOUT_SEC. NavigateToPose/pick_result transitions are
-        # event-driven (callbacks), not polled by this timer.
+        # Picks up the next queued task when IDLE, and expires the PICKING /
+        # PLACING dwells. NavigateToPose transitions are event-driven
+        # (callbacks), not polled by this timer.
         self.create_timer(0.2, self._tick)
 
     # -- dispatch -----------------------------------------------------
@@ -166,25 +198,33 @@ class TaskManager(Node):
     def _on_dispatch(self, msg: String) -> None:
         try:
             payload = json.loads(msg.data)
-            task = Task(
-                pickup=payload["pickup"],
-                dropoff=payload["dropoff"],
-                task_id=payload.get("task_id"),
-            )
-        except (json.JSONDecodeError, KeyError) as exc:
+            task_id = payload.get("task_id")
+            if "goto" in payload:
+                kind, names = "goto", [payload["goto"]]
+            else:
+                kind, names = "pickup", [payload["pickup"], payload["dropoff"]]
+        except (json.JSONDecodeError, KeyError, AttributeError) as exc:
             self.get_logger().error(f"bad dispatch payload: {msg.data!r} ({exc})")
             return
-        if task.pickup not in self.stations or task.dropoff not in self.stations:
-            self.get_logger().error(
-                f"unknown station in task {task.task_id}: "
-                f"pickup={task.pickup!r} dropoff={task.dropoff!r}"
-            )
+        # Re-read the working set so a waypoint placed on the map since this
+        # node started still resolves (the old stations file was load-once).
+        self.waypoints = load_waypoints(self.platform)
+        missing = [n for n in names if n not in self.waypoints]
+        if missing:
+            reason = (f"unknown waypoint {', '.join(map(repr, missing))} "
+                      f"(known: {', '.join(sorted(self.waypoints)) or 'none'})")
+            self.get_logger().error(f"rejected task {task_id}: {reason}")
+            # Say so on the status stream: without it the dashboard row for a
+            # rejected task sits at "waiting" forever.
+            self._publish_status(rejected={"task_id": task_id, "reason": reason})
             return
+        task = Task(kind, [self.waypoints[n] for n in names], task_id=task_id)
         self.queue.append(task)
         self.get_logger().info(
-            f"queued task {task.task_id}: {task.pickup} -> {task.dropoff} "
+            f"queued {kind} task {task.task_id}: {' -> '.join(names)} "
             f"(queue depth {len(self.queue)})"
         )
+        self._publish_status()
         if self._explorer_active:
             stop_msg = String()
             stop_msg.data = "stop"
@@ -193,6 +233,20 @@ class TaskManager(Node):
                 "dispatch received while explorer was active — sent stop so it "
                 "releases the nav goal server for this task"
             )
+
+    def _on_cancel(self, msg: String) -> None:
+        target = msg.data.strip()
+        before = len(self.queue)
+        self.queue = deque(t for t in self.queue if target not in ("all", t.task_id))
+        dropped = before - len(self.queue)
+        if self.current_task and target in ("all", self.current_task.task_id):
+            self.get_logger().info(f"cancelling running task {self.current_task.task_id}")
+            if self._nav_goal_handle is not None:
+                self._nav_goal_handle.cancel_goal_async()
+            self._end_task("CANCELLED")
+        elif dropped:
+            self.get_logger().info(f"dropped {dropped} queued task(s) for {target!r}")
+            self._publish_status()
 
     def _on_explore_status(self, msg: String) -> None:
         try:
@@ -204,20 +258,24 @@ class TaskManager(Node):
     # -- FSM ------------------------------------------------------------
 
     def _tick(self) -> None:
-        if self.state == "IDLE" and self.queue and not self._explorer_active:
+        # server_is_ready() (non-blocking) gates the pop: Nav2 routinely comes up
+        # after the robot is visible, and a task popped before then used to fail
+        # outright in _start_nav's wait — which made the first demo phase fail
+        # on a fresh session. Holding the queue lets it start the moment Nav2 does.
+        if (self.state == "IDLE" and self.queue and not self._explorer_active
+                and self.nav_client.server_is_ready()):
             self.current_task = self.queue.popleft()
-            self._start_nav(self.current_task.pickup, next_state="NAV_TO_PICKUP")
-        elif self.state in ("PICKING", "PLACING") and self._pick_timeout_deadline is not None:
-            if time.monotonic() >= self._pick_timeout_deadline:
-                self.get_logger().error(
-                    f"pick_result timed out in {self.state} for task "
-                    f"{self.current_task.task_id} — is scripted_pick.py running?"
-                )
-                self._fail_task()
+            first = "NAV_TO_GOAL" if self.current_task.kind == "goto" else "NAV_TO_PICKUP"
+            self._start_nav(self.current_task.stops[0], next_state=first)
+        elif self._dwell_deadline is not None and time.monotonic() >= self._dwell_deadline:
+            self._dwell_deadline = None
+            if self.state == "PICKING":
+                self._start_nav(self.current_task.stops[1], next_state="NAV_TO_DROPOFF")
+            elif self.state == "PLACING":
+                self._end_task("DONE")
 
-    def _start_nav(self, station_name: str, next_state: str) -> None:
-        station = self.stations[station_name]
-        x, y, yaw = station.dock_pose()
+    def _start_nav(self, wp: Waypoint, next_state: str) -> None:
+        x, y, yaw = wp.x, wp.y, wp.yaw
 
         goal = NavigateToPose.Goal()
         goal.pose = PoseStamped()
@@ -231,90 +289,102 @@ class TaskManager(Node):
 
         if not self.nav_client.wait_for_server(timeout_sec=2.0):
             self.get_logger().error("navigate_to_pose server not available")
-            self._fail_task()
+            self._end_task("FAILED")
             return
 
         self._set_state(next_state)
+        self._nav_goal_handle = None
+        task = self.current_task
         send_future = self.nav_client.send_goal_async(goal)
-        send_future.add_done_callback(self._on_goal_response)
+        send_future.add_done_callback(lambda f: self._on_goal_response(f, task))
 
-    def _on_goal_response(self, future) -> None:
+    # Both nav callbacks carry the task they were sent for: once a task can be
+    # cancelled mid-drive, a late response or result belongs to a task that is
+    # no longer current and must not advance (or fail) whatever runs now.
+
+    def _on_goal_response(self, future, task: Task) -> None:
         goal_handle = future.result()
+        if task is not self.current_task:
+            if goal_handle.accepted:
+                goal_handle.cancel_goal_async()   # cancelled before Nav2 answered
+            return
         if not goal_handle.accepted:
-            self.get_logger().error(f"nav goal rejected for task {self.current_task.task_id}")
-            self._fail_task()
+            self.get_logger().error(f"nav goal rejected for task {task.task_id}")
+            self._end_task("FAILED")
             return
         self._nav_goal_handle = goal_handle
         result_future = goal_handle.get_result_async()
-        result_future.add_done_callback(self._on_nav_result)
+        result_future.add_done_callback(lambda f: self._on_nav_result(f, task))
 
-    def _on_nav_result(self, future) -> None:
+    def _on_nav_result(self, future, task: Task) -> None:
+        if task is not self.current_task:
+            return
+        self._nav_goal_handle = None
         status = future.result().status
         if status != GoalStatus.STATUS_SUCCEEDED:
             self.get_logger().error(
-                f"nav failed for task {self.current_task.task_id}: status={status}"
+                f"nav failed for task {task.task_id}: status={status}"
             )
-            self._fail_task()
+            self._end_task("FAILED")
             return
 
         if self.state == "NAV_TO_PICKUP":
-            self._send_pick_request("attach")
-            self._set_state("PICKING")
+            self._begin_dwell("PICKING")
         elif self.state == "NAV_TO_DROPOFF":
-            self._send_pick_request("detach")
-            self._set_state("PLACING")
+            self._begin_dwell("PLACING")
+        elif self.state == "NAV_TO_GOAL":
+            self._end_task("DONE")
 
-    def _send_pick_request(self, cmd: str) -> None:
-        msg = String()
-        msg.data = cmd
-        self.pick_request_pub.publish(msg)
-        self._pick_timeout_deadline = time.monotonic() + PICK_TIMEOUT_SEC
+    def _begin_dwell(self, state: str) -> None:
+        # Arrived at the pickup (PICKING) or dropoff (PLACING): pause in place
+        # for DWELL_SEC, then _tick drives on. _tick's own cadence follows sim
+        # time, so a dwell can be checked a little coarsely under a low RTF —
+        # the deadline itself is steady-clock, so its length doesn't stretch.
+        self._set_state(state)
+        self._dwell_deadline = time.monotonic() + DWELL_SEC
 
-    def _on_pick_result(self, msg: String) -> None:
-        if self.state == "PICKING" and msg.data == "picked":
-            self._pick_timeout_deadline = None
-            self._start_nav(self.current_task.dropoff, next_state="NAV_TO_DROPOFF")
-        elif self.state == "PLACING" and msg.data == "placed":
-            self._pick_timeout_deadline = None
-            self._set_state("DONE")
-            self.current_task = None
-            self._set_state("IDLE")
-        elif self.state in ("PICKING", "PLACING") and msg.data == "failed":
-            self.get_logger().error(
-                f"scripted_pick reported failure in {self.state} for task "
-                f"{self.current_task.task_id}"
-            )
-            self._fail_task()
-        # else: stray/late result (e.g. after a timeout already failed the
-        # task) — ignore rather than corrupt whatever task is now active.
-
-    def _fail_task(self) -> None:
-        self._set_state("FAILED")
+    def _end_task(self, final: str) -> None:
+        # DONE / FAILED / CANCELLED go out with the task id, then IDLE without.
+        self._set_state(final)
         self.current_task = None
-        self._pick_timeout_deadline = None
+        self._dwell_deadline = None
+        self._nav_goal_handle = None
         self._set_state("IDLE")
 
     def _set_state(self, state: str) -> None:
         self.state = state
+        status = self._publish_status()
+        self.get_logger().info(f"state -> {state} ({status})")
+
+    def _publish_status(self, **extra) -> dict:
+        # `queue` lists what is waiting, in run order, so the dashboard can
+        # show (and cancel) queued tasks it didn't dispatch itself.
         status = {
             "task_id": self.current_task.task_id if self.current_task else None,
-            "state": state,
+            "state": self.state,
             "queue_depth": len(self.queue),
+            "queue": [t.summary() for t in self.queue],
+            **({"task": self.current_task.summary()} if self.current_task else {}),
+            **extra,
         }
         msg = String()
         msg.data = json.dumps(status)
         self.status_pub.publish(msg)
-        self.get_logger().info(f"state -> {state} ({status})")
+        return status
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot-id", default="robot_0")
-    parser.add_argument("--waypoints", type=Path, default=DEFAULT_WAYPOINTS)
+    parser.add_argument(
+        "--platform", default=os.environ.get("SORTBOTS_PLATFORM", "sim"),
+        help="which platform's waypoint set to read from data/nav_waypoints.json "
+             "(sim or real); default: $SORTBOTS_PLATFORM, else sim",
+    )
     args = parser.parse_args()
 
     rclpy.init()
-    node = TaskManager(args.robot_id, args.waypoints)
+    node = TaskManager(args.robot_id, args.platform)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

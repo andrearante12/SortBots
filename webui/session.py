@@ -288,8 +288,10 @@ PLATFORM_FLAGS = {"sim": RUN_FLAGS, "real": REAL_RUN_FLAGS}
 #   waypoints: map  = load the library map's own waypoints (if it has any)
 #              keep = leave the dashboard's working set as it is
 #              none = start with no waypoints
+#   demo: true      = once every robot is up, the operator view runs the task
+#                     demo (configs/demo_tasks.yaml) by itself
 WAYPOINT_POLICIES = ("map", "keep", "none")
-SESSION_KEYS = {"waypoints"}
+SESSION_KEYS = {"waypoints", "demo"}
 
 
 def library_db_path(name: str) -> Path:
@@ -300,6 +302,8 @@ def library_db_path(name: str) -> Path:
 
 
 def _check_session_keys(run: dict) -> None:
+    if not isinstance(run.get("demo", False), bool):
+        raise ScenarioError(f"demo: expected true or false, got {run['demo']!r}")
     if run.get("waypoints", "map") not in WAYPOINT_POLICIES:
         raise ScenarioError(
             f"waypoints: expected one of {list(WAYPOINT_POLICIES)}, got {run['waypoints']!r}")
@@ -480,13 +484,13 @@ def apply_overrides(scenario: dict, overrides: dict | None) -> dict:
 #         "readonly"-> --localize (Mem/IncrementalMemory=false)
 
 CONFIG_SIM_KEYS = {"scene", "robots", "map", "mode", "explore", "waypoints",
-                   "headless", "chase_cam", "chase_cam_robots", "teleop", "bag"}
-CONFIG_REAL_KEYS = {"map", "mode", "waypoints", "bag"}
+                   "headless", "chase_cam", "chase_cam_robots", "teleop", "bag", "demo"}
+CONFIG_REAL_KEYS = {"map", "mode", "waypoints", "bag", "demo"}
 CONFIG_KEYS = {"sim": CONFIG_SIM_KEYS, "real": CONFIG_REAL_KEYS}
 CONFIG_DEFAULTS = {
     "scene": "nvidia", "robots": 1, "map": "new", "mode": "extend",
     "explore": True, "waypoints": "map", "headless": True, "chase_cam": False,
-    "chase_cam_robots": 1, "teleop": False, "bag": False,
+    "chase_cam_robots": 1, "teleop": False, "bag": False, "demo": False,
 }
 MODES = ("extend", "readonly")
 
@@ -551,6 +555,8 @@ def config_to_run(config: dict, platform: str = "sim") -> dict:
         if run["chase_cam"]:
             run["chase_cam_robots"] = int(cfg["chase_cam_robots"])
     run["waypoints"] = cfg["waypoints"]
+    if _as_bool(cfg["demo"]):
+        run["demo"] = True  # absent otherwise, like every preset that doesn't use it
     _check_session_keys(run)
     build_argv(run, platform)  # the allowlist: type, range, choice, path containment
     return run
@@ -577,6 +583,8 @@ def run_to_config(run: dict, platform: str = "sim", bag: bool = False) -> dict:
     cfg["mode"] = "readonly" if run.get("localize") else "extend"
     cfg["waypoints"] = run.get("waypoints", "map")
     cfg["bag"] = bool(bag)
+    if run.get("demo"):
+        cfg["demo"] = True
     if platform == "sim":
         cfg["scene"] = run.get("scene", "nvidia")
         cfg["robots"] = int(run.get("robots") or 1)
@@ -606,6 +614,8 @@ def describe_config(cfg: dict, platform: str = "sim") -> str:
     if full["waypoints"] != default_wp:
         bits.append({"map": "map's waypoints", "keep": "current waypoints",
                      "none": "no waypoints"}[full["waypoints"]])
+    if _as_bool(full["demo"]):
+        bits.append("runs the task demo")
     return " · ".join(bits)
 
 

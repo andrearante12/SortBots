@@ -1081,25 +1081,36 @@ ufw status                                # inactive, or tailscale0 allowed?
 curl -s -o /dev/null -w '%{http_code}\n' http://<tailnet-ip>:8081/   # expect 200
 ```
 
-## The operator view (`/operator.html`)
+## The operator view (the default page, `/`)
 
-Fleet-first front end for warehouse operators; the per-robot dashboard at `/?robot=ID` stays
-as the engineering view and is one click away. Left: every robot (state, current task), and
-clicking one expands its camera and Stop / Explore buttons plus an **Open live view** link to
-`/?robot=ID`. Centre: the fused `/map`, robot poses (composed from `/tf`) and Nav2 plans,
-with a select / waypoint / send-robot toolbar (drag on a click to set the heading). Right:
-the task list, the waypoints, and a new-task form that dispatches to `/<id>/dispatch_task`.
+`http://<host>:8081/` serves the operator view (`webui/operator.html`). The old per-robot
+dashboard (`index.html` + `app.js`) is **deprecated**: it stays reachable at `/?robot=ID` (each
+open robot card links it as "Engineering view") for the panels the operator view doesn't have
+yet (drive pad, head aim, SLAM internals, splats), but new work goes into the operator view.
 
-- **Session** (header chip) opens the launch form, which is `scenarios.js` unchanged, so
-  scenarios, saved maps, Save & finish and Stop work exactly as in the engineering view. The
-  Mapping / Premapped switch just reports the running session; switching restarts the stack
-  (RTAB-Map cannot go from extend to read-only mid-run), so clicking the other side opens the
-  panel.
-- **Stop all** stops exploring, cancels every navigation goal (including task_manager's) and
-  zeroes cmd_vel on every robot.
-- Tasks: task_manager keeps one queue per robot and only reports the current task, so the
-  list is tasks this page dispatched plus any task a status message mentions. There is no
-  cancel and no battery readout; neither exists on the ROS side yet.
+- **Header.** Map / 3D cloud picks what the stage shows. The mode tile only reports how the
+  session was started (Mapping, or Premapped plus the map name): changing it restarts the stack
+  (RTAB-Map cannot go from extend to read-only mid-run), so that lives in **Session**, which
+  opens the launch form (`scenarios.js` unchanged). **Stop all** stops exploring, cancels every
+  navigation goal (including task_manager's) and zeroes cmd_vel on every robot.
+- **Robots (left).** Any number of cards can be open. Each shows a camera tile with a
+  Camera / Depth toggle (`/snapshot` polls of `camera/rgb` / `camera/depth_color`), a task tile
+  coloured by activity (blue moving, amber picking/placing, purple exploring, red failed), and
+  position, heading, speed / turn rate (from `/<id>/odom`) and distance left on the Nav2 plan.
+  The card opened or clicked into last has control: map sends and waypoint chips go to it.
+- **Stage (centre).** 2D: the fused `/map`, robot poses (composed from `/tf`), Nav2 plans, and a
+  select / waypoint / send-robot toolbar (drag on a click to set the heading). 3D:
+  `/fleet/recon_cloud` as points with a cone per robot, subscribed only while showing and
+  throttled to one cloud per 8 s (each is ~4 MB of base64 through rosbridge).
+- **Tasks (right).** task_manager keeps one FIFO per robot and reports the running task plus
+  the waiting ones on every change, so the list shows tasks queued from anywhere, and any
+  unfinished one can be cancelled (×, `/<id>/cancel_task`). Waypoints rename in place (the
+  pencil on a chip); queued tasks are unaffected, since task_manager resolves names to poses at
+  dispatch. **Queue tasks**: *Moves* builds an ordered list of stops and queues one `goto` task
+  per stop on one robot; *Pick & drop* queues a pickup -> dropoff task.
+- **Run demo** runs `configs/demo_tasks.yaml` in phases: each phase is queued only once every
+  task of the previous one has finished, so it shows each robot moving alone and then both in
+  parallel. The sequencing lives in the browser tab; Stop demo cancels what it queued.
 - Offline test: `node webui/tests/operator_test.mjs [--screenshot DIR]`.
 
 ## Testing the dashboard without the sim (recorded data)

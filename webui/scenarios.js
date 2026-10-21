@@ -223,6 +223,10 @@
   function onEdit() {
     presetSel.value = "";
     $("lf-preset-note").textContent = "";
+    // `demo` has no control of its own; it rides along only with the preset that
+    // set it. Kept across edits it would also stick in the saved form state and
+    // quietly turn every later custom run into a demo.
+    delete cfg.demo;
     readForm();
     saveCfg();
     renderForm();
