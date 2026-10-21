@@ -124,7 +124,27 @@ def _resolve_run(raw: dict) -> tuple[dict, dict]:
         run = s.apply_overrides(scen, overrides)
     except s.ScenarioError as e:
         raise SpecError(f"overrides: {e}") from None
+    _check_map(s, run)
     return scen, run
+
+
+def _check_map(s, run: dict) -> None:
+    """A saved map must be present and loadable NOW, not fail minutes into a
+    run: the scenario allowlist only checks a map name's shape, and a clone
+    without git-lfs (or a branch without that map) has a pointer or nothing."""
+    m = run.get("map")
+    if not m:
+        return
+    name = m if s.maps_lib.NAME_RX.match(str(m)) else s.maps_lib.map_name_for_path(m)
+    if not name:
+        return  # a working-DB path outside the library: run_demo.sh owns that check
+    try:
+        state = s.maps_lib.read_manifest(name).get("db_state")
+    except s.maps_lib.MapError as e:
+        raise SpecError(f"map {name!r}: {e}") from None
+    if state != "complete":
+        hint = " — run `git lfs pull`" if state == "pointer" else ""
+        raise SpecError(f"map {name!r} can't be loaded: pose graph is {state}{hint}")
 
 
 def robots_for(run: dict) -> list[str]:

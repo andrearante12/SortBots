@@ -10,7 +10,7 @@ description: >
   and NOT mapped. Scored with two clearance metrics — actors and props — so a
   scrape against a crate reads differently from a walker collision.
 
-scenario: moving_obstacles
+scenario: moving_obstacles_mapped
 overrides:
   world: cluttered_floor
 

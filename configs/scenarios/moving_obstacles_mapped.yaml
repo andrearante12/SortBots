@@ -1,0 +1,39 @@
+# Scenario definition for the dashboard's Scenarios tab — see the header of
+# configs/scenarios/explore_fresh.yaml for the schema. `world:` names a layout
+# in configs/worlds/ (simtest/world.py has that schema).
+
+name: moving_obstacles_mapped
+
+title: Moving obstacles — on a saved map (test base)
+description: >
+  moving_obstacles, but localizing read-only on a saved map of the warehouse
+  instead of starting from an empty one. This is what the avoidance tests in
+  configs/tests/ run on: Nav2's global costmap is only as big as the map, so
+  on a fresh map a goal across the open floor is "outside bounds" and aborts
+  before the robot ever meets a walker (found 2026-10-21, crossing_yield's
+  first live run). A saved map also makes every run start from the same
+  picture of the warehouse, which a test wants anyway.
+
+  The map is copied before use (run_demo.sh), never written, so runs can't
+  drift it. Pick another with the `map` override; it has to be a library
+  entry laid out for the same spawn poses (configs/robots.yaml).
+
+status: ready
+
+run:
+  scene: nvidia
+  robots: 1
+  robot_id: robot_0
+  headless: true
+  chase_cam: false
+  explore: false
+  resume: false
+  localize: true         # read-only: Mem/IncrementalMemory=false
+  teleop: false
+  map: fleet_warehouse_test
+  world: aisle_crossing
+
+overrides: [world, map, headless, chase_cam]
+
+capture:
+  bag: false

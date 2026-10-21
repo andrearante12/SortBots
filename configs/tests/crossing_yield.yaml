@@ -15,7 +15,7 @@ description: >
   the walker crosses it at ~16 s — so on a typical run they meet. Pass = no
   contact, the goal reached, and the walker not left painted into the map.
 
-scenario: moving_obstacles
+scenario: moving_obstacles_mapped
 overrides:
   world: aisle_crossing
 

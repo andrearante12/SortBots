@@ -288,7 +288,10 @@ async function main() {
         worlds.join(', '));
   const apiTests = await (await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/tests`)).json();
   check('/api/tests lists valid test cases and the metric catalog',
-        apiTests.tests.length > 0 && apiTests.tests.every((t) => t.status === 'ready') &&
+        // A test on a saved map is legitimately invalid where that git-lfs map
+        // isn't present (simtest_spec_test.py skips the same case).
+        apiTests.tests.length > 0 && apiTests.tests.every((t) => t.status === 'ready' ||
+          /map '.*(no map named|pose graph is)/.test(t.error)) &&
         apiTests.metrics.some((m) => m.name === 'clearance'),
         apiTests.tests.filter((t) => t.status !== 'ready').map((t) => t.error).join('; '));
   const roRun = await fetch(`http://127.0.0.1:${READONLY_PORT}/api/tests/run`);

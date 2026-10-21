@@ -21,7 +21,7 @@ from simtest.probe import ProbeCore  # noqa: E402
 
 BASE = {
     "name": "unit",
-    "scenario": "moving_obstacles",
+    "scenario": "moving_obstacles",   # fresh map: no saved-map dependency in unit tests
     "overrides": {"world": "aisle_crossing"},
     "warmup_s": 2,
     "goals": [{"robot": "robot_0", "pose": [-8.0, 3.0, 0.0], "timeout_s": 30},
@@ -40,17 +40,32 @@ def raw(**kw):
 
 # -- committed test cases --------------------------------------------------------
 
+# A saved map is a git-lfs library entry that a clone may legitimately lack
+# (no git-lfs, or a branch without that map). That's an environment gap, not a
+# broken test case — every other validation error still fails.
+def _missing_map(err: str) -> bool:
+    # "map 'X': no map named ..." / "map 'X' can't be loaded: pose graph is
+    # pointer", possibly prefixed "variant 'Y': ".
+    return "map '" in err and ("no map named" in err or "pose graph is" in err)
+
+
 @pytest.mark.parametrize("name", sorted(p.stem for p in spec.TESTS_DIR.glob("*.yaml")))
 def test_committed_tests_validate(name):
-    t = spec.load(name)
+    try:
+        t = spec.load(name)
+    except spec.SpecError as e:
+        if _missing_map(str(e)):
+            pytest.skip(f"saved map not present here: {e}")
+        raise
     assert t["variants"] and all(label for label, _ in t["variants"])
 
 
 def test_list_tests_reports_every_file():
     names = {t["name"]: t for t in spec.list_tests()}
     assert set(names) == {p.stem for p in spec.TESTS_DIR.glob("*.yaml")}
-    assert all(t["status"] == "ready" for t in names.values()), \
-        [t.get("error") for t in names.values()]
+    bad = [t["error"] for t in names.values()
+           if t["status"] != "ready" and not _missing_map(t["error"])]
+    assert not bad, bad
 
 
 # -- validation -------------------------------------------------------------------

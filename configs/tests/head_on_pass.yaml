@@ -9,7 +9,7 @@ description: >
   goal reached. Variant `crossing` asks the same thing of the aisle-mouth
   crossing world, for a side-by-side row in one report.
 
-scenario: moving_obstacles
+scenario: moving_obstacles_mapped
 overrides:
   world: aisle_head_on
 
