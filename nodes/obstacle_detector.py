@@ -70,6 +70,8 @@ DEFAULTS = {
     "max_moving_extent_m": 1.5,
     "edge_margin_px": 8,
     "min_moving_z_extent_m": 0.3,
+    "range_margin_m": 0.3,
+    "max_obstacle_speed_mps": 3.0,
 }
 
 
@@ -198,13 +200,16 @@ def cluster_cells(xy: np.ndarray, *, cell_m: float, min_cell_points: int):
 def summarize_clusters(pts: np.ndarray, uv: np.ndarray, labels: np.ndarray,
                        *, floor_z: float, min_points: int,
                        min_height_m: float, width: int | None = None,
-                       edge_margin_px: int = 8) -> list[dict]:
+                       edge_margin_px: int = 8, depth: np.ndarray | None = None,
+                       far_limit_m: float | None = None) -> list[dict]:
     """Per-cluster stats in base_link, nearest first.
 
     `height_m` is the top of the cluster above the floor, and `uv` the
     [u0, v0, u1, v1] box in image pixels that the dashboard draws. `clipped`
-    means the box touches the image's left or right edge, so only part of the
-    object is in view and its centroid isn't where the object is.
+    means only part of the object is in view, so its centroid isn't where the
+    object is: the box touches the image's left or right edge, or (given each
+    point's camera `depth`) the cluster reaches `far_limit_m`, where the range
+    crop cuts it.
     """
     out = []
     if labels.size == 0 or labels.max() < 0:
@@ -227,6 +232,8 @@ def summarize_clusters(pts: np.ndarray, uv: np.ndarray, labels: np.ndarray,
         u0, u1 = int(q[:, 0].min()), int(q[:, 0].max())
         clipped = width is not None and (
             u0 <= edge_margin_px or u1 >= width - 1 - edge_margin_px)
+        if depth is not None and far_limit_m is not None:
+            clipped = clipped or float(depth[m].max()) >= far_limit_m
         out.append({
             "centroid": [round(float(v), 3) for v in c],
             "min": [round(float(v), 3) for v in lo],
@@ -271,14 +278,16 @@ def detect(depth: np.ndarray, K, R_base_cam: np.ndarray, t_base_cam: np.ndarray,
 
     band = ((pts[:, 2] >= floor_z + c["min_height_m"])
             & (pts[:, 2] <= floor_z + c["max_height_m"]))
-    pts, uv = pts[band], uv[band]
+    pts, uv, cam_z = pts[band], uv[band], cam[band, 2]
     labels = cluster_cells(pts[:, :2], cell_m=c["cell_m"],
                            min_cell_points=int(c["min_cell_points"]))
     obstacles = summarize_clusters(pts, uv, labels, floor_z=floor_z,
                                    min_points=int(c["min_cluster_points"]),
                                    min_height_m=c["min_cluster_height_m"],
                                    width=depth.shape[1],
-                                   edge_margin_px=int(c["edge_margin_px"]))
+                                   edge_margin_px=int(c["edge_margin_px"]),
+                                   depth=cam_z,
+                                   far_limit_m=c["max_range_m"] - c["range_margin_m"])
     kept = {o["label"] for o in obstacles}
     in_obstacle = np.isin(labels, list(kept)) if kept else np.zeros(len(labels), bool)
     for o in obstacles:
@@ -293,7 +302,10 @@ def can_move(o: dict, cfg: dict | None = None) -> bool:
     turns, measured live in sim on 2026-10-22 (turning in place at 0.5 rad/s):
 
     - clipped: cut off at the image edge, more of it slides into view each
-      frame. 41 of 170 frames had a false "moving" before this rule.
+      frame. 41 of 170 frames had a false "moving" before this rule. Also cut
+      off at the far end of the range crop: driving toward a thin upright at
+      ~4.3 m pulled more of it inside max_range_m each frame (42 -> 134 points)
+      and read as 0.3-0.7 m/s in 20 of 331 frames (2-robot run, 2026-10-22).
     - long (extent_m): shelving and walls do the same along their length.
     - flat (z extent): a shelf deck near camera height is seen edge-on as a
       ~16 px line whose visible stretch shifts with the view angle. That was
@@ -364,11 +376,21 @@ class Tracker:
             else:
                 tr = self.tracks[tid]
                 dt = t - tr["t"]
-                if not movable[i]:
-                    tr["vel"] = (0.0, 0.0)
-                elif dt > 1e-3:
+                vx = vy = 0.0
+                if dt > 1e-3:
                     vx = (x - tr["pos"][0]) / dt
                     vy = (y - tr["pos"][1]) / dt
+                if math.hypot(vx, vy) > c["max_obstacle_speed_mps"]:
+                    # Faster than anything on a warehouse floor: the cluster
+                    # split or merged and its centroid jumped (live, 2026-10-22:
+                    # a shelf track 24 frames old read 1.2 m/s for a frame while
+                    # turning). Sim frames are ~0.03 s apart, so even a 0.1 m
+                    # jump inside the gate is 3 m/s. Start the track over: it
+                    # has to earn track_min_hits again before it can move.
+                    tr["vel"], tr["hits"] = (0.0, 0.0), 0
+                elif not movable[i]:
+                    tr["vel"] = (0.0, 0.0)
+                elif dt > 1e-3:
                     tr["vel"] = (a * vx + (1 - a) * tr["vel"][0],
                                  a * vy + (1 - a) * tr["vel"][1])
                 tr["pos"], tr["t"] = (x, y), t

@@ -246,3 +246,36 @@ def test_flat_deck_at_camera_height_cannot_move():
     depth, R, t = render([deck], tilt_deg=0)
     obs, _, _ = od.detect(depth, K, R, t, {**CFG, "min_cluster_height_m": 0.1})
     assert obs and not any(od.can_move(o) for o in obs)
+
+
+def test_object_at_far_range_limit_is_clipped():
+    """Live false positive: an upright straddling max_range_m, revealed bit by
+    bit as the robot drives toward it."""
+    # Side face of a rack running away from the robot, from 3.6 m to past the
+    # 4.5 m crop: only its near part is inside the window.
+    far = ((3.6, 0.6, 0.0), (5.5, 0.75, 1.8))
+    depth, R, t = render([far], tilt_deg=0, cam_z=1.0)
+    obs, _, _ = od.detect(depth, K, R, t, {**CFG, "max_range_m": 4.5})
+    # The grazing face is sparse, so it may come out as several clusters; the
+    # ones reaching the crop are the ones that slide.
+    at_limit = [o for o in obs if o["max"][0] >= 4.2]
+    assert at_limit and all(o["clipped"] and not od.can_move(o) for o in at_limit)
+    near = ((2.0, 0.6, 0.0), (2.8, 0.75, 1.8))
+    depth, R, t = render([near], tilt_deg=0, cam_z=1.0)
+    obs, _, _ = od.detect(depth, K, R, t, {**CFG, "max_range_m": 4.5})
+    assert obs and not any(o["clipped"] for o in obs)
+
+
+def test_centroid_jump_restarts_track_instead_of_moving():
+    tr = od.Tracker()
+    for k in range(20):
+        s = tr.update([(2.0, 0.0)], k * 0.03)[0]
+    assert s["hits"] == 20 and not s["moving"]
+    # Cluster merges with a neighbour: centroid jumps 0.3 m in one 0.03 s frame.
+    s = tr.update([(2.0, 0.3)], 20 * 0.03)[0]
+    assert not s["moving"] and s["speed_mps"] == 0.0 and s["hits"] == 1
+    # A real walker at 1.2 m/s on the same 0.03 s cadence still gets through.
+    tr = od.Tracker()
+    for k in range(12):
+        s = tr.update([(2.0, 1.0 - 1.2 * k * 0.03)], k * 0.03)[0]
+    assert s["moving"]

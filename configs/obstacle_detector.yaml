@@ -59,3 +59,9 @@ max_moving_extent_m: 1.5    # longer clusters (shelves, walls) never get a veloc
 # bottom it is a flat surface seen edge-on. Both slide as the robot turns.
 edge_margin_px: 8
 min_moving_z_extent_m: 0.3
+# A cluster whose farthest point is within range_margin_m of max_range_m is
+# cut by the range crop, and driving toward it pulls more of it inside: also
+# clipped. And no centroid moves faster than max_obstacle_speed_mps; a bigger
+# frame-to-frame jump is a cluster splitting or merging, so the track restarts.
+range_margin_m: 0.3
+max_obstacle_speed_mps: 3.0

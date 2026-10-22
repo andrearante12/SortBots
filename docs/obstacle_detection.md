@@ -94,13 +94,19 @@ cluster that fails any of these rules gets its velocity zeroed instead of fed:
 |---|---|---|
 | none | | 41 / 170 |
 | not `clipped` (box touches the image's left/right edge) | anything sliding into view | 11 / 171 |
+| not `clipped` at the far end (farthest point within `range_margin_m` of `max_range_m`) | an upright the range crop cuts, revealed as the robot drives toward it | (2-robot run: 20 / 331 while driving) |
 | `max[z] - min[z] ≥ min_moving_z_extent_m` | a shelf deck near camera height, seen edge-on as a ~16 px line | 1 / 164 |
 | `track_min_hits` 3 → 5 | a thin upright blipping for one frame | **0 / 162** |
 | `extent_m ≤ max_moving_extent_m` | shelving and walls, along their length | (always on) |
+| raw speed > `max_obstacle_speed_mps` restarts the track | a cluster splitting or merging, so its centroid jumps | (2-robot run: 1 / 312 while turning) |
 
-These numbers come from sim on 2026-10-22: `library_localize` on the
-`warehouse` map, robot_0 turning at ±0.5 rad/s, and 0 / 114 false frames while
-it stood still. The cost of the clipped rule is that a person walking in from
+These numbers come from sim on 2026-10-22. The first rows are from
+`library_localize` on the `warehouse` map, with robot_0 turning at ±0.5 rad/s
+and 0 / 114 false frames while it stood still. The two 2-robot rows are from a
+live operator-driven run. With every rule on, a 60 s recording of both robots
+(282 frames turning, 452 driving, 166 still) had **no** false "moving". The
+only "moving" track was each robot seeing the *other* robot drive toward it:
+equal mutual ranges, closing at the peer's odom speed of ~0.3 m/s. The cost of the clipped rule is that a person walking in from
 the side is called moving a few frames after they are fully in view, not while
 they cross the frame edge.
 
@@ -190,8 +196,8 @@ drawing.
 
 ## Known limits and next steps
 
-- **Partial views.** A cluster cut off at `max_range_m` (not the image edge,
-  which is handled) still has a biased centroid.
+- **Partial views at the top or bottom of the image.** These still bias the
+  centroid's height, but not its x/y, which is what tracking uses.
 - **People near shelving.** A person within ~2 cells of shelving merges into
   the shelf's cluster. That cluster is then too long to be called moving, so it
   still counts as an obstacle but not a moving one.
