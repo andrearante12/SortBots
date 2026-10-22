@@ -373,6 +373,30 @@
       ctx.fillText(nameOf(r.id), a, b + 28);
       ctx.globalAlpha = 1;
     }
+    drawDrag();
+  }
+
+  // The send being dragged: robot -> destination, in the robot's colour, with the
+  // heading it will arrive at.
+  function drawDrag() {
+    const r = drag && robots.get(drag.id);
+    if (!r || !r.pose) return;
+    const [a, b] = toPx(r.pose.x, r.pose.y), [ex, ey] = toPx(drag.wx, drag.wy);
+    const yaw = drag.wp ? -(drag.wp.yaw || 0) : Math.atan2(ey - b, ex - a); // canvas y points down
+    ctx.strokeStyle = r.color; ctx.fillStyle = r.color; ctx.lineWidth = 2.5;
+    ctx.setLineDash([7, 5]); ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(ex, ey); ctx.stroke(); ctx.setLineDash([]);
+    ctx.globalAlpha = 0.25; ctx.beginPath(); ctx.arc(ex, ey, 14, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.arc(ex, ey, 14, 0, 7); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(ex + Math.cos(yaw) * 12, ey + Math.sin(yaw) * 12);
+    ctx.lineTo(ex + Math.cos(yaw + 2.5) * 7, ey + Math.sin(yaw + 2.5) * 7);
+    ctx.lineTo(ex + Math.cos(yaw - 2.5) * 7, ey + Math.sin(yaw - 2.5) * 7);
+    ctx.fill();
+    const label = drag.wp ? `Send ${nameOf(r.id)} to ${drag.wp.name}` : `Send ${nameOf(r.id)} here`;
+    ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
+    const tw = ctx.measureText(label).width + 12;
+    ctx.fillRect(ex - tw / 2, ey - 38, tw, 18);
+    ctx.fillStyle = "#fff"; ctx.fillText(label, ex, ey - 25);
   }
   requestAnimationFrame(drawFrame);
 
@@ -1102,16 +1126,29 @@
 
   // -- tools / map input -------------------------------------------------------------------------------------------
 
+  // Sending is not a tool: drag a robot to where it should go, from any tool but the
+  // waypoint one. The old "send" tool needed select-robot, pick-tool, click; three
+  // steps and a mode to forget you were in.
   const HINTS = {
-    select: () => (selected ? "Click the map for waypoints and sends, or pick another robot" : "Click a robot to see its camera"),
+    select: () => "Drag a robot to send it there (drop on a pin to use it). Click a robot for its camera",
     wp: () => "Click the map to add a waypoint. Drag to set the heading",
-    goto: () => (selected ? `Click the map to send ${nameOf(selected)} there. Drag to set the heading` : "Select a robot first, then click a destination"),
   };
+  const ROBOT_HIT_PX = 16;
+  const robotAt = (px, py) => [...robots.values()].find((b) => {
+    if (!b.pose) return false;
+    const [a, c] = toPx(b.pose.x, b.pose.y);
+    return Math.hypot(a - px, c - py) < ROBOT_HIT_PX;
+  });
+  const waypointAt = (px, py) => waypoints.find((w) => {
+    const [a, c] = toPx(w.x, w.y);
+    return Math.hypot(a - px, c - py) < 12;
+  });
+  let drag = null; // a robot being dragged to a destination: {id, wx, wy, wp}
   function setTool(t) {
     tool = t;
     for (const b of document.querySelectorAll("#tools button")) b.classList.toggle("active", b.dataset.t === t);
     if (!view3d) $("#hint").textContent = HINTS[t]();
-    canvas.style.cursor = t === "select" ? "grab" : "crosshair";
+    canvas.style.cursor = t === "wp" ? "crosshair" : "grab";
   }
   for (const b of document.querySelectorAll("#tools button")) b.addEventListener("click", () => setTool(b.dataset.t));
 
@@ -1119,13 +1156,25 @@
   canvas.addEventListener("pointerdown", (e) => {
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
     const [wx, wy] = toWorld(px, py);
-    press = { px, py, wx, wy, moved: false, cx: view.cx, cy: view.cy };
+    // Pressing on a robot starts a send, not a pan, whatever the tool but waypoints.
+    const robot = tool === "wp" ? null : robotAt(px, py);
+    press = { px, py, wx, wy, moved: false, cx: view.cx, cy: view.cy, robot: robot ? robot.id : null };
     canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener("pointermove", (e) => {
-    if (!press) return;
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+    if (!press) { // hover: say what a press here would do
+      if (tool !== "wp") canvas.style.cursor = robotAt(px, py) ? "pointer" : "grab";
+      return;
+    }
     if (Math.hypot(px - press.px, py - press.py) > 6) press.moved = true;
+    if (press.moved && press.robot) {
+      const [wx, wy] = toWorld(px, py), wp = waypointAt(px, py);
+      drag = { id: press.robot, wx: wp ? wp.x : wx, wy: wp ? wp.y : wy, wp: wp || null };
+      canvas.style.cursor = "grabbing";
+      dirty = true;
+      return;
+    }
     if (press.moved && tool === "select") { // drag pans
       view.moved = true;
       view.cx = press.cx - (px - press.px) / view.scale;
@@ -1136,14 +1185,20 @@
   canvas.addEventListener("pointerup", (e) => {
     if (!press) return;
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
-    const p = press; press = null;
+    const p = press, d = drag; press = null; drag = null;
+    if (d) {
+      dirty = true;
+      canvas.style.cursor = "grab";
+      // Dropped back on the robot: changed its mind.
+      if (robotAt(px, py) && robotAt(px, py).id === d.id) return;
+      const r0 = robots.get(d.id);
+      // A pin keeps its own heading; anywhere else, arrive facing the way it travelled.
+      const yaw = d.wp ? d.wp.yaw || 0 : Math.atan2(d.wy - r0.pose.y, d.wx - r0.pose.x);
+      return sendNav(d.id, d.wx, d.wy, yaw, d.wp ? d.wp.name : `(${d.wx.toFixed(1)}, ${d.wy.toFixed(1)})`);
+    }
     if (tool === "select") {
       if (p.moved) return;
-      const hit = [...robots.values()].find((b) => {
-        if (!b.pose) return false;
-        const [a, c] = toPx(b.pose.x, b.pose.y);
-        return Math.hypot(a - px, c - py) < 16;
-      });
+      const hit = robotAt(px, py);
       // Closed -> open it; open -> give it control; already in control -> close it.
       if (hit) { if (!open.has(hit.id) || selected !== hit.id) openRobot(hit.id); else closeRobot(hit.id); }
       return;
@@ -1154,11 +1209,9 @@
       const name = nextWaypointName();
       saveWaypoints([...waypoints, { name, x: p.wx, y: p.wy, yaw }]);
       toast(`Waypoint ${name} added`);
-    } else if (tool === "goto") {
-      if (!selected) return toast("Select a robot first");
-      sendNav(selected, p.wx, p.wy, yaw, `(${p.wx.toFixed(1)}, ${p.wy.toFixed(1)})`);
     }
   });
+  canvas.addEventListener("pointercancel", () => { press = null; if (drag) { drag = null; dirty = true; } });
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
@@ -1214,9 +1267,13 @@
   $("#sp-x").addEventListener("click", closeSession);
   $("#session").addEventListener("click", (e) => { if (e.target.id === "session") closeSession(); });
   addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { if (!$("#session").hidden) closeSession(); else if (selected) select(null); return; }
+    if (e.key === "Escape") {
+      if (drag) { drag = null; press = null; dirty = true; canvas.style.cursor = "grab"; return; } // abandon a send mid-drag
+      if (!$("#session").hidden) closeSession(); else if (selected) select(null);
+      return;
+    }
     if (e.target.closest && e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
-    const t = { v: "select", f: "wp", g: "goto" }[e.key.toLowerCase()];
+    const t = { v: "select", f: "wp" }[e.key.toLowerCase()];
     if (t) setTool(t);
   });
   addEventListener("resize", resize);
@@ -1284,5 +1341,5 @@
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, view, toPx, toWorld, obstaclesInMap, onObstacles };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, view, toPx, toWorld, obstaclesInMap, onObstacles, get drag() { return drag; } };
 })();

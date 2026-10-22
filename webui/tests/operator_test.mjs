@@ -373,12 +373,63 @@ async function main() {
     await sleep(300);
     const rowGoing = await page.eval(`document.querySelector('#fleet .robot.sel .l2').textContent`);
     check(`${vp.label}: the robot row says where it is going`, /Going to A/.test(rowGoing), rowGoing);
+    // -- drag a robot to send it (no send tool) ---------------------------------------------------
+    check(`${vp.label}: there is no send tool any more`, await page.eval(`!document.querySelector('#tools [data-t="goto"]')`));
+    await page.eval(`document.querySelector('#tools [data-t="select"]').click()`);
+    const goals = async () => JSON.parse(await page.eval(`JSON.stringify(window.__ops.filter((o) => o.op === 'send_action_goal'))`));
+    const at = (x, y) => page.eval(`(() => { const r = document.getElementById('map').getBoundingClientRect(); const [a, b] = window.__operator.toPx(${x}, ${y}); return [r.left + a, r.top + b]; })()`);
+    const mouse = (type, [x, y]) => page.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 });
     await page.eval(`window.__ops.length = 0`);
-    await page.eval(`document.querySelector('#tools [data-t="goto"]').click()`);
-    await mapPointer(2, 4);
-    const sent2 = JSON.parse(await page.eval(`JSON.stringify(window.__ops)`));
-    check(`${vp.label}: the send tool sends a goal where you click`, sent2.length === 1 && Math.abs(sent2[0].args.pose.pose.position.x - 2) < 0.1 &&
-          Math.abs(sent2[0].args.pose.pose.position.y - 4) < 0.1, JSON.stringify(sent2[0]?.args?.pose?.pose?.position));
+    await mouse('mousePressed', await at(4, -2)); // r1
+    await mouse('mouseMoved', await at(3, 1));
+    await mouse('mouseMoved', await at(2, 4));
+    const mid = JSON.parse(await page.eval(`JSON.stringify(window.__operator.drag)`));
+    check(`${vp.label}: dragging a robot previews the send`, !!mid && mid.id === r1 && Math.abs(mid.wx - 2) < 0.1 && Math.abs(mid.wy - 4) < 0.1, JSON.stringify(mid));
+    check(`${vp.label}: ... and sends nothing until it is dropped`, (await goals()).length === 0);
+    await shot(`${vp.label}-drag-send`);
+    await mouse('mouseReleased', await at(2, 4));
+    await sleep(150);
+    let g = await goals();
+    const sp = g[0]?.args?.pose?.pose, gyaw = sp ? 2 * Math.atan2(sp.orientation.z, sp.orientation.w) : NaN;
+    check(`${vp.label}: dropping it sends that robot there`, g.length === 1 && g[0].action === `/${r1}/navigate_to_pose` &&
+          Math.abs(sp.position.x - 2) < 0.1 && Math.abs(sp.position.y - 4) < 0.1, JSON.stringify(sp?.position));
+    check(`${vp.label}: ... arriving facing the way it travelled`, Math.abs(gyaw - Math.atan2(6, -2)) < 0.05, `yaw ${gyaw}`);
+    check(`${vp.label}: a drag-send leaves the view where it was (no pan)`, await page.eval(`!window.__operator.drag`));
+
+    await page.eval(`window.__ops.length = 0`);
+    await mapPointer(4, -2, -5, -5); // onto pin B
+    g = await goals();
+    const bp = g[0]?.args?.pose?.pose, byaw = bp ? 2 * Math.atan2(bp.orientation.z, bp.orientation.w) : NaN;
+    check(`${vp.label}: dropping on a pin sends it to that waypoint, with the pin's heading`, g.length === 1 &&
+          Math.abs(bp.position.x + 5) < 1e-6 && Math.abs(bp.position.y + 5) < 1e-6 && Math.abs(byaw - Math.PI / 2) < 0.1, JSON.stringify(bp));
+    check(`${vp.label}: ... and names it`, /Going to B/.test(await page.eval(`document.querySelector('#fleet .robot[data-id="${r1}"] .l2').textContent`)));
+
+    await page.eval(`window.__ops.length = 0`);
+    const openBefore = await page.eval(`[...window.__operator.open].join()`);
+    await mapPointer(-3, 2, -1, 0); // r0, whose card isn't the selected one
+    g = await goals();
+    check(`${vp.label}: any robot can be dragged, not just the selected one`, g.length === 1 && g[0].action === `/${r0}/navigate_to_pose`, g[0]?.action);
+    check(`${vp.label}: ... without opening or closing cards`, (await page.eval(`[...window.__operator.open].join()`)) === openBefore);
+
+    await page.eval(`window.__ops.length = 0`);
+    const [r1x, r1y] = await at(4, -2); // a real drag (> 6 px) that ends back on the robot (< 16 px)
+    await mouse('mousePressed', [r1x, r1y]);
+    await mouse('mouseMoved', [r1x + 10, r1y]);
+    await mouse('mouseReleased', [r1x + 10, r1y]);
+    await sleep(150);
+    check(`${vp.label}: dropping a robot back on itself sends nothing`, (await goals()).length === 0);
+
+    await mouse('mousePressed', await at(4, -2));
+    await mouse('mouseMoved', await at(0, 3));
+    await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+    await mouse('mouseReleased', await at(0, 3));
+    await sleep(150);
+    check(`${vp.label}: Escape abandons a drag-send`, (await goals()).length === 0 && await page.eval(`!window.__operator.drag`));
+
+    const vc = await page.eval(`JSON.stringify([window.__operator.view.cx, window.__operator.view.cy])`);
+    await mapPointer(0, 3, 1, 4); // empty map
+    check(`${vp.label}: dragging empty map still pans`, (await page.eval(`JSON.stringify([window.__operator.view.cx, window.__operator.view.cy])`)) !== vc && (await goals()).length === 0);
+    check(`${vp.label}: the hint teaches the drag`, /Drag a robot/.test(await $text('#hint')), await $text('#hint'));
 
     // -- tasks --------------------------------------------------------------------------------------
     // A and B are both still placed here (deletion is exercised after the demo
