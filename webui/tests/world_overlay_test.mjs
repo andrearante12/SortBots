@@ -189,7 +189,7 @@ async function main() {
   await page.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
   await page.send('Emulation.setDeviceMetricsOverride', {
     width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
-  await page.send('Page.navigate', { url: `http://127.0.0.1:${HTTP_PORT}/` });
+  await page.send('Page.navigate', { url: `http://127.0.0.1:${HTTP_PORT}/index.html` });
   await sleep(1500);
 
   await page.eval(`document.querySelector('#stage-mode button[data-stage="map"]').click()`);

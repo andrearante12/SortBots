@@ -639,7 +639,7 @@ async function main() {
   });
 
   // ...and read-only: listed and readable, never runnable.
-  await page.send('Page.navigate', { url: `http://127.0.0.1:${READONLY_PORT}/` });
+  await page.send('Page.navigate', { url: `http://127.0.0.1:${READONLY_PORT}/index.html` });
   await sleep(1500);
   await page.eval(SHOW_TESTS);
   await sleep(900);
