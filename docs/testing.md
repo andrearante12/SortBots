@@ -119,7 +119,7 @@ overrides: {world: aisle_crossing}   # only keys the scenario lists in overrides
 warmup_s: 5                          # sim-s after the stack is ready, before t0
 goals:                               # per robot, in order
   - robot: robot_0
-    pose: [-8.0, 3.0, -1.5708]       # or station: shelf_a (configs/waypoints.yaml)
+    pose: [-8.0, 3.0, -1.5708]       # or waypoint: NAME (the saved map's own waypoints)
     at_s: 0                          # NO EARLIER than this; default: when the robot's previous goal ends
     timeout_s: 120                   # cancelled and scored `timeout` after this
 tasks:                               # optional task_manager deliveries

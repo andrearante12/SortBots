@@ -25,11 +25,22 @@ BASE = {
     "overrides": {"world": "aisle_crossing"},
     "warmup_s": 2,
     "goals": [{"robot": "robot_0", "pose": [-8.0, 3.0, 0.0], "timeout_s": 30},
-              {"robot": "robot_0", "station": "shelf_a", "at_s": 50}],
+              {"robot": "robot_0", "waypoint": "shelf_a", "at_s": 50}],
     "stop": {"sim_s": 100, "until": ["goals_done"], "settle_s": 2},
     "metrics": [{"metric": "clearance", "pass": {"contacts": {"eq": 0}}},
                 {"metric": "goals"}],
 }
+
+
+# The saved map's named waypoints, without needing a saved map: BASE runs on a
+# fresh map (above), and the real lookup is tested on its own below.
+WAYPOINTS = {"shelf_a": {"name": "shelf_a", "x": -4.5, "y": 5.5, "yaw": 0.0}}
+
+
+@pytest.fixture(autouse=True)
+def _waypoints(monkeypatch, request):
+    if request.node.name != "test_named_waypoints_need_a_saved_map":
+        monkeypatch.setattr(spec, "_named_waypoints", lambda run: WAYPOINTS)
 
 
 def raw(**kw):
@@ -70,7 +81,7 @@ def test_list_tests_reports_every_file():
 
 # -- validation -------------------------------------------------------------------
 
-def test_resolves_station_goal_and_robots():
+def test_resolves_waypoint_goal_and_robots():
     t = spec.validate(raw())
     label, r = t["variants"][0]
     assert label == "base" and r["robots"] == ["robot_0"]
@@ -84,8 +95,11 @@ def test_resolves_station_goal_and_robots():
     (lambda r: r.update(overrides={"robots": 2}), "not offered"),
     (lambda r: r.update(overrides={"world": "nope"}), "world"),
     (lambda r: r["goals"].append({"robot": "robot_1", "pose": [0, 0]}), "not in this run"),
-    (lambda r: r["goals"].append({"robot": "robot_0", "station": "atlantis"}), "station"),
-    (lambda r: r["goals"].append({"robot": "robot_0", "pose": [0, 0], "station": "shelf_a"}),
+    (lambda r: r["goals"].append({"robot": "robot_0", "waypoint": "atlantis"}),
+     "not one of the map's waypoints"),
+    (lambda r: r.update(tasks=[{"robot": "robot_0", "pickup": "shelf_a", "dropoff": "atlantis"}]),
+     "dropoff"),
+    (lambda r: r["goals"].append({"robot": "robot_0", "pose": [0, 0], "waypoint": "shelf_a"}),
      "exactly one"),
     (lambda r: r.update(stop={"sim_s": 0}), "sim_s"),
     (lambda r: r.update(stop={"sim_s": 10, "until": ["tasks_done"]}), "tasks_done"),
@@ -103,6 +117,14 @@ def test_validation_rejects(mutate, err):
     mutate(r)
     with pytest.raises(spec.SpecError, match=err):
         spec.validate(r)
+
+
+def test_named_waypoints_need_a_saved_map():
+    # BASE's scenario starts from a fresh map: no fixed set of names to resolve.
+    with pytest.raises(spec.SpecError, match="need a saved map"):
+        spec.validate(raw())
+    assert spec._named_waypoints({"map": None}) is None
+    assert spec._named_waypoints({"map": "anything", "waypoints": "keep"}) is None
 
 
 def test_variants_resolve_independently():

@@ -7,7 +7,7 @@
     warmup_s: 5                         # sim-s between "stack ready" and t0
     goals:                              # Nav2 goals the probe sends, per robot in order
       - robot: robot_0
-        pose: [-8.0, 3.0, -1.57]        # or station: shelf_a (configs/waypoints.yaml)
+        pose: [-8.0, 3.0, -1.57]        # or waypoint: shelf_a (the saved map's own)
         at_s: 0                         # NO EARLIER than this (s after t0); default:
                                         # as soon as this robot's previous goal ends
         timeout_s: 120                  # cancelled + scored `timeout` after this
@@ -39,6 +39,7 @@ TIME"); every `at_s`, `sim_s` and event time is measured from it.
 from __future__ import annotations
 
 import copy
+import json
 import math
 import os
 import re
@@ -54,7 +55,6 @@ from . import world as world_lib
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = Path(os.environ.get("SORTBOTS_TESTS_DIR") or REPO_ROOT / "configs" / "tests")
 RESULTS_DIR = Path(os.environ.get("SORTBOTS_TEST_RESULTS") or REPO_ROOT / "data" / "simtests")
-WAYPOINTS = REPO_ROOT / "configs" / "waypoints.yaml"
 
 NAME_RX = world_lib.NAME_RX
 UNTIL = ("goals_done", "tasks_done", "explorer_done")
@@ -82,9 +82,48 @@ def _session():
     return session
 
 
-def _stations() -> dict[str, dict]:
-    with open(WAYPOINTS) as f:
-        return (yaml.safe_load(f) or {}).get("stations") or {}
+def _map_name(s, run: dict) -> str | None:
+    """The library map a run loads, or None (fresh map, or a working DB)."""
+    m = run.get("map")
+    if not m:
+        return None
+    return m if s.maps_lib.NAME_RX.match(str(m)) else s.maps_lib.map_name_for_path(m)
+
+
+def _named_waypoints(run: dict) -> dict[str, dict] | None:
+    """Named waypoints a goal or task may use: the saved map's own
+    maps/<name>/waypoints.json, which the session restores into the working
+    set before launch (run["waypoints"] == "map", the default) and which
+    task_manager then resolves by name. None when the run can't have a fixed
+    set — a fresh map, or a policy of keep/none — because the dashboard's
+    working set (data/nav_waypoints.json) is live operator state, and a test
+    that depended on it would mean something different on every machine.
+
+    Replaced configs/waypoints.yaml `stations` (retired on main 2026-10-15)."""
+    s = _session()
+    name = _map_name(s, run)
+    if not name or run.get("waypoints", "map") != "map":
+        return None
+    f = s.maps_lib.resolve_dir(name, must_exist=True) / s.maps_lib.MAP_WAYPOINTS_NAME
+    try:
+        raw = json.loads(f.read_text()).get("waypoints", []) if f.is_file() else []
+    except (ValueError, AttributeError) as e:
+        raise SpecError(f"map {name!r} waypoints: {f.name} is not a JSON object ({e})") from None
+    try:
+        points = s.maps_lib.validate_waypoints(raw)
+    except s.maps_lib.MapError as e:
+        raise SpecError(f"map {name!r} waypoints: {e}") from None
+    return {w["name"]: w for w in points}
+
+
+def _waypoint(named: dict | None, name, where: str) -> dict:
+    if named is None:
+        raise SpecError(f"{where}: named waypoints need a saved map that carries them "
+                        "(scenario map: <name>, waypoints: map) — or give a pose")
+    if name not in named:
+        raise SpecError(f"{where}: {name!r} is not one of the map's waypoints "
+                        f"({', '.join(sorted(named)) or 'it has none'})")
+    return named[name]
 
 
 def _num(v, what, lo, hi) -> float:
@@ -132,12 +171,9 @@ def _check_map(s, run: dict) -> None:
     """A saved map must be present and loadable NOW, not fail minutes into a
     run: the scenario allowlist only checks a map name's shape, and a clone
     without git-lfs (or a branch without that map) has a pointer or nothing."""
-    m = run.get("map")
-    if not m:
-        return
-    name = m if s.maps_lib.NAME_RX.match(str(m)) else s.maps_lib.map_name_for_path(m)
+    name = _map_name(s, run)
     if not name:
-        return  # a working-DB path outside the library: run_demo.sh owns that check
+        return  # fresh map, or a working-DB path outside the library: run_demo.sh owns that
     try:
         state = s.maps_lib.read_manifest(name).get("db_state")
     except s.maps_lib.MapError as e:
@@ -153,7 +189,7 @@ def robots_for(run: dict) -> list[str]:
     return robots_lib.roster()[: int(run.get("robots") or 1)]
 
 
-def _goals(raw, robots: list[str], stations: dict) -> list[dict]:
+def _goals(raw, robots: list[str], named: dict | None) -> list[dict]:
     if raw is None:
         return []
     if not isinstance(raw, list):
@@ -163,19 +199,16 @@ def _goals(raw, robots: list[str], stations: dict) -> list[dict]:
         w = f"goals[{i}]"
         if not isinstance(g, dict):
             raise SpecError(f"{w}: expected a mapping")
-        unknown = set(g) - {"robot", "pose", "station", "at_s", "timeout_s"}
+        unknown = set(g) - {"robot", "pose", "waypoint", "at_s", "timeout_s"}
         if unknown:
             raise SpecError(f"{w}: unknown key(s) {sorted(unknown)}")
         if g.get("robot") not in robots:
             raise SpecError(f"{w}.robot: {g.get('robot')!r} is not in this run ({robots})")
-        if ("pose" in g) == ("station" in g):
-            raise SpecError(f"{w}: give exactly one of pose: [x, y, yaw] or station: NAME")
-        if "station" in g:
-            st = stations.get(g["station"])
-            if st is None:
-                raise SpecError(f"{w}.station: {g['station']!r} not in configs/waypoints.yaml")
-            p = st["pose"]
-            pose = [float(p["x"]), float(p["y"]), float(p.get("yaw", 0.0))]
+        if ("pose" in g) == ("waypoint" in g):
+            raise SpecError(f"{w}: give exactly one of pose: [x, y, yaw] or waypoint: NAME")
+        if "waypoint" in g:
+            p = _waypoint(named, g["waypoint"], f"{w}.waypoint")
+            pose = [p["x"], p["y"], p["yaw"]]
         else:
             p = g["pose"]
             if not isinstance(p, list) or len(p) not in (2, 3):
@@ -184,14 +217,14 @@ def _goals(raw, robots: list[str], stations: dict) -> list[dict]:
                     _num(p[2], f"{w}.pose[2]", -2 * math.pi, 2 * math.pi) if len(p) == 3
                     else 0.0]
         out.append({"id": f"g{i}", "robot": g["robot"], "pose": pose,
-                    "station": g.get("station"),
+                    "waypoint": g.get("waypoint"),
                     "at_s": _num(g.get("at_s", 0.0), f"{w}.at_s", 0, MAX_SIM_S),
                     "timeout_s": _num(g.get("timeout_s", 300.0), f"{w}.timeout_s",
                                       1, MAX_SIM_S)})
     return out
 
 
-def _tasks(raw, robots: list[str], stations: dict) -> list[dict]:
+def _tasks(raw, robots: list[str], named: dict | None) -> list[dict]:
     if raw is None:
         return []
     if not isinstance(raw, list):
@@ -203,12 +236,9 @@ def _tasks(raw, robots: list[str], stations: dict) -> list[dict]:
             raise SpecError(f"{w}: expected {{robot, pickup, dropoff, at_s}}")
         if t.get("robot") not in robots:
             raise SpecError(f"{w}.robot: {t.get('robot')!r} is not in this run ({robots})")
-        for key, kind in (("pickup", "pickup"), ("dropoff", "dropoff")):
-            st = stations.get(t.get(key))
-            if st is None:
-                raise SpecError(f"{w}.{key}: {t.get(key)!r} not in configs/waypoints.yaml")
-            if st.get("kind") != kind:
-                raise SpecError(f"{w}.{key}: station {t[key]!r} is a {st.get('kind')!r}")
+        # task_manager takes waypoint names; any waypoint can be either end.
+        for key in ("pickup", "dropoff"):
+            _waypoint(named, t.get(key), f"{w}.{key}")
         out.append({"id": f"t{i}", "robot": t["robot"], "pickup": t["pickup"],
                     "dropoff": t["dropoff"],
                     "at_s": _num(t.get("at_s", 0.0), f"{w}.at_s", 0, MAX_SIM_S)})
@@ -236,10 +266,10 @@ def _resolve_one(raw: dict) -> dict:
     """Validate one variant (or the base) end to end, including metric context."""
     scen, run = _resolve_run(raw)
     robots = robots_for(run)
-    stations = _stations()
+    named = _named_waypoints(run) if raw.get("goals") or raw.get("tasks") else None
     world = world_lib.load(run["world"]) if run.get("world") else None
-    goals = _goals(raw.get("goals"), robots, stations)
-    tasks = _tasks(raw.get("tasks"), robots, stations)
+    goals = _goals(raw.get("goals"), robots, named)
+    tasks = _tasks(raw.get("tasks"), robots, named)
     stop = _stop(raw.get("stop"), goals, tasks, bool(run.get("explore")))
     try:
         entries = metrics_lib.validate_list(raw.get("metrics"))

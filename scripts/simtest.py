@@ -143,7 +143,7 @@ def cmd_show(a) -> int:
             + (f", until {r['stop']['until']} (+{r['stop']['settle_s']:g}s)"
                if r["stop"]["until"] else ""))
         for g in r["goals"]:
-            log(f"  goal {g['id']}: {g['robot']} -> {g['station'] or g['pose']}  "
+            log(f"  goal {g['id']}: {g['robot']} -> {g['waypoint'] or g['pose']}  "
                 f"(at_s>={g['at_s']:g}, timeout {g['timeout_s']:g}s)")
         for tk in r["tasks"]:
             log(f"  task {tk['id']}: {tk['robot']} {tk['pickup']} -> {tk['dropoff']} "
