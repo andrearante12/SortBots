@@ -64,10 +64,12 @@ DEFAULTS = {
     "min_cluster_height_m": 0.10,
     "track_gate_m": 0.6,
     "track_max_age_s": 1.0,
-    "track_min_hits": 3,
+    "track_min_hits": 5,
     "velocity_smoothing": 0.4,
     "moving_speed_mps": 0.25,
     "max_moving_extent_m": 1.5,
+    "edge_margin_px": 8,
+    "min_moving_z_extent_m": 0.3,
 }
 
 
@@ -195,11 +197,14 @@ def cluster_cells(xy: np.ndarray, *, cell_m: float, min_cell_points: int):
 
 def summarize_clusters(pts: np.ndarray, uv: np.ndarray, labels: np.ndarray,
                        *, floor_z: float, min_points: int,
-                       min_height_m: float) -> list[dict]:
+                       min_height_m: float, width: int | None = None,
+                       edge_margin_px: int = 8) -> list[dict]:
     """Per-cluster stats in base_link, nearest first.
 
     `height_m` is the top of the cluster above the floor, and `uv` the
-    [u0, v0, u1, v1] box in image pixels that the dashboard draws.
+    [u0, v0, u1, v1] box in image pixels that the dashboard draws. `clipped`
+    means the box touches the image's left or right edge, so only part of the
+    object is in view and its centroid isn't where the object is.
     """
     out = []
     if labels.size == 0 or labels.max() < 0:
@@ -219,6 +224,9 @@ def summarize_clusters(pts: np.ndarray, uv: np.ndarray, labels: np.ndarray,
         # past the end that's actually closest.
         rng = float(np.min(np.hypot(p[:, 0], p[:, 1])))
         q = uv[m]
+        u0, u1 = int(q[:, 0].min()), int(q[:, 0].max())
+        clipped = width is not None and (
+            u0 <= edge_margin_px or u1 >= width - 1 - edge_margin_px)
         out.append({
             "centroid": [round(float(v), 3) for v in c],
             "min": [round(float(v), 3) for v in lo],
@@ -228,8 +236,8 @@ def summarize_clusters(pts: np.ndarray, uv: np.ndarray, labels: np.ndarray,
             "range_m": round(rng, 3),
             "bearing_deg": round(math.degrees(math.atan2(c[1], c[0])), 1),
             "n": int(m.sum()),
-            "uv": [int(q[:, 0].min()), int(q[:, 1].min()),
-                   int(q[:, 0].max()), int(q[:, 1].max())],
+            "uv": [u0, int(q[:, 1].min()), u1, int(q[:, 1].max())],
+            "clipped": bool(clipped),
             "label": lab,
         })
     out.sort(key=lambda o: o["range_m"])
@@ -268,12 +276,33 @@ def detect(depth: np.ndarray, K, R_base_cam: np.ndarray, t_base_cam: np.ndarray,
                            min_cell_points=int(c["min_cell_points"]))
     obstacles = summarize_clusters(pts, uv, labels, floor_z=floor_z,
                                    min_points=int(c["min_cluster_points"]),
-                                   min_height_m=c["min_cluster_height_m"])
+                                   min_height_m=c["min_cluster_height_m"],
+                                   width=depth.shape[1],
+                                   edge_margin_px=int(c["edge_margin_px"]))
     kept = {o["label"] for o in obstacles}
     in_obstacle = np.isin(labels, list(kept)) if kept else np.zeros(len(labels), bool)
     for o in obstacles:
         del o["label"]
     return obstacles, pts[in_obstacle], floor_z
+
+
+def can_move(o: dict, cfg: dict | None = None) -> bool:
+    """Whether an obstacle's centroid motion can be trusted as real motion.
+
+    Each rule removes a way a STATIC object's centroid slides while the robot
+    turns, measured live in sim on 2026-10-22 (turning in place at 0.5 rad/s):
+
+    - clipped: cut off at the image edge, more of it slides into view each
+      frame. 41 of 170 frames had a false "moving" before this rule.
+    - long (extent_m): shelving and walls do the same along their length.
+    - flat (z extent): a shelf deck near camera height is seen edge-on as a
+      ~16 px line whose visible stretch shifts with the view angle. That was
+      the remaining 11 of 171. A body is tall top to bottom; a deck isn't.
+    """
+    c = {**DEFAULTS, **(cfg or {})}
+    return (not o.get("clipped", False)
+            and o["extent_m"] <= c["max_moving_extent_m"]
+            and o["max"][2] - o["min"][2] >= c["min_moving_z_extent_m"])
 
 
 class Tracker:
@@ -290,9 +319,16 @@ class Tracker:
         self.tracks: dict[int, dict] = {}
         self._next_id = 1
 
-    def update(self, positions: list[tuple[float, float]], extents: list[float],
-               t: float) -> list[dict]:
-        """Associate this frame's centroids; returns one track state per input."""
+    def update(self, positions: list[tuple[float, float]], t: float,
+               movable: list[bool] | None = None) -> list[dict]:
+        """Associate this frame's centroids; returns one track state per input.
+
+        An observation that isn't `movable` (see can_move) still moves the
+        track, but its velocity is zeroed rather than fed a centroid slide. So
+        a person walking into view is called moving a couple of frames after
+        they're fully in it, not while they're clipped by the edge.
+        """
+        movable = movable if movable is not None else [True] * len(positions)
         c = self.cfg
         for tid in [k for k, tr in self.tracks.items()
                     if t - tr["t"] > c["track_max_age_s"]]:
@@ -328,7 +364,9 @@ class Tracker:
             else:
                 tr = self.tracks[tid]
                 dt = t - tr["t"]
-                if dt > 1e-3:
+                if not movable[i]:
+                    tr["vel"] = (0.0, 0.0)
+                elif dt > 1e-3:
                     vx = (x - tr["pos"][0]) / dt
                     vy = (y - tr["pos"][1]) / dt
                     tr["vel"] = (a * vx + (1 - a) * tr["vel"][0],
@@ -337,12 +375,9 @@ class Tracker:
                 tr["hits"] += 1
             tr = self.tracks[tid]
             speed = math.hypot(*tr["vel"])
-            # Long structure (shelving, walls) slides its centroid along as
-            # more of it comes into view, which reads as motion; only
-            # body-sized clusters are allowed to be "moving".
-            moving = (tr["hits"] >= c["track_min_hits"]
-                      and speed >= c["moving_speed_mps"]
-                      and extents[i] <= c["max_moving_extent_m"])
+            moving = (movable[i]
+                      and tr["hits"] >= c["track_min_hits"]
+                      and speed >= c["moving_speed_mps"])
             out.append({"track_id": tid,
                         "vel": [round(tr["vel"][0], 3), round(tr["vel"][1], 3)],
                         "speed_mps": round(speed, 3),
@@ -376,6 +411,7 @@ def main(argv=None):
 
     import rclpy
     from rclpy.duration import Duration
+    from rclpy.executors import ExternalShutdownException
     from rclpy.node import Node
     from rclpy.qos import qos_profile_sensor_data
     from rclpy.time import Time
@@ -479,7 +515,7 @@ def main(argv=None):
                 w = Ro @ np.asarray(o["centroid"], np.float32) + to
                 positions.append((float(w[0]), float(w[1])))
             states = self._tracker.update(
-                positions, [o["extent_m"] for o in obstacles], stamp_s)
+                positions, stamp_s, [can_move(o, cfg) for o in obstacles])
             for o, s in zip(obstacles, states):
                 o.update(s)
 
@@ -548,8 +584,14 @@ def main(argv=None):
     node = ObstacleDetector()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
+        # How rclpy reports the SIGTERM teardown sends: a normal stop.
         pass
+    except Exception:  # noqa: BLE001
+        # The same SIGTERM can land mid-spin and surface as RCLError ("context
+        # is not valid") instead; only a failure with the context still up is real.
+        if rclpy.ok():
+            raise
     finally:
         node.destroy_node()
         if rclpy.ok():

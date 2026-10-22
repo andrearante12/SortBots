@@ -78,13 +78,31 @@ flowchart LR
    `uv = [u0, v0, u1, v1]`. Clusters are listed nearest first.
 7. **Tracking.** Greedy nearest-neighbour association on centroids in
    `<id>/odom`, gated by `track_gate_m` around each track's predicted position.
-   Velocity is an EMA of frame-to-frame displacement. A track counts as
-   **`moving`** after `track_min_hits` frames at ≥ `moving_speed_mps`, but only
-   if the cluster is at most `max_moving_extent_m` long. Long structure such as
-   a shelf slides its centroid along as more of it comes into view, and that
-   would otherwise read as motion. Times are message stamps, so sim time works.
-   If odom TF is missing, tracking falls back to base_link and logs a warning
-   once: `moving` is then only meaningful while the robot stands still.
+   Velocity is an EMA of frame-to-frame displacement. Times are message stamps,
+   so sim time works. A track is **`moving`** after `track_min_hits` frames at
+   ≥ `moving_speed_mps`, and only while its cluster passes `can_move`. If odom
+   TF is missing, tracking falls back to base_link and logs a warning once:
+   `moving` is then only meaningful while the robot stands still.
+
+### When centroid motion is trusted (`can_move`)
+
+Odom removes the robot's own motion, but the centroid of a *static* object can
+still slide as the robot turns, because the part of it in view changes. A
+cluster that fails any of these rules gets its velocity zeroed instead of fed:
+
+| Rule | Static object it catches | Live false-"moving" frames, turning in place |
+|---|---|---|
+| none | | 41 / 170 |
+| not `clipped` (box touches the image's left/right edge) | anything sliding into view | 11 / 171 |
+| `max[z] - min[z] ≥ min_moving_z_extent_m` | a shelf deck near camera height, seen edge-on as a ~16 px line | 1 / 164 |
+| `track_min_hits` 3 → 5 | a thin upright blipping for one frame | **0 / 162** |
+| `extent_m ≤ max_moving_extent_m` | shelving and walls, along their length | (always on) |
+
+These numbers come from sim on 2026-10-22: `library_localize` on the
+`warehouse` map, robot_0 turning at ±0.5 rad/s, and 0 / 114 false frames while
+it stood still. The cost of the clipped rule is that a person walking in from
+the side is called moving a few frames after they are fully in view, not while
+they cross the frame edge.
 
 ## Outputs
 
@@ -148,11 +166,23 @@ A "person crosses the field of view" case can assert on `/<id>/obstacles` alone:
 ray-cast synthetic depth (`test_end_to_end_person_crossing_rendered_frames`),
 and `webui/tests/obstacle_overlay_test.mjs` covers the dashboard drawing.
 
+## Verification status
+
+- **Offline.** `tests/obstacle_detector_test.py` (18 tests) and
+  `webui/tests/obstacle_overlay_test.mjs` (15 checks).
+- **Live in sim.** Live sim runs (2026-10-22) covered sim 32FC1 depth, TF from
+  `robot_0/camera_optical`, the floor estimate (≈0 m), odom tracking, and the
+  false-positive table above.
+- **Not yet live.** No actual moving obstacle has been run live: the scene has
+  no actor. True detections are covered offline by the ray-cast crossing test
+  only. The first person-crossing scene is the real check. If it misses,
+  `moving_speed_mps` and `track_min_hits` are the knobs.
+- **Not on hardware.** The node hasn't run on the Jetson yet.
+
 ## Known limits and next steps
 
-- **Partial views.** A cluster cut off at the image edge or `max_range_m` has a
-  biased centroid. A person entering the frame reads as moving slightly faster
-  than they are.
+- **Partial views.** A cluster cut off at `max_range_m` (not the image edge,
+  which is handled) still has a biased centroid.
 - **People near shelving.** A person within ~2 cells of shelving merges into
   the shelf's cluster. That cluster is then too long to be called moving, so it
   still counts as an obstacle but not a moving one.

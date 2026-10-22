@@ -46,7 +46,16 @@ min_cluster_height_m: 0.10  # cluster top above floor; drops floor-hugging debri
 # track_gate_m; tracks unseen for track_max_age_s are dropped.
 track_gate_m: 0.6
 track_max_age_s: 1.0
-track_min_hits: 3           # frames before a track may be called moving
+# Frames before a track may be called moving. 3 let a thin upright blip to
+# 0.35 m/s for one frame while turning (live, 2026-10-22); 5 is 0.5 s at 10 Hz,
+# far less than a person takes to cross the view.
+track_min_hits: 5
 velocity_smoothing: 0.4     # EMA weight of each frame's raw velocity
 moving_speed_mps: 0.25      # slow walk is ~1 m/s; well above centroid jitter
-max_moving_extent_m: 1.5    # longer clusters (shelves, walls) are never "moving"
+max_moving_extent_m: 1.5    # longer clusters (shelves, walls) never get a velocity
+# Rules for when a centroid's motion counts (can_move in the node has the live
+# measurements behind each). Within edge_margin_px of the image's left/right
+# edge a cluster is only partly in view; under min_moving_z_extent_m top to
+# bottom it is a flat surface seen edge-on. Both slide as the robot turns.
+edge_margin_px: 8
+min_moving_z_extent_m: 0.3

@@ -159,7 +159,7 @@ def test_tracker_flags_crossing_person_as_moving():
     states = []
     for k in range(10):
         t = k * 0.1
-        states.append(tr.update([(2.0, 1.0 - 1.0 * t)], [0.4], t)[0])
+        states.append(tr.update([(2.0, 1.0 - 1.0 * t)], t)[0])
     assert len({s["track_id"] for s in states}) == 1
     assert not states[0]["moving"]
     assert states[-1]["moving"]
@@ -171,19 +171,20 @@ def test_tracker_static_and_long_structures_never_move():
     for k in range(10):
         t = k * 0.1
         # Small static box with 1 cm jitter, and a shelf whose centroid
-        # slides along it at 1 m/s as more of it comes into view.
-        s = tr.update([(1.5, 0.01 * (-1) ** k), (3.0 + t, 2.0)], [0.3, 4.0], t)
+        # slides along it at 1 m/s as more of it comes into view (can_move
+        # is False for it, see test_can_move_rules).
+        s = tr.update([(1.5, 0.01 * (-1) ** k), (3.0 + t, 2.0)], t, [True, False])
     assert not s[0]["moving"]
     assert not s[1]["moving"]
 
 
 def test_tracker_drops_stale_tracks_and_gates_jumps():
     tr = od.Tracker()
-    a = tr.update([(1.0, 0.0)], [0.3], 0.0)[0]["track_id"]
+    a = tr.update([(1.0, 0.0)], 0.0)[0]["track_id"]
     # A detection 2 m away is a new object, not a 20 m/s jump.
-    b = tr.update([(3.0, 0.0)], [0.3], 0.1)[0]["track_id"]
+    b = tr.update([(3.0, 0.0)], 0.1)[0]["track_id"]
     assert a != b
-    tr.update([], [], 5.0)
+    tr.update([], 5.0)
     assert tr.tracks == {}
 
 
@@ -197,7 +198,8 @@ def test_end_to_end_person_crossing_rendered_frames():
         depth, R, tt = render([((2.0, y - 0.2, 0.0), (2.3, y + 0.2, 1.7))])
         obs, _, _ = od.detect(depth, K, R, tt, CFG)
         assert len(obs) == 1
-        last = tr.update([tuple(obs[0]["centroid"][:2])], [obs[0]["extent_m"]], t)[0]
+        last = tr.update([tuple(obs[0]["centroid"][:2])], t,
+                         [od.can_move(obs[0])])[0]
     assert last["moving"]
 
 
@@ -207,3 +209,40 @@ def test_payload_shape():
                          height=480, world_frame="robot_0/odom")
     assert p["count"] == 2 and p["moving"] == 1
     assert p["w"] == 848 and p["stamp"] == 1.235
+
+
+def test_clipped_object_is_flagged_and_never_moving():
+    """The live turning false positive: a static object sliding into view at
+    the image edge drags its centroid sideways at ~1 m/s."""
+    depth, R, t = render([((1.5, 0.55, 0.0), (1.8, 1.4, 1.0))])
+    obs, _, _ = od.detect(depth, K, R, t, CFG)
+    assert len(obs) == 1 and obs[0]["clipped"]
+    depth, R, t = render([PERSON])
+    obs, _, _ = od.detect(depth, K, R, t, CFG)
+    assert not obs[0]["clipped"]
+    assert od.can_move(obs[0])
+
+    tr = od.Tracker()
+    for k in range(10):
+        s = tr.update([(1.8, 0.9 - 0.1 * k)], k * 0.1, [False])[0]
+    assert not s["moving"] and s["speed_mps"] == 0.0
+    # Once fully in view it is free to be called moving again.
+    for k in range(10, 14):
+        s = tr.update([(1.8, 0.9 - 0.1 * k)], k * 0.1, [True])[0]
+    assert s["moving"]
+
+
+def test_can_move_rules():
+    body = {"clipped": False, "extent_m": 0.4, "min": [2, 0, 0.0], "max": [2.3, 0.4, 1.7]}
+    assert od.can_move(body)
+    assert not od.can_move({**body, "clipped": True})
+    assert not od.can_move({**body, "extent_m": 3.0})            # shelving
+    # Shelf deck at camera height, edge-on: 1 m up but 7 cm top to bottom.
+    assert not od.can_move({**body, "min": [2, 0, 0.97], "max": [2.8, 0.4, 1.04]})
+
+
+def test_flat_deck_at_camera_height_cannot_move():
+    deck = ((1.6, -0.4, 0.95), (2.4, 0.4, 1.02))
+    depth, R, t = render([deck], tilt_deg=0)
+    obs, _, _ = od.detect(depth, K, R, t, {**CFG, "min_cluster_height_m": 0.1})
+    assert obs and not any(od.can_move(o) for o in obs)
