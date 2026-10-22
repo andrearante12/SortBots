@@ -1741,14 +1741,16 @@ function drawWorldOverlay() {
     ctx.stroke();
     const [px, py] = worldToPixel(pose.x, pose.y);
     const r = Math.max(3, (a.radius || 0.3) * view.scale);
-    if (pose.moving) {
-      ctx.strokeStyle = rgb(a.color, 1);
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(px, py);
-      ctx.lineTo(px + r * 2 * Math.cos(pose.yaw), py - r * 2 * Math.sin(pose.yaw));
-      ctx.stroke();
-    }
+    // Heading tick like the robot marker's, always: a walker dwelling at a
+    // waypoint still faces somewhere. Dashed while it stands still.
+    ctx.strokeStyle = rgb(a.color, 1);
+    ctx.lineWidth = 2;
+    ctx.setLineDash(pose.moving ? [] : [3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px + r * 2 * Math.cos(pose.yaw), py - r * 2 * Math.sin(pose.yaw));
+    ctx.stroke();
+    ctx.setLineDash([]);
     drawRobotLabel(px, py, r, a.label || a.id, rgb(a.color, 1));
   }
   ctx.restore();

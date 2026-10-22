@@ -48,6 +48,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # Sibling for shared helpers and the warehouse spawn-position table.
@@ -1107,6 +1108,7 @@ def _place_package_on_surface(stage, package_prim_path: str, decks) -> bool:
 
 WORLD_ROOT = "/World/SimTest"
 GROUND_TRUTH_EVERY = 6  # physics steps -> 10 Hz in sim time
+WORLD_REPUBLISH_S = 2.0  # wall seconds between /sim/world re-sends (see tick)
 
 
 def _world_color_material(stage, cache: dict, rgb):
@@ -1238,7 +1240,9 @@ class _WorldRuntime:
         self.gt_pub = self.node.create_publisher(String, "/sim/ground_truth", 10)
         self.world_pub = self.node.create_publisher(String, "/sim/world", latched)
         self.node.create_subscription(String, "/sim/world_cmd", self._on_cmd, 10)
-        self.world_pub.publish(String(data=json.dumps(self._describe())))
+        self.world_msg = String(data=json.dumps(self._describe()))
+        self.world_pub.publish(self.world_msg)
+        self.world_sent_at = time.monotonic()
 
     def _describe(self) -> dict:
         """/sim/world: the static half — what to draw, and the shapes the
@@ -1325,6 +1329,15 @@ class _WorldRuntime:
                 out["actors"][actor["id"]] = {k: (round(v, 4) if isinstance(v, float) else v)
                                               for k, v in p.items()}
         self.gt_pub.publish(self._String(data=self._json.dumps(out)))
+        # Latched is not enough for the dashboard: rosbridge picks a
+        # subscription's QoS when the FIRST browser subscribes, and the console
+        # is normally up before the sim, so with no publisher yet it falls back
+        # to VOLATILE and never sees a once-at-startup message. The overlay
+        # then had live ground truth but no layout and drew nothing (found
+        # 2026-10-22). Wall clock, so a slow sim doesn't stretch the wait.
+        if time.monotonic() - self.world_sent_at >= WORLD_REPUBLISH_S:
+            self.world_pub.publish(self.world_msg)
+            self.world_sent_at = time.monotonic()
 
     def close(self) -> None:
         self.node.destroy_node()
