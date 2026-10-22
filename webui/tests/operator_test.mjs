@@ -379,7 +379,9 @@ async function main() {
     check(`${vp.label}: the smoke test is runnable here`,
       await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"] [data-run]'); return !!c && !c.disabled; })()`));
     const smokeTitle = await $text('#tp-list .tp-test[data-name="pipeline_smoke"] .t');
-    check(`${vp.label}: rows are titled, not file names`, smokeTitle.length > 0 && smokeTitle !== 'pipeline_smoke', smokeTitle);
+    check(`${vp.label}: rows are numbered short names`, /^\d+Pipeline smoke$/.test(smokeTitle), smokeTitle);
+    check(`${vp.label}: no time/variant line under the names`, !(await page.eval(`!!document.querySelector('#tp-list .tp-row .m')`)));
+    const smokeName = 'Pipeline smoke';
     check(`${vp.label}: rows start collapsed`, !(await visible('#tp-list .tp-test[data-name="pipeline_smoke"] .tp-more')));
     await click('#tp-list .tp-test[data-name="crossing_yield"] .tp-row .t');
     await sleep(100);
@@ -392,7 +394,7 @@ async function main() {
     check(`${vp.label}: Run starts that test with the chosen repeats`, posted.length === 1 && posted[0].name === 'pipeline_smoke' && posted[0].repeats === 2, JSON.stringify(posted));
     check(`${vp.label}: ... and closes the panel to watch it on the map`, !(await visible('#session')));
     check(`${vp.label}: a chip over the map names the running test and its clock`,
-      await visible('#test-chip') && (await $text('#tc-name')) === smokeTitle && (await $text('#tc-time')) === '1:15', `${await $text('#tc-name')} ${await $text('#tc-time')}`);
+      await visible('#test-chip') && (await $text('#tc-name')) === smokeName && (await $text('#tc-time')) === '1:15', `${await $text('#tc-name')} ${await $text('#tc-time')}`);
     await shot(`${vp.label}-test-running`);
     await click('#tc-name');
     await sleep(500);
@@ -407,16 +409,10 @@ async function main() {
     await sleep(300);
     check(`${vp.label}: Stop test cancels it and the chip goes`, !(await visible('#test-chip')) && (await page.eval(`window.__testRun.exit`)) === 130);
 
-    await page.eval(`window.__testResults = [{ dir: '20261022T180000Z_crossing_yield', name: 'crossing_yield', state: 'done', complete: true, verdict: 'FAIL', done: 1, planned: 1,
-      runs: [{ criteria: [{ label: 'detection.recall >= 0.3', ok: false, actual: 0.12 }, { label: 'goals.reached >= 1', ok: true, actual: 1 }] }] }]`);
     await click('#session-chip');
     await sleep(900);
     check(`${vp.label}: the panel remembers the Tests tab`, await visible('#tests-pane'));
-    const res = await $text('#tp-results .tp-res');
-    check(`${vp.label}: results show the verdict, the test's title and what failed`, /FAIL/.test(res) && /Walker crosses/.test(res) && /recall >= 0.3: got 0.12/.test(res) && !/goals/.test(res), res.slice(0, 160));
-    await click('#tp-results .tp-res-row');
-    await sleep(300);
-    check(`${vp.label}: a result opens its report`, await visible('#tp-report') && /recall 0.12/.test(await $text('#tp-report')));
+    check(`${vp.label}: no results list, and no status line once the test is over`, !(await page.eval(`!!document.getElementById('tp-results')`)) && !(await visible('#tp-run')));
     await shot(`${vp.label}-tests-tab`);
     await click('#sp-tabs [data-tab="launch"]');
     check(`${vp.label}: the Launch tab brings the form back`, await visible('#launch-form') && !(await visible('#tests-pane')));

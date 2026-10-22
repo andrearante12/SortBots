@@ -4,8 +4,6 @@
 // Talks ONLY to webui/serve.py over HTTP, the same API as the engineering
 // dashboard's tests_view.js:
 //   GET  /api/tests            test cases (validated) + whether this server can run them
-//   GET  /api/tests/results    recent result dirs (data/simtests/), newest first
-//   GET  /api/tests/report     ?dir=NAME -> that run's report.md
 //   GET  /api/tests/run        ?offset= runner state + incremental log
 //   POST /api/tests/run        {name, repeats?, variant?}
 //   POST /api/tests/cancel
@@ -38,7 +36,6 @@
   let testsAt = 0;
   let run = null; // last GET /api/tests/run
   let logOffset = null;
-  let openReport = null;
   let timer = null;
   let wasRunning = false;
   let lastListSig = "";
@@ -49,7 +46,10 @@
   const isRunning = () => !!(run && run.running);
   const onTab = () => card.classList.contains("tab-tests");
   const panelOpen = () => !$("#session").hidden;
-  const titleOf = (name) => (tests.find((t) => t.name === name) || {}).title || name;
+  // Short names from the file name ("crossing_yield" -> "Crossing yield"): the
+  // spec's titles are sentences, and a new test file gets a name without anyone
+  // having to pick one. The full title is in the row's details.
+  const titleOf = (name) => { const w = String(name).replace(/_/g, " "); return w.charAt(0).toUpperCase() + w.slice(1); };
   const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
   const words = (s) => String(s || "").replace(/_/g, " ");
   // "2.5 min", "90 s": sim seconds, as the spec caps them.
@@ -98,13 +98,13 @@
     const ready = tests.filter((t) => t.status === "ready").length;
     $("#tp-count").textContent = tests.length ? `· ${ready} ready` : "";
     const why = !control ? "This server can't launch the sim (it isn't the sim console)" : busy ? "A test is already running" : "Launch the sim, run this test and score it";
-    $("#tp-list").innerHTML = tests.length ? tests.map((t) => {
+    $("#tp-list").innerHTML = tests.length ? tests.map((t, i) => {
       const open = expanded.has(t.name) ? " open" : "";
+      const label = `<span class="t"><span class="num">${i + 1}</span>${esc(titleOf(t.name))}</span>`;
       if (t.status !== "ready") {
         return `<div class="tp-test invalid${open}" data-name="${esc(t.name)}">
-          <div class="tp-row"><span class="chev">&#9654;</span><span class="t">${esc(t.title || t.name)}</span>
-            <span class="m">Can't run here: ${esc(t.error || "invalid")}</span></div>
-          <div class="tp-more"><code>configs/tests/${esc(t.name)}.yaml</code></div></div>`;
+          <div class="tp-row"><span class="chev">&#9654;</span>${label}</div>
+          <div class="tp-more"><p class="err">Can't run here: ${esc(t.error || "invalid")}</p><code>configs/tests/${esc(t.name)}.yaml</code></div></div>`;
       }
       const world = t.world ? ` · ${esc(words(t.world))}` : "";
       const checks = t.metrics.flatMap((m) => m.criteria.map((c) => `<li>${crit(m.id, c)}</li>`));
@@ -113,16 +113,16 @@
         ? `<label>Variant <select data-variant><option value="">all ${t.variants.length}</option>${t.variants.map((v) => `<option value="${esc(v)}">${esc(words(v))}</option>`).join("")}</select></label>` : "";
       return `<div class="tp-test${open}" data-name="${esc(t.name)}">
         <div class="tp-row" title="Show what this test checks">
-          <span class="chev">&#9654;</span><span class="t">${esc(t.title)}</span>
-          <span class="m">${plural(t.robots.length, "robot")}${world} · up to ${simTime(t.sim_s)} sim${t.variants.length > 1 ? ` · ${t.variants.length} variants` : ""}</span>
+          <span class="chev">&#9654;</span>${label}
           <button type="button" class="btn small" data-run ${!control || busy ? "disabled" : ""} title="${esc(why)}">Run</button>
         </div>
         <div class="tp-more">
+          <b>${esc(t.title)}</b>
           ${t.description ? `<p>${esc(t.description)}</p>` : ""}
           <dl>
             ${checks.length ? `<dt>Passes when</dt><dd><ul>${checks.join("")}</ul></dd>` : ""}
             ${reported.length ? `<dt>Also reports</dt><dd>${esc(reported.join(", "))}</dd>` : ""}
-            <dt>Runs</dt><dd>${esc(words(t.scenario))}${world}</dd>
+            <dt>Runs</dt><dd>${esc(words(t.scenario))}${world} · ${plural(t.robots.length, "robot")} · up to ${simTime(t.sim_s)} sim${t.variants.length > 1 ? ` · ${t.variants.length} variants` : ""}</dd>
           </dl>
           <div class="opts">${variant}<label>Repeats <input type="number" min="1" max="50" value="${t.repeats}" data-repeats></label>
             <code>configs/tests/${esc(t.name)}.yaml</code></div>
@@ -166,7 +166,9 @@
   function renderRun() {
     const box = $("#tp-run"), chip = $("#test-chip");
     const has = !!(run && run.name), live = isRunning();
-    box.hidden = !has;
+    // Only while one runs: a finished run's verdict is the toast, and a stale
+    // "last run ..." line read as something still wrong.
+    box.hidden = !live;
     chip.hidden = !live;
     card.classList.toggle("testing", live);
     if (!has) return;
@@ -205,43 +207,6 @@
     if (!log.hidden) log.scrollTop = log.scrollHeight;
   });
 
-  // -- results --------------------------------------------------------------------------
-
-  function when(dir) {
-    const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/.exec(dir);
-    if (!m) return dir;
-    const d = new Date(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5]));
-    const today = new Date().toDateString() === d.toDateString();
-    return d.toLocaleString([], today ? { hour: "numeric", minute: "2-digit" } : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-  }
-  function renderResults(results) {
-    $("#tp-results").innerHTML = results.length ? results.slice(0, 10).map((r) => {
-      const inFlight = r.state === "running" && !r.complete;
-      const v = inFlight ? ["run", "RUN"] : r.verdict === "PASS" ? ["pass", "PASS"] : r.verdict ? ["fail", r.verdict] : ["", "—"];
-      const last = r.runs[r.runs.length - 1];
-      const failed = !last ? [] : last.error ? [`<span class="bad">${esc(last.error)}</span>`]
-        : last.criteria.filter((c) => !c.ok).map((c) => `<span class="bad">${esc(c.label)}: got ${c.actual == null ? "no data" : esc(c.actual)}</span>`);
-      const detail = failed.length ? failed.join(" · ") : last && last.criteria.length ? `all ${last.criteria.length} checks held` : "";
-      return `<div class="tp-res" data-dir="${esc(r.dir)}"><div class="tp-res-row" title="Show the full report">
-        <span class="v ${v[0]}">${v[1]}</span><span class="n">${esc(titleOf(r.name))}</span>
-        <span class="w">${esc(when(r.dir))}${r.planned > 1 ? ` · ${r.done}/${r.planned}` : ""}</span>
-        ${detail ? `<div class="c">${detail}</div>` : ""}</div>
-        ${openReport === r.dir ? `<pre id="tp-report"></pre>` : ""}</div>`;
-    }).join("") : `<div class="tp-empty">No results yet.</div>`;
-    if (openReport && reportText != null) { const rep = $("#tp-report"); if (rep) rep.textContent = reportText; }
-  }
-  let reportText = null, lastResults = [];
-  $("#tp-results").addEventListener("click", async (e) => {
-    const row = e.target.closest(".tp-res-row");
-    if (!row) return;
-    const dir = row.parentElement.dataset.dir;
-    if (openReport === dir) { openReport = null; reportText = null; renderResults(lastResults); return; }
-    try {
-      reportText = (await api(`/api/tests/report?dir=${encodeURIComponent(dir)}`)).markdown;
-      openReport = dir; renderResults(lastResults);
-    } catch (err) { warn(err.message); }
-  });
-
   // -- polling ----------------------------------------------------------------------------
 
   async function poll() {
@@ -264,7 +229,6 @@
         testsAt = 0; // results changed
       }
       wasRunning = !!run.running;
-      if (visible) { lastResults = (await api("/api/tests/results")).results || []; renderResults(lastResults); }
     } catch (e) {
       if (visible) warn(`Tests unavailable: ${e.message}`);
     }
