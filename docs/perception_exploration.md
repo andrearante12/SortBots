@@ -82,8 +82,20 @@ channel instead.
 | `/{id}/dynamic_obstacles` | Nav2 ephemeral `ObstacleLayer` source |
 
 Detection v1: frame-to-frame depth change, morph close, keep robot-sized
-blobs. Vision-only — no peer TF. Bringup starts this **before** RTAB-Map so
-`depth_static` exists when mapping starts.
+blobs. No peer TF. Bringup starts this **before** RTAB-Map so `depth_static`
+exists when mapping starts.
+
+**Peers by radio.** Frame differencing misses a robot that stands still or
+creeps, and RTAB-Map then paints it into the shared map as a wall. On
+2026-10-22 that left 76 occupied `/map` cells under robot_0. Its global
+costmap went lethal around its own pose, and NavFn's cheapest way out pointed
+away from the goal, so the robot turned away and went the long way round. Now
+every pixel within `peer_radius_m` (0.5 m in x/y) of a peer's self-reported
+`/fleet/status` pose is masked too, and the robot uses only its own TF to place
+its camera. Live: ~17k px a frame masked with the peer 4 m away in view, none
+extra with it behind. The masking is limited to the columns the peer projects
+into: 2–11 ms with a peer in view, nothing otherwise. Already-painted phantoms
+(in a running map, or a saved one) stay until SLAM sees that spot empty again.
 
 ### Obstacle detector
 
