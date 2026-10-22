@@ -322,6 +322,72 @@
     }
   }
 
+  // -- world overlay: props and scripted walkers (configs/worlds/, sim only) -----------
+  // From GROUND TRUTH, never from what a robot perceived: /sim/world is the latched
+  // layout (shapes, colours, paths), /sim/ground_truth the 10 Hz poses. Drawn under
+  // the robots, so a running test reads at a glance: the walker, where it is going,
+  // and whether the robot's red obstacle marker sits on it. Same data and look as
+  // app.js's overlay; neither topic exists on a real robot, so nothing draws there.
+  const WORLD_TRUTH_TTL_MS = 3000; // sim gone quiet: stop drawing walkers frozen mid-stride
+  let worldLayout = null, worldTruth = null, worldTruthAt = -Infinity;
+  topic("/sim/world", "std_msgs/String").subscribe((msg) => {
+    try { worldLayout = JSON.parse(msg.data); } catch (e) { return; }
+    dirty = true;
+  });
+  topic("/sim/ground_truth", "std_msgs/String", { throttle_rate: 100, queue_length: 1 }).subscribe((msg) => {
+    try { worldTruth = JSON.parse(msg.data); } catch (e) { return; }
+    worldTruthAt = performance.now(); dirty = true;
+  });
+  const worldLive = () => !!(worldLayout && worldLayout.world && worldTruth && performance.now() - worldTruthAt < WORLD_TRUTH_TTL_MS);
+  const rgba = (c, a) => `rgba(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)},${a})`;
+  // A simtest.geometry shape: ["circle", [x, y], r] | ["poly", [[x, y], ...]].
+  function traceShape(shape) {
+    ctx.beginPath();
+    if (shape[0] === "circle") {
+      const [a, b] = toPx(shape[1][0], shape[1][1]);
+      ctx.arc(a, b, Math.max(3, shape[2] * view.scale), 0, 7);
+      return;
+    }
+    shape[1].forEach(([x, y], i) => { const [a, b] = toPx(x, y); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); });
+    ctx.closePath();
+  }
+  function actorShape(a, p) {
+    if (a.shape === "cylinder") return ["circle", [p.x, p.y], a.radius];
+    const [sx, sy] = a.size, c = Math.cos(p.yaw), s = Math.sin(p.yaw);
+    return ["poly", [[sx / 2, sy / 2], [-sx / 2, sy / 2], [-sx / 2, -sy / 2], [sx / 2, -sy / 2]]
+      .map(([x, y]) => [p.x + c * x - s * y, p.y + s * x + c * y])];
+  }
+  function drawWorld() {
+    if (!worldLive()) return;
+    ctx.save();
+    for (const p of worldLayout.props || []) {
+      traceShape(p.footprint);
+      ctx.fillStyle = rgba(p.color, 0.35); ctx.strokeStyle = rgba(p.color, 0.9); ctx.lineWidth = 1.5;
+      ctx.fill(); ctx.stroke();
+    }
+    ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
+    for (const a of worldLayout.actors || []) {
+      // The route it walks: dotted and faint, so it never reads as a Nav2 plan.
+      ctx.setLineDash([2, 5]); ctx.strokeStyle = rgba(a.color, 0.5); ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      (a.path || []).forEach(([x, y], i) => { const [px, py] = toPx(x, y); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); });
+      if (a.mode === "loop") ctx.closePath();
+      ctx.stroke(); ctx.setLineDash([]);
+      const pose = worldTruth.actors && worldTruth.actors[a.id];
+      if (!pose) continue;
+      traceShape(actorShape(a, pose));
+      ctx.fillStyle = rgba(a.color, 0.9); ctx.strokeStyle = palette.robotInk; ctx.lineWidth = 1.5;
+      ctx.fill(); ctx.stroke();
+      const [px, py] = toPx(pose.x, pose.y), r = Math.max(5, (a.radius || 0.3) * view.scale);
+      // Heading tick, dashed while it stands still at a waypoint.
+      ctx.strokeStyle = rgba(a.color, 1); ctx.lineWidth = 2; ctx.setLineDash(pose.moving ? [] : [3, 3]);
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px + r * 2 * Math.cos(pose.yaw), py - r * 2 * Math.sin(pose.yaw)); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = palette.ink; ctx.fillText(a.label || a.id, px, py + r + 13);
+    }
+    ctx.restore();
+  }
+
   // -- drawing ----------------------------------------------------------------------
 
   function drawFrame() {
@@ -337,6 +403,8 @@
       ctx.imageSmoothingEnabled = false; // crisp cells
       ctx.drawImage(mapCanvas, dx, dy, w * res * view.scale, h * res * view.scale);
     }
+
+    drawWorld();
 
     for (const r of robots.values()) { // planned routes
       if (!r.plan.length || !r.pose) continue;
@@ -1324,6 +1392,7 @@
       if (p && (!r.pose || Math.hypot(p.x - r.pose.x, p.y - r.pose.y) > 0.01 || Math.abs(p.yaw - r.pose.yaw) > 0.02)) { r.pose = p; moved = true; }
     }
     if (moved) { dirty = true; if (!view.moved) fitView(); if (view3d) syncCloudRobots(); }
+    if (worldTruth && !worldLive() && performance.now() - worldTruthAt < WORLD_TRUTH_TTL_MS + 500) dirty = true; // erase stale walkers
     for (const r of robots.values()) {
       if (!r.obstacles || performance.now() - r.obstaclesAt <= OBSTACLE_TTL_MS) continue;
       if (r.obstaclesMap.some((o) => o.moving)) dirty = true;

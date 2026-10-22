@@ -238,6 +238,46 @@
   #session .card:not(.failed) #session-state { display: none; }
   #sp-status[hidden] { display: none; }
   #sp-log summary { cursor: pointer; color: var(--muted); font-size: .84rem; }
+  /* Launch | Tests. The Tests tab shows while a session runs too: a test IS a session. */
+  #sp-tabs { font-size: .84rem; } #sp-tabs button { padding: 3px 12px; }
+  #session .card.tab-tests #launch-form, #session .card.tab-tests #session-pane,
+  #session .card.tab-tests #console-warning, #session .card:not(.tab-tests) #tests-pane { display: none !important; }
+  #tests-pane { display: grid; gap: 14px; }
+  #tp-warn { padding: 8px 12px; border-radius: 6px; background: var(--warnbg); border: 1px solid var(--warnline); color: var(--warnink); font-size: .86rem; }
+  #tp-warn[hidden], #tp-run[hidden], #tp-report[hidden] { display: none; }
+  #tp-run { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 6px; }
+  .tp-run-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .tp-run-head #tp-watch { margin-left: auto; }
+  .tp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--info); animation: tp-pulse 1.2s ease-in-out infinite; }
+  #tp-run.done .tp-dot { animation: none; background: var(--muted); }
+  #tp-run.done.pass .tp-dot { background: var(--go); } #tp-run.done.fail .tp-dot { background: var(--stop); }
+  @keyframes tp-pulse { 50% { opacity: .3; } }
+  #tp-log-box summary { cursor: pointer; color: var(--muted); font-size: .82rem; }
+  #tp-log, #tp-report { margin: 6px 0 0; max-height: 220px; overflow: auto; font: .72rem/1.4 ui-monospace, monospace; background: var(--ground); border-radius: 6px; padding: 8px; white-space: pre-wrap; }
+  #tp-list { display: grid; gap: 8px; }
+  .tp-test { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; }
+  .tp-test.invalid { opacity: .7; }
+  .tp-test .t { font-weight: 600; } .tp-test code { font-size: .74rem; color: var(--faint); margin-left: 6px; font-weight: 400; }
+  .tp-test .d, .tp-test .m { grid-column: 1; font-size: .82rem; color: var(--muted); }
+  .tp-test .d { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .tp-test .crit { grid-column: 1; display: flex; flex-wrap: wrap; gap: 4px; }
+  .tp-test .crit span { font-size: .72rem; padding: 1px 7px; border-radius: 10px; background: var(--segbg); color: var(--muted); }
+  .tp-test .go { grid-column: 2; grid-row: 1 / span 4; display: flex; align-items: center; gap: 6px; }
+  .tp-test .go input { width: 3.4em; } .tp-test .go label { font-size: .74rem; color: var(--muted); display: grid; gap: 1px; }
+  .tp-test .err { grid-column: 1 / -1; font-size: .82rem; color: var(--warnink); }
+  #tp-results-box h4 { margin: 0 0 6px; font-size: .84rem; font-weight: 600; color: var(--muted); }
+  .tp-res { display: grid; grid-template-columns: auto 1fr auto; gap: 2px 10px; padding: 6px 4px; border-top: 1px solid var(--line); cursor: pointer; font-size: .84rem; align-items: baseline; }
+  .tp-res:hover { background: var(--raise); }
+  .tp-res .v { font-size: .72rem; font-weight: 700; padding: 1px 7px; border-radius: 4px; color: #fff; background: var(--muted); }
+  .tp-res .v.pass { background: var(--go); } .tp-res .v.fail { background: var(--stop); } .tp-res .v.run { background: var(--info); }
+  .tp-res .w { color: var(--muted); font-size: .76rem; }
+  .tp-res .c { grid-column: 2 / -1; color: var(--muted); font-size: .76rem; } .tp-res .c .bad { color: var(--stop); }
+  /* Running test, over the map: what is being scored right now, and the way out. */
+  /* Bottom centre, above the hint line: the top belongs to toasts, the corners to tools and coverage. */
+  #test-chip { bottom: 50px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 5px 6px 5px 12px; font-size: .84rem; z-index: 3; }
+  #test-chip[hidden] { display: none; }
+  #test-chip .k { font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  #test-chip button.name { background: none; border: none; padding: 0; font-weight: 600; color: var(--ink); cursor: pointer; }
   #sp-log[open] summary { margin-bottom: 6px; }
   /* Startup progress: one segment per run_demo.sh phase (session.py PHASE_ORDER),
      plus a sweep so a long phase (first-run asset streaming) still looks alive. */
@@ -291,6 +331,9 @@
     <button data-t="wp" title="Add waypoint (F). Drag to set the heading">&#9670;</button>
   </div>
   <div class="float" id="coverage" hidden><b id="cov-n"></b><span class="muted">mapped</span></div>
+  <div class="float" id="test-chip" hidden><span class="tp-dot"></span><span class="k">Test</span>
+    <button type="button" class="name" id="tc-name" title="Open the Tests tab"></button><span id="tc-time" class="muted"></span>
+    <button type="button" class="btn small stop" id="tc-cancel">Stop test</button></div>
   <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
   <div id="hint"></div>
   <div id="empty" hidden><b id="empty-title">No session running</b><span class="muted" id="empty-sub">Start a session to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><button class="btn primary" id="empty-go">Start a session</button></div>
@@ -327,7 +370,12 @@
 
 <div id="session" hidden>
   <div class="card" role="dialog" aria-label="Session">
-    <h3>Session <button class="x" id="sp-x" title="Close (Esc)" aria-label="Close">&times;</button></h3>
+    <h3>Session
+      <div class="seg" id="sp-tabs" role="tablist" aria-label="Session panel">
+        <button type="button" data-tab="launch" class="active" role="tab">Launch</button>
+        <button type="button" data-tab="tests" role="tab" title="Scored test cases (configs/tests/): launch one and watch it on the map">Tests</button>
+      </div>
+      <button class="x" id="sp-x" title="Close (Esc)" aria-label="Close">&times;</button></h3>
     <div id="console-warning" hidden></div>
     <p id="scenario-hint"></p>
     <form id="launch-form" autocomplete="off">
@@ -398,6 +446,18 @@
           <button type="submit" id="lf-start">Start</button>
         </div>
       </form>
+    <!-- Scored tests (scripts/simtest.py via serve.py's /api/tests*): operator_tests.js. -->
+    <div id="tests-pane">
+      <div id="tp-warn" hidden></div>
+      <div id="tp-run" hidden>
+        <div class="tp-run-head"><span class="tp-dot"></span><b id="tp-run-name"></b><span id="tp-run-state" class="muted"></span>
+          <button type="button" class="btn small" id="tp-watch" title="Close this panel and watch the run on the map">Watch</button>
+          <button type="button" class="btn small stop" id="tp-cancel" title="Stop the sim; runs that finished are still scored">Cancel</button></div>
+        <details id="tp-log-box"><summary>Log</summary><pre id="tp-log"></pre></details>
+      </div>
+      <div id="tp-list"></div>
+      <div id="tp-results-box"><h4>Recent results</h4><div id="tp-results"></div><pre id="tp-report" hidden></pre></div>
+    </div>
     <div id="session-pane">
         <div class="boot" id="sp-boot" hidden><div class="bar"><i></i></div><span class="boot-label"></span></div>
         <span class="boot-label" id="sp-status" hidden></span>
@@ -422,5 +482,6 @@
 <script src="operator_cloud.js"></script>
 <script src="operator.js"></script>
 <script src="scenarios.js"></script>
+<script src="operator_tests.js"></script>
 </body>
 </html>

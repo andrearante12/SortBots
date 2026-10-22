@@ -50,6 +50,8 @@ window.ROSLIB = {
 // Shims: nav waypoints live in memory (the real endpoint writes data/), the session
 // can be faked per scenario, everything else goes to the real serve.py.
 window.__navWps = [];
+window.__testPosts = []; window.__testResults = [];
+window.__testRun = { running: false, name: null, exit: null, elapsed_s: null, log: '', offset: 0 };
 window.__fakeSession = null;
 const realFetch = window.fetch.bind(window);
 window.fetch = (url, opts) => {
@@ -60,6 +62,18 @@ window.fetch = (url, opts) => {
     return json({ waypoints: window.__navWps });
   }
   if (u.startsWith('/api/session') && !u.startsWith('/api/session/') && window.__fakeSession) return json(window.__fakeSession);
+  // Test runs: never launch scripts/simtest.py from a page test. The list itself
+  // (/api/tests) is real, read from configs/tests/.
+  if (u.startsWith('/api/tests/run')) {
+    if (opts && opts.method === 'POST') {
+      const body = JSON.parse(opts.body); window.__testPosts.push(body);
+      window.__testRun = { running: true, name: body.name, exit: null, elapsed_s: 75, log: '[simtest] launching\\n', offset: 20 };
+    }
+    return json({ ...window.__testRun, log: '' });
+  }
+  if (u.startsWith('/api/tests/cancel')) { window.__testRun = { ...window.__testRun, running: false, exit: 130 }; return json(window.__testRun); }
+  if (u.startsWith('/api/tests/results')) return json({ results: window.__testResults });
+  if (u.startsWith('/api/tests/report')) return json({ markdown: '# crossing_yield\\nrecall 0.12' });
   return realFetch(url, opts);
 };
 window.confirm = () => true;
@@ -352,6 +366,71 @@ async function main() {
     await click(`#fleet .robot[data-id="${r0}"] .l1`);
     await sleep(200);
     check(`${vp.label}: closing a card hands control back to the other open one`, (await page.eval(`window.__operator.selected`)) === r1 && (await page.eval(`document.querySelectorAll('#fleet .robot.sel').length`)) === 1);
+
+    // -- scored tests: the Session panel's Tests tab, the map chip, the walkers ----------------
+    await click('#session-chip');
+    await sleep(300);
+    await click('#sp-tabs [data-tab="tests"]');
+    await sleep(900);
+    check(`${vp.label}: the session panel has a Tests tab`, await visible('#tests-pane') && !(await visible('#launch-form')));
+    const cards = await page.eval(`[...document.querySelectorAll('#tp-list .tp-test')].map((c) => c.dataset.name || 'invalid')`);
+    const onDisk = fs.readdirSync(path.join(REPO_ROOT, 'configs', 'tests')).filter((f) => f.endsWith('.yaml')).length;
+    check(`${vp.label}: it lists every test case in configs/tests/`, cards.length === onDisk, cards.join(','));
+    check(`${vp.label}: the person-crossing test is runnable here`,
+      await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"] [data-run]'); return !!c && !c.disabled; })()`));
+    await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"]'); c.querySelector('[data-repeats]').value = '2'; c.querySelector('[data-run]').click(); })()`);
+    await sleep(400);
+    const posted = JSON.parse(await page.eval(`JSON.stringify(window.__testPosts)`));
+    check(`${vp.label}: Run starts that test with the chosen repeats`, posted.length === 1 && posted[0].name === 'pipeline_smoke' && posted[0].repeats === 2, JSON.stringify(posted));
+    check(`${vp.label}: ... and closes the panel to watch it on the map`, !(await visible('#session')));
+    check(`${vp.label}: a chip over the map names the running test and its clock`,
+      await visible('#test-chip') && (await $text('#tc-name')) === 'pipeline_smoke' && (await $text('#tc-time')) === '1:15', `${await $text('#tc-name')} ${await $text('#tc-time')}`);
+    await shot(`${vp.label}-test-running`);
+    await click('#tc-name');
+    await sleep(500);
+    check(`${vp.label}: the chip's name reopens the Tests tab`, await visible('#tests-pane') && await visible('#tp-run') && /running · 1:15/.test(await $text('#tp-run-state')));
+    check(`${vp.label}: ... where Run is disabled while a test runs`,
+      await page.eval(`[...document.querySelectorAll('#tp-list [data-run]')].every((b) => b.disabled)`));
+    await click('#sp-x');
+    await click('#tc-cancel');
+    await sleep(300);
+    check(`${vp.label}: Stop test cancels it and the chip goes`, !(await visible('#test-chip')) && (await page.eval(`window.__testRun.exit`)) === 130);
+
+    await page.eval(`window.__testResults = [{ dir: '20261022T180000Z_crossing_yield', name: 'crossing_yield', state: 'done', complete: true, verdict: 'FAIL', done: 1, planned: 1,
+      runs: [{ criteria: [{ label: 'detection.recall >= 0.3', ok: false, actual: 0.12 }, { label: 'goals.reached >= 1', ok: true, actual: 1 }] }] }]`);
+    await click('#session-chip');
+    await sleep(900);
+    check(`${vp.label}: the panel remembers the Tests tab`, await visible('#tests-pane'));
+    const res = await $text('#tp-results .tp-res');
+    check(`${vp.label}: results show the verdict and each criterion against its actual`, /FAIL/.test(res) && /recall >= 0.3 → 0.12/.test(res), res.slice(0, 120));
+    await click('#tp-results .tp-res');
+    await sleep(300);
+    check(`${vp.label}: a result opens its report`, await visible('#tp-report') && /recall 0.12/.test(await $text('#tp-report')));
+    await shot(`${vp.label}-tests-tab`);
+    await click('#sp-tabs [data-tab="launch"]');
+    check(`${vp.label}: the Launch tab brings the form back`, await visible('#launch-form') && !(await visible('#tests-pane')));
+    await click('#sp-x');
+
+    // Walkers come from sim ground truth; one green walker at (1, 1).
+    const greenNear = (x, y, rad) => page.eval(`(() => {
+      const c = document.getElementById('map'), s = c.width / c.clientWidth, [cx, cy] = window.__operator.toPx(${x}, ${y});
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0;
+      for (let py = 0; py < c.height; py++) for (let px = 0; px < c.width; px++) {
+        if (Math.hypot(px / s - cx, py / s - cy) > ${rad}) continue;
+        const i = (py * c.width + px) * 4; if (d[i + 1] > 150 && d[i] < 60 && d[i + 2] < 90) n++;
+      }
+      return n; })()`);
+    check(`${vp.label}: no walker drawn without a sim world`, (await greenNear(1, 1, 30)) === 0);
+    await emit('/sim/world', { data: JSON.stringify({ world: 'aisle_crossing', title: 'Aisle crossing', props: [],
+      actors: [{ id: 'walker_1', label: 'walker', shape: 'cylinder', radius: 0.3, color: [0.1, 0.75, 0.2], path: [[-1, 1], [3, 1]], mode: 'pingpong' }] }) });
+    await emit('/sim/ground_truth', { data: JSON.stringify({ wt: 4.2, running: true, actors: { walker_1: { x: 1, y: 1, yaw: 0, moving: true } } }) });
+    await sleep(300);
+    check(`${vp.label}: a walker is drawn at its ground-truth position`, (await greenNear(1, 1, 12)) > 40, String(await greenNear(1, 1, 12)));
+    await shot(`${vp.label}-walker`);
+    await sleep(3600); // > WORLD_TRUTH_TTL_MS with no ground truth
+    check(`${vp.label}: walkers vanish when the sim stops sending ground truth`, (await greenNear(1, 1, 30)) === 0);
+    await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); // that wait outlasted ONLINE_TTL_MS
+    await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
 
     // -- waypoints ------------------------------------------------------------------------
     await page.eval(`document.querySelector('#tools [data-t="wp"]').click()`);
