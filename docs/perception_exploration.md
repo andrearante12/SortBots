@@ -85,6 +85,14 @@ Detection v1: frame-to-frame depth change, morph close, keep robot-sized
 blobs. Vision-only — no peer TF. Bringup starts this **before** RTAB-Map so
 `depth_static` exists when mapping starts.
 
+### Obstacle detector
+
+[`nodes/obstacle_detector.py`](../nodes/obstacle_detector.py): geometric
+clusters in base_link plus a `moving` flag from odom-frame tracks, published
+as `/{id}/obstacles` (JSON), `/{id}/obstacle_points` and `/{id}/obstacles_viz`.
+It reads raw `camera/depth`, independent of the filter above, and runs on
+every platform. See [`docs/obstacle_detection.md`](obstacle_detection.md).
+
 ### RTAB-Map
 
 [`launch/sortbots_rtabmap_robot.launch.py`](../launch/sortbots_rtabmap_robot.launch.py)
@@ -209,7 +217,7 @@ as autonomy), not TF eavesdropping.
 | `configs/robots.yaml` | Roster + spawn poses (= fusion anchors) |
 | `configs/scenarios/explore_fleet.yaml` | 2-robot explore preset |
 | `configs/map_merge.yaml` / `recon_merge.yaml` / `fleet_radio.yaml` | Fusion / radio tuning |
-| `tests/map_merge_test.py` / `recon_merge_test.py` / `fleet_radio_test.py` / `dynamic_obstacle_filter_test.py` | Offline unit tests |
+| `tests/map_merge_test.py` / `recon_merge_test.py` / `fleet_radio_test.py` / `dynamic_obstacle_filter_test.py` / `obstacle_detector_test.py` | Offline unit tests |
 
 ---
 
@@ -217,7 +225,8 @@ as autonomy), not TF eavesdropping.
 
 ```bash
 /usr/bin/python3 -m pytest tests/map_merge_test.py tests/recon_merge_test.py \
-  tests/fleet_radio_test.py tests/dynamic_obstacle_filter_test.py -q
+  tests/fleet_radio_test.py tests/dynamic_obstacle_filter_test.py \
+  tests/obstacle_detector_test.py -q
 node webui/tests/scenarios_test.mjs   # includes fleet tab visibility
 ```
 

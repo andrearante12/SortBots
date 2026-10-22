@@ -196,6 +196,20 @@ def _make_per_robot_actions(
                 output="screen",
             ))
 
+        # Obstacles in front of the robot, from geometry rather than frame
+        # differencing: clusters in base_link plus a `moving` flag from odom
+        # tracks (docs/obstacle_detection.md). Every platform — it reads raw
+        # camera/depth, so it doesn't depend on the depth filter below, and the
+        # sensors view draws its boxes over the head camera.
+        actions.append(ExecuteProcess(
+            cmd=[
+                "python3",
+                os.path.join(REPO_ROOT, "nodes", "obstacle_detector.py"),
+                "--robot-id", rid,
+            ],
+            output="screen",
+        ))
+
         # Before RTAB-Map: strip movers from depth so SLAM never sees them.
         # Skipped on the real robot: one robot means no peer to paint into the
         # map, Nav2 (the other consumer) is off, and on the Orin Nano the

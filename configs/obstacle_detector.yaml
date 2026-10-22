@@ -1,0 +1,52 @@
+# nodes/obstacle_detector.py tuning. Every key overrides the node's DEFAULTS;
+# docs/obstacle_detection.md explains the pipeline these feed.
+
+# Frames processed per second, on the steady clock. The camera runs at 30;
+# 10 is plenty to track walking speed (~1.4 m/s = 14 cm a frame) and keeps
+# the node to a fraction of a core on the Orin Nano.
+rate_hz: 10.0
+
+# Back-project every Nth pixel in each direction. 4 on 848x480 is ~25k points
+# a frame; a person at 4 m is still ~25x60 samples.
+stride: 4
+
+# Range crop on raw depth (metres along the optical axis). The D435 is
+# unreliable under ~0.3 m and noisy past ~4.5 m; depth_colorizer uses the
+# same window.
+min_range_m: 0.3
+max_range_m: 4.5
+
+# Floor height in base_link. floor_auto re-estimates it every frame from the
+# densest z-bin within ±floor_search_m of floor_z_m, so neither the sim's
+# base_link offset (from the USD) nor the real camera's (still-unmeasured)
+# mount height has to be exact. With too little floor in view it keeps the
+# last estimate, and floor_z_m before any.
+floor_z_m: 0.0
+floor_auto: true
+floor_search_m: 0.5
+floor_bin_m: 0.02
+floor_min_points: 200
+floor_smoothing: 0.2        # EMA weight of each new estimate
+
+# Height band above the floor that counts as obstacle. The lower edge drops
+# floor noise and the plane's own thickness; the upper keeps ceiling and
+# high racking out of a ground robot's way.
+min_height_m: 0.08
+max_height_m: 2.0
+
+# Clustering: points are binned into cell_m x cell_m columns in x/y and
+# columns touching (8-connected) form one obstacle. Two people closer than
+# ~2 cells merge; raise min_cell_points if depth speckle makes ghost clusters.
+cell_m: 0.10
+min_cell_points: 3
+min_cluster_points: 30
+min_cluster_height_m: 0.10  # cluster top above floor; drops floor-hugging debris
+
+# Tracking (odom frame). A detection joins the nearest predicted track within
+# track_gate_m; tracks unseen for track_max_age_s are dropped.
+track_gate_m: 0.6
+track_max_age_s: 1.0
+track_min_hits: 3           # frames before a track may be called moving
+velocity_smoothing: 0.4     # EMA weight of each frame's raw velocity
+moving_speed_mps: 0.25      # slow walk is ~1 m/s; well above centroid jitter
+max_moving_extent_m: 1.5    # longer clusters (shelves, walls) are never "moving"

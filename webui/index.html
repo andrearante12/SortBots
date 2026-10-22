@@ -128,9 +128,14 @@
     font-size: 0.68rem; color: #cdd; background: rgba(20,22,26,0.7);
     padding: 2px 6px; border-radius: 4px; pointer-events: none;
   }
-  #feature-toggle { position: absolute; right: 6px; bottom: 6px; z-index: 3;
+  .tile-toggles { position: absolute; right: 6px; bottom: 6px; z-index: 3;
+    display: flex; gap: 4px; }
+  .tile-toggles label {
     font-size: 0.68rem; background: rgba(20,22,26,0.7); color: #cdd;
     padding: 2px 6px; border-radius: 4px; }
+  /* Top-left: the bottom-left tag already belongs to the features. */
+  #obstacle-tag { top: 6px; bottom: auto; }
+  #obstacle-tag.alert { color: #fff; background: rgba(200,40,40,0.85); }
   #stage-label {
     position: absolute; top: 10px; left: 12px; z-index: 6;
     font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;
@@ -571,10 +576,17 @@
       <div class="sensor-tile">
         <img id="sensor-rgb" alt="head camera (waiting for web_video_server)" />
         <canvas id="feature-overlay"></canvas>
+        <canvas id="obstacle-overlay"></canvas>
         <span class="sensor-tag" id="feature-tag">RGB</span>
-        <label id="feature-toggle"
-               title="Draw the features RTAB-Map's visual odometry tracks. Green = inlier (drives the pose), amber = matched, grey = detected only. Real robot only."><input
-               type="checkbox" id="feature-toggle-box" checked /> features</label>
+        <span class="sensor-tag" id="obstacle-tag">obstacles</span>
+        <div class="tile-toggles">
+          <label id="obstacle-toggle"
+                 title="Draw obstacle_detector's clusters. Red = moving (tracked in odom), amber = static. Label: track id, nearest range, speed."><input
+                 type="checkbox" id="obstacle-toggle-box" checked /> obstacles</label>
+          <label id="feature-toggle"
+                 title="Draw the features RTAB-Map's visual odometry tracks. Green = inlier (drives the pose), amber = matched, grey = detected only. Real robot only."><input
+                 type="checkbox" id="feature-toggle-box" checked /> features</label>
+        </div>
       </div>
       <div class="sensor-tile">
         <img id="sensor-depth" alt="depth view (waiting for depth_colorizer)" />

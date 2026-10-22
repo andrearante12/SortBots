@@ -324,8 +324,9 @@ function setStageMode(mode) {
   for (const btn of camSourceBar.querySelectorAll("button")) {
     btn.classList.toggle("active", btn.dataset.cam === (mode === "sensors" ? "sensors" : "chase"));
   }
-  if (mode === "sensors") drawFeatureOverlay();
+  if (mode === "sensors") { drawFeatureOverlay(); drawObstacleOverlay(); }
   syncFeatureSubscription();
+  syncObstacleSubscription();
   onStageResize();
 }
 
@@ -446,13 +447,102 @@ function syncFeatureSubscription() {
 featureToggle.addEventListener("change", drawFeatureOverlay);
 window.addEventListener("resize", drawFeatureOverlay);
 
+// -- obstacle overlay (nodes/obstacle_detector.py) --------------------------
+// Boxes in the depth image's pixel space, drawn on the RGB tile: in sim the
+// two share one camera, and the real D435's depth is aligned to color, so a
+// depth pixel IS an RGB pixel. Red = a tracked cluster moving in odom, amber =
+// static. Same canvas-over-snapshot approach as the features, for the same
+// web_video_server reason.
+const OBSTACLE_COLORS = { moving: "rgba(255,70,70,1)", static: "rgba(255,180,40,0.9)" };
+const obstacleCanvas = document.getElementById("obstacle-overlay");
+const obstacleTag = document.getElementById("obstacle-tag");
+const obstacleToggle = document.getElementById("obstacle-toggle-box");
+let lastObstacles = null; // newest /obstacles message
+let lastObstaclesAt = 0;
+
+function drawObstacleOverlay() {
+  const w = obstacleCanvas.clientWidth, h = obstacleCanvas.clientHeight;
+  if (!w || !h) return; // sensors view not on the stage
+  if (obstacleCanvas.width !== w) obstacleCanvas.width = w;
+  if (obstacleCanvas.height !== h) obstacleCanvas.height = h;
+  const ctx = obstacleCanvas.getContext("2d");
+  ctx.clearRect(0, 0, w, h);
+
+  const o = lastObstacles;
+  const fresh = o && Date.now() - lastObstaclesAt < 3000;
+  if (!o) {
+    obstacleTag.textContent = "obstacles · waiting for obstacle_detector";
+    return;
+  }
+  obstacleTag.textContent = !fresh
+    ? "obstacles · stale"
+    : `obstacles · ${o.count}` + (o.moving ? ` · ${o.moving} moving` : "");
+  obstacleTag.classList.toggle("alert", !!(fresh && o.moving));
+  if (!obstacleToggle.checked || !fresh) return;
+
+  // Same object-fit: contain inversion as drawFeatureOverlay.
+  const nw = o.w || sensorRgbEl.naturalWidth, nh = o.h || sensorRgbEl.naturalHeight;
+  if (!nw || !nh) return;
+  const k = Math.min(w / nw, h / nh);
+  const ox = (w - nw * k) / 2, oy = (h - nh * k) / 2;
+  ctx.font = "11px system-ui, sans-serif";
+  ctx.textBaseline = "bottom";
+  for (const ob of o.obstacles) {
+    const [u0, v0, u1, v1] = ob.uv;
+    const x = ox + u0 * k, y = oy + v0 * k;
+    const bw = (u1 - u0) * k, bh = (v1 - v0) * k;
+    const color = ob.moving ? OBSTACLE_COLORS.moving : OBSTACLE_COLORS.static;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = ob.moving ? 2.5 : 1.5;
+    ctx.strokeRect(x, y, bw, bh);
+    const label = `#${ob.track_id} ${ob.range_m.toFixed(1)} m`
+      + (ob.moving ? ` · ${ob.speed_mps.toFixed(1)} m/s` : "");
+    const tw = ctx.measureText(label).width + 6;
+    const ly = Math.max(y, 14);
+    ctx.fillStyle = color;
+    ctx.fillRect(x, ly - 14, tw, 14);
+    ctx.fillStyle = "#111";
+    ctx.fillText(label, x + 3, ly - 1);
+  }
+}
+
+// Only while the sensors view is up, like the features. The detector itself
+// runs regardless: Nav2 and tests read its other outputs.
+const obstaclesTopic = new ROSLIB.Topic({
+  ros,
+  name: `/${ROBOT_ID}/obstacles`,
+  messageType: "std_msgs/String",
+  reconnect_on_close: true,
+  throttle_rate: 100,
+  queue_length: 1,
+});
+function onObstacles(msg) {
+  try {
+    lastObstacles = JSON.parse(msg.data);
+    lastObstaclesAt = Date.now();
+    drawObstacleOverlay();
+  } catch (e) {
+    console.error("bad obstacles message", e);
+  }
+}
+let obstaclesSubscribed = false;
+function syncObstacleSubscription() {
+  const want = stageMode === "sensors";
+  if (want === obstaclesSubscribed) return;
+  obstaclesSubscribed = want;
+  if (want) obstaclesTopic.subscribe(onObstacles);
+  else obstaclesTopic.unsubscribe(onObstacles);
+}
+obstacleToggle.addEventListener("change", drawObstacleOverlay);
+window.addEventListener("resize", drawObstacleOverlay);
+
 setStageMode(lastCameraMode);
 
 // Start snapshot polls only after the stage classes are coherent — otherwise
 // markChaseMissing can race setStageMode's first paint, and the HTML default
 // (head as .stage-pip) would briefly poll a feed we intentionally hide.
 wireCameraStream("camera-stream", "camera/rgb");
-wireCameraStream("sensor-rgb", "camera/rgb", () => drawFeatureOverlay());
+wireCameraStream("sensor-rgb", "camera/rgb", () => { drawFeatureOverlay(); drawObstacleOverlay(); });
 wireCameraStream("sensor-depth", "camera/depth_color");
 wireCameraStream("chase-stream", "camera/chase/rgb");
 
