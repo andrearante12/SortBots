@@ -75,7 +75,10 @@
 
   header { grid-column: 1 / -1; background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 16px; padding: 0 16px; }
   h1 { margin: 0; font-size: 1rem; font-weight: 600; letter-spacing: -.01em; width: 228px; }
-  #mode-strip { display: flex; align-items: center; gap: 10px; }
+  #mode-strip { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  #mode-strip > * { flex: none; }
+  /* The tile gives way first when the bar gets crowded (a test chip, a narrow window). */
+  #mode-strip #mode-tile { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   header .spacer { flex: 1; }
   .btn.icon { width: 34px; padding: 6px 0; line-height: 1; font-size: 1rem; }
   #session-chip { display: inline-flex; align-items: center; gap: 8px; }
@@ -127,10 +130,7 @@
   #stage { position: relative; min-width: 0; min-height: 0; }
   #map { width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
   .float { position: absolute; background: var(--float); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 2px 8px var(--shadow); }
-  #tools { top: 14px; left: 14px; display: flex; flex-direction: column; padding: 4px; gap: 2px; }
-  #tools button { width: 36px; height: 36px; border: none; background: none; border-radius: 6px; font-size: 1.05rem; color: var(--muted); }
-  #tools button:hover { background: var(--hover2); }
-  #tools button.active { background: var(--ink); color: var(--on-ink); }
+  #tools button { padding: 5px 11px; font-size: .95rem; line-height: 1.2; }
   #view { flex-wrap: nowrap; }
   #mode-tile { display: inline-flex; align-items: baseline; gap: 7px; padding: 5px 12px; border-radius: 8px; border: 1px solid var(--line); font-size: .88rem; cursor: default; }
   #mode-tile[hidden] { display: none; }
@@ -142,9 +142,9 @@
   #cloud canvas { width: 100%; height: 100%; display: block; }
   /* Sits on the always-dark 3D scene, so fixed colours rather than theme tokens. */
   #cloud .cloud-info { position: absolute; bottom: 14px; left: 14px; color: #8b95a0; font-size: .8rem; pointer-events: none; }
-  #coverage { bottom: 14px; left: 14px; padding: 8px 14px; display: flex; gap: 8px; align-items: baseline; }
-  #coverage b { font-weight: 600; font-size: 1rem; }
-  #hint { position: absolute; bottom: 20px; right: 16px; font-size: .82rem; color: var(--muted); }
+  #coverage { font-size: .86rem; color: var(--muted); white-space: nowrap; }
+  #coverage b { font-weight: 600; color: var(--ink); }
+  #coverage[hidden] { display: none; }
   #empty { position: absolute; inset: 0; background: var(--scrim); display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; z-index: 3; text-align: center; padding: 24px; }
   #empty b { font-size: 1.15rem; font-weight: 600; } #empty .btn { margin-top: 8px; }
   #toast { position: absolute; top: 16px; left: 50%; z-index: 3; transform: translateX(-50%); background: var(--ink); color: var(--on-ink); padding: 6px 14px; border-radius: 6px; font-size: .84rem; opacity: 0; transition: opacity .2s; pointer-events: none; }
@@ -197,6 +197,18 @@
   #newtask label { display: grid; gap: 3px; font-size: .82rem; color: var(--muted); }
   #newtask select { width: 100%; color: var(--ink); }
 
+  /* Stop all dialog */
+  .veil { position: fixed; inset: 0; background: var(--veil); display: flex; align-items: flex-start; justify-content: center; padding-top: 120px; z-index: 11; }
+  .veil[hidden] { display: none; }
+  #stop-dlg .card { background: var(--surface); border-radius: 12px; box-shadow: 0 12px 40px var(--shadow); width: 440px; max-width: calc(100vw - 24px); padding: 20px 22px; display: grid; gap: 12px; }
+  #stop-dlg h3 { margin: 0; font-size: 1.05rem; font-weight: 600; }
+  #stop-dlg p { margin: 0; color: var(--muted); font-size: .9rem; line-height: 1.45; }
+  #sd-name-row { display: grid; gap: 4px; font-size: .84rem; color: var(--muted); }
+  #sd-name-row[hidden], #sd-err[hidden] { display: none; }
+  #sd-name { font: inherit; font-size: .92rem; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--ink); }
+  #sd-err { color: var(--stop) !important; }
+  .sd-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-top: 4px; }
+  .sd-actions [hidden] { display: none; }
   /* session panel: the launch form from scenarios.js, restyled */
   #session { position: fixed; inset: 0; background: var(--veil); display: flex; align-items: flex-start; justify-content: center; padding-top: 64px; z-index: 10; }
   #session .card { background: var(--surface); border-radius: 12px; box-shadow: 0 12px 40px var(--shadow); width: 700px; max-width: calc(100vw - 24px); max-height: calc(100vh - 90px); overflow: auto; padding: 20px 22px; display: grid; gap: 16px; }
@@ -286,8 +298,7 @@
   #session .card.testing #session-finish, #session .card.testing #session-stop { display: none; }
   #session .card.testing #sp-test-note { display: block; margin: 0; font-size: .86rem; color: var(--muted); }
   /* Running test, over the map: what is being scored right now, and the way out. */
-  /* Bottom centre, above the hint line: the top belongs to toasts, the corners to tools and coverage. */
-  #test-chip { bottom: 50px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 5px 6px 5px 12px; font-size: .84rem; z-index: 3; }
+  #test-chip { display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 12px; font-size: .84rem; border: 1px solid var(--line); border-radius: 8px; white-space: nowrap; }
   #test-chip[hidden] { display: none; }
   #test-chip .k { font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
   #test-chip button.name { background: none; border: none; padding: 0; font-weight: 600; color: var(--ink); cursor: pointer; }
@@ -323,12 +334,21 @@
       <button data-v="2d" class="active" title="Occupancy map: tools, waypoints and routes">Map</button>
       <button data-v="3d" title="The fleet's 3D point cloud (/fleet/recon_cloud). Drag to orbit, scroll to zoom, right-drag to pan">3D cloud</button>
     </div>
+    <!-- Map tools live up here, not over the map: the map gets the whole stage. -->
+    <div class="seg" id="tools" role="toolbar" aria-label="Map tools">
+      <button data-t="select" class="active" title="Select (V). Drag a robot to send it somewhere (drop on a pin to use it); click a robot for its camera; drag the map to pan">&#8598;</button>
+      <button data-t="wp" title="Add waypoint (F). Click to place, drag to set its heading">&#9670;</button>
+    </div>
     <span id="mode-tile" hidden title="How this session was started. Change it from Session"><span class="k">Mode</span><b id="mode-label"></b><span id="map-name"></span></span>
+    <span id="coverage" hidden title="Area of the map the fleet has seen"><b id="cov-n"></b> mapped</span>
   </div>
   <span class="spacer"></span>
+<div id="test-chip" hidden title="A scored test is driving the sim"><span class="tp-dot"></span><span class="k">Test</span>
+    <button type="button" class="name" id="tc-name" title="Open the Tests tab"></button><span id="tc-time" class="muted"></span>
+    <button type="button" class="btn small stop" id="tc-cancel">Stop test</button></div>
   <button class="btn icon" id="theme" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
   <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">No session</span></button>
-  <button class="btn stop" id="estop" title="Stop exploring and cancel every robot's navigation goal">Stop all</button>
+  <button class="btn stop" id="estop" title="Halt every robot now, then shut the sim down (you choose whether to keep the map)">Stop all</button>
 </header>
 
 <aside id="left">
@@ -339,16 +359,7 @@
 <main id="stage">
   <canvas id="map"></canvas>
   <div id="cloud" hidden></div>
-  <div class="float" id="tools" role="toolbar" aria-label="Map tools">
-    <button data-t="select" class="active" title="Select (V)">&#8598;</button>
-    <button data-t="wp" title="Add waypoint (F). Drag to set the heading">&#9670;</button>
-  </div>
-  <div class="float" id="coverage" hidden><b id="cov-n"></b><span class="muted">mapped</span></div>
-  <div class="float" id="test-chip" hidden><span class="tp-dot"></span><span class="k">Test</span>
-    <button type="button" class="name" id="tc-name" title="Open the Tests tab"></button><span id="tc-time" class="muted"></span>
-    <button type="button" class="btn small stop" id="tc-cancel">Stop test</button></div>
   <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
-  <div id="hint"></div>
   <div id="empty" hidden><b id="empty-title">No session running</b><span class="muted" id="empty-sub">Start a session to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><button class="btn primary" id="empty-go">Start a session</button></div>
   <div id="toast" role="status"></div>
 </main>
@@ -381,6 +392,21 @@
   </details>
 </aside>
 
+<!-- Stop all: the robots are already halted by the time this shows; this is the
+     sim itself, and whether this run's map is kept. operator.js fills it. -->
+<div id="stop-dlg" class="veil" hidden>
+  <form class="card" role="dialog" aria-labelledby="sd-title" autocomplete="off">
+    <h3 id="sd-title"></h3>
+    <p id="sd-body"></p>
+    <label id="sd-name-row" hidden>Save as <input id="sd-name" spellcheck="false" title="lowercase letters, digits, - and _"></label>
+    <p id="sd-err" hidden></p>
+    <div class="sd-actions">
+      <button type="button" class="btn" id="sd-cancel">Keep running</button>
+      <button type="button" class="btn stop" id="sd-discard"></button>
+      <button type="submit" class="btn primary" id="sd-save">Save &amp; stop</button>
+    </div>
+  </form>
+</div>
 <div id="session" hidden>
   <div class="card" role="dialog" aria-label="Session">
     <h3>Session

@@ -1197,10 +1197,6 @@
   // Sending is not a tool: drag a robot to where it should go, from any tool but the
   // waypoint one. The old "send" tool needed select-robot, pick-tool, click; three
   // steps and a mode to forget you were in.
-  const HINTS = {
-    select: () => "Drag a robot to send it there (drop on a pin to use it). Click a robot for its camera",
-    wp: () => "Click the map to add a waypoint. Drag to set the heading",
-  };
   const ROBOT_HIT_PX = 16;
   const robotAt = (px, py) => [...robots.values()].find((b) => {
     if (!b.pose) return false;
@@ -1215,7 +1211,6 @@
   function setTool(t) {
     tool = t;
     for (const b of document.querySelectorAll("#tools button")) b.classList.toggle("active", b.dataset.t === t);
-    if (!view3d) $("#hint").textContent = HINTS[t]();
     canvas.style.cursor = t === "wp" ? "crosshair" : "grab";
   }
   for (const b of document.querySelectorAll("#tools button")) b.addEventListener("click", () => setTool(b.dataset.t));
@@ -1326,15 +1321,80 @@
       saveWaypoints(waypoints.filter((w) => w.name !== del));
     }
   });
+  // Stop all: halt every robot NOW (it is still the emergency button), then end the
+  // sim, asking only what can't be undone: whether this run's map is kept. Same server
+  // calls as the session panel's Stop and Save & finish, so nobody has to go through
+  // the panel to shut down. A running test is stopped through the test runner
+  // instead, so what it saw is still scored (operator_tests.js has why).
+  let stopMode = null; // "test" | "save" | "plain" while the dialog is open
   $("#estop").addEventListener("click", () => {
     for (const id of robots.keys()) stopRobot(id);
-    toast("Stopped every robot");
+    const test = window.sortbotsTests && window.sortbotsTests.run;
+    if (test && test.running) return openStopDialog("test", test.name);
+    if (!sessionActive() || session.state === "stopping") return toast("Stopped every robot");
+    // Only a running, mapping session has a map worth asking about: a read-only run
+    // can't have changed its map, and one still starting has nothing to save yet.
+    openStopDialog(session.state === "running" && !session.read_only ? "save" : "plain");
+  });
+  function openStopDialog(mode, testName) {
+    stopMode = mode;
+    const name = $("#sd-name"), loaded = session && session.map_name;
+    $("#sd-title").textContent = mode === "test" ? "Stop the test?" : mode === "save" ? "Keep what this run mapped?" : "Stop the sim?";
+    $("#sd-body").textContent = mode === "test"
+      ? `The robots are halted. Stopping ends ${testName.replace(/_/g, " ")} and shuts the sim down; what it saw so far is still scored.`
+      : mode === "save"
+        ? `The robots are halted. Save the map ${loaded ? `back into ${loaded}` : "into the map library"} before the sim shuts down, or throw this run's changes away.`
+        : `The robots are halted. This shuts the sim down${session && session.read_only && loaded ? `; ${loaded} was loaded read-only, so it is unchanged` : ""}.`;
+    $("#sd-name-row").hidden = mode !== "save";
+    $("#sd-save").hidden = mode !== "save";
+    $("#sd-discard").textContent = mode === "test" ? "Stop test" : mode === "save" ? "Discard & stop" : "Stop sim";
+    $("#sd-err").hidden = true;
+    if (mode === "save") {
+      const d = new Date(), p2 = (n) => String(n).padStart(2, "0");
+      name.value = loaded || `map-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}`;
+    }
+    $("#stop-dlg").hidden = false;
+    (mode === "save" ? name : $("#sd-discard")).focus();
+  }
+  const closeStopDialog = () => { $("#stop-dlg").hidden = true; stopMode = null; };
+  async function stopCall(url, body, label) {
+    $("#sd-err").hidden = true;
+    for (const b of document.querySelectorAll(".sd-actions button")) b.disabled = true;
+    try {
+      const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(out.error || res.statusText);
+      closeStopDialog();
+      toast(label);
+      pollSession();
+    } catch (e) {
+      $("#sd-err").textContent = `Couldn't stop: ${e.message}`; $("#sd-err").hidden = false;
+    } finally {
+      for (const b of document.querySelectorAll(".sd-actions button")) b.disabled = false;
+    }
+  }
+  $("#sd-cancel").addEventListener("click", closeStopDialog);
+  $("#stop-dlg").addEventListener("click", (e) => { if (e.target.id === "stop-dlg") closeStopDialog(); });
+  $("#sd-discard").addEventListener("click", () => {
+    if (stopMode === "test") stopCall("/api/tests/cancel", {}, "Stopping the test…");
+    else stopCall("/api/session/stop", {}, "Shutting the sim down…");
+  });
+  $("#stop-dlg form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (stopMode !== "save") return;
+    const name = $("#sd-name").value.trim();
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) {
+      $("#sd-err").textContent = "Use lowercase letters, digits, - and _ (start with a letter or digit)."; $("#sd-err").hidden = false;
+      return;
+    }
+    stopCall("/api/session/finish", { name }, `Saving ${name}, then shutting the sim down…`);
   });
   $("#session-chip").addEventListener("click", openSession);
   $("#empty-go").addEventListener("click", openSession);
   $("#sp-x").addEventListener("click", closeSession);
   $("#session").addEventListener("click", (e) => { if (e.target.id === "session") closeSession(); });
   addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("#stop-dlg").hidden) { closeStopDialog(); return; }
     if (e.key === "Escape") {
       if (drag) { drag = null; press = null; dirty = true; canvas.style.cursor = "grab"; return; } // abandon a send mid-drag
       if (!$("#session").hidden) closeSession(); else if (selected) select(null);
@@ -1359,7 +1419,6 @@
     if (view3d) {
       if (!cloudMounted) { window.sortbotsCloud.mount($("#cloud"), ros); cloudMounted = true; }
       window.sortbotsCloud.show(); syncCloudRobots();
-      $("#hint").textContent = "Drag to orbit, scroll to zoom, right-drag to pan";
     } else {
       if (cloudMounted) window.sortbotsCloud.hide();
       setTool(tool); dirty = true;

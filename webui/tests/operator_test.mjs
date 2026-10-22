@@ -50,7 +50,7 @@ window.ROSLIB = {
 // Shims: nav waypoints live in memory (the real endpoint writes data/), the session
 // can be faked per scenario, everything else goes to the real serve.py.
 window.__navWps = [];
-window.__testPosts = []; window.__testResults = [];
+window.__testPosts = []; window.__testResults = []; window.__sessionPosts = [];
 window.__testRun = { running: false, name: null, exit: null, elapsed_s: null, log: '', offset: 0 };
 window.__fakeSession = null;
 const realFetch = window.fetch.bind(window);
@@ -62,6 +62,11 @@ window.fetch = (url, opts) => {
     return json({ waypoints: window.__navWps });
   }
   if (u.startsWith('/api/session') && !u.startsWith('/api/session/') && window.__fakeSession) return json(window.__fakeSession);
+  // Stop all's dialog: record, never stop anything real.
+  if ((u.startsWith('/api/session/stop') || u.startsWith('/api/session/finish')) && opts && opts.method === 'POST') {
+    window.__sessionPosts.push({ url: u, body: JSON.parse(opts.body || '{}') });
+    return json(window.__fakeSession || {});
+  }
   // Test runs: never launch scripts/simtest.py from a page test. The list itself
   // (/api/tests) is real, read from configs/tests/.
   if (u.startsWith('/api/tests/run')) {
@@ -515,7 +520,10 @@ async function main() {
     const vc = await page.eval(`JSON.stringify([window.__operator.view.cx, window.__operator.view.cy])`);
     await mapPointer(0, 3, 1, 4); // empty map
     check(`${vp.label}: dragging empty map still pans`, (await page.eval(`JSON.stringify([window.__operator.view.cx, window.__operator.view.cy])`)) !== vc && (await goals()).length === 0);
-    check(`${vp.label}: the hint teaches the drag`, /Drag a robot/.test(await $text('#hint')), await $text('#hint'));
+    check(`${vp.label}: no instruction text over the map; the select tool's tooltip teaches the drag`,
+      !(await page.eval(`!!document.getElementById('hint')`)) && /Drag a robot/.test(await page.eval(`document.querySelector('#tools [data-t="select"]').title`)));
+    check(`${vp.label}: map tools, mapped area and the test chip sit in the top bar`,
+      await page.eval(`['tools', 'coverage', 'test-chip'].every((id) => document.getElementById(id).closest('header'))`));
 
     // -- tasks --------------------------------------------------------------------------------------
     // A and B are both still placed here (deletion is exercised after the demo
@@ -652,6 +660,7 @@ async function main() {
     check(`${vp.label}: Stop all zeroes every robot's velocity`, roster.every((id) => stopped.some((p) => p.topic === `/${id}/cmd_vel` && p.msg.linear.x === 0)));
     const svc = JSON.parse(await page.eval(`JSON.stringify(window.__services)`));
     check(`${vp.label}: Stop all cancels navigation goals`, roster.every((id) => svc.some((s) => s.name === `/${id}/navigate_to_pose/_action/cancel_goal`)));
+    check(`${vp.label}: with no session, Stop all only halts the robots (no dialog)`, !(await visible('#stop-dlg')));
 
     // -- starting up: progress bar ---------------------------------------------------------------------------
     await page.eval(`window.__fakeSession = { state: 'starting', phase: 'sim_loading', phase_label: 'loading the warehouse', session_id: 's0', scenario: 'custom', config: { map: 'warehouse', mode: 'readonly', robots: 2 } }`);
@@ -677,6 +686,39 @@ async function main() {
     await sleep(400);
     check(`${vp.label}: the bar is gone once the robots are up`, await page.eval(`document.getElementById('sp-boot').hidden`));
     check(`${vp.label}: once running, a short status replaces the bar`, /^Running · /.test(await page.eval(`document.getElementById('sp-status').textContent`)) && await page.eval(`!document.getElementById('sp-status').hidden`));
+
+    // -- Stop all ends the sim: save or discard the map ----------------------------------------------------
+    await page.eval(`window.__fakeSession = { ...window.__fakeSession, read_only: false, map_name: 'warehouse' }`);
+    await sleep(3400);
+    await page.eval(`window.__published.length = 0; window.__sessionPosts.length = 0`);
+    await click('#estop');
+    await sleep(100);
+    check(`${vp.label}: Stop all still halts every robot first`, await page.eval(`${JSON.stringify(roster)}.every((id) => window.__published.some((p) => p.topic === '/' + id + '/cmd_vel'))`));
+    check(`${vp.label}: ... then asks whether to keep what a mapping run mapped`, await visible('#stop-dlg') && (await $text('#sd-title')) === 'Keep what this run mapped?' &&
+      (await page.eval(`document.getElementById('sd-name').value`)) === 'warehouse' && await visible('#sd-save') && await visible('#sd-discard'));
+    await shot(`${vp.label}-stop-dialog`);
+    await page.eval(`document.getElementById('sd-name').value = 'Bad Name'`);
+    await click('#sd-save');
+    await sleep(100);
+    check(`${vp.label}: a bad map name is refused in the dialog`, await visible('#sd-err') && (await page.eval(`window.__sessionPosts.length`)) === 0);
+    await page.eval(`document.getElementById('sd-name').value = 'warehouse-v2'`);
+    await click('#sd-save');
+    await sleep(200);
+    let sposts = JSON.parse(await page.eval(`JSON.stringify(window.__sessionPosts)`));
+    check(`${vp.label}: Save & stop saves under that name and ends the session`, sposts.length === 1 && sposts[0].url === '/api/session/finish' && sposts[0].body.name === 'warehouse-v2' && !(await visible('#stop-dlg')), JSON.stringify(sposts));
+    await click('#estop'); await sleep(100);
+    await click('#sd-discard'); await sleep(200);
+    sposts = JSON.parse(await page.eval(`JSON.stringify(window.__sessionPosts)`));
+    check(`${vp.label}: Discard & stop ends the session without saving`, sposts.length === 2 && sposts[1].url === '/api/session/stop');
+    await page.eval(`window.__fakeSession = { ...window.__fakeSession, read_only: true }`);
+    await sleep(3400);
+    await click('#estop'); await sleep(100);
+    check(`${vp.label}: a read-only run just asks to stop the sim`, (await $text('#sd-title')) === 'Stop the sim?' && !(await visible('#sd-name-row')) && !(await visible('#sd-save')) && /unchanged/.test(await $text('#sd-body')));
+    await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+    await sleep(100);
+    check(`${vp.label}: Escape keeps it running`, !(await visible('#stop-dlg')) && (await page.eval(`window.__sessionPosts.length`)) === 2);
+    await page.eval(`window.__fakeSession = { ...window.__fakeSession, read_only: undefined, map_name: undefined }`);
+    await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1)); // those waits outlasted ONLINE_TTL_MS
     // A demo: true session (the Fleet demo preset) starts the task demo by itself, once.
     await page.eval(`window.__published.length = 0; window.__fakeSession = { ...window.__fakeSession, session_id: 's-demo', config: { ...window.__fakeSession.config, demo: true } }`);
     await sleep(3600);
@@ -715,7 +757,7 @@ async function main() {
     check('3d: a cloud message is decoded and counted', /^2 points/.test(await $text('#cloud .cloud-info')), await $text('#cloud .cloud-info'));
     await shot('3d-cloud');
   }
-  check('3d: the hint explains orbiting', /orbit/.test(await $text('#hint')));
+  check('3d: the 3D button\'s tooltip explains orbiting (no instruction text on the stage)', /orbit/.test(await page.eval(`document.querySelector('#view [data-v="3d"]').title`)));
   await load();
   check('3d: the chosen view survives a reload', await visible('#cloud'));
   await click('#view [data-v="2d"]'); await sleep(200);

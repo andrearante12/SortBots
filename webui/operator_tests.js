@@ -152,7 +152,7 @@
       run = await api("/api/tests/run", payload);
       warn(null);
       $("#tp-log").textContent = ""; logOffset = 0;
-      toast(`Starting ${t.title}…`);
+      toast(`Starting ${titleOf(name)}…`);
       closePanel(); // the map is where a test is watched
     } catch (err) {
       warn(`Couldn't start ${t.title}: ${err.message}`);
