@@ -242,36 +242,61 @@
   #sp-tabs { font-size: .84rem; } #sp-tabs button { padding: 3px 12px; }
   #session .card.tab-tests #launch-form, #session .card.tab-tests #session-pane,
   #session .card.tab-tests #console-warning, #session .card:not(.tab-tests) #tests-pane { display: none !important; }
-  #tests-pane { display: grid; gap: 14px; }
+  #tests-pane { display: grid; gap: 18px; }
   #tp-warn { padding: 8px 12px; border-radius: 6px; background: var(--warnbg); border: 1px solid var(--warnline); color: var(--warnink); font-size: .86rem; }
-  #tp-warn[hidden], #tp-run[hidden], #tp-report[hidden] { display: none; }
-  #tp-run { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; gap: 6px; }
-  .tp-run-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .tp-run-head #tp-watch { margin-left: auto; }
-  .tp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--info); animation: tp-pulse 1.2s ease-in-out infinite; }
+  #tp-warn[hidden], #tp-run[hidden], #tp-log[hidden], #tp-report[hidden], #sp-test-note { display: none; }
+  button.link { background: none; border: none; padding: 0; color: var(--muted); font-size: .84rem; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+  button.link:hover { color: var(--ink); }
+  /* One line for the test that is running or ran last. */
+  #tp-run { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border-radius: 8px; background: var(--ground); }
+  .tp-run-text { flex: 1 1 200px; min-width: 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  #tp-run-state { color: var(--muted); font-size: .86rem; }
+  #tp-run.fail #tp-run-state { color: var(--stop); } #tp-run.pass #tp-run-state { color: var(--go); }
+  .tp-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--info); animation: tp-pulse 1.2s ease-in-out infinite; }
   #tp-run.done .tp-dot { animation: none; background: var(--muted); }
   #tp-run.done.pass .tp-dot { background: var(--go); } #tp-run.done.fail .tp-dot { background: var(--stop); }
   @keyframes tp-pulse { 50% { opacity: .3; } }
-  #tp-log-box summary { cursor: pointer; color: var(--muted); font-size: .82rem; }
-  #tp-log, #tp-report { margin: 6px 0 0; max-height: 220px; overflow: auto; font: .72rem/1.4 ui-monospace, monospace; background: var(--ground); border-radius: 6px; padding: 8px; white-space: pre-wrap; }
-  #tp-list { display: grid; gap: 8px; }
-  .tp-test { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; }
-  .tp-test.invalid { opacity: .7; }
-  .tp-test .t { font-weight: 600; } .tp-test code { font-size: .74rem; color: var(--faint); margin-left: 6px; font-weight: 400; }
-  .tp-test .d, .tp-test .m { grid-column: 1; font-size: .82rem; color: var(--muted); }
-  .tp-test .d { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .tp-test .crit { grid-column: 1; display: flex; flex-wrap: wrap; gap: 4px; }
-  .tp-test .crit span { font-size: .72rem; padding: 1px 7px; border-radius: 10px; background: var(--segbg); color: var(--muted); }
-  .tp-test .go { grid-column: 2; grid-row: 1 / span 4; display: flex; align-items: center; gap: 6px; }
-  .tp-test .go input { width: 3.4em; } .tp-test .go label { font-size: .74rem; color: var(--muted); display: grid; gap: 1px; }
-  .tp-test .err { grid-column: 1 / -1; font-size: .82rem; color: var(--warnink); }
-  #tp-results-box h4 { margin: 0 0 6px; font-size: .84rem; font-weight: 600; color: var(--muted); }
-  .tp-res { display: grid; grid-template-columns: auto 1fr auto; gap: 2px 10px; padding: 6px 4px; border-top: 1px solid var(--line); cursor: pointer; font-size: .84rem; align-items: baseline; }
-  .tp-res:hover { background: var(--raise); }
-  .tp-res .v { font-size: .72rem; font-weight: 700; padding: 1px 7px; border-radius: 4px; color: #fff; background: var(--muted); }
-  .tp-res .v.pass { background: var(--go); } .tp-res .v.fail { background: var(--stop); } .tp-res .v.run { background: var(--info); }
-  .tp-res .w { color: var(--muted); font-size: .76rem; }
-  .tp-res .c { grid-column: 2 / -1; color: var(--muted); font-size: .76rem; } .tp-res .c .bad { color: var(--stop); }
+  #tp-log { flex-basis: 100%; margin: 4px 0 0; max-height: 220px; overflow: auto; font: .72rem/1.45 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; }
+  .tp-h { margin: 0 0 4px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  /* Test cases: a list, not cards. A row is title, one line of what it runs, Run;
+     click it for what it checks and how often. */
+  .tp-test { border-top: 1px solid var(--line); }
+  .tp-test:last-child { border-bottom: 1px solid var(--line); }
+  .tp-row { display: grid; grid-template-columns: 14px 1fr auto; gap: 2px 10px; align-items: center; padding: 10px 4px; cursor: pointer; }
+  .tp-row:hover { background: var(--hover); }
+  .tp-row .chev { color: var(--faint); font-size: .7rem; transition: transform .15s; }
+  .tp-test.open .chev { transform: rotate(90deg); }
+  .tp-row .t { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tp-row .m { grid-column: 2; font-size: .8rem; color: var(--muted); }
+  .tp-row .btn { grid-column: 3; grid-row: 1 / span 2; }
+  .tp-test.invalid .t { color: var(--muted); }
+  .tp-test.invalid .m { color: var(--warnink); }
+  .tp-more { display: none; padding: 0 4px 14px 28px; font-size: .84rem; gap: 10px; }
+  .tp-test.open .tp-more { display: grid; }
+  .tp-more p { margin: 0; color: var(--muted); line-height: 1.45; }
+  .tp-more dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; }
+  .tp-more dt { color: var(--muted); } .tp-more dd { margin: 0; }
+  .tp-more ul { margin: 0; padding-left: 16px; } .tp-more li { margin: 1px 0; }
+  .tp-more .opts { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .tp-more .opts label { display: flex; gap: 6px; align-items: center; color: var(--muted); }
+  .tp-more .opts input { width: 4em; }
+  .tp-more code { font-size: .76rem; color: var(--faint); }
+  /* Results */
+  .tp-res { border-top: 1px solid var(--line); }
+  .tp-res:last-child { border-bottom: 1px solid var(--line); }
+  .tp-res-row { display: grid; grid-template-columns: 52px 1fr auto; gap: 2px 10px; padding: 8px 4px; cursor: pointer; align-items: baseline; font-size: .86rem; }
+  .tp-res-row:hover { background: var(--hover); }
+  .tp-res .v { font-size: .68rem; font-weight: 700; letter-spacing: .04em; text-align: center; padding: 2px 0; border-radius: 4px; color: var(--muted); background: var(--segbg); }
+  .tp-res .v.pass { color: #fff; background: var(--go); } .tp-res .v.fail { color: #fff; background: var(--stop); } .tp-res .v.run { color: #fff; background: var(--info); }
+  .tp-res .n { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tp-res .w { color: var(--muted); font-size: .78rem; white-space: nowrap; }
+  .tp-res .c { grid-column: 2 / -1; color: var(--muted); font-size: .78rem; }
+  .tp-res .c .bad { color: var(--stop); }
+  #tp-report { margin: 0 4px 10px 66px; max-height: 260px; overflow: auto; font: .72rem/1.45 ui-monospace, monospace; background: var(--ground); border-radius: 6px; padding: 10px; white-space: pre-wrap; }
+  .tp-empty { color: var(--muted); font-size: .84rem; padding: 6px 4px; }
+  /* A test owns the session it runs: its Stop would abort the run unscored. */
+  #session .card.testing #session-finish, #session .card.testing #session-stop { display: none; }
+  #session .card.testing #sp-test-note { display: block; margin: 0; font-size: .86rem; color: var(--muted); }
   /* Running test, over the map: what is being scored right now, and the way out. */
   /* Bottom centre, above the hint line: the top belongs to toasts, the corners to tools and coverage. */
   #test-chip { bottom: 50px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 8px; padding: 5px 6px 5px 12px; font-size: .84rem; z-index: 3; }
@@ -450,17 +475,26 @@
     <div id="tests-pane">
       <div id="tp-warn" hidden></div>
       <div id="tp-run" hidden>
-        <div class="tp-run-head"><span class="tp-dot"></span><b id="tp-run-name"></b><span id="tp-run-state" class="muted"></span>
-          <button type="button" class="btn small" id="tp-watch" title="Close this panel and watch the run on the map">Watch</button>
-          <button type="button" class="btn small stop" id="tp-cancel" title="Stop the sim; runs that finished are still scored">Cancel</button></div>
-        <details id="tp-log-box"><summary>Log</summary><pre id="tp-log"></pre></details>
+        <span class="tp-dot"></span>
+        <div class="tp-run-text"><b id="tp-run-name"></b><span id="tp-run-state"></span></div>
+        <button type="button" class="link" id="tp-log-toggle" aria-expanded="false">Log</button>
+        <button type="button" class="btn small" id="tp-watch" title="Close this panel and watch the run on the map">Watch</button>
+        <button type="button" class="btn small stop" id="tp-cancel" title="Stop the sim. What the run saw so far is still scored">Stop test</button>
+        <pre id="tp-log" hidden></pre>
       </div>
-      <div id="tp-list"></div>
-      <div id="tp-results-box"><h4>Recent results</h4><div id="tp-results"></div><pre id="tp-report" hidden></pre></div>
+      <section>
+        <h4 class="tp-h">Test cases <span class="muted" id="tp-count"></span></h4>
+        <div id="tp-list"></div>
+      </section>
+      <section>
+        <h4 class="tp-h">Recent results</h4>
+        <div id="tp-results"></div>
+      </section>
     </div>
     <div id="session-pane">
         <div class="boot" id="sp-boot" hidden><div class="bar"><i></i></div><span class="boot-label"></span></div>
         <span class="boot-label" id="sp-status" hidden></span>
+        <p id="sp-test-note">A test is driving this session. Stop it with <button type="button" class="link" id="sp-test-stop">Stop test</button> so what it saw is still scored.</p>
         <div id="session-strip">
           <span id="session-state">no session</span>
           <button type="button" id="session-finish" disabled

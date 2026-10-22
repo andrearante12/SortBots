@@ -376,21 +376,32 @@ async function main() {
     const cards = await page.eval(`[...document.querySelectorAll('#tp-list .tp-test')].map((c) => c.dataset.name || 'invalid')`);
     const onDisk = fs.readdirSync(path.join(REPO_ROOT, 'configs', 'tests')).filter((f) => f.endsWith('.yaml')).length;
     check(`${vp.label}: it lists every test case in configs/tests/`, cards.length === onDisk, cards.join(','));
-    check(`${vp.label}: the person-crossing test is runnable here`,
+    check(`${vp.label}: the smoke test is runnable here`,
       await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"] [data-run]'); return !!c && !c.disabled; })()`));
+    const smokeTitle = await $text('#tp-list .tp-test[data-name="pipeline_smoke"] .t');
+    check(`${vp.label}: rows are titled, not file names`, smokeTitle.length > 0 && smokeTitle !== 'pipeline_smoke', smokeTitle);
+    check(`${vp.label}: rows start collapsed`, !(await visible('#tp-list .tp-test[data-name="pipeline_smoke"] .tp-more')));
+    await click('#tp-list .tp-test[data-name="crossing_yield"] .tp-row .t');
+    await sleep(100);
+    const more = await $text('#tp-list .tp-test[data-name="crossing_yield"] .tp-more');
+    check(`${vp.label}: clicking a row shows what it checks`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Passes when/.test(more) && /recall ≥ 0.3/.test(more), more.slice(0, 160));
+    await click('#tp-list .tp-test[data-name="pipeline_smoke"] .tp-row .t');
     await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"]'); c.querySelector('[data-repeats]').value = '2'; c.querySelector('[data-run]').click(); })()`);
     await sleep(400);
     const posted = JSON.parse(await page.eval(`JSON.stringify(window.__testPosts)`));
     check(`${vp.label}: Run starts that test with the chosen repeats`, posted.length === 1 && posted[0].name === 'pipeline_smoke' && posted[0].repeats === 2, JSON.stringify(posted));
     check(`${vp.label}: ... and closes the panel to watch it on the map`, !(await visible('#session')));
     check(`${vp.label}: a chip over the map names the running test and its clock`,
-      await visible('#test-chip') && (await $text('#tc-name')) === 'pipeline_smoke' && (await $text('#tc-time')) === '1:15', `${await $text('#tc-name')} ${await $text('#tc-time')}`);
+      await visible('#test-chip') && (await $text('#tc-name')) === smokeTitle && (await $text('#tc-time')) === '1:15', `${await $text('#tc-name')} ${await $text('#tc-time')}`);
     await shot(`${vp.label}-test-running`);
     await click('#tc-name');
     await sleep(500);
     check(`${vp.label}: the chip's name reopens the Tests tab`, await visible('#tests-pane') && await visible('#tp-run') && /running · 1:15/.test(await $text('#tp-run-state')));
     check(`${vp.label}: ... where Run is disabled while a test runs`,
       await page.eval(`[...document.querySelectorAll('#tp-list [data-run]')].every((b) => b.disabled)`));
+    check(`${vp.label}: while a test runs, the session's own Stop gives way to Stop test`,
+      await page.eval(`document.querySelector('#session .card').classList.contains('testing')`) &&
+      await page.eval(`getComputedStyle(document.getElementById('session-stop')).display === 'none' && getComputedStyle(document.getElementById('sp-test-note')).display !== 'none'`));
     await click('#sp-x');
     await click('#tc-cancel');
     await sleep(300);
@@ -402,8 +413,8 @@ async function main() {
     await sleep(900);
     check(`${vp.label}: the panel remembers the Tests tab`, await visible('#tests-pane'));
     const res = await $text('#tp-results .tp-res');
-    check(`${vp.label}: results show the verdict and each criterion against its actual`, /FAIL/.test(res) && /recall >= 0.3 → 0.12/.test(res), res.slice(0, 120));
-    await click('#tp-results .tp-res');
+    check(`${vp.label}: results show the verdict, the test's title and what failed`, /FAIL/.test(res) && /Walker crosses/.test(res) && /recall >= 0.3: got 0.12/.test(res) && !/goals/.test(res), res.slice(0, 160));
+    await click('#tp-results .tp-res-row');
     await sleep(300);
     check(`${vp.label}: a result opens its report`, await visible('#tp-report') && /recall 0.12/.test(await $text('#tp-report')));
     await shot(`${vp.label}-tests-tab`);
