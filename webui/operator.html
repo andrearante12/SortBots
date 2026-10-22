@@ -300,6 +300,20 @@
   /* Running test, over the map: what is being scored right now, and the way out. */
   #test-chip { display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 12px; font-size: .84rem; border: 1px solid var(--line); border-radius: 8px; white-space: nowrap; }
   #test-chip[hidden] { display: none; }
+  /* Top left of the map, empty since the tools moved up: toasts own the top centre. */
+  #result-card { top: 14px; left: 14px; width: 340px; max-width: calc(100% - 28px); padding: 12px 14px 14px; display: grid; gap: 8px; z-index: 4; }
+  #result-card[hidden], #rc-err[hidden] { display: none; }
+  .rc-head { display: flex; align-items: center; gap: 8px; }
+  .rc-head .x { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 1.3rem; line-height: 1; padding: 0 2px; }
+  .rc-v { font-size: .7rem; font-weight: 700; letter-spacing: .05em; padding: 2px 8px; border-radius: 4px; color: #fff; background: var(--muted); }
+  .rc-v.pass { background: var(--go); } .rc-v.fail { background: var(--stop); }
+  #rc-meta { margin: 0; font-size: .8rem; color: var(--muted); }
+  #rc-checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; font-size: .86rem; }
+  #rc-checks li { display: grid; grid-template-columns: 16px 1fr auto; gap: 8px; align-items: baseline; }
+  #rc-checks .ok { color: var(--go); font-weight: 700; } #rc-checks .no { color: var(--stop); font-weight: 700; }
+  #rc-checks .got { font-variant-numeric: tabular-nums; color: var(--muted); }
+  #rc-checks li.bad .got { color: var(--stop); }
+  #rc-err { margin: 0; font-size: .84rem; color: var(--stop); }
   #test-chip .k { font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
   #test-chip button.name { background: none; border: none; padding: 0; font-weight: 600; color: var(--ink); cursor: pointer; }
   #sp-log[open] summary { margin-bottom: 6px; }
@@ -359,6 +373,14 @@
 <main id="stage">
   <canvas id="map"></canvas>
   <div id="cloud" hidden></div>
+  <!-- A finished test's score: shown once, until dismissed, never kept (operator_tests.js). -->
+  <div class="float" id="result-card" hidden role="dialog" aria-labelledby="rc-name">
+    <div class="rc-head"><span class="rc-v" id="rc-v"></span><b id="rc-name"></b>
+      <button type="button" class="x" id="rc-x" title="Dismiss" aria-label="Dismiss">&times;</button></div>
+    <p id="rc-meta"></p>
+    <ul id="rc-checks"></ul>
+    <p id="rc-err" hidden></p>
+  </div>
   <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
   <div id="empty" hidden><b id="empty-title">No session running</b><span class="muted" id="empty-sub">Start a session to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><button class="btn primary" id="empty-go">Start a session</button></div>
   <div id="toast" role="status"></div>

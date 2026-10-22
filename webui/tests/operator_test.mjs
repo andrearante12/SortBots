@@ -92,8 +92,19 @@ function spawnTracked(cmd, argv, opts = {}) {
   children.push(p);
   return p;
 }
+// Every temp dir a run makes (Chrome profile, sessions, seeded maps) is removed on
+// exit: they were never cleaned, and a day of runs filled the disk (2026-10-22).
+const tempDirs = [];
+const tmpDir = (prefix) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tempDirs.push(d); return d; };
 function cleanup() {
   for (const p of children) { try { p.kill('SIGKILL'); } catch {} }
+  // SIGKILL is asynchronous: Chrome writes into its profile while it dies, so wait
+  // (up to 2 s, synchronously: this runs in an 'exit' handler) before deleting.
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  for (const p of children) {
+    for (let i = 0; i < 40 && p.pid; i++) { try { process.kill(p.pid, 0); } catch { break; } Atomics.wait(nap, 0, 0, 50); }
+  }
+  for (const d of tempDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
 }
 process.on('exit', cleanup);
 process.on('SIGINT', () => { cleanup(); process.exit(130); });
@@ -161,7 +172,7 @@ const tf = (parent, child, x, y, yaw = 0) => ({ transforms: [{
   transform: { translation: { x, y, z: 0 }, rotation: { x: 0, y: 0, z: Math.sin(yaw / 2), w: Math.cos(yaw / 2) } } }] });
 
 async function main() {
-  const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sortbots-sessions-'));
+  const sessionsDir = tmpDir('sortbots-sessions-');
   spawnTracked('python3', [path.join(WEBUI_DIR, 'serve.py'), '--control', '--platform', 'sim',
                            '--port', String(PORT), '--host', '127.0.0.1'],
                { cwd: REPO_ROOT, env: { ...process.env, SORTBOTS_SESSIONS_DIR: sessionsDir } });
@@ -173,7 +184,7 @@ async function main() {
   // The map test below places A and B; a task dispatches between those two.
   const pick = 'A', drop = 'B';
 
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'sortbots-chrome-'));
+  const profile = tmpDir('sortbots-chrome-');
   const chromeBin = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']
     .find((b) => { try { return spawn(b, ['--version']).pid; } catch { return false; } }) || 'google-chrome';
   spawnTracked(chromeBin, ['--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--enable-unsafe-swiftshader',
@@ -409,10 +420,22 @@ async function main() {
     check(`${vp.label}: while a test runs, the session's own Stop gives way to Stop test`,
       await page.eval(`document.querySelector('#session .card').classList.contains('testing')`) &&
       await page.eval(`getComputedStyle(document.getElementById('session-stop')).display === 'none' && getComputedStyle(document.getElementById('sp-test-note')).display !== 'none'`));
+    await page.eval(`window.__testResults = [{ dir: '20261022T190000Z_pipeline_smoke', name: 'pipeline_smoke', state: 'done', complete: true, verdict: 'FAIL', done: 1, planned: 1,
+      runs: [{ ok: false, error: null, sim_s: 41.2, criteria: [{ label: 'clearance.contacts == 0', ok: false, actual: 3 }, { label: 'goals.success_rate >= 1', ok: true, actual: 1 }] }] }]`);
     await click('#sp-x');
     await click('#tc-cancel');
     await sleep(300);
     check(`${vp.label}: Stop test cancels it and the chip goes`, !(await visible('#test-chip')) && (await page.eval(`window.__testRun.exit`)) === 130);
+    await sleep(300);
+    const card = await $text('#result-card');
+    check(`${vp.label}: a finished test opens a result card with every check`, await visible('#result-card') && /STOPPED/.test(card) &&
+      /Clearance contacts = 0/.test(card) && /got 3/.test(card) && /Goals success rate ≥ 1/.test(card), card.slice(0, 200));
+    check(`${vp.label}: ... marking the failed ones`, (await page.eval(`document.querySelectorAll('#rc-checks li.bad').length`)) === 1 && (await page.eval(`document.querySelectorAll('#rc-checks .ok').length`)) === 1);
+    await shot(`${vp.label}-result-card`);
+    await sleep(4500);
+    check(`${vp.label}: ... and stays until dismissed`, await visible('#result-card'));
+    await click('#rc-x');
+    check(`${vp.label}: the × dismisses it`, !(await visible('#result-card')));
 
     await click('#session-chip');
     await sleep(900);

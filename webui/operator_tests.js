@@ -4,6 +4,7 @@
 // Talks ONLY to webui/serve.py over HTTP, the same API as the engineering
 // dashboard's tests_view.js:
 //   GET  /api/tests            test cases (validated) + whether this server can run them
+//   GET  /api/tests/results    the finished run's score, for the result card
 //   GET  /api/tests/run        ?offset= runner state + incremental log
 //   POST /api/tests/run        {name, repeats?, variant?}
 //   POST /api/tests/cancel
@@ -150,6 +151,7 @@
     btn.disabled = true;
     try {
       run = await api("/api/tests/run", payload);
+      $("#result-card").hidden = true; // the last score is gone once the next run starts
       warn(null);
       $("#tp-log").textContent = ""; logOffset = 0;
       toast(`Starting ${titleOf(name)}…`);
@@ -207,6 +209,51 @@
     if (!log.hidden) log.scrollTop = log.scrollHeight;
   });
 
+  // -- result card: a finished run's score, once ------------------------------------------
+  // simtest.py writes every run to data/simtests/; the card reads the newest one for
+  // this test when it finishes and shows it until dismissed. Nothing is kept here:
+  // a reload, or the next run, starts clean.
+
+  const fmt = (v) => (v == null ? "no data" : typeof v === "number" ? String(Math.round(v * 1000) / 1000) : String(v));
+  // "clearance.contacts == 0" -> ["Clearance contacts", "= 0"]
+  function splitLabel(label) {
+    const m = /^([\w.]+)\s*(==|>=|<=|>|<|!=)\s*(.+)$/.exec(label);
+    if (!m) return [label, ""];
+    const name = m[1].replace(/[._]/g, " ");
+    const op = { "==": "=", ">=": "≥", "<=": "≤", "!=": "≠" }[m[2]] || m[2];
+    return [name.charAt(0).toUpperCase() + name.slice(1), `${op} ${m[3]}`];
+  }
+  async function showResult(name, exit) {
+    let r = null;
+    try { r = ((await api("/api/tests/results")).results || []).find((x) => x.name === name) || null; } catch (e) { /* card says so */ }
+    const runs = r ? r.runs : [];
+    const passed = runs.filter((x) => x.ok).length;
+    const verdict = exit === 130 ? "STOPPED" : r && r.verdict ? r.verdict : exit === 0 ? "PASS" : "FAIL";
+    $("#rc-v").textContent = verdict;
+    $("#rc-v").className = `rc-v ${verdict === "PASS" ? "pass" : verdict === "STOPPED" ? "" : "fail"}`;
+    $("#rc-name").textContent = titleOf(name);
+    const simS = runs.length ? runs[runs.length - 1].sim_s : null;
+    $("#rc-meta").textContent = runs.length > 1 ? `${passed} of ${runs.length} runs passed`
+      : simS != null ? `${Math.round(simS)} s of sim time${exit === 130 ? ", stopped early" : ""}` : "";
+    // One line per check. Over several runs: the share of runs it held in, last value.
+    const byLabel = new Map();
+    for (const x of runs) for (const c of x.criteria || []) {
+      const e = byLabel.get(c.label) || { held: 0, n: 0, actual: null };
+      e.n++; if (c.ok) e.held++; e.actual = c.actual;
+      byLabel.set(c.label, e);
+    }
+    $("#rc-checks").innerHTML = [...byLabel].map(([label, e]) => {
+      const [what, want] = splitLabel(label), ok = e.held === e.n;
+      const got = e.n > 1 ? `${e.held}/${e.n} runs` : `got ${fmt(e.actual)}`;
+      return `<li class="${ok ? "" : "bad"}"><span class="${ok ? "ok" : "no"}">${ok ? "✓" : "✗"}</span><span>${esc(what)} ${esc(want)}</span><span class="got">${esc(got)}</span></li>`;
+    }).join("");
+    const errs = runs.map((x) => x.error).filter(Boolean);
+    const err = errs.length ? errs[errs.length - 1] : !r ? "No score was written for this run" : !byLabel.size && exit !== 0 ? `Run ${EXIT_LABEL[exit] || `exited ${exit}`}` : "";
+    $("#rc-err").textContent = err; $("#rc-err").hidden = !err;
+    $("#result-card").hidden = false;
+  }
+  $("#rc-x").addEventListener("click", () => { $("#result-card").hidden = true; });
+
   // -- polling ----------------------------------------------------------------------------
 
   async function poll() {
@@ -224,10 +271,7 @@
       run = await api(`/api/tests/run${q}`);
       if (logOffset == null) $("#tp-log").textContent = "";
       appendLog(run.log); logOffset = run.offset;
-      if (wasRunning && !run.running && run.name) {
-        toast(`${titleOf(run.name)}: ${EXIT_LABEL[run.exit] || `exited ${run.exit}`}`);
-        testsAt = 0; // results changed
-      }
+      if (wasRunning && !run.running && run.name) showResult(run.name, run.exit);
       wasRunning = !!run.running;
     } catch (e) {
       if (visible) warn(`Tests unavailable: ${e.message}`);
