@@ -1,0 +1,41 @@
+# A test case (simtest/spec.py has the schema; docs/testing.md the how-to).
+#
+# The cheapest end-to-end check of the test harness itself: sim up, world
+# clock restarted, ground truth flowing, one short goal sent and scored. Run
+# it after changing the probe, the world runtime or the runner, before
+# trusting a long test's verdict.
+
+name: pipeline_smoke
+title: Harness smoke — one short goal, ground truth flowing
+description: >
+  robot_0 drives 1.6 m down its aisle in the aisle_crossing world. Pass =
+  ground truth arriving at a sane rate and the goal reached. No avoidance is
+  asked of it: the walker is never near this route.
+
+scenario: moving_obstacles
+overrides:
+  world: aisle_crossing
+
+warmup_s: 2
+
+goals:
+  - robot: robot_0
+    pose: [-7.15, 10.0, -1.5708]
+    timeout_s: 60
+
+stop:
+  sim_s: 90
+  until: [goals_done]
+  settle_s: 1
+
+metrics:
+  - metric: goals
+    pass:
+      success_rate: {gte: 1.0}
+  - metric: run_stats
+    pass:
+      gt_hz: {gte: 5}
+  - metric: clearance
+
+repeats: 1
+pass_rate: 1.0

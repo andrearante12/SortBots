@@ -131,6 +131,7 @@ const VIEWPORTS = [
 
 const SHOW_SCENARIOS = `document.querySelector('#view-mode button[data-view="scenarios"]').click()`;
 const SHOW_FLEET = `document.querySelector('#view-mode button[data-view="fleet"]').click()`;
+const SHOW_TESTS = `document.querySelector('#view-mode button[data-view="tests"]').click()`;
 const SHOW_LIVE = `document.querySelector('#view-mode button[data-view="live"]').click()`;
 const VISIBLE = `(id) => {
   const el = document.getElementById(id);
@@ -172,6 +173,32 @@ function seedMapLibrary() {
   return dir;
 }
 
+// One finished test run (data/simtests/<dir>/), written by hand — a real one
+// needs the sim. Shape follows scripts/simtest.py + simtest/report.py; the
+// python side of that schema is pinned by tests/simtest_spec_test.py.
+const SEEDED_RESULT = '20261021T120000Z_crossing_yield';
+
+function seedTestResults() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sortbots-simtests-'));
+  const run = path.join(dir, SEEDED_RESULT);
+  fs.mkdirSync(path.join(run, 'runs', '0_0'), { recursive: true });
+  fs.writeFileSync(path.join(run, 'test.json'), JSON.stringify({
+    name: 'crossing_yield', title: 'Walker crosses the aisle mouth', description: '',
+    repeats: 1, pass_rate: 1.0, record: [], variants: [{ label: 'base', resolved: {} }],
+  }));
+  fs.writeFileSync(path.join(run, 'results.jsonl'), JSON.stringify({
+    variant: 'base', repeat: 0, run_dir: '0_0', ok: true,
+    meta: { sim_s: 41.2, stop_reason: 'goals_done' },
+    score: { ok: true, metrics: [{ id: 'clearance', metric: 'clearance', version: 1,
+      params: {}, values: { min_m: 0.42, contacts: 0 }, detail: {}, ok: true,
+      criteria: [{ value: 'contacts', op: 'eq', threshold: 0, actual: 0, ok: true,
+                   no_data: false }] }] },
+  }) + '\n');
+  fs.writeFileSync(path.join(run, 'report.md'), '# crossing_yield — PASS\n\nseeded report\n');
+  fs.writeFileSync(path.join(run, 'state.json'), JSON.stringify({ state: 'done' }));
+  return dir;
+}
+
 async function main() {
   // 1. two servers: console mode and read-only mode
   // Isolated sessions dir: a stale current.json from a real console run
@@ -181,7 +208,10 @@ async function main() {
   // something to render: pointing at the repo's real maps/ would make this
   // test's assertions depend on whatever the developer happens to have saved.
   const mapsDir = seedMapLibrary();
-  const serverEnv = { ...process.env, SORTBOTS_MAPS_DIR: mapsDir };
+  // Seeded results for the Tests tab, isolated from whatever real runs left in data/.
+  const resultsDir = seedTestResults();
+  const serverEnv = { ...process.env, SORTBOTS_MAPS_DIR: mapsDir,
+                      SORTBOTS_TEST_RESULTS: resultsDir };
   // --platform pinned: left to auto-detect, this test would see the real
   // robot's scenario list when run on the Jetson and the sim's elsewhere.
   spawnTracked('python3', [path.join(WEBUI_DIR, 'serve.py'), '--control', '--platform', 'sim',
@@ -250,6 +280,31 @@ async function main() {
   check('real console lists only robots with a `real` spawn',
         JSON.stringify(realRobots.robots) === JSON.stringify(['robot_0']),
         JSON.stringify(realRobots.robots));
+
+  // The test layer's read API (configs/worlds/, configs/tests/, data/simtests/).
+  const apiWorlds = await (await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/worlds`)).json();
+  const worlds = (apiWorlds.worlds || []).map((w) => w.name);
+  check('/api/worlds lists the committed worlds', worlds.includes('aisle_crossing'),
+        worlds.join(', '));
+  const apiTests = await (await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/tests`)).json();
+  check('/api/tests lists valid test cases and the metric catalog',
+        // A test on a saved map is legitimately invalid where that git-lfs map
+        // isn't present (simtest_spec_test.py skips the same case).
+        apiTests.tests.length > 0 && apiTests.tests.every((t) => t.status === 'ready' ||
+          /map '.*(no map named|pose graph is)/.test(t.error)) &&
+        apiTests.metrics.some((m) => m.name === 'clearance'),
+        apiTests.tests.filter((t) => t.status !== 'ready').map((t) => t.error).join('; '));
+  const roRun = await fetch(`http://127.0.0.1:${READONLY_PORT}/api/tests/run`);
+  check('read-only server refuses the test runner with 503', roRun.status === 503,
+        `got ${roRun.status}`);
+  const badTest = await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/tests/run`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: '../../etc/passwd' }) });
+  check('control server rejects a traversing test name with 400', badTest.status === 400,
+        `got ${badTest.status}`);
+  const badReport = await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/tests/report?dir=../../etc`);
+  check('report endpoint rejects a traversing dir with 400', badReport.status === 400,
+        `got ${badReport.status}`);
 
   const idle = await (await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/session`)).json();
   check('no session is running at rest', idle.state === 'idle', idle.state);
@@ -515,6 +570,89 @@ async function main() {
         /--resume/.test(filled.command) && new RegExp(`--map \\S*${SEEDED_MAP}/map\\.db`).test(filled.command),
         filled.error || filled.command);
 
+  // 5b. worlds in the form: picking one must reach the server's own argv.
+  const worldPick = await page.eval(`(async () => {
+    const sel = document.getElementById('lf-world');
+    const options = [...sel.options].map((o) => o.value);
+    sel.value = 'aisle_crossing';
+    sel.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 600));
+    const preset = document.getElementById('lf-preset');
+    preset.value = 'moving_obstacles';
+    preset.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 600));
+    return { options, command: document.getElementById('lf-command').textContent,
+             presetWorld: sel.value };
+  })()`);
+  check('the world picker lists every world plus none',
+        worldPick.options[0] === 'none' && worlds.every((w) => worldPick.options.includes(w)),
+        worldPick.options.join(','));
+  check('a picked world reaches the launch command',
+        /--world aisle_crossing/.test(worldPick.command), worldPick.command);
+  check('a world preset fills the world picker', worldPick.presetWorld === 'aisle_crossing',
+        worldPick.presetWorld);
+
+  // 5c. the Tests tab: lists the test cases, shows the seeded result and its
+  // report, and offers Run — which this file never clicks.
+  for (const vp of VIEWPORTS) {
+    await page.send('Emulation.setDeviceMetricsOverride', {
+      width: vp.w, height: vp.h, deviceScaleFactor: 1, mobile: vp.mobile,
+    });
+    await page.eval(SHOW_TESTS);
+    await sleep(900);
+    const tv = await page.eval(`(async () => {
+      const vis = ${VISIBLE};
+      const row = document.querySelector('#tests-results .result-row');
+      if (row) row.click();
+      await new Promise((r) => setTimeout(r, 400));
+      const out = {
+        tests: vis('view-tests'), stage: vis('stage-panel'), scenarios: vis('view-scenarios'),
+        cards: document.querySelectorAll('#tests-list .test-card').length,
+        runnable: [...document.querySelectorAll('#tests-list .test-run-btn')]
+                    .filter((b) => !b.disabled).length,
+        verdict: row ? row.querySelector('.verdict').textContent : null,
+        report: document.getElementById('tests-report').textContent,
+        state: document.getElementById('tests-run-state').textContent,
+        h: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      };
+      if (row) row.click(); // fold the report back up for the next viewport
+      return out;
+    })()`);
+    check(`${vp.label}: tests tab hides live and scenarios`, tv.tests && !tv.stage && !tv.scenarios);
+    check(`${vp.label}: tests tab lists every test case`, tv.cards === apiTests.tests.length,
+          `${tv.cards} cards for ${apiTests.tests.length} tests`);
+    check(`${vp.label}: every valid test is runnable in control mode`,
+          tv.runnable === apiTests.tests.filter((t) => t.status === 'ready').length,
+          `${tv.runnable} runnable`);
+    check(`${vp.label}: the seeded result shows its verdict`, tv.verdict === 'PASS', tv.verdict);
+    check(`${vp.label}: clicking a result shows its report`, /seeded report/.test(tv.report));
+    check(`${vp.label}: run strip reports idle`, /idle/.test(tv.state), tv.state);
+    check(`${vp.label}: no horizontal scrolling with tests open`, tv.h <= 1, `overflow ${tv.h}px`);
+    if (SCREENSHOT_DIR) {
+      const shot = await page.send('Page.captureScreenshot', { format: 'png' });
+      fs.writeFileSync(path.join(SCREENSHOT_DIR, `${vp.label}-tests.png`),
+                       Buffer.from(shot.result.data, 'base64'));
+    }
+  }
+  await page.send('Emulation.setDeviceMetricsOverride', {
+    width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false,
+  });
+
+  // ...and read-only: listed and readable, never runnable.
+  await page.send('Page.navigate', { url: `http://127.0.0.1:${READONLY_PORT}/index.html` });
+  await sleep(1500);
+  await page.eval(SHOW_TESTS);
+  await sleep(900);
+  const roTests = await page.eval(`(() => ({
+    cards: document.querySelectorAll('#tests-list .test-card').length,
+    runnable: [...document.querySelectorAll('#tests-list .test-run-btn')].filter((b) => !b.disabled).length,
+    warning: document.getElementById('tests-warning').textContent,
+    results: document.querySelectorAll('#tests-results .result-row').length,
+  }))()`);
+  check('read-only: tests are listed with their results', roTests.cards > 0 && roTests.results === 1);
+  check('read-only: no test is runnable', roTests.runnable === 0, `${roTests.runnable} runnable`);
+  check('read-only: the tests tab says why', /Read-only/.test(roTests.warning), roTests.warning);
+
   // 6. nothing we did started a sim
   const finalSession = await (await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/session`)).json();
   check('the test never launched a session', finalSession.state === 'idle',
@@ -524,6 +662,9 @@ async function main() {
   const libraryAfter = await (await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/maps`)).json();
   check('the test never wrote a map', (libraryAfter.maps || []).length === 1,
         `${(libraryAfter.maps || []).length} entries`);
+  const runAfter = await (await fetch(`http://127.0.0.1:${CONTROL_PORT}/api/tests/run`)).json();
+  check('the test never started a test run', !runAfter.running && !runAfter.name,
+        JSON.stringify({ running: runAfter.running, name: runAfter.name }));
 
   check('no uncaught page errors', pageErrors.length === 0, pageErrors.join('; '));
 

@@ -44,6 +44,8 @@ run:
   localize: false
   teleop: false
   map: null              # null = run_demo.sh's default ~/.ros/sortbots_<robot_id>.db
+  # world: aisle_crossing  # optional: a configs/worlds/ layout (props + scripted
+                           # movers) added to the scene — see moving_obstacles.yaml
 
 # Which `run:` keys the scenario card exposes as controls. Everything else is
 # fixed by this file — keeping the launch-time surface small and reviewable.
