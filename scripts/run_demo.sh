@@ -104,6 +104,11 @@ CONSOLE_PATTERNS=(rosbridge_websocket web_video_server "webui/serve.py" \
 # generations of bringup live at once (fleet_radio, dynamic_obstacle_filter and
 # collision_monitor x2 per robot) after several "stopped" runs — the four
 # newest nodes at the time had never been added here.
+# sortbots_bringup.launch.py is here too, hard-killed after the SIGINT grace:
+# a launch that didn't exit in 2 s kept running with its map_handoff.py
+# children (not listed either) — three such generations found 2026-10-22, one
+# 20 h old, any of which could flip a later run's RTAB-Map between mapping and
+# localization.
 PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz2 \
                    controller_server planner_server smoother_server behavior_server \
                    bt_navigator waypoint_follower velocity_smoother lifecycle_manager \
@@ -113,6 +118,7 @@ PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz
                    map_merge.py static_transform_publisher \
                    fleet_radio.py dynamic_obstacle_filter.py recon_cloud_merge.py \
                    depth_colorizer.py feature_overlay.py obstacle_detector.py \
+                   map_handoff.py sortbots_bringup.launch.py \
                    "spawn_warehouse.py")
 # Note scripts/save_map.sh --watch is deliberately absent from that list. Its
 # checkpoint loop has to OUTLIVE teardown: rtabmap gets pkill -9'd only 2 s
