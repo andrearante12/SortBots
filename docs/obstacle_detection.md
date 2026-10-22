@@ -134,13 +134,20 @@ All outputs carry the source depth image's stamp.
 
 ## Seeing it
 
-- **Dashboard.** Open `index.html` → camera → **head + depth**. Boxes are drawn
-  over the head RGB: red for moving, amber for static, each labelled with track
-  id, nearest range and speed. A tag at top-left counts obstacles and turns red
-  while something moves, and the **obstacles** toggle hides the boxes. In sim
-  the depth and RGB images come from one camera, and on the D435 depth is
-  aligned to colour, so a depth pixel is an RGB pixel. The JSON is only
-  subscribed while that view is up.
+- **Operator view** (`operator.html`, the default page):
+  - **Map.** Every *moving* obstacle gets a red marker with a halo, an arrow
+    showing where it will be in one second, and a "moving · 1.2 m/s" label.
+    Static clusters are left off, since they are mostly shelving the map
+    already shows. Positions come in base_link and are placed in `map` with the
+    robot's `/tf` pose when they arrive. A robot whose detector goes quiet for
+    1.5 s has its markers removed.
+  - **Robot card.** The camera tile (Camera or Depth) boxes every obstacle: red
+    for moving, amber for static, labelled with range. The card's facts include
+    "Obstacles: 2, 1 moving · nearest 1.9 m".
+  - **Tests.** `webui/tests/operator_test.mjs` covers all three.
+- **Engineering dashboard** (`index.html`, deprecated). Camera → **head + depth**
+  draws the same boxes over the head RGB, with an **obstacles** toggle. Tested
+  by `webui/tests/obstacle_overlay_test.mjs`.
 - **RViz.** Add a MarkerArray display on `/<id>/obstacles_viz`, with
   `<id>/base_link` or `map` as the fixed frame.
 - **CLI.** Prints each frame's JSON:
@@ -164,11 +171,13 @@ A "person crosses the field of view" case can assert on `/<id>/obstacles` alone:
 
 `tests/obstacle_detector_test.py` covers the same cases offline with
 ray-cast synthetic depth (`test_end_to_end_person_crossing_rendered_frames`),
-and `webui/tests/obstacle_overlay_test.mjs` covers the dashboard drawing.
+and `webui/tests/operator_test.mjs` and `obstacle_overlay_test.mjs` cover the
+drawing.
 
 ## Verification status
 
-- **Offline.** `tests/obstacle_detector_test.py` (18 tests) and
+- **Offline.** `tests/obstacle_detector_test.py` (18 tests), the obstacle checks
+  in `webui/tests/operator_test.mjs` (11 per viewport), and
   `webui/tests/obstacle_overlay_test.mjs` (15 checks).
 - **Live in sim.** Live sim runs (2026-10-22) covered sim 32FC1 depth, TF from
   `robot_0/camera_optical`, the floor estimate (≈0 m), odom tracking, and the

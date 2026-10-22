@@ -4,7 +4,7 @@
 //
 // Talks to two things, like the rest of the webui:
 //   - rosbridge (9090)   live topics: /map, /tf, per-robot plan / explore_status /
-//                        task_status / action status, and the commands this page
+//                        task_status / action status / obstacles, and the commands this page
 //                        sends (dispatch_task, explore_cmd, navigate_to_pose, cmd_vel)
 //   - serve.py (HTTP)    /api/robots, /api/nav_waypoints (waypoints, which are
 //                        also the task endpoints), /api/session (console control)
@@ -25,6 +25,10 @@
   // explore_status / task_status are heartbeats; silence means the node is gone.
   const EXPLORE_TTL_MS = 6000;
   const COLORS = ["#2f6fed", "#ef7d1a", "#8a5cf0", "#e0457b", "#1aa6a6", "#7a8b1f"];
+  // obstacle_detector.py publishes at ~10 Hz; a robot whose last list is older than
+  // this has its markers dropped rather than left frozen where someone used to be.
+  const OBSTACLE_TTL_MS = 1500;
+  const OBSTACLE_RED = "#e5484d";
   const GOAL_STATES = { 1: "accepted", 2: "navigating", 3: "cancelling", 4: "arrived", 5: "cancelled", 6: "failed" };
 
   const $ = (s) => document.querySelector(s);
@@ -224,6 +228,100 @@
     dirty = true;
   }
 
+  // -- obstacles (nodes/obstacle_detector.py) ----------------------------------------
+  // Positions arrive in <id>/base_link and velocities in the detector's world frame
+  // (<id>/odom, or base_link when it had no odom TF). Both are placed in `map` once, on
+  // arrival, with the poses /tf gives right then, so a marker stays put while the robot
+  // carries on moving instead of swinging around with it until the next message.
+  function obstaclesInMap(p, base, world) {
+    const c = Math.cos(base.yaw), s = Math.sin(base.yaw);
+    const toMap = (x, y) => [base.x + c * x - s * y, base.y + s * x + c * y];
+    const vyaw = world ? world.yaw : base.yaw;
+    const vc = Math.cos(vyaw), vs = Math.sin(vyaw);
+    return (p.obstacles || []).map((o) => {
+      const [x0, y0] = o.min, [x1, y1] = o.max, v = o.vel || [0, 0];
+      return {
+        id: o.track_id, moving: !!o.moving, speed: o.speed_mps || 0, range: o.range_m,
+        at: toMap(o.centroid[0], o.centroid[1]),
+        corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map(([a, b]) => toMap(a, b)),
+        vel: [vc * v[0] - vs * v[1], vs * v[0] + vc * v[1]],
+      };
+    });
+  }
+  function onObstacles(r, p) {
+    r.obstacles = p; r.obstaclesAt = performance.now();
+    const base = lookupPose(`${r.id}/base_link`);
+    const world = p.world_frame ? lookupPose(p.world_frame) : null;
+    const had = r.obstaclesMap.some((o) => o.moving);
+    r.obstaclesMap = base ? obstaclesInMap(p, base, world) : [];
+    if (had || r.obstaclesMap.some((o) => o.moving)) dirty = true;
+    drawCamObstacles(r.id);
+  }
+
+  // Map: only MOVING obstacles. Static ones are mostly shelving the map already shows,
+  // and drawing every cluster would bury the robots under boxes.
+  function drawObstacles() {
+    ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
+    for (const r of robots.values()) {
+      for (const o of r.obstaclesMap) {
+        if (!o.moving) continue;
+        ctx.fillStyle = OBSTACLE_RED; ctx.strokeStyle = OBSTACLE_RED; ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.3; ctx.beginPath();
+        o.corners.forEach(([x, y], i) => { const [a, b] = toPx(x, y); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); });
+        ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1; ctx.stroke();
+        const [a, b] = toPx(o.at[0], o.at[1]);
+        ctx.beginPath(); ctx.arc(a, b, 5, 0, 7); ctx.fill();
+        // A person's footprint is a few pixels at fleet zoom; the halo is what's found.
+        ctx.globalAlpha = 0.35; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(a, b, 12, 0, 7); ctx.stroke();
+        ctx.globalAlpha = 1; ctx.lineWidth = 2;
+        // Where it will be in one second at this velocity, floored so a slow walker's
+        // arrow is still visible at fleet zoom.
+        const len = Math.max(Math.hypot(o.vel[0], o.vel[1]) * view.scale, 14);
+        const ang = Math.atan2(-o.vel[1], o.vel[0]); // canvas y points down
+        const ex = a + Math.cos(ang) * len, ey = b + Math.sin(ang) * len;
+        ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(ex, ey); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ex, ey);
+        ctx.lineTo(ex - Math.cos(ang - 0.45) * 8, ey - Math.sin(ang - 0.45) * 8);
+        ctx.lineTo(ex - Math.cos(ang + 0.45) * 8, ey - Math.sin(ang + 0.45) * 8);
+        ctx.closePath(); ctx.fill();
+        const label = `moving · ${o.speed.toFixed(1)} m/s`;
+        const tw = ctx.measureText(label).width + 10;
+        ctx.fillRect(a - tw / 2, b - 30, tw, 16);
+        ctx.fillStyle = "#fff"; ctx.fillText(label, a, b - 18);
+      }
+    }
+  }
+
+  // Camera tile: every obstacle, boxed in the depth image's pixels (in sim one camera
+  // makes both images; the D435's depth is aligned to colour). The picture is drawn
+  // `background-size: cover`, so invert a cover crop, not a contain letterbox.
+  function drawCamObstacles(id) {
+    const c = cams.get(id);
+    if (!c || !open.has(id)) return;
+    const cv = c.overlay, w = cv.clientWidth, h = cv.clientHeight;
+    if (!w || !h) return;
+    if (cv.width !== w) cv.width = w;
+    if (cv.height !== h) cv.height = h;
+    const g = cv.getContext("2d");
+    g.clearRect(0, 0, w, h);
+    const r = robots.get(id), p = r && r.obstacles;
+    if (!p || performance.now() - r.obstaclesAt > OBSTACLE_TTL_MS || !p.w || !p.h) return;
+    const k = Math.max(w / p.w, h / p.h), ox = (w - p.w * k) / 2, oy = (h - p.h * k) / 2;
+    g.font = '600 10px "IBM Plex Sans", system-ui, sans-serif'; g.textBaseline = "bottom";
+    for (const o of p.obstacles || []) {
+      const [u0, v0, u1, v1] = o.uv;
+      const x = ox + u0 * k, y = oy + v0 * k, bh = (v1 - v0) * k, color = o.moving ? OBSTACLE_RED : "#f5a524";
+      g.strokeStyle = color; g.lineWidth = o.moving ? 2.5 : 1.5;
+      g.strokeRect(x, y, (u1 - u0) * k, bh);
+      const label = o.moving ? `moving · ${o.range_m.toFixed(1)} m` : `${o.range_m.toFixed(1)} m`;
+      // Inside the box's bottom edge: the top of the tile belongs to the Camera/Depth
+      // switch, and a person's box reaches it.
+      const tw = g.measureText(label).width + 6, ly = Math.min(y + bh, h);
+      g.fillStyle = color; g.fillRect(x, ly - 13, tw, 13);
+      g.fillStyle = o.moving ? "#fff" : "#15191e"; g.fillText(label, x + 3, ly - 1);
+    }
+  }
+
   // -- drawing ----------------------------------------------------------------------
 
   function drawFrame() {
@@ -257,6 +355,8 @@
       ctx.fillStyle = palette.ink; ctx.fillText(w.name, a, b - 14);
     }
 
+    drawObstacles();
+
     for (const r of robots.values()) {
       if (!r.pose) continue;
       const [a, b] = toPx(r.pose.x, r.pose.y), live = online(r);
@@ -286,8 +386,17 @@
       id, color: COLORS[robots.size % COLORS.length], pose: null, linkAt: -Infinity, plan: [],
       explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity, queueDepth: 0,
       nav: null, seenStamp: {}, odom: null, odomAt: -Infinity,
+      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [],
     };
     robots.set(id, r);
+
+    // Always subscribed, not just while a card is open: moving obstacles go on the
+    // fleet map. A few KB at 5 Hz per robot.
+    topic(`/${id}/obstacles`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
+      let p;
+      try { p = JSON.parse(msg.data); } catch (e) { return; }
+      onObstacles(r, p);
+    });
 
     // Only the twist is used (speed / turn rate on the card); the pose comes from /tf.
     // Throttled: the card shows it to two decimals, 4 Hz is plenty.
@@ -463,7 +572,10 @@
       for (let i = 1; i < r.plan.length; i++) d += Math.hypot(r.plan[i][0] - r.plan[i - 1][0], r.plan[i][1] - r.plan[i - 1][1]);
       togo = `${d.toFixed(1)} m`;
     }
+    const ob = r.obstacles && now - r.obstaclesAt < OBSTACLE_TTL_MS ? r.obstacles : null;
+    const nearest = ob && ob.obstacles && ob.obstacles.length ? ` · nearest ${ob.obstacles[0].range_m.toFixed(1)} m` : "";
     return {
+      obst: !ob ? "—" : !ob.count ? "None in view" : `${ob.count}${ob.moving ? `, ${ob.moving} moving` : ""}${nearest}`,
       pos: r.pose ? `${r.pose.x.toFixed(2)}, ${r.pose.y.toFixed(2)} m` : "—",
       heading: r.pose ? `${Math.round(((r.pose.yaw * 180) / Math.PI + 360) % 360)}°` : "—",
       speed: tw ? `${Math.hypot(tw.linear.x, tw.linear.y).toFixed(2)} m/s` : "—",
@@ -471,7 +583,7 @@
       togo,
     };
   }
-  const FACTS = [["pos", "Position"], ["heading", "Heading"], ["speed", "Speed"], ["turn", "Turn rate"], ["togo", "To go"]];
+  const FACTS = [["pos", "Position"], ["heading", "Heading"], ["speed", "Speed"], ["turn", "Turn rate"], ["togo", "To go"], ["obst", "Obstacles"]];
 
   function renderFleet() {
     const list = [...robots.values()];
@@ -498,7 +610,7 @@
         <div class="l2">${st.tag === "on a task" ? tile.title + (tile.sub ? ` · ${tile.sub}` : "") : esc(st.detail) + (r.queueDepth ? ` · ${r.queueDepth} waiting` : "")}</div>
         ${isOpen ? `<div class="more">
           <div class="cam-slot" data-cam="${esc(r.id)}"></div>
-          <dl class="facts" data-id="${esc(r.id)}">${FACTS.map(([k, label]) => `<div${k === "pos" ? ' class="wide"' : ""}><dt>${label}</dt><dd data-f="${k}">${esc(f[k])}</dd></div>`).join("")}</dl>
+          <dl class="facts" data-id="${esc(r.id)}">${FACTS.map(([k, label]) => `<div${k === "pos" ? ' class="wide"' : k === "obst" ? ' class="full"' : ""}><dt>${label}</dt><dd data-f="${k}">${esc(f[k])}</dd></div>`).join("")}</dl>
           <div class="acts"><button class="btn small" data-act="stop">Stop</button>
             <button class="btn small" data-act="explore">${st.tag === "exploring" ? "Stop exploring" : "Explore"}</button>
             ${busy ? `<button class="btn small" data-act="clear" title="Cancel this robot's current task and everything queued behind it">Clear tasks</button>` : ""}</div>
@@ -523,9 +635,9 @@
     if (c) return c;
     const el = document.createElement("div");
     el.className = "cam";
-    el.innerHTML = `<div class="pic"></div><span class="msg">Connecting to camera…</span>
+    el.innerHTML = `<div class="pic"></div><canvas class="obst"></canvas><span class="msg">Connecting to camera…</span>
       <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button></div>`;
-    c = { el, pic: el.querySelector(".pic"), msg: el.querySelector(".msg"), mode: camDefault, timer: null, token: 0 };
+    c = { el, pic: el.querySelector(".pic"), overlay: el.querySelector("canvas.obst"), msg: el.querySelector(".msg"), mode: camDefault, timer: null, token: 0 };
     cams.set(id, c);
     syncCamButtons(c);
     return c;
@@ -1155,6 +1267,12 @@
       if (p && (!r.pose || Math.hypot(p.x - r.pose.x, p.y - r.pose.y) > 0.01 || Math.abs(p.yaw - r.pose.yaw) > 0.02)) { r.pose = p; moved = true; }
     }
     if (moved) { dirty = true; if (!view.moved) fitView(); if (view3d) syncCloudRobots(); }
+    for (const r of robots.values()) {
+      if (!r.obstacles || performance.now() - r.obstaclesAt <= OBSTACLE_TTL_MS) continue;
+      if (r.obstaclesMap.some((o) => o.moving)) dirty = true;
+      r.obstacles = null; r.obstaclesMap = [];
+      drawCamObstacles(r.id); // clears it
+    }
     renderFleet(); renderEmpty(); maybeAutoDemo();
   }, 250);
 
@@ -1166,5 +1284,5 @@
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, view, toPx, toWorld };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, view, toPx, toWorld, obstaclesInMap, onObstacles };
 })();

@@ -105,6 +105,7 @@
   .more { cursor: default; }
   .more .cam { width: 100%; aspect-ratio: 16/9; border-radius: 6px; background: #0b0d10; position: relative; overflow: hidden; }
   .more .cam .pic { position: absolute; inset: 0; background: center / cover no-repeat; }
+  .more .cam canvas.obst { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .more .cam .msg { position: absolute; inset: 0; display: grid; place-items: center; color: #8b95a0; font-size: .8rem; pointer-events: none; }
   .more .cam .msg:empty { display: none; }
   /* Over the picture, so fixed dark-glass colours rather than theme tokens. */
@@ -118,6 +119,7 @@
   .pill.exploring { --tc: #8a5cf0; } .pill.failed { --tc: var(--stop); } .pill.off { --tc: var(--faint); }
   .more .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; margin: 0; }
   .more .facts .wide { grid-column: span 2; }
+  .more .facts .full { grid-column: 1 / -1; }
   .more .facts dt { font-size: .7rem; color: var(--muted); }
   .more .facts dd { margin: 0; font-size: .84rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .more .acts { display: flex; gap: 6px; flex-wrap: wrap; }

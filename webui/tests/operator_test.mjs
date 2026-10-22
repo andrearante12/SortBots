@@ -292,6 +292,62 @@ async function main() {
     await emit(`/${r0}/task_status`, { data: JSON.stringify({ task_id: null, state: 'IDLE', queue_depth: 0, queue: [] }) });
     await sleep(300);
     check(`${vp.label}: an idle robot's pill is the idle colour`, await page.eval(`document.querySelector('#fleet .robot[data-id="${r0}"] .tag').classList.contains('idle')`));
+
+    // -- obstacles (nodes/obstacle_detector.py) ---------------------------------------------
+    // r0 sits at (-3, 2) facing 0.5 rad. One person 2 m dead ahead crossing to its right,
+    // one static box; no world_frame, so velocity is in base_link like a detector without
+    // odom TF would send it.
+    const ahead = [-3 + 2 * Math.cos(0.5), 2 + 2 * Math.sin(0.5)];
+    const obstacles = (moving) => ({ data: JSON.stringify({ stamp: 1, frame: `${r0}/base_link`, world_frame: null, floor_z: 0,
+      w: 848, h: 480, count: 2, moving: moving ? 1 : 0, obstacles: [
+        { track_id: 4, moving, speed_mps: 1.2, vel: [0, -1.2], centroid: [2.0, 0, 0.9], min: [1.9, -0.2, 0.1], max: [2.1, 0.2, 1.7],
+          extent_m: 0.4, height_m: 1.7, range_m: 1.9, bearing_deg: 0, n: 900, uv: [380, 60, 470, 470], clipped: false, hits: 8 },
+        { track_id: 2, moving: false, speed_mps: 0, vel: [0, 0], centroid: [3.0, 1.0, 0.3], min: [2.9, 0.8, 0.1], max: [3.1, 1.2, 0.5],
+          extent_m: 0.4, height_m: 0.5, range_m: 3.0, bearing_deg: 18, n: 200, uv: [100, 300, 200, 400], clipped: false, hits: 30 },
+      ] }) });
+    // Obstacle red (#e5484d) on a canvas, optionally only within `rad` px of (cx, cy).
+    const redPx = (sel, cx = null, cy = null, rad = 0) => page.eval(`(() => {
+      const c = document.querySelector(${JSON.stringify(sel)});
+      if (!c || !c.width) return -1;
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data, s = c.width / c.clientWidth;
+      let n = 0;
+      for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+        if (${cx} !== null && Math.hypot(x / s - ${cx}, y / s - ${cy}) > ${rad}) continue;
+        const i = (y * c.width + x) * 4;
+        if (d[i] > 200 && d[i + 1] < 100 && d[i + 2] < 100 && d[i + 3] > 128) n++;
+      }
+      return n;
+    })()`);
+    check(`${vp.label}: no obstacle red on the map before any detection`, (await redPx('#map')) === 0);
+    await emit(`/${r0}/obstacles`, obstacles(true));
+    await sleep(400);
+    const [ax, ay] = await page.eval(`window.__operator.toPx(${ahead[0]}, ${ahead[1]})`);
+    // The marker, its 1 s velocity arrow and its label, all around the obstacle.
+    const near = await redPx('#map', ax, ay, 90), all = await redPx('#map');
+    check(`${vp.label}: a moving obstacle is marked on the map 2 m ahead of its robot`, near > 30 && near === all, `near=${near} all=${all}`);
+    check(`${vp.label}: the card counts obstacles, moving ones and the nearest`, (await f0('obst')) === '2, 1 moving · nearest 1.9 m', await f0('obst'));
+    check(`${vp.label}: the camera tile boxes the obstacles`, (await redPx(`#fleet .robot[data-id="${r0}"] canvas.obst`)) > 50);
+    await emit(`/${r0}/obstacles`, obstacles(false));
+    await sleep(300);
+    check(`${vp.label}: static obstacles are left off the map`, (await redPx('#map')) === 0);
+    check(`${vp.label}: a static-only frame still counts them on the card`, (await f0('obst')) === '2 · nearest 1.9 m', await f0('obst'));
+    await emit(`/${r0}/obstacles`, obstacles(true));
+    await sleep(2000); // > OBSTACLE_TTL_MS with nothing new
+    check(`${vp.label}: a silent detector's markers expire from the map`, (await redPx('#map')) === 0);
+    check(`${vp.label}: ... from the camera tile`, (await redPx(`#fleet .robot[data-id="${r0}"] canvas.obst`)) === 0);
+    check(`${vp.label}: ... and from the card`, (await f0('obst')) === '—', await f0('obst'));
+    const tfm = await page.eval(`JSON.stringify([
+      window.__operator.obstaclesInMap({ obstacles: [{ track_id: 1, centroid: [1, 0, 0], min: [1, 0, 0], max: [1, 0, 0], vel: [1, 0] }] }, { x: 1, y: 2, yaw: Math.PI / 2 }, { yaw: 0 })[0],
+      window.__operator.obstaclesInMap({ obstacles: [{ track_id: 1, centroid: [1, 0, 0], min: [1, 0, 0], max: [1, 0, 0], vel: [1, 0] }] }, { x: 1, y: 2, yaw: Math.PI / 2 }, null)[0]])`);
+    const [wOdom, wBase] = JSON.parse(tfm), close = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-9);
+    check(`${vp.label}: obstacle positions go base_link -> map, velocity stays in its world frame`, close(wOdom.at, [1, 3]) && close(wOdom.vel, [1, 0]), tfm);
+    check(`${vp.label}: velocity without a world frame is rotated like a position`, close(wBase.vel, [0, 1]), tfm);
+    // That wait also outlasted ONLINE_TTL_MS for both robots; a live one keeps sending /tf.
+    await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+    await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+    await emit(`/${r0}/obstacles`, obstacles(true));
+    await sleep(300);
+    await shot(`${vp.label}-obstacles`);
     await shot(`${vp.label}-two-cards`);
     await click(`#fleet .robot[data-id="${r0}"] .l1`);
     await sleep(200);
@@ -315,7 +371,8 @@ async function main() {
     check(`${vp.label}: a waypoint chip sends the selected robot`, sent.length === 1 && sent[0].op === 'send_action_goal' &&
           sent[0].action === `/${r1}/navigate_to_pose` && sent[0].args.pose.header.frame_id === 'map', ops.slice(0, 160));
     await sleep(300);
-    check(`${vp.label}: the robot row says where it is going`, /Going to A/.test(await page.eval(`document.querySelector('#fleet .robot.sel .l2').textContent`)));
+    const rowGoing = await page.eval(`document.querySelector('#fleet .robot.sel .l2').textContent`);
+    check(`${vp.label}: the robot row says where it is going`, /Going to A/.test(rowGoing), rowGoing);
     await page.eval(`window.__ops.length = 0`);
     await page.eval(`document.querySelector('#tools [data-t="goto"]').click()`);
     await mapPointer(2, 4);
@@ -338,7 +395,8 @@ async function main() {
     await emit(`/${r1}/task_status`, { data: JSON.stringify({ task_id: payload.task_id, state: 'NAV_TO_PICKUP', queue_depth: 0 }) });
     await sleep(200);
     check(`${vp.label}: task status moves it to en route`, /en route/.test(await $text('#tasks')));
-    check(`${vp.label}: the robot row follows its task`, /Heading to pick-up/.test(await page.eval(`document.querySelector('#fleet .robot.sel .l2').textContent`)));
+    const rowTask = await page.eval(`document.querySelector('#fleet .robot.sel .l2').textContent`);
+    check(`${vp.label}: the robot row follows its task`, /Heading to pick-up/.test(rowTask), rowTask);
     await emit(`/${r1}/task_status`, { data: JSON.stringify({ task_id: payload.task_id, state: 'DONE', queue_depth: 0 }) });
     await sleep(200);
     check(`${vp.label}: DONE finishes the task`, /done/.test(await $text('#tasks')));
