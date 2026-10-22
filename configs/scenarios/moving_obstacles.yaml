@@ -33,7 +33,7 @@ run:
   map: null
   world: aisle_crossing
 
-overrides: [world, headless, chase_cam, explore]
+overrides: [world, headless, chase_cam, explore, render_every, lite_render]
 
 capture:
   bag: false

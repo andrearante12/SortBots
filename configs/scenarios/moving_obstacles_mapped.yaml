@@ -33,7 +33,7 @@ run:
   map: fleet_warehouse_test
   world: aisle_crossing
 
-overrides: [world, map, headless, chase_cam]
+overrides: [world, map, headless, chase_cam, render_every, lite_render]
 
 capture:
   bag: false
