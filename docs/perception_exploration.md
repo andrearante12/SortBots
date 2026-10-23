@@ -190,9 +190,10 @@ http://localhost:8081/).
 
 | Tab | Role |
 |---|---|
-| **live** | Cameras / fused 2D map / drive / dispatch / 3D fleet recon |
-| **fleet** | Monitor `/fleet/status` + `/fleet/intent` ([`webui/fleet_comms.js`](../webui/fleet_comms.js)) |
-| **scenarios** | Start/stop sims via HTTP control API ([`webui/scenarios.js`](../webui/scenarios.js)) |
+| **operator view** | Cameras / fused 2D map / dispatch / 3D fleet recon (`webui/operator.html`) |
+| **Session panel** | Start/stop sims via HTTP control API ([`webui/scenarios.js`](../webui/scenarios.js)) |
+
+The old fleet-radio monitor tab (`fleet_comms.js`) was removed with the per-robot dashboard.
 
 Peer markers on the live map/3D view also prefer `/fleet/status` (same radio
 as autonomy), not TF eavesdropping.
@@ -218,7 +219,7 @@ as autonomy), not TF eavesdropping.
 ```bash
 /usr/bin/python3 -m pytest tests/map_merge_test.py tests/recon_merge_test.py \
   tests/fleet_radio_test.py tests/dynamic_obstacle_filter_test.py -q
-node webui/tests/scenarios_test.mjs   # includes fleet tab visibility
+node webui/tests/operator_test.mjs
 ```
 
 ## Live checks (headless fleet)

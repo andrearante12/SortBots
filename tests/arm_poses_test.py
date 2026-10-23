@@ -191,9 +191,8 @@ def test_degenerate_move_sec_still_reaches_target(move_sec):
 
 
 def test_format_capture_matches_the_dashboard():
-    # Byte-identical to what webui/arm.js emits; webui/tests/arm_test.mjs
-    # asserts the other direction by parsing the browser's output with this
-    # loader. Both halves are hand-written, so both directions are checked.
+    # Was byte-identical to what the removed webui/arm.js (the old dashboard's
+    # arm pad) emitted; kept as the capture-format contract for hand-written poses.
     assert (format_capture([0.0, 1.047, -0.524, 0.0, 0.0, 1.2], "approach")
             == "    - {name: approach, q: [0.000, 1.047, -0.524, 0.000, 0.000, 1.200]}")
 

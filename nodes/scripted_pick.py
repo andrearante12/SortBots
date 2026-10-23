@@ -6,7 +6,7 @@ Plays back recorded joint-space poses from `configs/arm_poses.yaml`:
     STOW -> APPROACH -> DESCEND -> CLOSE -> (weld) -> LIFT -> CARRY
 
 There is no IK on this path. The poses were captured by jogging the arm with
-the dashboard's arm pad (`webui/arm.js`) and pasting the emitted YAML into the
+the old dashboard's arm pad (since removed) and pasting the emitted YAML into the
 config — so the numbers are measured, not solved, and the node needs neither
 torch nor pytorch-kinematics. That is what makes it launchable: the previous
 version carried a module-scope `import torch`, so no launch file could start it

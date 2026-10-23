@@ -122,7 +122,7 @@ Decide on numbers, not impressions.
 
 ### Phase 6: reproducible perception offline (L13, L9, L12) · ~1.5 d
 
-1. **Record real D435 bags** (`scripts/record_dashboard_bag.sh` already exists): one
+1. **Record real D435 bags** (`scripts/record_explore_bag.sh` already exists): one
    still scene, one slow handheld loop, one fast-turn/blank-wall stress run. Store them
    out of git (they are large); `maps/`-style manifest.
 2. **`tests/real_odometry_replay`** (manual, needs ROS, not CI): replay each bag
