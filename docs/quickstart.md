@@ -6,7 +6,7 @@ warehouse in the browser. This is the only setup doc; everything else
 reach for after this works.
 
 The **primary track is Isaac Sim** (mobile / multi-robot / ROS 2 / SLAM). The
-GUI you drive is the **web dashboard** at `http://localhost:8081/` — not rviz,
+GUI you drive is the **operator view** at `http://localhost:8081/` — not rviz,
 not Isaac's own Kit window. rviz is off by default; you never touch the Kit UI
 for a normal run. The **ManiSkill** arm-manipulation track is optional and
 lives at the end.
@@ -138,7 +138,7 @@ SortBots dashboard console is UP
 ```
 
 1. Open **`http://localhost:8081/`**.
-2. Switch the header toggle to **scenarios**.
+2. Click **Session** in the header to open the launch form.
 3. Pick **`explore_fleet`** and hit **Start**.
 
 `explore_fleet` spawns **two robots** at their `configs/robots.yaml` positions,
@@ -148,7 +148,7 @@ robot has mapped. They deconflict over mesh radio (`/fleet/intent` +
 `/fleet/status`), not a TF oracle. This is the project's default operating
 mode; `explore_fresh` is the single-robot variant.
 
-The tab streams the launcher output and a phase readout:
+The launch form streams the launcher output and a phase readout:
 
 ```
 starting Isaac Sim → loading the warehouse → sim publishing
@@ -159,20 +159,22 @@ The **first** run streams the NVIDIA warehouse assets — allow a few minutes at
 "loading the warehouse" (cached afterward). At **running** the map view starts
 filling in and both robots explore hands-off. Chase cams are off by default in
 fleet runs (the 3rd-person render product costs ~30% of real-time factor); the
-dashboard shows robot_0's head cam. Tick **chase_cam** on the card to get the
-3rd-person view back.
+operator view shows each robot's head cam on its card. Tick **chase_cam** in the
+launch form to get the 3rd-person view back.
 
-- **camera / map** buttons (header) swap the stage between camera and the
-  occupancy grid. In map mode, drag on the grid to send a nav goal.
-- **Robot switcher** (header) reloads the page scoped to the other robot.
-- **W/A/S/D** drive, **Q/E** rotate, **Space** stops — anywhere on the page.
-  Don't drive while exploration or a task is active; Nav2 will fight you.
-- **Dispatch & task queue** (right column): **Start / Stop** for exploration
-  and the pickup→dropoff form.
+- **Map / 3D cloud** (header) swaps the stage between the fused occupancy grid and the
+  fused point cloud. In 2D, use the toolbar to place waypoints or send a robot to a point.
+- **Robot cards** (left) show each robot's camera, task and pose; the card you opened last
+  has control of map sends and waypoint chips.
+- **Tasks** (right): queue moves or pickup→dropoff tasks per robot, and cancel any queued
+  one. **Stop all** (header) halts every robot at once.
+- The old per-robot dashboard is deprecated; it remains at `/?robot=ID` (the
+  "Engineering view" link on an open robot card) for the drive pad and SLAM internals.
+  See [`running.md`](running.md#the-operator-view-the-default-page-).
 
 ## 6. Stop
 
-- **Stop** in the scenarios tab — tears the run down, leaves the console and
+- **Stop** in the Session panel — tears the run down, leaves the console and
   your open page up for the next run.
 - `scripts/run_console.sh stop` — takes down the console *and* any running sim.
 - Ctrl-C in the console terminal — stops the console only; a running sim keeps
@@ -190,7 +192,7 @@ scripts/run_demo.sh --robots 1      # single robot instead
 scripts/run_demo.sh stop            # tear it all down
 ```
 
-Everything the scenarios tab does is also `scripts/sim_ctl.sh`, with exit codes
+Everything the Session panel does is also `scripts/sim_ctl.sh`, with exit codes
 as the interface (`0` ok, `1` failure, `3` no console, `4` nothing running,
 `124` timeout):
 
