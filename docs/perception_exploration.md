@@ -101,7 +101,7 @@ into: 2–11 ms with a peer in view, nothing otherwise. Already-painted phantoms
 
 [`nodes/obstacle_detector.py`](../nodes/obstacle_detector.py): geometric
 clusters in base_link plus a `moving` flag from odom-frame tracks, published
-as `/{id}/obstacles` (JSON), `/{id}/obstacle_points` and `/{id}/obstacles_viz`.
+as `/{id}/obstacle_tracks` (JSON), `/{id}/obstacle_points` and `/{id}/obstacles_viz`.
 It reads raw `camera/depth`, independent of the filter above, and runs on
 every platform. See [`docs/obstacle_detection.md`](obstacle_detection.md).
 

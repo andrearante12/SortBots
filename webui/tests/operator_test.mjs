@@ -349,7 +349,7 @@ async function main() {
       return n;
     })()`);
     check(`${vp.label}: no obstacle red on the map before any detection`, (await redPx('#map')) === 0);
-    await emit(`/${r0}/obstacles`, obstacles(true));
+    await emit(`/${r0}/obstacle_tracks`, obstacles(true));
     await sleep(400);
     const [ax, ay] = await page.eval(`window.__operator.toPx(${ahead[0]}, ${ahead[1]})`);
     // The marker, its 1 s velocity arrow and its label, all around the obstacle.
@@ -357,11 +357,11 @@ async function main() {
     check(`${vp.label}: a moving obstacle is marked on the map 2 m ahead of its robot`, near > 30 && near === all, `near=${near} all=${all}`);
     check(`${vp.label}: the card counts obstacles, moving ones and the nearest`, (await f0('obst')) === '2, 1 moving · nearest 1.9 m', await f0('obst'));
     check(`${vp.label}: the camera tile boxes the obstacles`, (await redPx(`#fleet .robot[data-id="${r0}"] canvas.obst`)) > 50);
-    await emit(`/${r0}/obstacles`, obstacles(false));
+    await emit(`/${r0}/obstacle_tracks`, obstacles(false));
     await sleep(300);
     check(`${vp.label}: static obstacles are left off the map`, (await redPx('#map')) === 0);
     check(`${vp.label}: a static-only frame still counts them on the card`, (await f0('obst')) === '2 · nearest 1.9 m', await f0('obst'));
-    await emit(`/${r0}/obstacles`, obstacles(true));
+    await emit(`/${r0}/obstacle_tracks`, obstacles(true));
     await sleep(2000); // > OBSTACLE_TTL_MS with nothing new
     check(`${vp.label}: a silent detector's markers expire from the map`, (await redPx('#map')) === 0);
     check(`${vp.label}: ... from the camera tile`, (await redPx(`#fleet .robot[data-id="${r0}"] canvas.obst`)) === 0);
@@ -375,7 +375,7 @@ async function main() {
     // That wait also outlasted ONLINE_TTL_MS for both robots; a live one keeps sending /tf.
     await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
     await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
-    await emit(`/${r0}/obstacles`, obstacles(true));
+    await emit(`/${r0}/obstacle_tracks`, obstacles(true));
     await sleep(300);
     await shot(`${vp.label}-obstacles`);
     await shot(`${vp.label}-two-cards`);

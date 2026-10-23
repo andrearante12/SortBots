@@ -484,7 +484,7 @@
 
     // Always subscribed, not just while a card is open: moving obstacles go on the
     // fleet map. A few KB at 5 Hz per robot.
-    topic(`/${id}/obstacles`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
+    topic(`/${id}/obstacle_tracks`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
       let p;
       try { p = JSON.parse(msg.data); } catch (e) { return; }
       onObstacles(r, p);

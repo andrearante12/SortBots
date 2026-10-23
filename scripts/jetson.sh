@@ -107,6 +107,11 @@ case "${1:-}" in
     # ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST: the dashboard runs HERE, so no
     #   DDS traffic needs to leave the Jetson — and a desktop sim on the same
     #   LAN, which also publishes /robot_0/*, can't cross-talk with the robot.
+    # FASTRTPS_DEFAULT_PROFILES_FILE: shared-memory segment big enough for a
+    #   whole D435 frame (configs/dds/fastdds_large_shm.xml explains why).
+    # ROS_STATIC_PEERS: the workstation that runs offloaded SLAM
+    #   (SORTBOTS_WORKSTATION=<its address> scripts/jetson.sh console), the one
+    #   exception to LOCALHOST discovery. Unset = robot stays private.
     docker run -d --name "$NAME" \
       --runtime nvidia \
       --network host --ipc host \
@@ -118,6 +123,8 @@ case "${1:-}" in
       --user "$(id -u):$(id -g)" \
       -e HOME="$HOME" \
       -e ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
+      -e ROS_STATIC_PEERS="${SORTBOTS_WORKSTATION:-}" \
+      -e FASTRTPS_DEFAULT_PROFILES_FILE="$REPO_ROOT/configs/dds/fastdds_large_shm.xml" \
       -e SORTBOTS_PLATFORM=real \
       -v "$HOME/.ros:$HOME/.ros" \
       -v "$REPO_ROOT:$REPO_ROOT" \
@@ -145,6 +152,11 @@ case "${1:-}" in
       # run_console.sh stop takes the robot pipeline down too (it calls
       # run_robot.sh stop on this platform), then the container itself.
       docker exec "$NAME" bash "$REPO_ROOT/scripts/run_console.sh" stop || true
+      # The container shares the host's /dev/shm (--ipc host): Fast DDS
+      # segments of killed processes outlive it and stay in RAM. Clean the
+      # zombies (segments no live process holds) before the container goes.
+      docker exec "$NAME" bash -c "source /opt/ros/jazzy/setup.bash; fastdds shm clean" \
+        >/dev/null 2>&1 || true
     fi
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     echo "[jetson] stopped."

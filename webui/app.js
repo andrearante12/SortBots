@@ -457,7 +457,7 @@ const OBSTACLE_COLORS = { moving: "rgba(255,70,70,1)", static: "rgba(255,180,40,
 const obstacleCanvas = document.getElementById("obstacle-overlay");
 const obstacleTag = document.getElementById("obstacle-tag");
 const obstacleToggle = document.getElementById("obstacle-toggle-box");
-let lastObstacles = null; // newest /obstacles message
+let lastObstacles = null; // newest /obstacle_tracks message
 let lastObstaclesAt = 0;
 
 function drawObstacleOverlay() {
@@ -510,7 +510,7 @@ function drawObstacleOverlay() {
 // runs regardless: Nav2 and tests read its other outputs.
 const obstaclesTopic = new ROSLIB.Topic({
   ros,
-  name: `/${ROBOT_ID}/obstacles`,
+  name: `/${ROBOT_ID}/obstacle_tracks`,
   messageType: "std_msgs/String",
   reconnect_on_close: true,
   throttle_rate: 100,

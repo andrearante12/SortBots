@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Headless test for the dashboard's obstacle overlay (index.html sensors view,
- * drawn from nodes/obstacle_detector.py's /<id>/obstacles JSON).
+ * drawn from nodes/obstacle_detector.py's /<id>/obstacle_tracks JSON).
  *
  *     node webui/tests/obstacle_overlay_test.mjs [--screenshot DIR] [--port N]
  *
@@ -210,15 +210,15 @@ async function main() {
     }
     return { red, amber, any };
   })()`);
-  const subscribed = () => page.eval(`(window.__topics['/robot_0/obstacles'] || []).length`);
+  const subscribed = () => page.eval(`(window.__topics['/robot_0/obstacle_tracks'] || []).length`);
 
   check('not subscribed outside the sensors view', (await page.eval(`stageMode`)) !== 'sensors' ? (await subscribed()) === 0 : true);
   await page.eval(`setStageMode('sensors')`);
   await sleep(300);
-  check('sensors view subscribes to /robot_0/obstacles', (await subscribed()) === 1);
+  check('sensors view subscribes to /robot_0/obstacle_tracks', (await subscribed()) === 1);
   check('tag waits for the detector before any message', /waiting/.test(await $text('#obstacle-tag')), await $text('#obstacle-tag'));
 
-  await emit('/robot_0/obstacles', payload(1.0));
+  await emit('/robot_0/obstacle_tracks', payload(1.0));
   await sleep(200);
   const tag = await $text('#obstacle-tag');
   check('tag counts obstacles and moving ones', tag === 'obstacles · 2 · 1 moving', tag);
@@ -247,12 +247,12 @@ async function main() {
   await sleep(100);
   check('toggle on draws them again', (await colours()).red > 200);
 
-  await emit('/robot_0/obstacles', { data: JSON.stringify({ stamp: 2, w: 848, h: 480, count: 0, moving: 0, obstacles: [] }) });
+  await emit('/robot_0/obstacle_tracks', { data: JSON.stringify({ stamp: 2, w: 848, h: 480, count: 0, moving: 0, obstacles: [] }) });
   await sleep(100);
   check('an empty frame clears the canvas', (await colours()).any === 0);
   check('tag drops the alert with nothing moving', !(await page.eval(`document.getElementById('obstacle-tag').classList.contains('alert')`)));
 
-  await emit('/robot_0/obstacles', { data: 'not json' });
+  await emit('/robot_0/obstacle_tracks', { data: 'not json' });
   await sleep(100);
   check('a malformed message is logged, not thrown', pageErrors.length === 0, pageErrors.join(' | '));
 
@@ -263,7 +263,7 @@ async function main() {
   if (SCREENSHOT_DIR) {
     fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
     await page.eval(`setStageMode('sensors')`);
-    await emit('/robot_0/obstacles', payload(3.0));
+    await emit('/robot_0/obstacle_tracks', payload(3.0));
     await sleep(300);
     const r = await page.send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(path.join(SCREENSHOT_DIR, 'sensors-obstacles.png'), Buffer.from(r.result.data, 'base64'));

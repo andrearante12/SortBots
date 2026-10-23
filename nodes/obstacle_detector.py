@@ -19,7 +19,7 @@ Pipeline (docs/obstacle_detection.md has the rationale and the tuning notes):
 
 Outputs, all stamped with the source depth image's time:
 
-    /<id>/obstacles        std_msgs/String JSON  (dashboard overlay, tests)
+    /<id>/obstacle_tracks  std_msgs/String JSON  (dashboard overlay, tests)
     /<id>/obstacle_points  sensor_msgs/PointCloud2 in <id>/base_link (Nav2-ready)
     /<id>/obstacles_viz    visualization_msgs/MarkerArray (RViz)
 
@@ -468,7 +468,7 @@ def main(argv=None):
                                      self._on_depth, qos)
             self.create_subscription(CameraInfo, f"/{robot_id}/camera/camera_info",
                                      self._on_info, qos)
-            self.json_pub = self.create_publisher(String, f"/{robot_id}/obstacles", 1)
+            self.json_pub = self.create_publisher(String, f"/{robot_id}/obstacle_tracks", 1)
             self.cloud_pub = self.create_publisher(
                 PointCloud2, f"/{robot_id}/obstacle_points", qos)
             self.viz_pub = self.create_publisher(

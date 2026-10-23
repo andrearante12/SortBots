@@ -47,7 +47,7 @@ flowchart LR
   H --> C[2-D cell grid,<br/>8-connected components]
   C --> S[per-cluster stats]
   S -->|TF odom ← base_link| T[nearest-neighbour tracks]
-  T --> J["/id/obstacles (JSON)"]
+  T --> J["/id/obstacle_tracks (JSON)"]
   S --> P["/id/obstacle_points (PointCloud2)"]
   T --> M["/id/obstacles_viz (MarkerArray)"]
 ```
@@ -114,13 +114,17 @@ they cross the frame edge.
 
 All outputs carry the source depth image's stamp.
 
+The JSON isn't on `/<id>/obstacles`. That name belongs to the real robot's
+`nodes/obstacle_cloud.py`, a raw obstacle PointCloud2 that `slam_bench` reads,
+and two message types on one topic break both.
+
 | Topic | Type | Frame | For |
 |---|---|---|---|
-| `/<id>/obstacles` | `std_msgs/String` JSON | base_link (+ odom for tracks) | tests, dashboard |
+| `/<id>/obstacle_tracks` | `std_msgs/String` JSON | base_link (+ odom for tracks) | tests, dashboard |
 | `/<id>/obstacle_points` | `sensor_msgs/PointCloud2` (BEST_EFFORT) | `<id>/base_link` | a future Nav2 `ObstacleLayer` source |
 | `/<id>/obstacles_viz` | `visualization_msgs/MarkerArray` | `<id>/base_link` | RViz: a box per cluster (red = moving, amber = static) + label |
 
-`/<id>/obstacles` payload:
+`/<id>/obstacle_tracks` payload:
 
 ```json
 {
@@ -161,12 +165,12 @@ All outputs carry the source depth image's stamp.
 ```bash
 bash -c 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
          source /opt/ros/jazzy/setup.bash
-         ros2 topic echo --field data /robot_0/obstacles'
+         ros2 topic echo --field data /robot_0/obstacle_tracks'
 ```
 
 ## Writing tests against it
 
-A "person crosses the field of view" case can assert on `/<id>/obstacles` alone:
+A "person crosses the field of view" case can assert on `/<id>/obstacle_tracks` alone:
 
 - **Detected.** Some frame has an obstacle whose `uv` box or bearing matches the
   person, with `height_m` around body height.
