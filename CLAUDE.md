@@ -54,6 +54,17 @@ No custom `.msg`/`.srv`: inter-node protocol is `std_msgs/String` carrying JSON.
 Node tuning is plain YAML loaded by the node itself, not ROS params. Nodes take
 `--robot-id` and prefix topics by f-string, not `PushRosNamespace`.
 
+### One GUI: the operator view
+
+`webui/operator.html` (served by `webui/serve.py`) is the ONLY user-facing GUI.
+New UI is a view, panel or popover inside it, built on its CSS tokens, its
+light/dark theme and `webui/tests/operator_test.mjs`. Never a new standalone HTML
+page, a second HTTP server, or another port. A backend feature exposes `/api/...`
+routes on serve.py or ROS topics over rosbridge, and the operator view renders
+it. `webui/index.html` is the deprecated engineering view: fix it, don't grow it.
+Tools that shipped their own page (e.g. `commsim/viz/`) get folded into the
+operator view, not kept beside it.
+
 ## Invariants that cost the most time when violated
 
 - **Never `source /opt/ros/...` in a shell that will launch the sim.** Isaac's
