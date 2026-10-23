@@ -1,0 +1,28 @@
+# Canned demo the operator view runs in one click ("Run demo"), for testing and
+# showing the fleet off, instead of filling the queue menu by hand each time.
+# Loaded by webui/serve.py at /api/demo_tasks and fired through the same
+# /<robot>/dispatch_task path a hand-queued task takes, so once queued a demo
+# task is indistinguishable from a manual one (no separate code path to rot).
+#
+# Everything is queued at once: each robot runs ITS tasks in order on its own
+# queue (task_manager's per-robot FIFO), and the robots run at the same time.
+# The demo is "done" when every task has finished; Stop demo cancels them.
+#
+# A task is either {goto: W} (drive there and stop) or {pickup: W, dropoff: W}
+# (drive, pause, drive, pause). Every W MUST name a waypoint in the working set
+# (data/nav_waypoints.json — the pins on the map; renaming a pin breaks the
+# entries that name it). An entry naming an unknown waypoint, or a robot that
+# isn't running, is skipped with a warning rather than queueing a task no robot
+# can resolve. `robot` is optional: omit it or use "auto" to round-robin.
+#
+# Written for the warehouse map's pins (tables near the spawn, Aisles 1-3 along
+# the north wall). Each robot keeps to its own side — robot_0 the west aisles,
+# robot_1 the east aisle and the tables — so running them together shows the
+# fleet, not the collision monitor.
+tasks:
+  - {robot: robot_0, goto: Aisle 3}
+  - {robot: robot_0, goto: Aisle 2}
+  - {robot: robot_0, pickup: Aisle 2, dropoff: Aisle 3}
+  - {robot: robot_1, goto: Aisle 1}
+  - {robot: robot_1, goto: tables}
+  - {robot: robot_1, pickup: tables, dropoff: Aisle 1}

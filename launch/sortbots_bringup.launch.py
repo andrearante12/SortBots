@@ -40,12 +40,12 @@ a full independent RTAB-Map + Nav2 + task_manager stack per robot — TF is
 already multi-robot-safe (see scripts/_ros2_graphs.py's frame-prefixing) and
 configs/nav2_params.yaml is rewritten per-robot at launch time (see
 sortbots_nav2.launch.py). The dashboard (webui) stays singular regardless of
-robot count. `localization`/`database_path`/`explore` apply ONLY to the
-single robot named by `robot_id` (default robot_0) — other robots in
-`robot_ids` get their own auto-computed map path, matching the multi-robot
-scope this was built and tested against. `robot_id` itself does not need to
-appear in `robot_ids` for its map settings to be ignored cleanly; it's
-simplest to just include it.
+robot count. `localization`/`database_path` apply to the robot named by
+`robot_id` (default robot_0); other robots in `robot_ids` get their own map
+path (~/.ros/sortbots_<rid>.db) and, by default, map from empty. With
+`shared_map:=true` (what run_demo.sh passes for a multi-robot run on a saved
+map) every robot opens its own copy of that map instead, localizes on it, and
+in resume mode then extends it — see nodes/map_handoff.py.
 
 Each robot's RTAB-Map owns its own SLAM at `<rid>/map`, unrelated to any
 other robot's. This file anchors every robot into a shared `map` frame with a
@@ -120,6 +120,7 @@ def _make_per_robot_actions(
     scene_cfg,
     platform_cfg,
     slam_role_cfg,
+    shared_map_cfg,
 ):
     primary_robot_id = robot_id_cfg.perform(context)
     raw = robot_ids_cfg.perform(context).strip()
@@ -138,6 +139,15 @@ def _make_per_robot_actions(
         raise ValueError(f"slam_role:={slam_role!r} — expected all or robot")
     if slam_role == "robot" and platform != "real":
         raise ValueError("slam_role:=robot is for platform:=real (sim has no Jetson budget)")
+    as_bool = lambda cfg: cfg.perform(context).lower() in ("true", "1")
+    # Shared map: every robot opens its OWN copy of one saved map (run_demo.sh
+    # makes the copies) instead of only the primary. See nodes/map_handoff.py for
+    # the frame argument; in short, all their <rid>/map frames are then the
+    # primary's, each robot starts read-only, and map_handoff switches an extend
+    # session to mapping once that robot has localized.
+    shared = as_bool(shared_map_cfg) and len(robot_ids) > 1
+    localize_only = as_bool(localization)
+    primary_spawn = _spawn_pose(scene, primary_robot_id)
 
     actions = []
     for rid in robot_ids:
@@ -147,7 +157,11 @@ def _make_per_robot_actions(
         # init — which is this robot's known spawn pose. nodes/map_merge.py
         # looks this transform up to resample every robot's grid into one
         # `/map`; get it wrong and two robots' grids fuse at the wrong offset.
-        x, y, z = _spawn_pose(scene, rid)
+        spawn = _spawn_pose(scene, rid)
+        # Shared map: the map was built in the primary's frame, so EVERY robot's
+        # <rid>/map sits at the primary's spawn. Anchoring each at its own spawn
+        # would draw the same shelves twice, offset by the spawns' difference.
+        x, y, z = primary_spawn if shared else spawn
         actions.append(Node(
             package="tf2_ros",
             executable="static_transform_publisher",
@@ -248,16 +262,45 @@ def _make_per_robot_actions(
         # actually writing it, and crashed FATAL ("attempt to write a
         # readonly database") — which then meant robot_1 never published its
         # map -> odom TF, so its whole tree was disconnected from `map`.
-        if rid == primary_robot_id:
+        #
+        # localization and delete_db_on_start leak the same way, so they are now
+        # set explicitly for every robot too. Before 2026-10-21 they weren't: a
+        # resume run's delete_db_on_start=false reached robot_1, which then
+        # resumed whatever ~/.ros/sortbots_robot_1.db earlier runs had left
+        # (a stale 2.2 GB map, fused over the real one as ghost shelving).
+        if shared:
+            # Read-only until localized; map_handoff flips an extend run to mapping.
+            rtabmap_args["localization"] = "true"
+            rtabmap_args["delete_db_on_start"] = "false"
+        elif rid == primary_robot_id:
             rtabmap_args["localization"] = localization
             rtabmap_args["delete_db_on_start"] = delete_db_on_start
-            rtabmap_args["database_path"] = database_path
         else:
-            rtabmap_args["database_path"] = ["~/.ros/sortbots_", rid, ".db"]
+            # Not sharing the map: a secondary robot always maps from empty.
+            rtabmap_args["localization"] = "false"
+            rtabmap_args["delete_db_on_start"] = "true"
+        rtabmap_args["database_path"] = (database_path if rid == primary_robot_id
+                                         else ["~/.ros/sortbots_", rid, ".db"])
+        # Set for every robot, for the same leak reason. On a shared map it is the
+        # robot's spawn in the PRIMARY's frame, which is the map's frame.
+        rtabmap_args["initial_pose"] = (
+            f"{spawn[0] - primary_spawn[0]:.3f} {spawn[1] - primary_spawn[1]:.3f} 0 0 0 0" if shared else "")
         actions.append(IncludeLaunchDescription(
             _include("sortbots_rtabmap_robot.launch.py"),
             launch_arguments=rtabmap_args.items(),
         ))
+
+        if shared:
+            actions.append(ExecuteProcess(
+                cmd=[
+                    "python3",
+                    os.path.join(REPO_ROOT, "nodes", "map_handoff.py"),
+                    "--robot-id", rid,
+                    "--then", "localize" if localize_only else "mapping",
+                    *(["--explore"] if as_bool(explore) and as_bool(explore_autostart) else []),
+                ],
+                output="screen",
+            ))
 
         actions.append(IncludeLaunchDescription(
             _include("sortbots_nav2.launch.py"),
@@ -305,38 +348,29 @@ def _make_per_robot_actions(
         # /map fused across robots (nodes/map_merge.py) and fleet mesh
         # intent/status (nodes/fleet_radio.py + explorer /fleet/intent),
         # this is what makes a multi-robot run collaborative.
-        actions.append(GroupAction(
-            condition=IfCondition(explore),
-            actions=[
-                # use_sim_time is REQUIRED, not cosmetic: every timeout in
-                # configs/explorer.yaml (goal_timeout_s, stuck_window_s,
-                # blacklist TTLs) is really a distance budget, and the robot
-                # covers those metres in SIM time. On the wall clock they are
-                # worth ~45% of their configured value — see nodes/explorer.py's
-                # _now() for the live failure that caused.
-                ExecuteProcess(
-                    cmd=[
-                        "python3",
-                        os.path.join(REPO_ROOT, "nodes", "explorer.py"),
-                        "--robot-id", rid,
-                        "--autostart",
-                        "--ros-args", "-p", ["use_sim_time:=", use_sim_time],
-                    ],
-                    output="screen",
-                    condition=IfCondition(explore_autostart),
-                ),
-                ExecuteProcess(
-                    cmd=[
-                        "python3",
-                        os.path.join(REPO_ROOT, "nodes", "explorer.py"),
-                        "--robot-id", rid,
-                        "--ros-args", "-p", ["use_sim_time:=", use_sim_time],
-                    ],
-                    output="screen",
-                    condition=UnlessCondition(explore_autostart),
-                ),
-            ],
-        ))
+        # use_sim_time is REQUIRED, not cosmetic: every timeout in
+        # configs/explorer.yaml (goal_timeout_s, stuck_window_s, blacklist
+        # TTLs) is really a distance budget, and the robot covers those metres
+        # in SIM time. On the wall clock they are worth ~45% of their configured
+        # value — see nodes/explorer.py's _now() for the live failure that caused.
+        explorer_cmd = lambda autostart: [
+            "python3", os.path.join(REPO_ROOT, "nodes", "explorer.py"), "--robot-id", rid,
+            *(["--autostart"] if autostart else []),
+            "--ros-args", "-p", ["use_sim_time:=", use_sim_time],
+        ]
+        if shared:
+            # Never autostart on a shared map: map_handoff sends explore_cmd=start
+            # once this robot is localized (and mapping), because an unlocalized
+            # robot exploring is exactly what draws a second, offset map.
+            explorers = [ExecuteProcess(cmd=explorer_cmd(False), output="screen")]
+        else:
+            explorers = [
+                ExecuteProcess(cmd=explorer_cmd(True), output="screen",
+                               condition=IfCondition(explore_autostart)),
+                ExecuteProcess(cmd=explorer_cmd(False), output="screen",
+                               condition=UnlessCondition(explore_autostart)),
+            ]
+        actions.append(GroupAction(condition=IfCondition(explore), actions=explorers))
 
     # Fuses every robot's own /<rid>/map into the world-anchored /map (see
     # that node's docstring). Once per bringup, not per robot — it needs the
@@ -386,8 +420,20 @@ def generate_launch_description():
     scene = LaunchConfiguration("scene")
     platform = LaunchConfiguration("platform")
     slam_role = LaunchConfiguration("slam_role")
+    shared_map = LaunchConfiguration("shared_map")
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "shared_map",
+            default_value="false",
+            description=(
+                "Every robot in robot_ids opens its own copy of the saved map "
+                "(run_demo.sh makes them: ~/.ros/sortbots_<rid>.db), localizes on "
+                "it, and with localization:=false then extends it. Without this "
+                "only the primary uses the map and the others map from empty. "
+                "Ignored for a single robot. See nodes/map_handoff.py."
+            ),
+        ),
         DeclareLaunchArgument(
             "platform",
             default_value="sim",
@@ -546,6 +592,7 @@ def generate_launch_description():
                 localization, database_path, delete_db_on_start,
                 explore, explore_autostart, robot_id, robot_ids, scene, platform,
                 slam_role,
+                shared_map,
             ],
         ),
     ])

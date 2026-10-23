@@ -311,7 +311,7 @@ async function main() {
 
   const worker_url = `http://127.0.0.1:${WORKER_PORT}`;
   await page.send('Page.navigate', {
-    url: `http://127.0.0.1:${HTTP_PORT}/?recon=splat&splat_worker=${encodeURIComponent(worker_url)}`,
+    url: `http://127.0.0.1:${HTTP_PORT}/index.html?recon=splat&splat_worker=${encodeURIComponent(worker_url)}`,
   });
 
   // 1. splat mode comes up and loads the newest splat from the worker.

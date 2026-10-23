@@ -26,8 +26,10 @@ run:
   scene: nvidia
   robots: 1
   robot_id: robot_0
-  headless: false
+  headless: true
   chase_cam: false       # off by default for speed — see explore_fresh.yaml
+  render_every: 1        # 2 halves render cost; see run_demo.sh --render-every
+  lite_render: false     # RTX effects SLAM doesn't need, off
   explore: false         # localize is read-only, so exploring it would drive
                          # the robot around without ever growing the map
   resume: false          # mutually exclusive with localize (read-only vs. keep-mapping)
@@ -38,7 +40,7 @@ run:
 # `map` is exposed because picking WHICH saved map to load is the entire point
 # of this scenario. `localize` is not: turning it off would drop into plain
 # mapping mode, which wipes the database on start.
-overrides: [map, headless, chase_cam]
+overrides: [map, headless, chase_cam, render_every, lite_render]
 
 capture:
   bag: false

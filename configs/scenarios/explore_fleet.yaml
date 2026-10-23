@@ -26,10 +26,12 @@ run:
   scene: nvidia
   robots: 2              # robot_ids derives from this, in configs/robots.yaml order
   robot_id: robot_0      # which robot --localize/--resume/--map/--teleop would apply to
-  headless: false
+  headless: true
   chase_cam: false       # the toggle; false wins over chase_cam_robots below
   chase_cam_robots: 1    # how many robots get one WHEN enabled — robot_0 only,
                          # since the dashboard never shows robot_1's chase feed
+  render_every: 1        # 2 halves render cost; see run_demo.sh --render-every
+  lite_render: false     # RTX effects SLAM doesn't need, off
   explore: true
   resume: false
   localize: false
@@ -40,7 +42,7 @@ run:
 # with robot_ids (left unset above so run_demo.sh derives it FROM robots), and
 # a scenario named "fleet" that silently ran as 1 robot would be confusing.
 # Use explore_fresh for the single-robot case.
-overrides: [headless, resume, chase_cam, chase_cam_robots]
+overrides: [headless, resume, chase_cam, chase_cam_robots, render_every, lite_render]
 
 capture:
   bag: false

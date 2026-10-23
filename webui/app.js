@@ -1,7 +1,7 @@
 // SortBots dashboard. Vanilla JS, no build step. Talks to:
 //   - rosbridge_websocket (ws://<host>:9090)   — pub/sub for dispatch/status/map/tf
 //   - web_video_server    (http://<host>:8080) — MJPEG camera stream
-//   - webui/serve.py      (this page's own origin) — /api/waypoints
+//   - webui/serve.py      (this page's own origin) — /api/nav_waypoints
 // All three are brought up together by launch/sortbots_webui.launch.py.
 
 // Which robot this whole page talks to. Read once, synchronously, from
@@ -689,20 +689,23 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) releaseAllDriveKeys();
 });
 
-// -- dispatch form (populated from configs/waypoints.yaml via serve.py) --
+// -- dispatch form (populated from the nav waypoints via serve.py) --
+// Pick-up and drop-off are plain waypoints now (stations merged into waypoints
+// 2026-10-15): any waypoint can be either end, so both menus list the same set.
 
 const pickupSelect = document.getElementById("pickup-select");
 const dropoffSelect = document.getElementById("dropoff-select");
 
-fetch("/api/waypoints")
+fetch("/api/nav_waypoints")
   .then((r) => r.json())
-  .then((stations) => {
-    for (const [name, spec] of Object.entries(stations)) {
-      const o = document.createElement("option");
-      o.value = name;
-      o.textContent = name;
-      const target = spec.kind === "pickup" ? pickupSelect : dropoffSelect;
-      target.appendChild(o);
+  .then((body) => {
+    for (const w of body.waypoints || []) {
+      for (const sel of [pickupSelect, dropoffSelect]) {
+        const o = document.createElement("option");
+        o.value = w.name;
+        o.textContent = w.name;
+        sel.appendChild(o);
+      }
     }
   })
   .catch((e) => console.error("failed to load waypoints", e));

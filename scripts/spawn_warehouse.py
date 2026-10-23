@@ -71,6 +71,10 @@ NVIDIA_WAREHOUSE_REL = "Isaac/Environments/Simple_Warehouse/full_warehouse.usd"
 NVIDIA_WAREHOUSE_FALLBACK_REL = "Isaac/Environments/Simple_Warehouse/warehouse.usd"
 
 D435_CONFIG = REPO_ROOT / "configs" / "sensors" / "d435.json"
+# Perf experiments: point at an alternate intrinsics file (e.g. a lower
+# resolution with K scaled to match) without editing the canonical one.
+if os.environ.get("SORTBOTS_D435_CONFIG"):
+    D435_CONFIG = Path(os.environ["SORTBOTS_D435_CONFIG"])
 MPU6050_CONFIG = REPO_ROOT / "configs" / "sensors" / "mpu6050.json"
 WAYPOINTS_CONFIG = REPO_ROOT / "configs" / "waypoints.yaml"
 ROBOTS_CONFIG = REPO_ROOT / "configs" / "robots.yaml"
@@ -161,8 +165,15 @@ def _load_station_props():
     """
     import yaml
 
+    # configs/waypoints.yaml was retired 2026-10-15 when stations merged into
+    # plain nav waypoints (nav-only tasks, no arm pick). A layout that still
+    # ships one gets its shelves; its absence just means no station props, same
+    # as --no-station-props — the package-placement fallback at the call site
+    # (and task_manager) handles an empty list.
+    if not WAYPOINTS_CONFIG.exists():
+        return []
     with open(WAYPOINTS_CONFIG) as f:
-        stations = yaml.safe_load(f)["stations"]
+        stations = (yaml.safe_load(f) or {}).get("stations") or {}
     out = []
     for name, spec in stations.items():
         prop = spec.get("prop")
@@ -314,14 +325,24 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Render (and therefore evaluate every OnPlaybackTick OmniGraph) "
             "only on every Nth physics step; physics always steps at 60 Hz "
-            "regardless. Diagnostic knob, NOT a speedup — see the measured "
-            "numbers in scripts/bench_sim.sh's header. Default 1 (render "
-            "every step) because decimating buys almost nothing: N=2 moved "
-            "real-time factor 0.33x -> 0.36x, because the per-render cost "
-            "roughly doubles when you halve the rate, while it does halve "
-            "/clock, odom, TF and cmd_vel, which all ride OnPlaybackTick. A "
-            "huge N (600) renders essentially never and isolates physics "
-            "from rendering, which is what it's genuinely useful for."
+            "regardless. Whether it's a speedup depends on the machine — see "
+            "scripts/bench_sim.sh's header: N=2 bought 0.33x -> 0.36x on a "
+            "CPU-bound 16-core desktop, but 0.47x -> 0.91x on a GPU-bound "
+            "RTX 4070 laptop (2026-10-06). It always halves /clock, odom, TF "
+            "and cmd_vel, which ride OnPlaybackTick; at N=2 the D435's 30 Hz "
+            "still gets a render every frame. A huge N (600) renders "
+            "essentially never and isolates physics from rendering."
+        ),
+    )
+    p.add_argument(
+        "--lite-render",
+        action="store_true",
+        help=(
+            "Turn off the RTX effects SLAM doesn't need (reflections, "
+            "translucency, indirect diffuse, AO, sampled lighting; DLSS to "
+            "performance). Direct light and shadows stay, so the head cams "
+            "still look like a lit warehouse. 0.47x -> 0.73x on a GPU-bound "
+            "RTX 4070 laptop (scripts/bench_sim.sh, 2026-10-06)."
         ),
     )
     return p.parse_args()
@@ -339,8 +360,24 @@ if args.render_every < 1:
 # SimulationApp MUST be constructed before any other isaacsim / omni / pxr imports.
 from isaacsim import SimulationApp  # noqa: E402
 
+# --lite-render's preset. Each of these is a render pass per camera per frame;
+# none of them changes depth, and the RGB that RTAB-Map extracts features from
+# keeps its direct lighting and shadows.
+LITE_RENDER_KIT_ARGS = [
+    "--/rtx/reflections/enabled=false",
+    "--/rtx/translucency/enabled=false",
+    "--/rtx/indirectDiffuse/enabled=false",
+    "--/rtx/ambientOcclusion/enabled=false",
+    "--/rtx/directLighting/sampledLighting/enabled=false",
+    "--/rtx-transient/dlssg/enabled=false",
+    "--/rtx/post/dlss/execMode=0",
+]
+# SORTBOTS_KIT_ARGS: extra Kit settings, whitespace-separated, appended after
+# the preset — for render-cost experiments without another flag.
 simulation_app = SimulationApp(
-    {"headless": args.headless, "renderer": "RayTracedLighting"}
+    {"headless": args.headless, "renderer": "RayTracedLighting",
+     "extra_args": (LITE_RENDER_KIT_ARGS if args.lite_render else [])
+                   + os.environ.get("SORTBOTS_KIT_ARGS", "").split()}
 )
 
 # The ROS 2 bridge does NOT auto-load on pip-install Isaac Sim 5.1 — enable
@@ -1040,6 +1077,7 @@ def main() -> int:
     emit(f"  duration={'forever' if args.forever else args.duration}")
     emit(f"  render_every={args.render_every} (physics 60Hz -> "
          f"{60.0 / args.render_every:.0f}Hz render/OnPlaybackTick)")
+    emit(f"  lite_render={args.lite_render}")
 
     d435, mpu = _load_sensor_configs()
     emit(f"  d435: {d435['width']}x{d435['height']}@{d435['fps']}Hz")
@@ -1213,22 +1251,28 @@ def main() -> int:
 
         pickup = next((p for p in props if p[1] == "pickup"), None)
         package_prim_path = "/World/package_0"
+        pkg_pose = None
         if pickup is not None:
             _, _, pkg_x, pkg_y, _, pkg_prop = pickup
-            pkg_z = _package_z(float(pkg_prop["deck_height_m"]))
-        else:
-            # No prop'd pickup station (e.g. --no-station-props): fall back to
-            # the first pickup pose with the box on the floor, so the mock pick
-            # still has something to grab.
+            pkg_pose = (pkg_x, pkg_y, _package_z(float(pkg_prop["deck_height_m"])))
+        elif WAYPOINTS_CONFIG.exists():
+            # No prop'd pickup station (e.g. --no-station-props) but a stations
+            # file is present: fall back to the first pickup pose with the box
+            # on the floor, so the mock pick still has something to grab.
             import yaml
 
-            with open(WAYPOINTS_CONFIG) as f:
-                stations = yaml.safe_load(f)["stations"]
-            first = next(s for s in stations.values() if s["kind"] == "pickup")
-            pkg_x, pkg_y = float(first["pose"]["x"]), float(first["pose"]["y"])
-            pkg_z = PACKAGE_SIZE_M / 2.0
-        _spawn_package(stage, package_prim_path, pkg_x, pkg_y, pkg_z)
-        emit(f"  package_0 spawned at ({pkg_x}, {pkg_y}, {pkg_z:.3f})")
+            stations = (yaml.safe_load(WAYPOINTS_CONFIG.read_text()) or {}).get("stations") or {}
+            first = next((s for s in stations.values() if s.get("kind") == "pickup"), None)
+            if first is not None:
+                pkg_pose = (float(first["pose"]["x"]), float(first["pose"]["y"]),
+                            PACKAGE_SIZE_M / 2.0)
+        # else: stations retired (nav-only tasks, 2026-10-15) — there is no pick,
+        # so no package to spawn. The mock-pick subscribers below are harmless
+        # with nothing to grab; task_manager never sends a pick request now.
+        if pkg_pose is not None:
+            pkg_x, pkg_y, pkg_z = pkg_pose
+            _spawn_package(stage, package_prim_path, pkg_x, pkg_y, pkg_z)
+            emit(f"  package_0 spawned at ({pkg_x}, {pkg_y}, {pkg_z:.3f})")
 
         extra_ros_node, pick_cmd_state, head_cmd_state = _start_extra_ros_subscribers("robot_0")
         emit("  pick_cmd/head_cmd rclpy subscriber started")

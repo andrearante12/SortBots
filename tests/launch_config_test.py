@@ -90,6 +90,8 @@ def test_grid_only_map_cannot_be_loaded(lib):
     ({"scene": "moon"}, "--scene"),
     ({"mode": "both"}, "mode"),
     ({"waypoints": "all"}, "waypoints"),
+    ({"render_every": 5}, "--render-every"),
+    ({"render_every": "x"}, "--render-every"),
 ])
 def test_bad_settings_are_rejected(lib, config, match):
     with pytest.raises(sm.ScenarioError, match=match):
@@ -101,6 +103,21 @@ def test_real_platform_takes_only_its_settings(lib):
     assert _flags(run, "real")[:2] == ["--robot-id", "robot_0"]
     with pytest.raises(sm.ScenarioError, match="platform 'real'"):
         sm.config_to_run({"robots": 2}, "real")
+
+
+def test_render_cost_knobs(lib):
+    # Stock values must add no flag, so every pre-existing run's logged argv
+    # stays byte-identical; set, they reach run_demo.sh and survive the
+    # preset round trip. Sim-only: the robot has no renderer.
+    assert not {"--render-every", "--lite-render"} & set(_flags(sm.config_to_run({})))
+    run = sm.config_to_run({"render_every": 2, "lite_render": True})
+    flags = _flags(run)
+    assert flags[flags.index("--render-every") + 1] == "2" and "--lite-render" in flags
+    cfg = sm.run_to_config(run)["config"]
+    assert (cfg["render_every"], cfg["lite_render"]) == (2, True)
+    assert "render every 2 · lite render" in sm.describe_config(cfg)
+    with pytest.raises(sm.ScenarioError, match="platform 'real'"):
+        sm.config_to_run({"lite_render": True}, "real")
 
 
 def test_form_matches_the_equivalent_preset(lib):

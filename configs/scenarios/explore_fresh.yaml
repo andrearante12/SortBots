@@ -33,10 +33,12 @@ run:
   scene: nvidia          # nvidia | primitive
   robots: 1
   robot_id: robot_0
-  headless: false        # true drops the Isaac window (the dashboard still works)
+  headless: true        # false opens the Isaac window (costs GPU the remote desktop needs)
   chase_cam: false       # cosmetic 3rd-person view; off by default because the
                          # render product costs ~30% of real-time factor (see
                          # scripts/bench_sim.sh). Tick it in the UI to watch.
+  render_every: 1        # 2 halves render cost; see run_demo.sh --render-every
+  lite_render: false     # RTX effects SLAM doesn't need, off
   explore: true
   resume: false          # false = wipe the map database and start clean
   localize: false
@@ -45,7 +47,7 @@ run:
 
 # Which `run:` keys the scenario card exposes as controls. Everything else is
 # fixed by this file — keeping the launch-time surface small and reviewable.
-overrides: [headless, robots, resume, chase_cam]
+overrides: [headless, robots, resume, chase_cam, render_every, lite_render]
 
 capture:
   # true also runs scripts/record_explore_bag.sh into the session directory for

@@ -22,10 +22,12 @@
 // and this tab explains that rather than showing dead buttons.
 
 (function () {
+  // .filter(Boolean): operator.html reuses this file for its session panel and
+  // has none of the live view's panes. A missing pane is simply not toggled.
   const viewLive = [
     document.getElementById("stage-panel"),
     document.getElementById("right-col"),
-  ];
+  ].filter(Boolean);
   const viewScenarios = document.getElementById("view-scenarios");
   const viewFleet = document.getElementById("view-fleet");
   // Live-only header chrome: the stage switcher and the SLAM badge are about
@@ -33,7 +35,7 @@
   const liveChrome = [
     document.getElementById("stage-mode"),
     document.getElementById("slam-badge"),
-  ];
+  ].filter(Boolean);
 
   const formEl = document.getElementById("launch-form");
   const warningEl = document.getElementById("console-warning");
@@ -101,9 +103,13 @@
   const mapSel = $("lf-map");
   const robotsSel = $("lf-robots");
   const chaseCountSel = $("lf-chase_cam_robots");
+  const renderEveryIn = $("lf-render_every");
   const startBtn = $("lf-start");
   const SEGMENTS = { scene: $("lf-scene"), mode: $("lf-mode"), waypoints: $("lf-waypoints") };
-  const CHECKS = ["explore", "headless", "chase_cam", "teleop", "bag"];
+  // Only the checkboxes this page carries: operator.html has its own copy of
+  // this form, and a field it lacks must not take the whole form down.
+  const CHECKS = ["explore", "headless", "chase_cam", "teleop", "bag", "lite_render"]
+    .filter((k) => $(`lf-${k}`));
   const CFG_KEY = "sortbots.launchConfig";
 
   // Why a saved map can't be loaded, keyed by maps_lib.py's db_state. Shown in
@@ -166,7 +172,8 @@
     for (const el of formEl.querySelectorAll("[data-field]")) {
       el.hidden = !fields.has(el.dataset.field);
     }
-    $("lf-advanced").hidden = !["headless", "chase_cam", "teleop", "bag", "waypoints"].some((f) => fields.has(f));
+    $("lf-advanced").hidden = !["headless", "chase_cam", "teleop", "bag", "waypoints", "render_every", "lite_render"]
+      .some((f) => fields.has(f));
   }
 
   // cfg -> controls (+ the dependent bits: mode only matters for a non-new
@@ -182,6 +189,10 @@
     mapSel.value = cfg.map;
     robotsSel.value = String(cfg.robots);
     chaseCountSel.value = String(cfg.chase_cam_robots);
+    if (renderEveryIn) {
+      renderEveryIn.value = String(cfg.render_every || 1);
+      $("lf-render_every-unit").textContent = cfg.render_every > 1 ? "frames" : "frame";
+    }
     for (const k of CHECKS) $(`lf-${k}`).checked = !!cfg[k];
 
     const fields = new Set(options.fields);
@@ -215,12 +226,22 @@
     cfg.map = mapSel.value;
     cfg.robots = Number(robotsSel.value) || 1;
     cfg.chase_cam_robots = Number(chaseCountSel.value) || 1;
+    // Typed, so clamp to the input's own bounds (session.py rejects the rest);
+    // renderForm then writes the clamped value back into the box.
+    if (renderEveryIn) {
+      const n = Math.round(Number(renderEveryIn.value)) || 1;
+      cfg.render_every = Math.min(Number(renderEveryIn.max), Math.max(Number(renderEveryIn.min), n));
+    }
     for (const k of CHECKS) cfg[k] = $(`lf-${k}`).checked;
   }
 
   function onEdit() {
     presetSel.value = "";
     $("lf-preset-note").textContent = "";
+    // `demo` has no control of its own; it rides along only with the preset that
+    // set it. Kept across edits it would also stick in the saved form state and
+    // quietly turn every later custom run into a demo.
+    delete cfg.demo;
     readForm();
     saveCfg();
     renderForm();
@@ -235,7 +256,7 @@
       onEdit();
     });
   }
-  for (const el of [mapSel, robotsSel, chaseCountSel, ...CHECKS.map((k) => $(`lf-${k}`))]) {
+  for (const el of [mapSel, robotsSel, chaseCountSel, renderEveryIn, ...CHECKS.map((k) => $(`lf-${k}`))].filter(Boolean)) {
     el.addEventListener("change", () => {
       // Picking a library map defaults its waypoints back to the map's own.
       if (el === mapSel && libraryMap(mapSel.value)) cfg.waypoints = "map";
@@ -602,4 +623,8 @@
 
   setView("live");
   loadOptions().then(() => schedulePoll(0));
+
+  // operator.html keeps the launch form in a panel it opens on demand: it asks
+  // for fast polling while the panel is open and the idle cadence when closed.
+  window.sortbotsScenarios = { setView, reload: () => loadOptions().then(() => schedulePoll(0)) };
 })();

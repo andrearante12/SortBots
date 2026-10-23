@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SortBots Operator (mockup)</title>
+<!-- MOCKUP for issue #6. Static, fake data, no ROS. Open via the console:
+     http://localhost:8081/mockups/operator.html
+     Everything here is simulated in-page (robots drift along their routes, tasks
+     advance on a timer) so the layout can be judged with motion. Palette and
+     segmented-control vocabulary are lifted from webui/index.html on purpose. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* Design notes: a warehouse floor, not a cockpit. Concrete-grey ground, white work
+     surfaces, ink text. Hi-vis yellow is floor tape, so it marks waypoints and nothing
+     else. Red is for stopping. The map is the one big thing; everything else is plain
+     lists separated by hairlines, no boxed cards. One family (IBM Plex Sans). */
+  :root {
+    color-scheme: light;
+    --ground: #f2f3f4; --surface: #fff; --ink: #15191e; --muted: #68717b; --faint: #9aa3ac; --line: #e3e6e9;
+    --tape: #f2b705; --stop: #d63b2f; --go: #1f9d63;
+    --r0: #2f6fed; --r1: #ef7d1a; --r2: #8a5cf0;
+  }
+  [hidden] { display: none !important; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.4 "IBM Plex Sans", system-ui, sans-serif;
+         font-variant-numeric: tabular-nums; display: grid; grid-template-columns: 280px 1fr 320px; grid-template-rows: 56px 1fr; overflow: hidden; }
+  button, select, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--r0); outline-offset: 2px; }
+  .muted { color: var(--muted); }
+
+  /* buttons ------------------------------------------------------------- */
+  .btn { background: var(--surface); border: 1px solid #d3d8dd; border-radius: 6px; padding: 6px 14px; font-weight: 500; }
+  .btn:hover { background: #f7f8f9; }
+  .btn.primary { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .btn.primary:hover { background: #2a3139; }
+  .btn.stop { color: var(--stop); border-color: #efc4c0; }
+  .btn.stop:hover { background: #fdf1f0; }
+  .btn.small { padding: 3px 10px; font-size: .8rem; }
+  .link { background: none; border: none; padding: 0; color: var(--muted); }
+  .link:hover { color: var(--ink); }
+  select { background: var(--surface); border: 1px solid #d3d8dd; border-radius: 6px; padding: 5px 8px; }
+  .seg { display: inline-flex; background: #e9ecef; border-radius: 8px; padding: 3px; }
+  .seg button { background: none; border: none; border-radius: 6px; padding: 5px 14px; color: var(--muted); font-weight: 500; }
+  .seg button.active { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgba(20,25,30,.12); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--go); display: inline-block; }
+  .dot.idle { background: var(--faint); }
+
+  /* header -------------------------------------------------------------- */
+  header { grid-column: 1 / -1; background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 16px; padding: 0 16px; }
+  h1 { margin: 0; font-size: 1rem; font-weight: 600; letter-spacing: -.01em; width: 248px; }
+  #mode-strip { display: flex; align-items: center; gap: 10px; }
+  header .spacer { flex: 1; }
+  #session-chip { display: inline-flex; align-items: center; gap: 8px; }
+
+  /* columns ------------------------------------------------------------- */
+  aside { background: var(--surface); display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+  #left { border-right: 1px solid var(--line); }
+  #right { border-left: 1px solid var(--line); }
+  .head { display: flex; align-items: baseline; gap: 8px; padding: 14px 16px 8px; position: sticky; top: 0; background: var(--surface); }
+  .head h2 { margin: 0; font-size: .95rem; font-weight: 600; }
+  .head .muted { font-size: .82rem; margin-left: auto; }
+
+  /* fleet ------------------------------------------------------------------ */
+  .robot { padding: 10px 16px; border-top: 1px solid var(--line); cursor: pointer; border-left: 3px solid transparent; }
+  .robot:hover { background: #fafbfb; }
+  .robot.sel { background: #f6f8fb; border-left-color: var(--c); }
+  .robot .l1 { display: flex; align-items: center; gap: 8px; }
+  .robot .sw { width: 10px; height: 10px; border-radius: 50%; background: var(--c); }
+  .robot .name { font-weight: 600; }
+  .robot .batt { margin-left: auto; font-size: .82rem; color: var(--muted); }
+  .robot .batt.low { color: var(--stop); font-weight: 600; }
+  .robot .l2 { margin: 2px 0 0 18px; font-size: .84rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bar { height: 3px; background: var(--line); border-radius: 2px; margin: 7px 0 0 18px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--c, var(--go)); }
+  .more { margin: 10px 0 2px 18px; display: grid; gap: 10px; }
+  .more canvas { width: 100%; aspect-ratio: 16/9; border-radius: 6px; background: #0b0d10; display: block; }
+  .more .facts { display: flex; gap: 14px; font-size: .82rem; color: var(--muted); }
+  .more .acts { display: flex; gap: 6px; flex-wrap: wrap; }
+  .more .open { text-align: center; background: var(--ink); color: #fff; border-radius: 6px; padding: 7px; font-weight: 500; text-decoration: none; }
+  .more .open:hover { background: #2a3139; }
+
+  /* map stage ---------------------------------------------------------------- */
+  #stage { position: relative; min-width: 0; min-height: 0; }
+  #map { width: 100%; height: 100%; display: block; cursor: crosshair; }
+  .float { position: absolute; background: rgba(255,255,255,.94); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 2px 8px rgba(20,25,30,.08); }
+  #tools { top: 14px; left: 14px; display: flex; flex-direction: column; padding: 4px; gap: 2px; }
+  #tools button { width: 36px; height: 36px; border: none; background: none; border-radius: 6px; font-size: 1.05rem; color: var(--muted); }
+  #tools button:hover { background: #f1f3f5; }
+  #tools button.active { background: var(--ink); color: #fff; }
+  #coverage { bottom: 14px; left: 14px; display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 14px; }
+  #coverage .pct { font-weight: 600; font-size: 1rem; }
+  #coverage .track { width: 110px; height: 4px; background: var(--line); border-radius: 2px; overflow: hidden; }
+  #coverage .track i { display: block; height: 100%; background: var(--go); }
+  #hint { position: absolute; bottom: 20px; right: 16px; font-size: .82rem; color: var(--muted); }
+  #empty { position: absolute; inset: 0; background: rgba(242,243,244,.92); display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; z-index: 3; text-align: center; }
+  #empty b { font-size: 1.15rem; font-weight: 600; } #empty .btn { margin-top: 8px; }
+  #toast { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); background: var(--ink); color: #fff; padding: 6px 14px; border-radius: 6px; font-size: .84rem; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.on { opacity: 1; }
+
+  /* tasks ---------------------------------------------------------------------- */
+  #tasks { flex: 1; min-height: 120px; }
+  .tk { padding: 10px 16px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 1px 10px; }
+  .tk .t1 { font-weight: 500; }
+  .tk .t2 { color: var(--muted); font-size: .84rem; }
+  .tk .st { font-size: .8rem; text-align: right; color: var(--muted); }
+  .tk .st.running { color: var(--r0); font-weight: 600; } .tk .st.done { color: var(--go); }
+  .tk .who { font-size: .8rem; color: var(--muted); text-align: right; display: flex; align-items: center; gap: 5px; justify-content: flex-end; }
+  .tk .who i { width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
+  .tk.done { opacity: .6; }
+  .tk .x { background: none; border: none; color: var(--faint); padding: 0 2px; }
+  .tk .x:hover { color: var(--stop); }
+  #wps { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 12px; }
+  .wp { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 12px; background: var(--ground); font-size: .84rem; }
+  .wp::before { content: ""; width: 8px; height: 8px; background: var(--tape); transform: rotate(45deg); }
+  .wp.dock::before { background: var(--faint); }
+  .wp button { background: none; border: none; color: var(--faint); padding: 0; }
+  .wp button:hover { color: var(--stop); }
+  #newtask { border-top: 1px solid var(--line); padding: 12px 16px 16px; display: grid; gap: 10px; }
+  #newtask summary { cursor: pointer; font-weight: 600; font-size: .95rem; list-style: none; }
+  #newtask summary::-webkit-details-marker { display: none; }
+  #newtask summary::before { content: "+"; display: inline-block; width: 1.1em; color: var(--muted); }
+  #newtask[open] summary::before { content: "−"; }
+  #newtask .fields { display: grid; gap: 10px; margin-top: 12px; }
+  #newtask label { display: grid; gap: 3px; font-size: .82rem; color: var(--muted); }
+  #newtask select { width: 100%; color: var(--ink); }
+
+  /* session panel (scenarios) --------------------------------------------- */
+  #session { position: fixed; inset: 0; background: rgba(21,25,30,.35); display: flex; align-items: flex-start; justify-content: center; padding-top: 64px; z-index: 10; }
+  #session .card { background: var(--surface); border-radius: 12px; box-shadow: 0 12px 40px rgba(20,25,30,.25); width: 680px; max-height: calc(100vh - 90px); overflow: auto; padding: 20px 22px; display: grid; gap: 18px; }
+  #session h3 { margin: 0; font-size: 1.1rem; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+  #session h3 .x { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 1.4rem; line-height: 1; }
+  .sub { font-size: .88rem; font-weight: 600; margin-bottom: 8px; }
+  .presets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .preset { display: flex; flex-direction: column; justify-content: flex-start; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .preset:hover { border-color: #c4cad0; }
+  .preset b { display: block; font-weight: 600; font-size: .88rem; } .preset span { font-size: .8rem; color: var(--muted); }
+  .preset.on { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
+  .preset.planned { opacity: .45; cursor: not-allowed; }
+  .frow { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .frow .k { width: 80px; color: var(--muted); }
+  .runbox { background: #f6f8fb; border-radius: 8px; padding: 12px 14px; display: flex; align-items: center; gap: 10px; }
+  .runbox .s { color: var(--muted); font-size: .84rem; }
+  details summary { cursor: pointer; color: var(--muted); margin-bottom: 10px; }
+  .chk { display: inline-flex; gap: 6px; align-items: center; margin-right: 14px; }
+  #sp-log { margin: 0; font: .75rem/1.5 ui-monospace, monospace; color: var(--muted); background: var(--ground); border-radius: 8px; padding: 10px 12px; max-height: 90px; overflow: auto; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>SortBots</h1>
+
+  <!-- THE decision an operator makes first. Mapping builds a new map; Premapped
+       loads one from the library and robots localize against it. -->
+  <div id="mode-strip">
+    <div class="seg" id="mode">
+      <button data-m="map" class="active" title="Robots explore and build a new map">Mapping</button>
+      <button data-m="loc" title="Load a saved map; robots localize and take tasks">Premapped</button>
+    </div>
+    <select id="map-pick" hidden>
+      <option>warehouse (saved Oct 8)</option>
+      <option>fleet_warehouse_test</option>
+    </select>
+  </div>
+
+  <span class="spacer"></span>
+  <!-- Scenarios land here: the session is what the whole page runs inside, so it is a
+       header control (always visible, one click), not a tab competing with the map. -->
+  <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot" id="s-dot"></span><span id="s-label">Session running</span></button>
+  <button class="btn stop" id="estop">Stop all</button>
+</header>
+
+<aside id="left">
+  <div class="head"><h2>Robots</h2><span class="muted" id="n-robots">3 online</span></div>
+  <div id="fleet"></div>
+</aside>
+
+<main id="stage">
+  <canvas id="map"></canvas>
+  <div class="float" id="tools" role="toolbar" aria-label="Map tools">
+    <button data-t="select" class="active" title="Select (V)">&#8598;</button>
+    <button data-t="wp" title="Add waypoint (F)">&#9670;</button>
+    <button data-t="goto" title="Send selected robot (G)">&#10140;</button>
+  </div>
+  <div class="float" id="coverage">
+    <span class="pct" id="cov-n">61%</span><span class="muted">mapped</span>
+    <span class="track"><i id="cov-bar" style="width:61%"></i></span>
+    <button class="btn small" id="save-map" title="Save the map and waypoints to the library">Save map</button>
+  </div>
+  <div id="hint"></div>
+  <div id="empty" hidden><b>No session running</b><span class="muted">Start a session to see your robots and give them tasks.</span><button class="btn primary" id="empty-go">Start a session</button></div>
+  <div id="toast"></div>
+</main>
+
+<aside id="right">
+  <div class="head"><h2>Tasks</h2><span class="muted" id="tk-count"></span></div>
+  <div id="tasks"></div>
+  <div class="head"><h2>Waypoints</h2></div>
+  <div id="wps"></div>
+  <details id="newtask">
+    <summary>New task</summary>
+    <div class="fields">
+      <label>Pick up at<select id="nt-from"></select></label>
+      <label>Drop off at<select id="nt-to"></select></label>
+      <label>Robot<select id="nt-who"><option value="auto">Nearest idle robot</option></select></label>
+      <button class="btn primary" id="nt-add">Add task</button>
+    </div>
+  </details>
+</aside>
+
+<div id="session" hidden>
+  <div class="card">
+    <h3>Session <span class="muted" style="font-weight:400;font-size:.85rem" id="sp-state"></span>
+      <button class="x" id="sp-x" title="Close (Esc)">×</button></h3>
+
+    <div class="runbox" id="sp-run">
+      <div><b id="sp-title">explore_fleet</b><div class="s" id="sp-sub">3 robots, running for 12 minutes</div></div>
+      <span style="flex:1"></span>
+      <button class="btn primary" id="sp-finish" title="Save the map, pose graph and waypoints into the library, then stop">Save map &amp; finish</button>
+      <button class="btn stop" id="sp-stop" title="Tear down the sim and ROS stack WITHOUT saving">Stop</button>
+    </div>
+
+    <div id="sp-launch">
+      <div class="sub">Start from a preset</div>
+      <div class="presets" id="presets">
+        <button class="preset" data-p="explore_fresh"><b>Explore from scratch</b><span>1 robot, wipe the map, frontier exploration</span></button>
+        <button class="preset on" data-p="explore_fleet"><b>Explore with fleet</b><span>3 robots, one fused map</span></button>
+        <button class="preset" data-p="explore_resume"><b>Resume mapping</b><span>extend the last map</span></button>
+        <button class="preset" data-p="library_localize"><b>Premapped</b><span>load a saved map and take tasks</span></button>
+        <button class="preset" data-p="library_resume"><b>Premapped, keep mapping</b><span>load a saved map and extend it</span></button>
+        <button class="preset planned" data-p="avoid" disabled><b>Person avoidance</b><span>planned: needs an animated-actor scene</span></button>
+      </div>
+
+      <div class="sub" style="margin-top:16px">Or set it up yourself</div>
+      <div class="frow"><span class="k">Map</span>
+        <div class="seg" id="sp-map"><button class="active">new</button><button>saved map</button></div>
+        <select id="sp-mapsel"><option>warehouse</option><option>fleet_warehouse_test</option></select></div>
+      <div class="frow"><span class="k">Mode</span>
+        <div class="seg"><button class="active">Keep mapping</button><button>Localize only</button></div></div>
+      <div class="frow"><span class="k">Robots</span><select><option>1</option><option>2</option><option selected>3</option></select>
+        <label class="chk"><input type="checkbox" checked> explore immediately</label></div>
+      <details><summary>Sim options</summary>
+        <label class="chk"><input type="checkbox"> headless</label>
+        <label class="chk"><input type="checkbox"> chase cam <span class="muted">(slows the sim by about 30%)</span></label>
+        <label class="chk"><input type="checkbox"> record bag</label>
+        <div class="frow" style="margin-top:8px"><span class="k">Waypoints</span>
+          <div class="seg"><button class="active">from map</button><button>keep current</button><button>start empty</button></div></div>
+      </details>
+      <div style="display:flex;gap:10px;align-items:center;margin-top:6px">
+        <span class="muted" style="font-size:.84rem">Starting replaces the running session. The sim takes about a minute to come up, longer on a first run.</span>
+        <span style="flex:1"></span><button class="btn primary" id="sp-start">Start session</button>
+      </div>
+    </div>
+    <pre id="sp-log">[run_demo] isaac sim up
+[run_demo] bringup: rtabmap, nav2, task_manager ready
+[run_demo] session running</pre>
+  </div>
+</div>
+
+<script>
+"use strict";
+// ---- fake world ------------------------------------------------------------
+const W = 40, H = 26;                       // metres
+const SHELVES = [];                         // [x,y,w,h]
+for (let i = 0; i < 4; i++) { SHELVES.push([6 + i * 7, 5, 3, 7]); SHELVES.push([6 + i * 7, 15, 3, 7]); }
+const DOCK = { x: 2, y: 13 };
+const COLORS = ["#2f6fed", "#ef7d1a", "#8a5cf0"];
+let waypoints = [
+  { id: "dock", x: 2, y: 13, fixed: true },
+  { id: "inbound-A", x: 4.5, y: 4 }, { id: "shelf-1", x: 11, y: 13.5 },
+  { id: "shelf-2", x: 25, y: 13.5 }, { id: "outbound", x: 36, y: 13 },
+];
+const robots = [
+  { id: "robot_0", x: 12, y: 13.5, a: 0, batt: 78, state: "exploring", task: "Exploring the north-east", prog: .42, route: [[18, 13.5], [18, 3], [34, 3]], speed: 1.1 },
+  { id: "robot_1", x: 30, y: 13.5, a: 3, batt: 54, state: "navigating", task: "Moving shelf-2 to outbound", prog: .6, route: [[36, 13]], speed: 1.0 },
+  { id: "robot_2", x: 2, y: 13, a: 0, batt: 19, state: "charging", task: "At the dock", prog: 0, route: [], speed: 0 },
+];
+robots.forEach((r, i) => { r.c = COLORS[i]; });
+let tasks = [
+  { id: "T-101", from: "inbound-A", to: "shelf-1", who: "robot_1", state: "done" },
+  { id: "T-102", from: "shelf-2", to: "outbound", who: "robot_1", state: "running" },
+  { id: "T-103", from: "inbound-A", to: "shelf-2", who: "auto", state: "queued" },
+  { id: "T-104", from: "shelf-1", to: "outbound", who: "auto", state: "queued" },
+];
+let mode = "map", tool = "select", selected = null, nextTask = 105, cov = 61;
+
+const $ = s => document.querySelector(s);
+const cv = $("#map"), cx = cv.getContext("2d");
+let sc = 1, ox = 0, oy = 0;
+function resize() {
+  const r = cv.parentElement.getBoundingClientRect(), d = devicePixelRatio || 1;
+  cv.width = r.width * d; cv.height = r.height * d; cx.setTransform(d, 0, 0, d, 0, 0);
+  sc = Math.min(r.width / (W + 2), r.height / (H + 2)); ox = (r.width - W * sc) / 2; oy = (r.height - H * sc) / 2;
+}
+const px = (x, y) => [ox + x * sc, oy + y * sc], wx = (px_, py_) => [(px_ - ox) / sc, (py_ - oy) / sc];
+
+// ---- drawing -----------------------------------------------------------------
+function drawMap() {
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cx.clearRect(0, 0, w, h);
+  cx.fillStyle = "#f2f3f4"; cx.fillRect(0, 0, w, h);
+  const [x0, y0] = px(0, 0);
+  // unexplored backdrop; explored = a disc around each robot's trail, faked by coverage
+  cx.fillStyle = "#fbfbfc"; cx.fillRect(x0, y0, W * sc, H * sc);
+  const known = mode === "loc" ? 1 : cov / 100;
+  cx.save(); cx.beginPath(); cx.rect(x0, y0, W * sc * Math.min(1, known * 1.35), H * sc); cx.clip();
+  cx.fillStyle = "#e7eaed"; cx.fillRect(x0, y0, W * sc, H * sc);
+  cx.fillStyle = "#c5ccd3"; SHELVES.forEach(([x, y, w_, h_]) => { const [a, b] = px(x, y); cx.fillRect(a, b, w_ * sc, h_ * sc); });
+  cx.restore();
+  cx.strokeStyle = "#d3d8dd"; cx.lineWidth = 1; cx.strokeRect(x0, y0, W * sc, H * sc);
+
+  // planned routes
+  robots.forEach(r => {
+    if (!r.route.length) return;
+    cx.strokeStyle = r.c; cx.globalAlpha = .7; cx.setLineDash([6, 5]); cx.lineWidth = 2; cx.beginPath();
+    cx.moveTo(...px(r.x, r.y)); r.route.forEach(p => cx.lineTo(...px(p[0], p[1]))); cx.stroke();
+    cx.setLineDash([]); cx.globalAlpha = 1;
+  });
+  // waypoints
+  waypoints.forEach(p => {
+    const [a, b] = px(p.x, p.y);
+    cx.fillStyle = p.fixed ? "#9aa3ac" : "#f2b705"; cx.beginPath(); cx.moveTo(a, b - 9); cx.lineTo(a + 6, b); cx.lineTo(a, b + 9); cx.lineTo(a - 6, b); cx.fill();
+    cx.fillStyle = "#15191e"; cx.font = "500 11px \"IBM Plex Sans\", system-ui"; cx.textAlign = "center"; cx.fillText(p.id, a, b - 13);
+  });
+  // robots
+  robots.forEach(r => {
+    const [a, b] = px(r.x, r.y), on = selected === r.id;
+    if (on) { cx.strokeStyle = r.c; cx.lineWidth = 2; cx.beginPath(); cx.arc(a, b, 17, 0, 7); cx.stroke(); }
+    cx.fillStyle = r.c; cx.beginPath(); cx.arc(a, b, 10, 0, 7); cx.fill();
+    cx.fillStyle = "#fff"; cx.beginPath(); cx.moveTo(a + Math.cos(r.a) * 13, b + Math.sin(r.a) * 13);
+    cx.lineTo(a + Math.cos(r.a + 2.5) * 6, b + Math.sin(r.a + 2.5) * 6); cx.lineTo(a + Math.cos(r.a - 2.5) * 6, b + Math.sin(r.a - 2.5) * 6); cx.fill();
+    cx.fillStyle = "#15191e"; cx.font = "600 11px \"IBM Plex Sans\", system-ui"; cx.textAlign = "center"; cx.fillText(r.id.replace("robot_", "Robot "), a, b + 27);
+  });
+}
+
+// fake camera: a corridor in perspective with shelves, rendered per frame
+function drawCam(r) {
+  const el = document.getElementById("cam-c"); if (!el) return;
+  const cc = el.getContext("2d"), w = 320, h = 180, t = performance.now() / 1000;
+  cc.fillStyle = "#1a1d22"; cc.fillRect(0, 0, w, h);
+  cc.fillStyle = "#23272e"; cc.fillRect(0, h * .55, w, h * .45);           // floor
+  cc.fillStyle = "#15171b"; cc.fillRect(0, 0, w, h * .55 * .5);            // ceiling
+  const off = (t * 60) % 120;
+  for (let i = 0; i < 6; i++) {                                             // shelf bays receding
+    const k = (i * 120 + off) / 720, s = k * k, y = h * .5 + (h * .5) * s * .3;
+    const bw = 20 + s * 130, bh = 15 + s * 110;
+    [[w / 2 - 35 - bw, 1], [w / 2 + 35, 1]].forEach(([x]) => {
+      cc.fillStyle = `rgba(138,147,163,${.25 + s * .6})`; cc.fillRect(x, y - bh * .7, bw, bh);
+      cc.strokeStyle = `rgba(20,22,26,${.8})`; cc.lineWidth = 2; cc.strokeRect(x, y - bh * .7, bw, bh);
+    });
+  }
+  cc.fillStyle = r.c; cc.beginPath(); cc.arc(w / 2, h - 26, 11, 0, 7); cc.fill();      // own body (chase cam)
+  cc.fillStyle = "rgba(0,0,0,.5)"; cc.fillRect(0, h - 16, w, 16);
+  cc.fillStyle = "#e8eef4"; cc.font = "10px system-ui"; cc.textAlign = "left";
+  cc.fillText(`${r.id.replace("robot_", "Robot ")}`, 6, h - 4);
+}
+
+// ---- panels ------------------------------------------------------------------
+function renderFleet() {
+  $("#fleet").innerHTML = robots.map(r => `
+    <div class="robot ${selected === r.id ? "sel" : ""}" data-id="${r.id}" style="--c:${r.c}" tabindex="0">
+      <div class="l1"><span class="sw"></span><span class="name">${r.id.replace("robot_", "Robot ")}</span><span class="batt ${r.batt < 25 ? "low" : ""}">${Math.round(r.batt)}%</span></div>
+      <div class="l2">${r.state === "charging" || r.state === "idle" ? r.state + (r.state === "idle" ? "" : "") : r.task}</div>
+      ${r.prog && r.state !== "charging" ? `<div class="bar"><i style="width:${Math.round(r.prog * 100)}%"></i></div>` : ""}
+      ${selected === r.id ? `<div class="more">
+        <canvas id="cam-c" width="320" height="180"></canvas>
+        <div class="facts"><span>${r.state}</span><span>${r.x.toFixed(1)}, ${r.y.toFixed(1)} m</span><span>${r.state === "charging" ? "0.0" : r.speed.toFixed(1)} m/s</span></div>
+        <div class="acts"><button class="btn small" data-act="pause">Pause</button><button class="btn small" data-act="home">Dock</button><button class="btn small" data-act="cancel">Cancel task</button></div>
+        <a class="open" href="/?robot=${r.id}" target="_blank" title="The full per-robot dashboard: cameras, SLAM, drive pad, pick and place">Open live view</a></div>` : ""}
+    </div>`).join("");
+  $("#n-robots").textContent = `${robots.length} online`;
+}
+function renderTasks() {
+  const order = { running: 0, queued: 1, done: 2, failed: 3 };
+  const list = [...tasks].sort((a, b) => order[a.state] - order[b.state]);
+  $("#tasks").innerHTML = list.map(t => {
+    const r = robots.find(x => x.id === t.who);
+    return `<div class="tk ${t.state}"><span class="t1">${t.from} to ${t.to}</span>
+      <span class="st ${t.state}">${t.state === "queued" ? `<button class="x" data-cancel="${t.id}" title="Remove from queue" aria-label="Remove ${t.id}">×</button>` : t.state}</span>
+      <span class="t2">${t.id}</span>
+      <span class="who">${r ? `<i style="--c:${r.c}"></i>${r.id.replace("robot_", "Robot ")}` : "next free robot"}</span></div>`;
+  }).join("");
+  const q = tasks.filter(t => t.state === "queued").length, a = tasks.filter(t => t.state === "running").length;
+  $("#tk-count").textContent = `${a} running, ${q} waiting`;
+}
+function renderWps() {
+  $("#wps").innerHTML = waypoints.map(p => `<span class="wp ${p.fixed ? "dock" : ""}">${p.id}${p.fixed ? "" : `<button data-del="${p.id}" title="Delete" aria-label="Delete ${p.id}">×</button>`}</span>`).join("");
+  const opts = waypoints.map(p => `<option>${p.id}</option>`).join("");
+  const keep = [$("#nt-from").value, $("#nt-to").value];
+  $("#nt-from").innerHTML = opts; $("#nt-to").innerHTML = opts;
+  if (keep[0]) $("#nt-from").value = keep[0]; if (keep[1]) { $("#nt-to").value = keep[1]; } else $("#nt-to").selectedIndex = Math.min(2, waypoints.length - 1);
+  $("#nt-who").innerHTML = `<option value="auto">Nearest idle robot</option>` + robots.map(r => `<option value="${r.id}">${r.id.replace("robot_", "Robot ")}</option>`).join("");
+}
+function toast(m) { const t = $("#toast"); t.textContent = m; t.classList.add("on"); clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("on"), 1800); }
+function select(id) { selected = id; renderFleet(); }
+function act(a) {
+  const r = robots.find(x => x.id === selected); if (!r) return;
+  if (a === "pause") { r.speed = 0; r.state = "idle"; toast("Paused"); }
+  if (a === "home") { r.route = [[DOCK.x, DOCK.y]]; r.speed = 1; r.state = "navigating"; r.task = "Returning to dock"; toast("Returning to dock"); }
+  if (a === "cancel") { r.route = []; r.state = "idle"; r.task = "Idle"; r.speed = 0; }
+  renderFleet();
+}
+
+// ---- interaction -------------------------------------------------------------
+$("#fleet").onclick = e => { if (e.target.dataset.act) return act(e.target.dataset.act); if (e.target.closest("a")) return; const c = e.target.closest(".robot"); if (c) select(selected === c.dataset.id ? null : c.dataset.id); };
+addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
+  if (e.key === "Escape") { select(null); $("#session").hidden = true; }
+  const m = { v: "select", f: "wp", g: "goto" }[e.key.toLowerCase()]; if (m) setTool(m);
+});
+function setTool(t) {
+  tool = t; document.querySelectorAll("#tools button").forEach(b => b.classList.toggle("active", b.dataset.t === t));
+  $("#hint").textContent = { select: "Click a robot to see its camera",
+    wp: "Click the map to add a waypoint", goto: selected ? `Click the map to send ${selected} there` : "Select a robot first, then click a destination" }[t];
+}
+document.querySelectorAll("#tools button").forEach(b => b.onclick = () => setTool(b.dataset.t));
+cv.onclick = e => {
+  const r = cv.getBoundingClientRect(), [x, y] = wx(e.clientX - r.left, e.clientY - r.top);
+  const hit = robots.find(b => Math.hypot(b.x - x, b.y - y) < 1.2);
+  if (hit && tool === "select") return select(hit.id);
+  if (tool === "wp") {
+    if (mode === "map" && cov < 30) return toast("Map a bit more first");
+    const n = waypoints.filter(p => !p.fixed).length + 1; let id = "wp-" + n; while (waypoints.some(p => p.id === id)) id += "'";
+    waypoints.push({ id, x, y }); renderWps(); toast(`Waypoint ${id} added`);
+  } else if (tool === "goto") {
+    const rb = robots.find(b => b.id === selected); if (!rb) return toast("Select a robot first");
+    rb.route = [[x, y]]; rb.state = "navigating"; rb.task = "Manual goto"; rb.speed = 1; rb.prog = 0; toast(`${rb.id} sent`); renderFleet();
+  }
+};
+$("#tasks").onclick = e => { const id = e.target.dataset.cancel; if (id) { tasks = tasks.filter(t => t.id !== id); renderTasks(); } };
+$("#wps").onclick = e => { const id = e.target.dataset.del; if (id) { waypoints = waypoints.filter(p => p.id !== id); renderWps(); } };
+$("#nt-add").onclick = () => {
+  const f = $("#nt-from").value, t = $("#nt-to").value; if (f === t) return toast("Pick up and drop off must differ");
+  tasks.push({ id: "T-" + nextTask++, from: f, to: t, who: $("#nt-who").value, state: "queued" }); renderTasks(); toast("Task queued");
+};
+$("#mode").onclick = e => {
+  const m = e.target.dataset.m; if (!m) return; mode = m;
+  document.querySelectorAll("#mode button").forEach(b => b.classList.toggle("active", b.dataset.m === m));
+  $("#map-pick").hidden = m !== "loc";
+  $("#save-map").hidden = m !== "map";
+  $("#coverage").hidden = m !== "map";
+  robots[0].state = m === "map" ? "exploring" : "navigating"; robots[0].task = m === "map" ? "Exploring the north-east" : "Localized on saved map";
+  toast(m === "map" ? "Mapping mode" : "Premapped: robots localizing"); renderFleet();
+};
+$("#estop").onclick = () => { robots.forEach(r => { r.route = []; r.speed = 0; r.state = r.state === "charging" ? "charging" : "idle"; r.task = r.state === "charging" ? r.task : "Stopped by operator"; }); toast("All robots stopped"); renderFleet(); };
+$("#save-map").onclick = () => toast("Map saved to library");
+
+// ---- sim tick ----------------------------------------------------------------
+let last = performance.now(), tk = 0;
+function tick(now) {
+  const dt = Math.min(.1, (now - last) / 1000); last = now; tk += dt;
+  robots.forEach(r => {
+    if (r.state === "charging") { r.batt = Math.min(100, r.batt + dt * .8); return; }
+    if (!r.route.length || !r.speed) return;
+    const [tx, ty] = r.route[0], dx = tx - r.x, dy = ty - r.y, d = Math.hypot(dx, dy);
+    r.a = Math.atan2(dy, dx); r.batt -= dt * .05;
+    if (d < .3) { r.route.shift(); if (!r.route.length) { r.speed = 0; r.state = "idle"; r.task = "Idle"; r.prog = 0; renderFleet(); } }
+    else { r.x += dx / d * r.speed * dt * 2; r.y += dy / d * r.speed * dt * 2; r.prog = Math.min(1, r.prog + dt * .02); }
+  });
+  if (mode === "map") { cov = Math.min(97, cov + dt * .25); $("#cov-n").textContent = Math.round(cov) + "%"; $("#cov-bar").style.width = cov + "%"; }
+  if (tk > 1) { tk = 0; renderFleet(); }
+  drawMap(); const s = robots.find(r => r.id === selected); if (s) drawCam(s);
+  requestAnimationFrame(tick);
+}
+// session panel: running vs idle changes what the panel offers and what the page shows
+let session = "running";
+function renderSession() {
+  const run = session === "running";
+  $("#sp-run").hidden = !run; $("#sp-state").textContent = run ? "running · explore_fleet" : "no session";
+  $("#empty").hidden = run;
+  $("#s-label").textContent = run ? "Session running" : "No session"; $("#s-dot").className = "dot " + (run ? "" : "idle");
+  $("#sp-start").textContent = run ? "Restart with these settings" : "Start session";
+}
+$("#empty-go").onclick = () => $("#session").hidden = false;
+$("#session-chip").onclick = () => $("#session").hidden = false;
+$("#sp-x").onclick = () => $("#session").hidden = true;
+$("#session").onclick = e => { if (e.target.id === "session") $("#session").hidden = true; };
+$("#presets").onclick = e => { const b = e.target.closest(".preset"); if (!b || b.disabled) return;
+  document.querySelectorAll(".preset").forEach(x => x.classList.toggle("on", x === b)); };
+document.querySelectorAll("#session .seg").forEach(g => g.onclick = e => { if (e.target.tagName === "BUTTON") [...g.children].forEach(b => b.classList.toggle("active", b === e.target)); });
+$("#sp-start").onclick = () => { session = "running"; renderSession(); $("#session").hidden = true; toast("Session starting…"); };
+$("#sp-stop").onclick = () => { session = "none"; renderSession(); toast("Session stopped"); };
+$("#sp-finish").onclick = () => { session = "none"; renderSession(); toast("Map saved, session stopped"); };
+addEventListener("resize", resize);
+resize(); renderFleet(); renderTasks(); renderWps(); renderSession(); setTool("select"); requestAnimationFrame(tick);
+if (location.hash === "#session") $("#session").hidden = false; else if (location.hash.length > 1) select(location.hash.slice(1));   // #robot_1 expands that card, #session opens the session panel
+</script>
+</body>
+</html>
