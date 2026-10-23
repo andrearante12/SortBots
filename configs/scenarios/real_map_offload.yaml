@@ -1,0 +1,28 @@
+# Real-robot scenario — see configs/scenarios/explore_fresh.yaml for the file
+# format and real_map_fresh.yaml for the on-Jetson version of the same run.
+name: real_map_offload
+
+title: Real robot — camera mapping, SLAM on the workstation
+description: >
+  The Jetson keeps only what must be on the robot: the D435 driver, visual
+  odometry, the live obstacle cloud, and a ~2 Hz compressed keyframe stream.
+  RTAB-Map mapping, loop closure and the 3D reconstruction run on the
+  workstation — start launch/sortbots_slam_workstation.launch.py there first,
+  with the Jetson container started as SORTBOTS_WORKSTATION=<workstation ip>
+  scripts/jetson.sh console. The map and reconstruction panels show the
+  workstation's map. See tasks/slam_offload.md.
+
+platform: real
+status: ready
+
+run:
+  robot_id: robot_0
+  resume: false
+  localize: false
+  map: null
+  slam_role: robot
+
+overrides: [resume]
+
+capture:
+  bag: false
