@@ -165,6 +165,24 @@ def generate_launch_description():
     camera_odometry = LaunchConfiguration("camera_odometry")
     depth_filter = LaunchConfiguration("depth_filter")
     wait_imu_to_init = LaunchConfiguration("wait_imu_to_init")
+    slam_role = LaunchConfiguration("slam_role")
+    keyframe_rate = LaunchConfiguration("keyframe_rate")
+    keyframe_decimation = LaunchConfiguration("keyframe_decimation")
+
+    def role_is(*roles):
+        return PythonExpression([
+            "'", slam_role, "' in (", ", ".join(f"'{r}'" for r in roles), ")"])
+
+    # Mapping on the robot itself yields the CPU to odometry and the live
+    # obstacle cloud: on the Orin Nano the three compete, and the bench
+    # (tasks/slam_offload.md) measured obstacle latency p99 going from 16 ms to
+    # 170-220 ms when RTAB-Map shared an unpinned CPU budget with them.
+    # Real robot mapping on itself only — sim has a whole desktop to spare,
+    # and a workstation running slam_role:=workstation has nothing to yield to.
+    slam_prefix = PythonExpression([
+        "'nice -n 10' if '", camera_odometry, "'.lower() in ('true', '1') and '",
+        slam_role, "' == 'all' else ''",
+    ])
 
     # RTAB-Map takes --delete_db_on_start as a flag inside `args`, so it can't
     # just be a bool passed through. Forced OFF in localization mode: deleting
@@ -302,6 +320,43 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
+            "slam_role",
+            default_value="all",
+            description=(
+                "Where SLAM runs (tasks/slam_offload.md). all: odometry AND "
+                "RTAB-Map mapping on this machine (sim, and the robot until a "
+                "workstation is in the loop). robot: only what must be on the "
+                "robot — odometry plus a compressed RGB-D keyframe stream "
+                "(/<id>/rgbd_image/compressed) for the workstation. "
+                "workstation: RTAB-Map built from that keyframe stream and the "
+                "robot's /<id>/odom; publishes the map, <id>/map -> <id>/odom "
+                "and the reconstruction clouds back."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "keyframe_rate",
+            default_value="2.0",
+            description=(
+                "slam_role:=robot — Hz of the compressed keyframe stream. "
+                "RTAB-Map only adds a node at Rtabmap/DetectionRate (2 Hz on "
+                "real) anyway, so frames beyond that are network load for "
+                "nothing. ~180 kB per 640x480 keyframe (JPEG + PNG depth)."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "keyframe_decimation",
+            # 2 = half resolution, a third of the bytes: 2.7 -> 0.95 Mb/s per
+            # robot. Full resolution is ~27% of a 2.4 GHz mesh channel per robot
+            # per hop, so two robots would cross the 50% busy line where the
+            # comms model starts failing. Costs some SLAM accuracy (bench at 2x
+            # speed: ATE 0.7 -> 1.15 m); set 1 on a wired or 5 GHz-only link.
+            default_value="2",
+            description=(
+                "slam_role:=robot — image decimation before compression "
+                "(1 = full resolution, ~2.7 Mb/s per robot; 2 = half, ~1 Mb/s)."
+            ),
+        ),
+        DeclareLaunchArgument(
             "rtabmap_args",
             default_value=GRID_ARGS,
             description=(
@@ -312,7 +367,8 @@ def generate_launch_description():
             ),
         ),
         IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
+            condition=IfCondition(role_is("all", "workstation")),
+            launch_description_source=PythonLaunchDescriptionSource(
                 PathJoinSubstitution([
                     FindPackageShare("rtabmap_launch"),
                     "launch",
@@ -391,6 +447,16 @@ def generate_launch_description():
                 # Tie it to the same flag so standalone use still gets a GUI.
                 "rtabmap_viz":        rviz,
                 "namespace":          robot_id,
+                # slam_role:=workstation: RTAB-Map reads the robot's compressed
+                # keyframe stream instead of raw images (upstream's
+                # rgbd_relay_uncompress turns <rgbd_topic>/compressed into
+                # <rgbd_topic_relay>). The relay name is passed explicitly for
+                # the same shared-launch-context reason as rgb_topic_relay.
+                "subscribe_rgbd":     PythonExpression(["'true' if '", slam_role, "' == 'workstation' else 'false'"]),
+                "compressed":         PythonExpression(["'true' if '", slam_role, "' == 'workstation' else 'false'"]),
+                "rgbd_topic":         ["/", robot_id, "/rgbd_image"],
+                "rgbd_topic_relay":   ["/", robot_id, "/rgbd_image_relay"],
+                "launch_prefix":      slam_prefix,
                 "use_sim_time":       use_sim_time,
                 # Map persistence. Without these, upstream silently defaults to
                 # database_path=~/.ros/rtabmap.db and localization=false, so
@@ -412,7 +478,9 @@ def generate_launch_description():
         # exactly what Isaac publishes in sim, so RTAB-Map can't tell the two
         # apart.
         Node(
-            condition=IfCondition(camera_odometry),
+            condition=IfCondition(PythonExpression([
+                "'", camera_odometry, "'.lower() in ('true', '1') and '",
+                slam_role, "' != 'workstation'"])),
             package="rtabmap_odom",
             executable="rgbd_odometry",
             name="rgbd_odometry",
@@ -439,6 +507,14 @@ def generate_launch_description():
                 "Odom/ImageDecimation": "2",
                 "Vis/MaxFeatures": "600",
                 "OdomF2M/MaxSize": "1200",
+                # Frame-to-frame, not the default frame-to-map: no local feature
+                # map to match against and update, so each frame is cheaper and
+                # odometry keeps more of the camera's frames on a CPU-bound Orin.
+                # Bench (tasks/slam_offload.md, TUM pioneer_slam at 2x speed,
+                # Jetson CPU budget, 3 runs each): 6.6 -> 9.9 Hz, odometry ATE
+                # 2.4 -> 1.3 m, SLAM ATE 2.6 -> 0.7 m. At 1x speed SLAM ATE is
+                # unchanged (0.19 m); short-window drift is ~1-2 points higher.
+                "Odom/Strategy": "1",
             }],
             remappings=[
                 ("rgb/image", ["/", robot_id, "/camera/rgb"]),
@@ -448,9 +524,34 @@ def generate_launch_description():
             ],
         ),
 
+        # slam_role:=robot — the keyframe stream the workstation maps from:
+        # RTAB-Map's own RGBDImage with JPEG rgb + PNG depth, rate-capped. The
+        # D435 driver stamps color and aligned depth identically, so exact sync.
+        # Raw 30 Hz images never leave the robot.
+        Node(
+            condition=IfCondition(role_is("robot")),
+            package="rtabmap_sync",
+            executable="rgbd_sync",
+            name="rgbd_sync",
+            namespace=robot_id,
+            output="screen",
+            parameters=[{
+                "approx_sync": False,
+                "compressed_rate": keyframe_rate,
+                "decimation": keyframe_decimation,
+                "use_sim_time": use_sim_time,
+            }],
+            remappings=[
+                ("rgb/image", ["/", robot_id, "/camera/rgb"]),
+                ("depth/image", ["/", robot_id, "/camera/depth"]),
+                ("rgb/camera_info", ["/", robot_id, "/camera/camera_info"]),
+            ],
+        ),
+
         # Keeps cloud_map/cloud_ground/cloud_obstacles/octomap_* flowing — see
         # nodes/rtabmap_cloud_pump.py's docstring for why this is needed.
         ExecuteProcess(
+            condition=IfCondition(role_is("all", "workstation")),
             cmd=[
                 "python3",
                 os.path.join(REPO_ROOT, "nodes", "rtabmap_cloud_pump.py"),
@@ -471,6 +572,7 @@ def generate_launch_description():
         # vendored roslib can't reassemble fragments — see the relay's
         # docstring for why a point budget beats a bigger max_message_size.
         ExecuteProcess(
+            condition=IfCondition(role_is("all", "workstation")),
             cmd=[
                 "python3",
                 os.path.join(REPO_ROOT, "nodes", "recon_cloud_relay.py"),

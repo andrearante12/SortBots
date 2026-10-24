@@ -30,6 +30,7 @@
   ].filter(Boolean);
   const viewScenarios = document.getElementById("view-scenarios");
   const viewFleet = document.getElementById("view-fleet");
+  const viewTests = document.getElementById("view-tests"); // gone with the old dashboard; the guard below keeps it harmless
   // Live-only header chrome: the stage switcher and the SLAM badge are about
   // the robot, not about which sim to launch or the fleet radio monitor.
   const liveChrome = [
@@ -77,6 +78,7 @@
     for (const el of liveChrome) el.hidden = view !== "live";
     if (viewScenarios) viewScenarios.hidden = view !== "scenarios";
     if (viewFleet) viewFleet.hidden = view !== "fleet";
+    if (viewTests) viewTests.hidden = view !== "tests";
     for (const btn of document.querySelectorAll("#view-mode button")) {
       btn.classList.toggle("active", btn.dataset.view === view);
     }
@@ -104,6 +106,7 @@
   const robotsSel = $("lf-robots");
   const chaseCountSel = $("lf-chase_cam_robots");
   const renderEveryIn = $("lf-render_every");
+  const worldSel = $("lf-world");
   const startBtn = $("lf-start");
   const SEGMENTS = { scene: $("lf-scene"), mode: $("lf-mode"), waypoints: $("lf-waypoints") };
   // Only the checkboxes this page carries: operator.html has its own copy of
@@ -159,6 +162,20 @@
       o.title = bits.join(" · ");
     }
 
+    // Worlds (configs/worlds/): props + scripted movers. An invalid one is
+    // listed disabled with its reason, like an unloadable map. operator.html
+    // has no world picker (see CHECKS), so every use is guarded.
+    if (worldSel) {
+      worldSel.textContent = "";
+      option(worldSel, "none", "None — the warehouse as is");
+      for (const w of options.worlds || []) {
+        const ok = w.status === "ready";
+        const o = option(worldSel, w.name, ok ? w.title : `${w.name} (invalid)`, !ok);
+        o.title = ok ? `${w.description} · ${w.props} prop(s), ${w.actors} actor(s) · ` +
+          `scenes: ${w.scenes.join(", ")}` : w.error;
+      }
+    }
+
     robotsSel.textContent = "";
     chaseCountSel.textContent = "";
     options.roster.forEach((_, i) => {
@@ -187,6 +204,7 @@
       for (const b of seg.querySelectorAll("button")) b.classList.toggle("active", b.dataset.v === cfg[key]);
     }
     mapSel.value = cfg.map;
+    if (worldSel) worldSel.value = cfg.world || "none";
     robotsSel.value = String(cfg.robots);
     chaseCountSel.value = String(cfg.chase_cam_robots);
     if (renderEveryIn) {
@@ -217,6 +235,11 @@
     if (cfg.map !== "new" && cfg.mode === "extend") {
       notes.push("Runs on a copy: keep what it maps with Save & finish.");
     }
+    const world = (options.worlds || []).find((w) => w.name === cfg.world);
+    if (world && cfg.explore && fields.has("explore")) {
+      notes.push(`${world.title}: with exploring on, the robots go wherever frontiers ` +
+        "are — leave it off and send goals to put them in the actors' way.");
+    }
     $("lf-map-note").textContent = notes.join(" ");
     updateStartButton();
   }
@@ -224,6 +247,7 @@
   // controls -> cfg, on any edit. An edit means "no longer exactly a preset".
   function readForm() {
     cfg.map = mapSel.value;
+    if (worldSel) cfg.world = worldSel.value || "none";
     cfg.robots = Number(robotsSel.value) || 1;
     cfg.chase_cam_robots = Number(chaseCountSel.value) || 1;
     // Typed, so clamp to the input's own bounds (session.py rejects the rest);
@@ -256,7 +280,7 @@
       onEdit();
     });
   }
-  for (const el of [mapSel, robotsSel, chaseCountSel, renderEveryIn, ...CHECKS.map((k) => $(`lf-${k}`))].filter(Boolean)) {
+  for (const el of [mapSel, worldSel, robotsSel, chaseCountSel, renderEveryIn, ...CHECKS.map((k) => $(`lf-${k}`))].filter(Boolean)) {
     el.addEventListener("change", () => {
       // Picking a library map defaults its waypoints back to the map's own.
       if (el === mapSel && libraryMap(mapSel.value)) cfg.waypoints = "map";
@@ -294,6 +318,7 @@
     // must not leave the select pointing at nothing.
     const valid = [...mapSel.options].some((o) => o.value === cfg.map && !o.disabled);
     if (!valid) cfg.map = "new";
+    if (worldSel && ![...worldSel.options].some((o) => o.value === cfg.world && !o.disabled)) cfg.world = "none";
     if (cfg.robots > options.roster.length) cfg.robots = options.roster.length;
   }
 

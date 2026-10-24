@@ -119,6 +119,7 @@ def _make_per_robot_actions(
     robot_ids_cfg,
     scene_cfg,
     platform_cfg,
+    slam_role_cfg,
     shared_map_cfg,
 ):
     primary_robot_id = robot_id_cfg.perform(context)
@@ -131,6 +132,13 @@ def _make_per_robot_actions(
     # entry. Forced rather than trusted so a forgotten scene:= can't anchor
     # hardware at a sim spawn pose (the fused /map would be offset by it).
     scene = "real" if platform == "real" else scene_cfg.perform(context)
+    slam_role = slam_role_cfg.perform(context)
+    if slam_role not in ("all", "robot"):
+        # "workstation" is its own launch (sortbots_slam_workstation.launch.py):
+        # it has no camera, no obstacles and no fleet radio to start.
+        raise ValueError(f"slam_role:={slam_role!r} — expected all or robot")
+    if slam_role == "robot" and platform != "real":
+        raise ValueError("slam_role:=robot is for platform:=real (sim has no Jetson budget)")
     as_bool = lambda cfg: cfg.perform(context).lower() in ("true", "1")
     # Shared map: every robot opens its OWN copy of one saved map (run_demo.sh
     # makes the copies) instead of only the primary. See nodes/map_handoff.py for
@@ -196,6 +204,33 @@ def _make_per_robot_actions(
                 output="screen",
             ))
 
+        # Obstacles in front of the robot, from geometry rather than frame
+        # differencing: clusters in base_link plus a `moving` flag from odom
+        # tracks (docs/obstacle_detection.md). Every platform — it reads raw
+        # camera/depth, so it doesn't depend on the depth filter below, and the
+        # sensors view draws its boxes over the head camera.
+        actions.append(ExecuteProcess(
+            cmd=[
+                "python3",
+                os.path.join(REPO_ROOT, "nodes", "obstacle_detector.py"),
+                "--robot-id", rid,
+            ],
+            output="screen",
+        ))
+        # Live obstacles from raw depth, at camera rate, in base_link: what is
+        # in front of the robot NOW, independent of odometry and SLAM (and of
+        # where SLAM runs). Real robot only for now — sim's Nav2 reads the
+        # dynamic_obstacle_filter's clouds below.
+        if platform == "real":
+            actions.append(ExecuteProcess(
+                cmd=[
+                    "python3",
+                    os.path.join(REPO_ROOT, "nodes", "obstacle_cloud.py"),
+                    "--robot-id", rid,
+                ],
+                output="screen",
+            ))
+
         # Before RTAB-Map: strip movers from depth so SLAM never sees them.
         # Skipped on the real robot: one robot means no peer to paint into the
         # map, Nav2 (the other consumer) is off, and on the Orin Nano the
@@ -219,6 +254,7 @@ def _make_per_robot_actions(
             # RTAB-Map supplies odom itself and must not wait on /imu.
             rtabmap_args["camera_odometry"] = "true"
             rtabmap_args["wait_imu_to_init"] = "false"
+            rtabmap_args["slam_role"] = slam_role
         # Map-lifecycle overrides (localization / an explicit --map path /
         # delete_db_on_start) are a single-robot concept today — see module
         # docstring; every OTHER robot in a multi-robot robot_ids list falls
@@ -396,6 +432,7 @@ def generate_launch_description():
     explore_autostart = LaunchConfiguration("explore_autostart")
     scene = LaunchConfiguration("scene")
     platform = LaunchConfiguration("platform")
+    slam_role = LaunchConfiguration("slam_role")
     shared_map = LaunchConfiguration("shared_map")
 
     return LaunchDescription([
@@ -519,6 +556,17 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
+            "slam_role",
+            default_value="all",
+            description=(
+                "all: odometry + RTAB-Map mapping here. robot (platform:=real "
+                "only): odometry, live obstacles and a compressed keyframe "
+                "stream; mapping runs on a workstation via "
+                "launch/sortbots_slam_workstation.launch.py. See "
+                "tasks/slam_offload.md."
+            ),
+        ),
+        DeclareLaunchArgument(
             "explore",
             default_value="false",
             description=(
@@ -556,6 +604,7 @@ def generate_launch_description():
                 use_sim_time, rviz, nav2, task_manager, scripted_pick,
                 localization, database_path, delete_db_on_start,
                 explore, explore_autostart, robot_id, robot_ids, scene, platform,
+                slam_role,
                 shared_map,
             ],
         ),

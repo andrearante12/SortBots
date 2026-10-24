@@ -82,8 +82,28 @@ channel instead.
 | `/{id}/dynamic_obstacles` | Nav2 ephemeral `ObstacleLayer` source |
 
 Detection v1: frame-to-frame depth change, morph close, keep robot-sized
-blobs. Vision-only — no peer TF. Bringup starts this **before** RTAB-Map so
-`depth_static` exists when mapping starts.
+blobs. No peer TF. Bringup starts this **before** RTAB-Map so `depth_static`
+exists when mapping starts.
+
+**Peers by radio.** Frame differencing misses a robot that stands still or
+creeps, and RTAB-Map then paints it into the shared map as a wall. On
+2026-10-22 that left 76 occupied `/map` cells under robot_0. Its global
+costmap went lethal around its own pose, and NavFn's cheapest way out pointed
+away from the goal, so the robot turned away and went the long way round. Now
+every pixel within `peer_radius_m` (0.5 m in x/y) of a peer's self-reported
+`/fleet/status` pose is masked too, and the robot uses only its own TF to place
+its camera. Live: ~17k px a frame masked with the peer 4 m away in view, none
+extra with it behind. The masking is limited to the columns the peer projects
+into: 2–11 ms with a peer in view, nothing otherwise. Already-painted phantoms
+(in a running map, or a saved one) stay until SLAM sees that spot empty again.
+
+### Obstacle detector
+
+[`nodes/obstacle_detector.py`](../nodes/obstacle_detector.py): geometric
+clusters in base_link plus a `moving` flag from odom-frame tracks, published
+as `/{id}/obstacle_tracks` (JSON), `/{id}/obstacle_points` and `/{id}/obstacles_viz`.
+It reads raw `camera/depth`, independent of the filter above, and runs on
+every platform. See [`docs/obstacle_detection.md`](obstacle_detection.md).
 
 ### RTAB-Map
 
@@ -210,7 +230,7 @@ as autonomy), not TF eavesdropping.
 | `configs/robots.yaml` | Roster + spawn poses (= fusion anchors) |
 | `configs/scenarios/explore_fleet.yaml` | 2-robot explore preset |
 | `configs/map_merge.yaml` / `recon_merge.yaml` / `fleet_radio.yaml` | Fusion / radio tuning |
-| `tests/map_merge_test.py` / `recon_merge_test.py` / `fleet_radio_test.py` / `dynamic_obstacle_filter_test.py` | Offline unit tests |
+| `tests/map_merge_test.py` / `recon_merge_test.py` / `fleet_radio_test.py` / `dynamic_obstacle_filter_test.py` / `obstacle_detector_test.py` | Offline unit tests |
 
 ---
 
@@ -218,7 +238,8 @@ as autonomy), not TF eavesdropping.
 
 ```bash
 /usr/bin/python3 -m pytest tests/map_merge_test.py tests/recon_merge_test.py \
-  tests/fleet_radio_test.py tests/dynamic_obstacle_filter_test.py -q
+  tests/fleet_radio_test.py tests/dynamic_obstacle_filter_test.py \
+  tests/obstacle_detector_test.py -q
 node webui/tests/operator_test.mjs
 ```
 

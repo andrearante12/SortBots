@@ -1,6 +1,9 @@
 # Real-robot perception: limitations found on 2026-09-28/30, and a plan
 
 **Status:** proposal for review. Nothing here is implemented yet.
+**Update 2026-10-09:** issue #2 (slow, drifting SLAM) is investigated and
+addressed in [`slam_offload.md`](slam_offload.md). It covers L3–L5 and L11, and
+the Phase 2 live obstacle layer is now `nodes/obstacle_cloud.py`.
 **Scope:** the camera → odometry → SLAM → dashboard chain on the Jetson Orin
 Nano + RealSense D435 (`platform: real`, `docs/jetson.md`). Motion control
 (base driver, Nav2 on hardware) is out of scope except where it feeds perception.

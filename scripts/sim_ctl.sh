@@ -226,7 +226,7 @@ cmd_wait() {
 # rather than contaminating ours, and prepend the system PATH so `ros2` and
 # map_saver_cli don't pick up conda's python3.
 run_maps_sh() {
-  bash -c "source /opt/ros/jazzy/setup.bash
+  "$REPO_ROOT/scripts/ros_bash.sh" -c "source /opt/ros/jazzy/setup.bash
            export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH
            exec '$REPO_ROOT/scripts/maps.sh' \"\$@\"" _ "$@"
 }

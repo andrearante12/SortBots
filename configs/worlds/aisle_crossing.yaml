@@ -1,0 +1,38 @@
+# A world layout (simtest/world.py has the full schema and the rationale).
+# Referenced by name from a scenario's `run: world:` or a test's overrides —
+# never by path.
+#
+# Coordinates are the `map` frame, which IS Isaac's world frame: every robot's
+# map -> <rid>/map anchor is its configs/robots.yaml spawn pose, so a point
+# here, on the dashboard's map and in /sim/ground_truth is the same point.
+# Placed against the fleet_warehouse_test grid (origin/sim/infrastructure,
+# 2026-08-27): racks along +y at x ~ -10 and x ~ -6 bound robot_0's aisle for
+# y ~ 9..16, and the aisle opens south onto clear floor (x -15..-5.5, y -2..8.5).
+
+name: aisle_crossing
+title: Aisle mouth — one walker crossing
+description: >
+  A person-sized cylinder walks back and forth across the mouth of robot_0's
+  aisle (y = 6.5, x -11 -> -6), perpendicular to the obvious route from the
+  spawn pose out onto the open floor. The baseline moving-obstacle case: a
+  robot driving south has to see it, slow or stop, and let it pass.
+
+scenes: [nvidia]
+
+# Live demos: actors move from the moment the sim plays. Tests ignore this and
+# reset + start the world clock at their own t0 (see /sim/world_cmd).
+autostart: true
+
+actors:
+  - id: walker_0
+    label: walker
+    shape: cylinder
+    radius: 0.25          # shoulder width ~0.5 m
+    height: 1.75
+    color: [0.95, 0.45, 0.10]
+    path:
+      waypoints: [[-11.0, 6.5], [-6.0, 6.5]]
+      speed_mps: 1.0      # unhurried walk; a person in a hurry is ~1.4
+      mode: pingpong
+      start_at_s: 0.0
+      dwell_s: 1.0        # pause at each end, like someone glancing down an aisle

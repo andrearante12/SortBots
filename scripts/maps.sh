@@ -11,7 +11,7 @@
 #   scripts/maps.sh show NAME [--json]
 #   scripts/maps.sh save NAME [--title T] [--description D] [--robot-id ID]
 #                             [--robot-ids a,b] [--scene nvidia]
-#                             [--no-live-db] [--no-vacuum] [--force]
+#                             [--no-live-db] [--live-db PATH] [--no-vacuum] [--force]
 #   scripts/maps.sh verify NAME
 #   scripts/maps.sh rm NAME [--force]
 #
@@ -132,8 +132,7 @@ save_grid() {
 # keeps its own database and carries on. It does cost a multi-second stall while
 # memory reloads, which is why --no-live-db exists.
 save_db_live() {
-  local name="$1" rid="$2" vac="$3"
-  local live="$HOME/.ros/sortbots_${rid}.db"
+  local name="$1" rid="$2" vac="$3" live="$4"
   local back="${live}.back"
 
   if ! ros2 service type "/${rid}/rtabmap/backup" >/dev/null 2>&1; then
@@ -155,8 +154,7 @@ save_db_live() {
 }
 
 save_db_offline() {
-  local name="$1" rid="$2" vac="$3"
-  local live="$HOME/.ros/sortbots_${rid}.db"
+  local name="$1" rid="$2" vac="$3" live="$4"
   [[ -f "$live" ]] || { echo "[maps] no database at $live" >&2; return 1; }
   "$PY" "$MAPS_LIB" add-db "$name" --src "$live" --robot-id "$rid" $vac
 }
@@ -165,7 +163,7 @@ save_db_offline() {
 
 cmd_save() {
   local name="" title="" desc="" rid="robot_0" rids="" scene="nvidia"
-  local live_db=true vac="" force=false
+  local live_db=true vac="" force=false live_path=""
   [[ $# -gt 0 ]] || usage 2
   name="$1"; shift
   while [[ $# -gt 0 ]]; do
@@ -176,11 +174,19 @@ cmd_save() {
       --robot-ids)   rids="$2";  shift 2;;
       --scene)       scene="$2"; shift 2;;
       --no-live-db)  live_db=false; shift;;
+      --live-db)     live_path="$2"; shift 2;;
       --no-vacuum)   vac="--no-vacuum"; shift;;
       --force)       force=true; shift;;
       *) echo "[maps] unknown arg: $1" >&2; exit 2;;
     esac
   done
+
+  # Where RTAB-Map is writing. The bringup's default is ~/.ros/sortbots_<rid>.db;
+  # the offload launch (sortbots_slam_workstation.launch.py) uses
+  # ~/.ros/sortbots_<rid>_ws.db so a workstation that also runs sims can't
+  # clobber its sim map, and the backup service writes <that path>.back, so
+  # the saver has to be told (tasks/slam_offload.md).
+  local live="${live_path:-$HOME/.ros/sortbots_${rid}.db}"
 
   "$PY" "$MAPS_LIB" init "$name" \
       ${title:+--title "$title"} ${desc:+--description "$desc"} \
@@ -190,7 +196,7 @@ cmd_save() {
     require_ros
     save_grid "$name" || exit 1
     if [[ "$live_db" == true ]]; then
-      save_db_live "$name" "$rid" "$vac" || true
+      save_db_live "$name" "$rid" "$vac" "$live" || true
     else
       echo "[maps] --no-live-db: pose graph deferred until the stack is down"
     fi
@@ -200,7 +206,7 @@ cmd_save() {
       die "$name has no grid and the stack is down, so one can't be captured.
        Start the sim and save again, or pass --force to keep a DB-only entry."
     fi
-    save_db_offline "$name" "$rid" "$vac" || exit 1
+    save_db_offline "$name" "$rid" "$vac" "$live" || exit 1
   fi
 
   # The dashboard's operator waypoints ride along with the map they were

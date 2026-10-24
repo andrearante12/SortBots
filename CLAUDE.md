@@ -46,6 +46,7 @@ This is **not a colcon workspace** — there is no `src/`, no `package.xml`, no
 | `webui/` | dashboard (vanilla JS, no build step) + `serve.py` + `session.py` |
 | `scripts/` | Isaac Sim entry points, `run_demo.sh`, `run_console.sh`, `sim_ctl.sh` |
 | `configs/` | tuning YAML, `scenarios/` presets |
+| `simtest/` | scored-test layer: `configs/worlds/` (props + scripted movers), `configs/tests/` (goals + metrics), probe, versioned metrics — `docs/testing.md` |
 | `maps/` | saved map library — named, committed snapshots of explored maps |
 | `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `docs/splat.md`) |
 | `docs/running.md` | the full runbook |
@@ -107,7 +108,13 @@ Prefer offline. Seconds, no GPU, no display, no ROS:
 node webui/tests/operator_test.mjs    # operator view, fake ROSLIB (no fixture needed)
 python3 webui/session.py --list       # scenario validation
 python3 -m pytest tests/              # pure-python node logic (system python3 — see below)
+scripts/simtest.py validate           # scored test cases (configs/tests/) resolve
 ```
+
+Scored live tests — a world of props and scripted movers
+(`configs/worlds/`), a scenario, goals and pass criteria — run with
+`scripts/simtest.py run NAME`; metrics are versioned and re-scorable from
+recorded events without a sim. See `docs/testing.md`.
 
 `tests/*_test.py` needs the SYSTEM python3 (`/usr/bin/python3 -m pytest`), not
 conda's — conda's base env doesn't have pytest, and this is the same
