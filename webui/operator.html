@@ -49,7 +49,7 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.4 "IBM Plex Sans", system-ui, sans-serif;
-         font-variant-numeric: tabular-nums; display: grid; grid-template-columns: 260px 1fr 296px; grid-template-rows: 50px 1fr; overflow: hidden; }
+         font-variant-numeric: tabular-nums; display: grid; grid-template-columns: var(--left-w, 260px) 1fr var(--right-w, 296px); grid-template-rows: 50px 1fr; overflow: hidden; }
   button, select, input { font: inherit; color: inherit; }
   button { cursor: pointer; }
   button:disabled { cursor: not-allowed; opacity: .5; }
@@ -102,6 +102,14 @@
   aside { background: var(--surface); display: flex; flex-direction: column; min-height: 0; overflow: auto; }
   #left { border-right: 1px solid var(--line); }
   #right { border-left: 1px solid var(--line); }
+  /* Drag handles on the inner edge of each side bar (operator.js: drag to resize,
+     double-click to reset). Outside the asides, which scroll. */
+  .resizer { position: fixed; top: 50px; bottom: 0; width: 9px; z-index: 4; cursor: col-resize; touch-action: none; }
+  .resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 4px; width: 1px; background: transparent; transition: background .1s; }
+  .resizer:hover::after, .resizer.drag::after { background: var(--info); width: 2px; left: 3.5px; }
+  #rz-left { left: calc(var(--left-w, 260px) - 5px); }
+  #rz-right { right: calc(var(--right-w, 296px) - 4px); }
+  body.resizing { cursor: col-resize; user-select: none; }
   .head { display: flex; align-items: baseline; gap: 8px; padding: 14px 16px 8px; position: sticky; top: 0; background: var(--surface); z-index: 1; }
   .head h2 { margin: 0; font-size: .95rem; font-weight: 600; }
   .head .muted { font-size: .82rem; margin-left: auto; white-space: nowrap; }
@@ -421,6 +429,9 @@
   <div class="head"><h2>Robots</h2><span class="muted" id="n-robots"></span></div>
   <div id="fleet"></div>
 </aside>
+
+<div class="resizer" id="rz-left" role="separator" aria-orientation="vertical" aria-label="Resize the robot list" title="Drag to resize · double-click to reset"></div>
+<div class="resizer" id="rz-right" role="separator" aria-orientation="vertical" aria-label="Resize the task list" title="Drag to resize · double-click to reset"></div>
 
 <main id="stage">
   <canvas id="map"></canvas>

@@ -909,6 +909,32 @@ async function main() {
   check('comms: toggling off closes the model stream', !(await vz()).on && !(await vz()).connected && !(await visible('#comms')));
   await page.eval(`localStorage.clear()`);
 
+  // -- resizable side bars ------------------------------------------------------------------------
+  console.log('\n--- side bars ---');
+  await page.eval(`localStorage.clear()`); await load();
+  const widths = () => page.eval(`[document.getElementById('left').getBoundingClientRect().width, document.getElementById('right').getBoundingClientRect().width, document.getElementById('map').getBoundingClientRect().width]`);
+  const [l0, r0w, m0] = await widths();
+  const dragX = async (sel, dx) => {
+    const [x, y] = await page.eval(`(() => { const r = document.querySelector('${sel}').getBoundingClientRect(); return [r.left + r.width / 2, r.top + 200]; })()`);
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x + dx / 2, y, button: 'left' });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x + dx, y, button: 'left' });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x + dx, y, button: 'left', clickCount: 1 });
+  };
+  await dragX('#rz-left', 120); await dragX('#rz-right', -100); await sleep(200);
+  const [l1, r1w, m1] = await widths();
+  check('side bars: dragging the left edge widens the robot list', Math.abs(l1 - (l0 + 120)) < 4, `${l0} -> ${l1}`);
+  check('side bars: dragging the right edge widens the task list', Math.abs(r1w - (r0w + 100)) < 4, `${r0w} -> ${r1w}`);
+  check('side bars: the map gives up the room', Math.abs(m1 - (m0 - 220)) < 6, `${m0} -> ${m1}`);
+  await dragX('#rz-left', -600); await sleep(100);
+  check('side bars: a bar never shrinks past its minimum', Math.abs((await widths())[0] - 200) < 2, String((await widths())[0]));
+  await load();
+  check('side bars: widths survive a reload', Math.abs((await widths())[0] - 200) < 2 && Math.abs((await widths())[1] - r1w) < 4, JSON.stringify(await widths()));
+  await page.eval(`document.getElementById('rz-left').dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); document.getElementById('rz-right').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await sleep(100);
+  check('side bars: double-click resets both', Math.abs((await widths())[0] - l0) < 2 && Math.abs((await widths())[1] - r0w) < 2, JSON.stringify(await widths()));
+  await page.eval(`localStorage.clear()`);
+
   // -- 2D map / 3D cloud -----------------------------------------------------------------------
   console.log('\n--- 3d view ---');
   await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });

@@ -1631,6 +1631,34 @@
   const syncCloudRobots = () => window.sortbotsCloud.setRobots([...robots.values()].map((r) => ({ id: r.id, color: r.color, pose: r.pose })));
   $("#view").addEventListener("click", (e) => { if (e.target.dataset.v) setView(e.target.dataset.v === "3d"); });
 
+  // -- resizable side bars -----------------------------------------------------------------------
+  // The grid's outer columns are --left-w / --right-w on <body>. Each handle drags its
+  // bar's inner edge; widths persist per browser, double-click resets. The stage
+  // canvases size from their parent, so a resize event re-fits the map and overlay.
+  const SIDES = { left: { min: 200, max: 520, dflt: 260 }, right: { min: 240, max: 560, dflt: 296 } };
+  function setSide(side, w, save = true) {
+    const { min, max, dflt } = SIDES[side];
+    const v = w == null ? dflt : Math.round(Math.min(max, Math.max(min, w)));
+    document.body.style.setProperty(`--${side}-w`, `${v}px`);
+    if (save) { try { if (w == null) localStorage.removeItem(`sortbots.${side}W`); else localStorage.setItem(`sortbots.${side}W`, String(v)); } catch (e) { /* this tab only */ } }
+    dispatchEvent(new Event("resize"));
+  }
+  for (const side of ["left", "right"]) {
+    try { const w = Number(localStorage.getItem(`sortbots.${side}W`)); if (w) setSide(side, w, false); } catch (e) { /* defaults */ }
+    const h = $(`#rz-${side}`);
+    h.addEventListener("pointerdown", (e) => {
+      e.preventDefault(); h.setPointerCapture(e.pointerId);
+      h.classList.add("drag"); document.body.classList.add("resizing");
+    });
+    h.addEventListener("pointermove", (e) => {
+      if (!h.hasPointerCapture(e.pointerId)) return;
+      setSide(side, side === "left" ? e.clientX : innerWidth - e.clientX);
+    });
+    const end = (e) => { if (h.hasPointerCapture(e.pointerId)) h.releasePointerCapture(e.pointerId); h.classList.remove("drag"); document.body.classList.remove("resizing"); };
+    h.addEventListener("pointerup", end); h.addEventListener("pointercancel", end);
+    h.addEventListener("dblclick", () => setSide(side, null));
+  }
+
   let toastTimer = null;
   function toast(msg) {
     const t = $("#toast");
