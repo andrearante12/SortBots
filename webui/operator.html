@@ -161,6 +161,19 @@
   #coverage { bottom: 14px; left: 14px; padding: 8px 14px; display: flex; gap: 8px; align-items: baseline; }
   #coverage b { font-weight: 600; font-size: 1rem; }
   #hint { position: absolute; bottom: 20px; right: 16px; font-size: .82rem; color: var(--muted); }
+  #comms { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  #comms-toggle[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--on-ink); }
+  #comms-bar { top: 14px; left: 64px; right: 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 6px 10px; font-size: .84rem; }
+  #comms-bar .model { font-weight: 600; font-size: .76rem; padding: 2px 8px; border-radius: 99px; border: 1px dashed var(--muted); color: var(--muted); }
+  #comms-bar .cm-range { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+  #comms-bar .cm-range input { width: 90px; }
+  #comms-bar .cm-what { display: inline-flex; gap: 6px; }
+  #comms-bar select { padding: 2px 6px; }
+  #comms-bar:not([hidden]) ~ #toast { top: 108px; } /* below the bar, which wraps to two rows */
+  #comms-feed { bottom: 64px; left: 14px; max-width: 360px; margin: 0; padding: 6px 12px; list-style: none; font-size: .8rem; color: var(--muted); }
+  #comms-feed:empty { display: none; }
+  #comms-feed li { padding: 2px 0; } #comms-feed li:first-child { color: var(--ink); }
+  #comms-feed li.error { color: var(--stop); }
   #empty { position: absolute; inset: 0; background: var(--scrim); display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; z-index: 3; text-align: center; padding: 24px; }
   #empty b { font-size: 1.15rem; font-weight: 600; } #empty .btn { margin-top: 8px; }
   #toast { position: absolute; top: 16px; left: 50%; z-index: 3; transform: translateX(-50%); background: var(--ink); color: var(--on-ink); padding: 6px 14px; border-radius: 6px; font-size: .84rem; opacity: 0; transition: opacity .2s; pointer-events: none; }
@@ -286,6 +299,10 @@
       <button data-v="2d" class="active" title="Occupancy map: tools, waypoints and routes">Map</button>
       <button data-v="3d" title="The fleet's 3D point cloud (/fleet/recon_cloud). Drag to orbit, scroll to zoom, right-drag to pan">3D cloud</button>
     </div>
+    <!-- Comms overlay (operator_comms.js): the commsim model of the fleet radio, fed
+         the real robots' poses, the map's obstacles and the gateway pin. Predicted, so it
+         only ever draws on the map; the robot cards and alarms stay the real fleet's. -->
+    <button class="btn" id="comms-toggle" aria-pressed="false" title="Overlay the comms model: predicted radio links, mesh routes and every message hop, for where the robots are now">Comms</button>
     <span id="mode-tile" hidden title="How this session was started. Change it from Session"><span class="k">Mode</span><b id="mode-label"></b><span id="map-name"></span></span>
   </div>
   <span class="spacer"></span>
@@ -305,12 +322,28 @@
 
 <main id="stage">
   <canvas id="map"></canvas>
+  <canvas id="comms" hidden></canvas>
   <div id="cloud" hidden></div>
   <div class="float" id="tools" role="toolbar" aria-label="Map tools">
     <button data-t="select" class="active" title="Select (V)">&#8598;</button>
     <button data-t="wp" title="Add waypoint (F). Drag to set the heading">&#9670;</button>
     <button data-t="goto" title="Send the selected robot (G). Drag to set the heading">&#10140;</button>
+    <button data-t="gw" title="Place the fleet gateway (R): where the comms overlay puts the access point">&#9650;</button>
   </div>
+  <div class="float" id="comms-bar" hidden role="toolbar" aria-label="Comms model">
+    <span class="model" title="Everything drawn by this overlay is the commsim model's prediction (commsim/des): the real robots' positions and the map's obstacles go in, links, routes and message hops come out. Its what-ifs change the model only, never the robots.">Model</span>
+    <span id="cm-state" class="muted"></span>
+    <button class="btn small" id="cm-play" type="button">Pause</button>
+    <select id="cm-speed" title="Model speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+    <label class="cm-range" title="Open-air radio range. Obstacles from the map shorten real links">Range <input type="range" id="cm-range" min="8" max="120" step="1" value="22"> <span id="cm-range-v">22 m</span></label>
+    <span class="cm-what" title="What-ifs: change the model, not the robots">
+      <button class="btn small" id="cm-link" type="button">Pull a link</button>
+      <button class="btn small" id="cm-kill" type="button">Switch off</button>
+      <button class="btn small" id="cm-send" type="button">Send A&rarr;B</button>
+    </span>
+    <label class="lf-check" title="Mesh routing beacons, transport ACKs and keepalives: most of the airtime, little of the story"><input type="checkbox" id="cm-chatter"> routing chatter</label>
+  </div>
+  <ul class="float" id="comms-feed" hidden aria-live="polite"></ul>
   <div class="float" id="coverage" hidden><b id="cov-n"></b><span class="muted">mapped</span></div>
   <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
   <div id="hint"></div>
@@ -441,6 +474,7 @@
 <script src="vendor/three.min.js"></script>
 <script src="vendor/OrbitControls.js"></script>
 <script src="operator_cloud.js"></script>
+<script src="operator_comms.js"></script>
 <script src="operator.js"></script>
 <script src="scenarios.js"></script>
 </body>

@@ -32,7 +32,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
+import queue
 import shutil
+import sys
+import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -49,6 +54,36 @@ ROBOTS_CONFIG = WEBUI_DIR.parent / "configs" / "robots.yaml"
 SPLAT_CONFIG = WEBUI_DIR.parent / "configs" / "splat.yaml"
 
 MAX_BODY_BYTES = 64 * 1024
+# The comms overlay posts the explored map, downsampled to 0.5 m cells, one
+# character each: a 200 x 200 m floor is 160 k characters.
+MAX_COMMSIM_BODY_BYTES = 1024 * 1024
+
+# Where the operator dropped the fleet's gateway (the comms overlay's AP), per
+# platform. Its own file, not a waypoint: it is not a place to send a robot.
+COMMS_GATEWAY_FILE = Path(os.environ["SORTBOTS_COMMS_GATEWAY"]) \
+    if os.environ.get("SORTBOTS_COMMS_GATEWAY") else WEBUI_DIR.parent / "data" / "comms_gateway.json"
+
+# What the page may ask of the comms model (commsim/viz/demo.py Hub.apply).
+# "task" and "cancel" are left out on purpose: the overlay shows the radio
+# only, and the real fleet's auction lives on /fleet/task_board.
+COMMSIM_OPS = {"move", "obstacle", "link", "node", "send", "range", "layout", "gateway",
+               "speed", "pause", "reset"}
+_HUB = None
+_HUB_LOCK = threading.Lock()
+
+
+def _commsim_hub():
+    """The comms model, started on first use. Lazy because importing commsim
+    (and its YAML config) is wasted on a dashboard nobody opens the overlay on."""
+    global _HUB
+    with _HUB_LOCK:
+        if _HUB is None:
+            repo = str(WEBUI_DIR.parent)
+            if repo not in sys.path:
+                sys.path.insert(0, repo)
+            from commsim.viz.demo import Hub
+            _HUB = Hub()
+        return _HUB
 
 # Set by main() when --control is given. None means "control endpoints off".
 SESSIONS: session_mod.SessionManager | None = None
@@ -60,6 +95,32 @@ PLATFORM = "sim"
 
 def _load_nav_waypoints() -> dict:
     return {"platform": PLATFORM, "waypoints": maps_lib.read_working_waypoints(PLATFORM)}
+
+
+def _read_comms_gateways() -> dict:
+    try:
+        raw = json.loads(COMMS_GATEWAY_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _load_comms_gateway() -> dict:
+    return {"platform": PLATFORM, "gateway": _read_comms_gateways().get(PLATFORM)}
+
+
+def _validate_gateway(raw):
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("gateway must be {x, y} or null")
+    try:
+        x, y = float(raw["x"]), float(raw["y"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("gateway needs numeric x and y")
+    if not (math.isfinite(x) and math.isfinite(y)) or abs(x) > 1e4 or abs(y) > 1e4:
+        raise ValueError("gateway x/y out of range")
+    return {"x": round(x, 3), "y": round(y, 3)}
 
 
 def _session_robot_ids(roster: list[str]) -> list[str] | None:
@@ -112,6 +173,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_demo_tasks()
         elif route == "/api/splat/config":
             self._serve_splat_config()
+        elif route == "/api/comms_gateway":
+            self._serve_json(_load_comms_gateway())
+        elif route == "/api/commsim/events":
+            self._serve_commsim_events()
         elif route == "/api/session":
             self._with_control(lambda: self._serve_json(SESSIONS.status()))
         elif route == "/api/session/log":
@@ -136,6 +201,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_control(self._finish_session)
         elif route == "/api/nav_waypoints":
             self._save_nav_waypoints()
+        elif route == "/api/comms_gateway":
+            self._save_comms_gateway()
+        elif route == "/api/commsim/cmd":
+            self._commsim_cmd()
         elif route == "/api/launch/preview":
             self._preview_launch()
         elif route == "/api/presets":
@@ -259,6 +328,72 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_error(400, str(exc))
             return
         self._serve_json(_load_nav_waypoints())
+
+    def _save_comms_gateway(self):
+        # Same deal as the waypoints: one small JSON file under data/, no
+        # --control needed, last write wins.
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            gw = _validate_gateway(body.get("gateway"))
+        except ValueError as exc:
+            self._serve_error(400, str(exc))
+            return
+        all_ = _read_comms_gateways()
+        all_[PLATFORM] = gw
+        try:
+            COMMS_GATEWAY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = COMMS_GATEWAY_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(all_, indent=2) + "\n")
+            tmp.replace(COMMS_GATEWAY_FILE)
+        except OSError as exc:
+            self._serve_error(500, f"failed to save the gateway: {exc}")
+            return
+        self._serve_json(_load_comms_gateway())
+
+    # -- comms overlay: the commsim model (commsim/viz/demo.py) ------------
+    # Server-Sent Events out, JSON commands in. ThreadingHTTPServer gives each
+    # stream its own thread; it ends when the page goes away (BrokenPipe).
+
+    def _serve_commsim_events(self):
+        try:
+            hub = _commsim_hub()
+        except Exception as exc:  # commsim missing or its config broken: say so, don't 500 the page
+            self._serve_error(503, f"comms model unavailable: {type(exc).__name__}: {exc}")
+            return
+        q = hub.subscribe()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        try:
+            while True:
+                try:
+                    self.wfile.write(f"data: {q.get(timeout=5.0)}\n\n".encode())
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            hub.unsubscribe(q)
+            self.close_connection = True
+
+    def _commsim_cmd(self):
+        body = self._read_json_body(limit=MAX_COMMSIM_BODY_BYTES)
+        if body is None:
+            return
+        if body.get("op") not in COMMSIM_OPS:
+            self._serve_error(400, f"unknown comms model op: {body.get('op')!r}")
+            return
+        try:
+            hub = _commsim_hub()
+        except Exception as exc:
+            self._serve_error(503, f"comms model unavailable: {type(exc).__name__}: {exc}")
+            return
+        hub.cmds.put(body)  # applied on the model's own thread; bad fields come back as an error event
+        self._serve_json({"ok": True})
 
     def _serve_robots(self):
         # configs/robots.yaml is the fleet roster (ids + per-scene spawn
@@ -502,13 +637,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         fn()
 
-    def _read_json_body(self):
+    def _read_json_body(self, limit: int = MAX_BODY_BYTES):
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             self._serve_error(400, "bad Content-Length")
             return None
-        if length > MAX_BODY_BYTES:
+        if length > limit:
             self._serve_error(413, "request body too large")
             return None
         raw = self.rfile.read(length) if length else b"{}"

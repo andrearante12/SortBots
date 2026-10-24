@@ -43,6 +43,7 @@
   let tool = "select";
   let view3d = false; // main stage: 2D occupancy map, or the 3D point cloud
   let waypoints = []; // [{name, x, y, yaw}], the server's copy — also the task endpoints
+  let gateway = null; // {x, y}: the fleet gateway pin (comms overlay), server's copy
   let tasks = []; // [{id, kind: "goto"|"pickup", goto, pickup, dropoff, robot, state, at, reason}]
   let session = null; // last /api/session body, null until the first answer
   let controlAvailable = true; // false once /api/session answers 503
@@ -257,6 +258,15 @@
       ctx.beginPath(); ctx.moveTo(a, b - 9); ctx.lineTo(a + 6, b); ctx.lineTo(a, b + 9); ctx.lineTo(a - 6, b); ctx.closePath();
       ctx.fill(); ctx.stroke();
       ctx.fillStyle = palette.ink; ctx.fillText(w.name, a, b - 14);
+    }
+    // The gateway pin only matters to the comms overlay; shown while it or the tool is on.
+    if (gateway && (tool === "gw" || (window.sortbotsComms && window.sortbotsComms.on))) {
+      const [a, b] = toPx(gateway.x, gateway.y);
+      ctx.fillStyle = palette.ink; ctx.strokeStyle = palette.bg; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(a, b - 10); ctx.lineTo(a + 9, b + 7); ctx.lineTo(a - 9, b + 7); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = palette.ink; ctx.lineWidth = 1.2;
+      for (const r of [14, 19]) { ctx.beginPath(); ctx.arc(a, b - 2, r, -2.2, -0.95); ctx.stroke(); }
+      ctx.fillStyle = palette.ink; ctx.fillText("Gateway", a, b + 21);
     }
 
     for (const r of robots.values()) {
@@ -775,6 +785,26 @@
     publishString(`/${id}/explore_cmd`, exploring ? "stop" : "start");
   }
 
+  // -- gateway pin (comms overlay) -------------------------------------------------------------------
+  // Where the fleet's gateway / access point stands, per platform (serve.py:
+  // data/comms_gateway.json). Not a waypoint: nothing drives there.
+  async function loadGateway() {
+    try {
+      const body = await (await fetch("/api/comms_gateway")).json();
+      const next = body.gateway || null;
+      if (JSON.stringify(next) !== JSON.stringify(gateway)) { gateway = next; dirty = true; if (window.sortbotsComms) window.sortbotsComms.gatewayMoved(); }
+    } catch (e) { /* older serve.py, or offline: no pin */ }
+  }
+  async function saveGateway(g) {
+    try {
+      const res = await fetch("/api/comms_gateway", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ gateway: g }) });
+      if (!res.ok) throw new Error((await res.json()).error || res.status);
+      gateway = (await res.json()).gateway; dirty = true;
+      if (window.sortbotsComms) window.sortbotsComms.gatewayMoved();
+      toast("Gateway placed");
+    } catch (e) { toast(`Couldn't save the gateway: ${e.message || e}`); }
+  }
+
   // -- waypoints ------------------------------------------------------------------------------------
 
   async function loadWaypoints() {
@@ -1140,12 +1170,14 @@
     select: () => (selected ? "Click the map for waypoints and sends, or pick another robot" : "Click a robot to see its camera"),
     wp: () => "Click the map to add a waypoint. Drag to set the heading",
     goto: () => (selected ? `Click the map to send ${nameOf(selected)} there. Drag to set the heading` : "Select a robot first, then click a destination"),
+    gw: () => "Click the map where the fleet's gateway (the access point) stands",
   };
   function setTool(t) {
     tool = t;
     for (const b of document.querySelectorAll("#tools button")) b.classList.toggle("active", b.dataset.t === t);
     if (!view3d) $("#hint").textContent = HINTS[t]();
     canvas.style.cursor = t === "select" ? "grab" : "crosshair";
+    dirty = true; // the gateway pin shows with its tool
   }
   for (const b of document.querySelectorAll("#tools button")) b.addEventListener("click", () => setTool(b.dataset.t));
 
@@ -1191,6 +1223,8 @@
     } else if (tool === "goto") {
       if (!selected) return toast("Select a robot first");
       sendNav(selected, p.wx, p.wy, yaw, `(${p.wx.toFixed(1)}, ${p.wy.toFixed(1)})`);
+    } else if (tool === "gw") {
+      saveGateway({ x: p.wx, y: p.wy });
     }
   });
   canvas.addEventListener("wheel", (e) => {
@@ -1250,7 +1284,7 @@
   addEventListener("keydown", (e) => {
     if (e.key === "Escape") { if (!$("#session").hidden) closeSession(); else if (selected) select(null); return; }
     if (e.target.closest && e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
-    const t = { v: "select", f: "wp", g: "goto" }[e.key.toLowerCase()];
+    const t = { v: "select", f: "wp", g: "goto", r: "gw" }[e.key.toLowerCase()];
     if (t) setTool(t);
   });
   addEventListener("resize", resize);
@@ -1265,6 +1299,8 @@
     // style.display, not [hidden]: #map / #tools set their own display, which beats the attribute.
     canvas.style.display = $("#tools").style.display = view3d ? "none" : "";
     $("#cloud").hidden = !view3d;
+    $("#comms-toggle").hidden = view3d; // the overlay draws on the 2D map only
+    setComms(!view3d && commsWanted);
     if (view3d) {
       if (!cloudMounted) { window.sortbotsCloud.mount($("#cloud"), ros); cloudMounted = true; }
       window.sortbotsCloud.show(); syncCloudRobots();
@@ -1275,6 +1311,27 @@
     }
     try { localStorage.setItem("sortbots.mapView", view3d ? "3d" : "2d"); } catch (e) { /* this tab only */ }
   }
+  // -- comms overlay (operator_comms.js) ----------------------------------------------------------
+  let commsWanted = false;
+  function setComms(v) {
+    if (!window.sortbotsComms) return;
+    window.sortbotsComms.set(v);
+    $("#comms-toggle").setAttribute("aria-pressed", String(v));
+    dirty = true;
+  }
+  if (window.sortbotsComms) {
+    window.sortbotsComms.mount({
+      canvas: $("#comms"), toPx, scale: () => view.scale, getMap: () => lastMap,
+      getRobots: () => [...robots.values()].filter(online), getGateway: () => gateway,
+      hint: (t) => { $("#hint").textContent = t || HINTS[tool](); },
+    });
+  }
+  $("#comms-toggle").addEventListener("click", () => {
+    commsWanted = !commsWanted;
+    setComms(commsWanted && !view3d);
+    try { localStorage.setItem("sortbots.comms", commsWanted ? "on" : "off"); } catch (e) { /* this tab only */ }
+  });
+
   const syncCloudRobots = () => window.sortbotsCloud.setRobots([...robots.values()].map((r) => ({ id: r.id, color: r.color, pose: r.pose })));
   $("#view").addEventListener("click", (e) => { if (e.target.dataset.v) setView(e.target.dataset.v === "3d"); });
 
@@ -1302,15 +1359,18 @@
     }
     if (moved) { dirty = true; if (!view.moved) fitView(); if (view3d) syncCloudRobots(); }
     renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending();
+    if (window.sortbotsComms) window.sortbotsComms.sync();
   }, 250);
 
   // -- boot ----------------------------------------------------------------------------------------------------------------------
   applyTheme(); resize(); setTool("select"); renderTasks(); renderWaypoints();
-  refreshRoster(); loadWaypoints(); pollSession();
+  refreshRoster(); loadWaypoints(); loadGateway(); pollSession();
   try { if (localStorage.getItem("sortbots.mapView") === "3d") setView(true); } catch (e) { /* default: 2D */ }
   setInterval(loadWaypoints, 10000); // another operator may have added pins
+  setInterval(loadGateway, 10000);
+  try { if (localStorage.getItem("sortbots.comms") === "on") $("#comms-toggle").click(); } catch (e) { /* default: off */ }
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, view, toPx, toWorld, onBoard, get board() { return board; } };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; } };
 })();

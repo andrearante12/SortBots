@@ -145,7 +145,9 @@ async function main() {
   const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sortbots-sessions-'));
   spawnTracked('python3', [path.join(WEBUI_DIR, 'serve.py'), '--control', '--platform', 'sim',
                            '--port', String(PORT), '--host', '127.0.0.1'],
-               { cwd: REPO_ROOT, env: { ...process.env, SORTBOTS_SESSIONS_DIR: sessionsDir } });
+               { cwd: REPO_ROOT, env: { ...process.env, SORTBOTS_SESSIONS_DIR: sessionsDir,
+                 // The gateway pin is saved by the real serve.py: never into data/.
+                 SORTBOTS_COMMS_GATEWAY: path.join(sessionsDir, 'comms_gateway.json') } });
   await waitFor(async () => (await fetch(`http://127.0.0.1:${PORT}/operator.html`)).ok, { what: 'serve.py' });
   const roster = (await (await fetch(`http://127.0.0.1:${PORT}/api/robots`)).json()).robots || [];
   check('roster has at least two robots', roster.length >= 2, roster.join(','));
@@ -566,9 +568,88 @@ async function main() {
   }
 
 
+  // -- comms overlay ---------------------------------------------------------------------------
+  // operator_comms.js against the REAL commsim model in this serve.py (no stub): the
+  // robots' poses, the map's obstacles and the gateway pin go in; links, routes and
+  // what-ifs come out, drawn on the map only.
+  console.log('\n--- comms overlay ---');
+  const load = async () => { await page.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/operator.html` }); await sleep(1200); };
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+  await page.eval(`localStorage.clear()`); await load();
+  const vz = async () => JSON.parse(await page.eval(`JSON.stringify(window.__viz.state())`));
+  // 30 x 20 m floor (border wall) plus a free-standing wall between the two robots.
+  const walled = grid(60, 40, 0.5, -10, -10);
+  for (let row = 8; row < 32; row++) { walled.data[row * 60 + 21] = 100; walled.data[row * 60 + 22] = 100; }
+  await emit('/map', walled);
+  await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+  await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+  await sleep(500);
+  check('comms: off by default, no overlay, no model stream', !(await visible('#comms')) && !(await visible('#comms-bar')) && !(await vz()).on);
+  await page.eval(`document.querySelector('#tools [data-t="gw"]').click()`);
+  await mapPointer(0.5, 8);
+  await waitFor(async () => (await page.eval(`JSON.stringify(window.__operator.gateway)`)) !== 'null', { what: 'gateway pin save', tries: 20 });
+  const gwPin = JSON.parse(await page.eval(`JSON.stringify(window.__operator.gateway)`));
+  check('comms: the gateway tool drops a pin and saves it', Math.abs(gwPin.x - 0.5) < 0.2 && Math.abs(gwPin.y - 8) < 0.2, JSON.stringify(gwPin));
+  const saved = await (await fetch(`http://127.0.0.1:${PORT}/api/comms_gateway`)).json();
+  check('comms: serve.py keeps the pin per platform', saved.platform === 'sim' && Math.abs(saved.gateway.x - 0.5) < 0.2, JSON.stringify(saved));
+  await page.eval(`document.querySelector('#tools [data-t="select"]').click()`);
+  await click('#comms-toggle');
+  await waitFor(async () => { const s = await vz(); return s.connected && s.n === 3 && s.racks >= 2 && s.origin; }, { what: 'the comms model to take the fleet', tries: 60 });
+  let cs = await vz();
+  check('comms: toggling on shows the overlay and its bar', (await visible('#comms')) && (await visible('#comms-bar')) && cs.on);
+  check('comms: the model gets one node per robot plus the gateway', cs.n === 3, `n=${cs.n}`);
+  check('comms: the map\'s obstacles become the model\'s racks', cs.racks === 2 && /2 obstacles from the map/.test(await $text('#cm-state')), `${cs.racks} / ${await $text('#cm-state')}`);
+  await waitFor(async () => { const s = await vz(); return Math.abs(s.nodes[1][0] - 7) < 0.3 && Math.abs(s.nodes[0][0] - 10.5) < 0.3; }, { what: 'model positions', tries: 30 });
+  cs = await vz();
+  check('comms: the model\'s robots stand where the real ones are (map origin removed)',
+        Math.abs(cs.nodes[1][0] - 7) < 0.3 && Math.abs(cs.nodes[1][1] - 12) < 0.3 && Math.abs(cs.nodes[2][0] - 14) < 0.3 && Math.abs(cs.nodes[2][1] - 8) < 0.3, JSON.stringify(cs.nodes));
+  check('comms: the gateway pin is the model\'s gateway', Math.abs(cs.nodes[0][0] - 10.5) < 0.3 && Math.abs(cs.nodes[0][1] - 18) < 0.3, JSON.stringify(cs.nodes[0]));
+  await waitFor(async () => { const s = await vz(); return s.routes[1] && s.routes[1][0] && s.routes[2] && s.routes[2][0] && s.airCount > 0; }, { what: 'model routes', tries: 40 });
+  check('comms: every robot has a predicted route to the gateway, and messages fly', true);
+  const atWorld = (x, y) => page.eval(`(() => { const r = document.getElementById('comms').getBoundingClientRect(); const [a, b] = window.__operator.toPx(${x}, ${y}); return [r.left + a, r.top + b]; })()`);
+  const tap = async ([x, y]) => {
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+  };
+  await click('#cm-send');
+  await tap(await atWorld(-3, 2)); await tap(await atWorld(4, -2));
+  await waitFor(async () => (await vz()).feed.some((t) => /Robot 1 got the message from Robot 0/.test(t)), { what: 'a message A -> B', tries: 40 });
+  check('comms: send A->B delivers a message through the model and says how', /hop/.test((await vz()).feed.find((t) => /got the message/.test(t))), (await vz()).feed.join(' | '));
+  await click('#cm-link');
+  await tap(await atWorld(-3, 2)); await tap(await atWorld(0.5, 8));
+  await waitFor(async () => (await vz()).blocked.includes('0-1'), { what: 'a pulled link', tries: 30 });
+  check('comms: pulling a link blocks it in the model', (await vz()).blocked.includes('0-1'));
+  await page.eval(`window.__viz.cmd({ op: 'link', a: 0, b: 1, action: 'unblock' })`);
+  await waitFor(async () => !(await vz()).blocked.includes('0-1'), { what: 'a restored link', tries: 30 });
+  await emit('/tf', tf('map', `${r1}/base_link`, 6, -2, 3.1));
+  await waitFor(async () => Math.abs((await vz()).nodes[2][0] - 16) < 0.3, { what: 'a pose update to move the model', tries: 30 });
+  check('comms: a robot that drives moves in the model too', true);
+  await click('#cm-kill');
+  check('comms: a what-if asks you to pick a robot', (await vz()).pick === 'node' && /switch it off/.test(await $text('#hint')), await $text('#hint'));
+  const node2 = await page.eval(`(() => { const r = document.getElementById('comms').getBoundingClientRect(); const [a, b] = window.__operator.toPx(6, -2); return [r.left + a, r.top + b]; })()`);
+  await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: node2[0], y: node2[1], button: 'left', clickCount: 1 });
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: node2[0], y: node2[1], button: 'left', clickCount: 1 });
+  await waitFor(async () => (await vz()).dead.includes(2), { what: 'model kill', tries: 30 });
+  check('comms: switching a robot off kills it in the model', (await vz()).dead.includes(2) && !(await vz()).pick);
+  const row1 = await page.eval(`document.querySelector('#fleet .robot[data-id="${r1}"] .l1').textContent`);
+  check('comms: a model what-if never touches the real robot\'s card', !/silent|offline/.test(row1), row1);
+  await page.eval(`window.__viz.cmd({ op: 'node', id: 2, action: 'revive' })`);
+  await waitFor(async () => !(await vz()).dead.includes(2), { what: 'model revive', tries: 30 });
+  await shot('comms-overlay');
+  await page.eval(`localStorage.setItem('sortbots.comms', 'on')`); await load();
+  await emit('/map', walled);
+  await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+  check('comms: the toggle survives a reload', (await page.eval(`document.getElementById('comms-toggle').getAttribute('aria-pressed')`)) === 'true' && (await vz()).on);
+  await click('#view [data-v="3d"]'); await sleep(200);
+  check('comms: the 3D view turns the overlay off', !(await vz()).on && !(await visible('#comms-toggle')));
+  await click('#view [data-v="2d"]'); await sleep(200);
+  check('comms: back to 2D brings it back', (await vz()).on);
+  await click('#comms-toggle'); await sleep(300);
+  check('comms: toggling off closes the model stream', !(await vz()).on && !(await vz()).connected && !(await visible('#comms')));
+  await page.eval(`localStorage.clear()`);
+
   // -- 2D map / 3D cloud -----------------------------------------------------------------------
   console.log('\n--- 3d view ---');
-  const load = async () => { await page.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/operator.html` }); await sleep(1200); };
   await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
   await page.eval(`localStorage.clear()`);
   await page.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/operator.html` }); await sleep(1200);

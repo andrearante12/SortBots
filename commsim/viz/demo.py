@@ -1,29 +1,23 @@
-"""Live demonstration: the real DES (commsim/des/sim.py — the same radio
-model, batman-style routing and core/protocol.py allocator the sweeps use)
-stepped in real time and streamed to commsim/viz/demo.html, which draws it
-and sends back what the viewer does: drag robots, add an obstacle, post a
-task, pull a link, kill a robot, send a message A -> B.
+"""Live comms model behind the operator view's comms overlay: the real DES
+(commsim/des/sim.py — the same radio model, batman-style routing and
+core/protocol.py allocator the sweeps use) stepped in real time.
 
-    /usr/bin/python3 -m commsim.viz.demo [--port 8765] [--n 4] [--variant V3] [--layout warehouse]
-    # then open http://127.0.0.1:8765/
+webui/serve.py owns one `Hub` and streams its events to the page as
+Server-Sent Events (GET /api/commsim/events); the page's commands come back as
+JSON (POST /api/commsim/cmd). There is no server here any more: the operator
+view is the one GUI (CLAUDE.md, "One GUI"), and this module is its engine.
 
-Standard library only (works on Windows: `py -3 -m commsim.viz.demo`).
-Transport to the page is Server-Sent Events (GET /events) and JSON commands
-(POST /cmd); no websocket, so http.server is enough.
-
-What is real and what is not: the radio range, contention, routing, every
-message's size and timing, the auction, leases and silence detection are the
-model's — nothing is scripted for the demo. The demo differs from a sweep in
-three ways only: tasks and obstacles arrive when the viewer asks (not Poisson),
-robots stand where the viewer put them (they still drive to a task they win),
-and the clock is paced to the wall.
+In the overlay the model's robots stand where the REAL robots are (the page
+moves them as their poses change), its racks are the explored map's
+occupied cells (`layout` command, commsim/des/layout.py from_occupancy) and
+its gateway is the operator's gateway pin. What is real and what is not: the
+radio range, contention, routing, every message's size and timing, leases
+and silence detection are the model's. The overlay never posts tasks to it —
+the real fleet's auction is on /fleet/task_board — so its robots never drive.
 """
 from __future__ import annotations
 
 import argparse
-import collections
-import copy
-import heapq
 import json
 import math
 import queue
@@ -31,19 +25,18 @@ import sys
 import threading
 import time
 import traceback
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from commsim.core.fleet import load_config
 from commsim.des import radio as R
+from commsim.des.layout import Layout, from_occupancy
 from commsim.des.sim import CLAIMED, GW, Frame, Sim
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 BASE_CFG = REPO / "commsim/configs/base.yaml"
 
-# DES frame -> page kind (colours/labels live in viz.js)
+# DES frame -> page kind (colours/labels live in webui/operator_comms.js)
 MSG_KIND = {"Status": "status", "StatusLite": "status", "Pose": "status", "TaskAnnounce": "announce",
             "Bid": "bid", "Claim": "claim", "LeaseBeacon": "lease", "TaskEvent": "event",
             "ObstacleEvent": "obstacle", "ObstacleList": "obstacle", "MapUpdate": "map",
@@ -76,18 +69,27 @@ class DemoSim:
     methods are called from the stepping thread (commands come through
     `queue`), so nothing here locks."""
 
-    def __init__(self, emit, n: int, variant: str, layout: str, seed: int = 1,
+    def __init__(self, emit, n: int, variant: str, layout: "str | Layout", seed: int = 1,
                  positions: list | None = None, range_m: float | None = None):
         self.emit = emit
-        self.n, self.variant, self.layout_name, self.seed = n, variant, layout, seed
+        custom = layout if isinstance(layout, Layout) else None
+        self.layout_name = "map" if custom else layout
+        self.n, self.variant, self.seed = n, variant, seed
         cfg = load_config(BASE_CFG)
         des = cfg.setdefault("commsim_des", {})
         des["task_rate_per_robot_hz"] = 0.0   # tasks come from the viewer
         des["obstacle_rate_hz"] = 1e-9          # (expovariate needs > 0; mean 30 years)
         self.cfg = cfg
-        self.sim = Sim(cfg, variant, n, seed=seed, layout=layout, warmup_s=0.0, steady_s=1e12,
-                       status_transport="udp", positions=positions)
+        self.sim = Sim(cfg, variant, n, seed=seed, layout="open_floor" if custom else layout,
+                       warmup_s=0.0, steady_s=1e12, status_transport="udp", positions=positions)
         self.sim.obstacle_rate = 1e-9
+        if custom:
+            # Sim builds its layout by name; swap the map's in before start()
+            # runs the first topo(), and keep every node on the floor.
+            self.sim.layout = custom
+            if not positions:
+                self.sim.nodes[GW].pos = tuple(custom.gateway_pos)
+            self._clamp_all()
         self.band0 = self.sim.bands[0]
         self.last_routes: dict = {}
         self.last_pos: dict = {}
@@ -285,6 +287,10 @@ class DemoSim:
                        "pos": list(r.pos), "gateway": r.is_gw, "alive": r.alive}
                       for i, r in sorted(sim.nodes.items())],
             "snr": self.snr_matrix(),
+            # The routes as they stand. Building a DemoSim runs topo() and emits
+            # its routes BEFORE the Hub can send this header, and a page clears
+            # its routes on init: without these it showed none until one changed.
+            "routes": [[node, dst, nh, tq] for (node, dst), (nh, tq) in sorted(self.last_routes.items())],
             "range_m": {"robot": self.open_air_range(False), "gateway": self.open_air_range(True)},
             "knobs": {"status_timeout_s": sim.params.status_timeout_s, "status_hz": sim.status_hz,
                       "orig_interval_ms": int(sim.orig_s * 1000),
@@ -302,12 +308,41 @@ class DemoSim:
 
     # ---- commands from the page -----------------------------------------------
 
+    def _clamp(self, x: float, y: float) -> tuple:
+        lay = self.sim.layout
+        return (min(max(x, 0.0), lay.width), min(max(y, 0.0), lay.height))
+
+    def _clamp_all(self) -> None:
+        for r in self.sim.nodes.values():
+            r.pos = self._clamp(*r.pos)
+
+    def set_layout(self, layout: Layout) -> None:
+        """New racks from the map (it grows while the robots explore). In
+        place, not a reset: link state, routes and silence survive."""
+        self.sim.layout = layout
+        self.layout_name = "map"
+        self._clamp_all()
+        self.sim.topo()
+        t = self.us(self.sim.now)
+        self.emit({"t": t, "k": "layout", "width": layout.width, "height": layout.height,
+                   "racks": len(set(layout.groups)) if layout.groups else len(layout.racks)})
+        for i, r in sorted(self.sim.nodes.items()):
+            self.emit({"t": t, "k": "pos", "id": i, "pos": list(r.pos)})
+        self.emit({"t": t, "k": "snr", "snr": self.snr_matrix()})
+
+    def set_gateway(self, x: float, y: float) -> None:
+        gw = self.sim.nodes[GW]
+        gw.pos = self._clamp(x, y)
+        self.sim.layout.gateway_pos = gw.pos
+        self.sim.topo()
+        self.emit({"t": self.us(self.sim.now), "k": "pos", "id": GW, "pos": list(gw.pos)})
+        self.emit({"t": self.us(self.sim.now), "k": "snr", "snr": self.snr_matrix()})
+
     def move(self, rid: int, x: float, y: float) -> None:
         r = self.sim.nodes.get(rid)
         if r is None or r.is_gw:
             return
-        lay = self.sim.layout
-        r.pos = (min(max(x, 0.0), lay.width), min(max(y, 0.0), lay.height))
+        r.pos = self._clamp(x, y)
         if r.task is not None:  # re-plan the drive from where it now stands
             tid = r.task
             r.task, r.route = None, []
@@ -394,12 +429,17 @@ class DemoSim:
                        "busy": {b: round(c.busy_acc, 3) for b, c in sim.ch.items()}})
 
 
-# ---- server --------------------------------------------------------------------------
+# ---- engine --------------------------------------------------------------------------
 
 class Hub:
-    """Owns the sim thread, fans events out to SSE clients, applies commands."""
+    """Owns the sim thread, fans events out to SSE clients, applies commands.
 
-    def __init__(self, n: int, variant: str, layout: str, range_m: float | None = None):
+    webui/serve.py makes one, lazily, on the first /api/commsim/events. The
+    thread steps the model only while someone is subscribed: serve.py runs on
+    the Jetson too, and a DES spinning for nobody would burn its CPU."""
+
+    def __init__(self, n: int = 2, variant: str = "V3", layout: "str | Layout" = "open_floor",
+                 range_m: float | None = 22.0):
         self.clients: list[queue.Queue] = []
         self.cmds: queue.Queue = queue.Queue()
         self.lock = threading.Lock()
@@ -432,11 +472,18 @@ class Hub:
             if q in self.clients:
                 self.clients.remove(q)
 
-    def reset(self, n: int | None = None, variant: str | None = None, layout: str | None = None,
+    def reset(self, n: int | None = None, variant: str | None = None, layout=None,
               positions: list | None = None) -> None:
         n0, v0, l0 = self.args
-        self.args = (n or n0, variant or v0, layout or l0)
+        # The map's layout outlives a reset (a robot joined): only a new
+        # `layout` command replaces it.
+        self.args = (n or n0, variant or v0, layout or (self.sim.sim.layout if self.sim.layout_name == "map" else l0))
         keep = self.sim.open_air_range(False)
+        gw = self.sim.sim.nodes[GW].pos
+        if positions is None and self.sim.layout_name == "map":
+            positions = [list(gw)]
+        elif positions is not None and len(positions) and positions[0] is None:
+            positions = [list(gw)] + positions[1:]
         self.sim = DemoSim(self.emit, *self.args, positions=positions, range_m=keep)
         self.emit({"k": "init", "header": self.sim.header(), "speed": self.speed, "paused": self.paused})
 
@@ -458,6 +505,11 @@ class Hub:
             s.send(int(c["src"]), int(c["dst"]), int(c.get("size", 200)), bool(c.get("reliable", True)))
         elif op == "range":
             s.set_range(float(c["metres"]))
+        elif op == "layout":
+            s.set_layout(from_occupancy(str(c["occ"]), int(c["w"]), int(c["h"]), float(c["cell"]),
+                                        gateway_pos=s.sim.nodes[GW].pos))
+        elif op == "gateway":
+            s.set_gateway(float(c["x"]), float(c["y"]))
         elif op == "speed":
             self.speed = max(0.05, min(20.0, float(c["speed"])))
             self.emit({"k": "ctl", "speed": self.speed, "paused": self.paused})
@@ -465,7 +517,8 @@ class Hub:
             self.paused = bool(c.get("paused", True))
             self.emit({"k": "ctl", "speed": self.speed, "paused": self.paused})
         elif op == "reset":
-            self.reset(c.get("n"), c.get("variant"), c.get("layout"), c.get("positions"))
+            pos = c.get("positions")
+            self.reset(c.get("n"), c.get("variant"), None, pos)
 
     def loop(self) -> None:
         last = time.monotonic()
@@ -473,7 +526,7 @@ class Hub:
         while True:
             if time.monotonic() - report > 2.0 and self.verbose:
                 report = time.monotonic()
-                print(f"[demo] sim t={self.sim.sim.now:.1f} s, {len(self.clients)} client(s), "
+                print(f"[commsim] sim t={self.sim.sim.now:.1f} s, {len(self.clients)} client(s), "
                       f"queue {len(self.sim.sim._q)}, paused={self.paused}", file=sys.stderr, flush=True)
             try:
                 while True:
@@ -485,98 +538,26 @@ class Hub:
                 self.emit({"k": "error", "text": f"{type(exc).__name__}: {exc}"})
             now = time.monotonic()
             dt, last = now - last, now
-            if not self.paused:
+            with self.lock:
+                watched = bool(self.clients)
+            if watched and not self.paused:
                 try:
                     self.sim.step(self.sim.sim.now + min(dt, 0.5) * self.speed)
                 except Exception as exc:
                     traceback.print_exc()
                     self.emit({"k": "error", "text": f"sim: {type(exc).__name__}: {exc}"})
                     self.paused = True
-            time.sleep(0.02)
-
-
-HUB: Hub | None = None
-
-
-class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *a, **kw):
-        super().__init__(*a, directory=str(HERE), **kw)
-
-    def log_message(self, fmt, *args):  # quiet: the SSE stream would spam the console
-        pass
-
-    def end_headers(self):
-        self.send_header("Cache-Control", "no-cache")
-        super().end_headers()
-
-    def do_GET(self):
-        path = urlsplit(self.path).path
-        if path == "/":
-            self.path = "/demo.html"
-            return super().do_GET()
-        if path != "/events":
-            return super().do_GET()
-        q = HUB.subscribe()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Connection", "keep-alive")
-        self.end_headers()
-        try:
-            while True:
-                try:
-                    data = q.get(timeout=5.0)
-                    self.wfile.write(f"data: {data}\n\n".encode())
-                except queue.Empty:
-                    self.wfile.write(b": ping\n\n")
-                self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        finally:
-            HUB.unsubscribe(q)
-
-    def do_POST(self):
-        if urlsplit(self.path).path != "/cmd":
-            self.send_error(404)
-            return
-        n = int(self.headers.get("Content-Length") or 0)
-        try:
-            c = json.loads(self.rfile.read(n) or b"{}")
-        except json.JSONDecodeError:
-            self.send_error(400, "bad json")
-            return
-        HUB.cmds.put(c)
-        body = b'{"ok":true}'
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+            time.sleep(0.02 if watched else 0.25)
 
 
 def main(argv=None) -> int:
-    global HUB
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--n", type=int, default=4, help="robots (plus the gateway)")
-    ap.add_argument("--variant", default="V3", help="V3 = 2.4 GHz mesh (default), V4 = dual band")
-    ap.add_argument("--layout", default="warehouse", choices=["warehouse", "open_floor"])
-    ap.add_argument("--range-m", type=float, default=22.0,
-                    help="open-air radio range to start with (the slider changes it live); "
-                         "the model's placeholder power reaches ~210 m, more than the floor")
-    ap.add_argument("--verbose", action="store_true", help="a status line every 2 s on stderr")
-    a = ap.parse_args(argv)
-    HUB = Hub(a.n, a.variant, a.layout, a.range_m)
-    HUB.verbose = a.verbose
-    srv = ThreadingHTTPServer((a.host, a.port), Handler)
-    srv.daemon_threads = True
-    print(f"commsim live demo: http://{a.host}:{a.port}/  (n={a.n}, {a.variant}, {a.layout}; Ctrl-C to stop)",
-          flush=True)
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    return 0
+    argparse.ArgumentParser(description=__doc__,
+                            formatter_class=argparse.RawDescriptionHelpFormatter).parse_args(argv)
+    print("The comms model now runs inside the operator view (CLAUDE.md, \"One GUI\"):\n"
+          "    python3 webui/serve.py --port 8081    # or scripts/run_console.sh\n"
+          "then open http://localhost:8081/operator.html and turn on Comms in the map tools.",
+          file=sys.stderr)
+    return 2
 
 
 if __name__ == "__main__":
