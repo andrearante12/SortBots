@@ -324,8 +324,9 @@ function setStageMode(mode) {
   for (const btn of camSourceBar.querySelectorAll("button")) {
     btn.classList.toggle("active", btn.dataset.cam === (mode === "sensors" ? "sensors" : "chase"));
   }
-  if (mode === "sensors") drawFeatureOverlay();
+  if (mode === "sensors") { drawFeatureOverlay(); drawObstacleOverlay(); }
   syncFeatureSubscription();
+  syncObstacleSubscription();
   onStageResize();
 }
 
@@ -446,13 +447,102 @@ function syncFeatureSubscription() {
 featureToggle.addEventListener("change", drawFeatureOverlay);
 window.addEventListener("resize", drawFeatureOverlay);
 
+// -- obstacle overlay (nodes/obstacle_detector.py) --------------------------
+// Boxes in the depth image's pixel space, drawn on the RGB tile: in sim the
+// two share one camera, and the real D435's depth is aligned to color, so a
+// depth pixel IS an RGB pixel. Red = a tracked cluster moving in odom, amber =
+// static. Same canvas-over-snapshot approach as the features, for the same
+// web_video_server reason.
+const OBSTACLE_COLORS = { moving: "rgba(255,70,70,1)", static: "rgba(255,180,40,0.9)" };
+const obstacleCanvas = document.getElementById("obstacle-overlay");
+const obstacleTag = document.getElementById("obstacle-tag");
+const obstacleToggle = document.getElementById("obstacle-toggle-box");
+let lastObstacles = null; // newest /obstacle_tracks message
+let lastObstaclesAt = 0;
+
+function drawObstacleOverlay() {
+  const w = obstacleCanvas.clientWidth, h = obstacleCanvas.clientHeight;
+  if (!w || !h) return; // sensors view not on the stage
+  if (obstacleCanvas.width !== w) obstacleCanvas.width = w;
+  if (obstacleCanvas.height !== h) obstacleCanvas.height = h;
+  const ctx = obstacleCanvas.getContext("2d");
+  ctx.clearRect(0, 0, w, h);
+
+  const o = lastObstacles;
+  const fresh = o && Date.now() - lastObstaclesAt < 3000;
+  if (!o) {
+    obstacleTag.textContent = "obstacles · waiting for obstacle_detector";
+    return;
+  }
+  obstacleTag.textContent = !fresh
+    ? "obstacles · stale"
+    : `obstacles · ${o.count}` + (o.moving ? ` · ${o.moving} moving` : "");
+  obstacleTag.classList.toggle("alert", !!(fresh && o.moving));
+  if (!obstacleToggle.checked || !fresh) return;
+
+  // Same object-fit: contain inversion as drawFeatureOverlay.
+  const nw = o.w || sensorRgbEl.naturalWidth, nh = o.h || sensorRgbEl.naturalHeight;
+  if (!nw || !nh) return;
+  const k = Math.min(w / nw, h / nh);
+  const ox = (w - nw * k) / 2, oy = (h - nh * k) / 2;
+  ctx.font = "11px system-ui, sans-serif";
+  ctx.textBaseline = "bottom";
+  for (const ob of o.obstacles) {
+    const [u0, v0, u1, v1] = ob.uv;
+    const x = ox + u0 * k, y = oy + v0 * k;
+    const bw = (u1 - u0) * k, bh = (v1 - v0) * k;
+    const color = ob.moving ? OBSTACLE_COLORS.moving : OBSTACLE_COLORS.static;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = ob.moving ? 2.5 : 1.5;
+    ctx.strokeRect(x, y, bw, bh);
+    const label = `#${ob.track_id} ${ob.range_m.toFixed(1)} m`
+      + (ob.moving ? ` · ${ob.speed_mps.toFixed(1)} m/s` : "");
+    const tw = ctx.measureText(label).width + 6;
+    const ly = Math.max(y, 14);
+    ctx.fillStyle = color;
+    ctx.fillRect(x, ly - 14, tw, 14);
+    ctx.fillStyle = "#111";
+    ctx.fillText(label, x + 3, ly - 1);
+  }
+}
+
+// Only while the sensors view is up, like the features. The detector itself
+// runs regardless: Nav2 and tests read its other outputs.
+const obstaclesTopic = new ROSLIB.Topic({
+  ros,
+  name: `/${ROBOT_ID}/obstacle_tracks`,
+  messageType: "std_msgs/String",
+  reconnect_on_close: true,
+  throttle_rate: 100,
+  queue_length: 1,
+});
+function onObstacles(msg) {
+  try {
+    lastObstacles = JSON.parse(msg.data);
+    lastObstaclesAt = Date.now();
+    drawObstacleOverlay();
+  } catch (e) {
+    console.error("bad obstacles message", e);
+  }
+}
+let obstaclesSubscribed = false;
+function syncObstacleSubscription() {
+  const want = stageMode === "sensors";
+  if (want === obstaclesSubscribed) return;
+  obstaclesSubscribed = want;
+  if (want) obstaclesTopic.subscribe(onObstacles);
+  else obstaclesTopic.unsubscribe(onObstacles);
+}
+obstacleToggle.addEventListener("change", drawObstacleOverlay);
+window.addEventListener("resize", drawObstacleOverlay);
+
 setStageMode(lastCameraMode);
 
 // Start snapshot polls only after the stage classes are coherent — otherwise
 // markChaseMissing can race setStageMode's first paint, and the HTML default
 // (head as .stage-pip) would briefly poll a feed we intentionally hide.
 wireCameraStream("camera-stream", "camera/rgb");
-wireCameraStream("sensor-rgb", "camera/rgb", () => drawFeatureOverlay());
+wireCameraStream("sensor-rgb", "camera/rgb", () => { drawFeatureOverlay(); drawObstacleOverlay(); });
 wireCameraStream("sensor-depth", "camera/depth_color");
 wireCameraStream("chase-stream", "camera/chase/rgb");
 
@@ -1614,6 +1704,148 @@ new ROSLIB.Topic({
   reconnect_on_close: true,
 }).subscribe(onTfMessage);
 
+// -- world overlay (spawn_warehouse.py --world, configs/worlds/) -------------
+// Props and scripted movers, drawn from GROUND TRUTH (/sim/ground_truth: where
+// an actor really is), never from anything a robot perceived. That's the
+// point of drawing them: over the costmap you can see at a glance whether the
+// robot's picture of a mover matches the mover. /sim/world is the latched
+// static half (shapes, colours, paths); ground truth the 10 Hz poses. Both
+// only exist in sim, so on a real robot this whole block draws nothing.
+const worldToggle = document.getElementById("world-toggle");
+const WORLD_TRUTH_TTL_MS = 3000; // sim gone quiet -> stop drawing stale actors
+let worldLayout = null; // {world, title, props: [...], actors: [...]}
+let worldTruth = null; // last /sim/ground_truth
+let worldTruthAt = 0;
+
+new ROSLIB.Topic({
+  ros, name: "/sim/world", messageType: "std_msgs/String", reconnect_on_close: true,
+}).subscribe((msg) => {
+  try {
+    worldLayout = JSON.parse(msg.data);
+  } catch (e) {
+    return;
+  }
+  renderWorldTracker();
+});
+
+new ROSLIB.Topic({
+  ros, name: "/sim/ground_truth", messageType: "std_msgs/String",
+  reconnect_on_close: true, throttle_rate: 100,
+}).subscribe((msg) => {
+  try {
+    worldTruth = JSON.parse(msg.data);
+  } catch (e) {
+    return;
+  }
+  worldTruthAt = Date.now();
+  renderWorldTracker();
+});
+
+const worldCmdTopic = new ROSLIB.Topic({
+  ros, name: "/sim/world_cmd", messageType: "std_msgs/String",
+});
+
+function worldLive() {
+  return worldLayout && worldLayout.world && worldTruth &&
+    Date.now() - worldTruthAt < WORLD_TRUTH_TTL_MS;
+}
+
+const trkWorldRow = document.getElementById("trk-world-row");
+const trkWorld = document.getElementById("trk-world");
+const worldPauseBtn = document.getElementById("world-pause");
+function renderWorldTracker() {
+  const live = worldLive();
+  trkWorldRow.hidden = !live;
+  if (!live) return;
+  trkWorld.textContent = `${worldLayout.world} · actors t=${worldTruth.wt.toFixed(1)}s` +
+    (worldTruth.running ? "" : " (paused)");
+  worldPauseBtn.textContent = worldTruth.running ? "pause" : "resume";
+}
+document.getElementById("world-restart").addEventListener("click", () => {
+  worldCmdTopic.publish({ data: JSON.stringify({ cmd: "restart" }) });
+});
+worldPauseBtn.addEventListener("click", () => {
+  const cmd = worldTruth && worldTruth.running ? "pause" : "start";
+  worldCmdTopic.publish({ data: JSON.stringify({ cmd }) });
+});
+
+const rgb = (c, a) => `rgba(${Math.round(c[0] * 255)}, ${Math.round(c[1] * 255)}, ` +
+  `${Math.round(c[2] * 255)}, ${a})`;
+
+// A simtest.geometry shape (["circle", [x, y], r] | ["poly", [[x, y], ...]]) as a path.
+function traceWorldShape(shape) {
+  ctx.beginPath();
+  if (shape[0] === "circle") {
+    const [px, py] = worldToPixel(shape[1][0], shape[1][1]);
+    ctx.arc(px, py, Math.max(3, shape[2] * view.scale), 0, 2 * Math.PI);
+    return;
+  }
+  shape[1].forEach(([x, y], i) => {
+    const [px, py] = worldToPixel(x, y);
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  });
+  ctx.closePath();
+}
+
+function actorShape(a, p) {
+  if (a.shape === "cylinder") return ["circle", [p.x, p.y], a.radius];
+  const [sx, sy] = a.size;
+  const c = Math.cos(p.yaw), s = Math.sin(p.yaw);
+  return ["poly", [[sx / 2, sy / 2], [-sx / 2, sy / 2], [-sx / 2, -sy / 2], [sx / 2, -sy / 2]]
+    .map(([x, y]) => [p.x + c * x - s * y, p.y + s * x + c * y])];
+}
+
+function drawWorldOverlay() {
+  if (!worldToggle.checked || !worldLive()) return;
+  ctx.save();
+  for (const p of worldLayout.props) {
+    traceWorldShape(p.footprint);
+    ctx.fillStyle = rgb(p.color, 0.35);
+    ctx.strokeStyle = rgb(p.color, 0.9);
+    ctx.lineWidth = 1.5;
+    ctx.fill();
+    ctx.stroke();
+  }
+  for (const a of worldLayout.actors) {
+    // The path the actor walks: dashed, so it never reads as a Nav2 plan.
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = rgb(a.color, 0.45);
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    a.path.forEach(([x, y], i) => {
+      const [px, py] = worldToPixel(x, y);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    if (a.mode === "loop") ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const pose = worldTruth.actors[a.id];
+    if (!pose) continue;
+    traceWorldShape(actorShape(a, pose));
+    ctx.fillStyle = rgb(a.color, 0.85);
+    ctx.strokeStyle = "rgba(255,255,255,0.85)";
+    ctx.lineWidth = 1.5;
+    ctx.fill();
+    ctx.stroke();
+    const [px, py] = worldToPixel(pose.x, pose.y);
+    const r = Math.max(3, (a.radius || 0.3) * view.scale);
+    // Heading tick like the robot marker's, always: a walker dwelling at a
+    // waypoint still faces somewhere. Dashed while it stands still.
+    ctx.strokeStyle = rgb(a.color, 1);
+    ctx.lineWidth = 2;
+    ctx.setLineDash(pose.moving ? [] : [3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px + r * 2 * Math.cos(pose.yaw), py - r * 2 * Math.sin(pose.yaw));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    drawRobotLabel(px, py, r, a.label || a.id, rgb(a.color, 1));
+  }
+  ctx.restore();
+}
+
 function drawFrame() {
   requestAnimationFrame(drawFrame);
   // Nothing to draw to while the map is off-stage. The subscriptions stay
@@ -1776,6 +2008,9 @@ function drawFrame() {
     ctx.lineTo(px + r * 1.8 * Math.cos(goal.yaw), py - r * 1.8 * Math.sin(goal.yaw));
     ctx.stroke();
   }
+
+  // Under the robot markers, over everything the robot itself produced.
+  drawWorldOverlay();
 
   if (lastPose) {
     const [px, py] = worldToPixel(lastPose.x, lastPose.y);

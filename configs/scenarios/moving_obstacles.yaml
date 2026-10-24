@@ -1,0 +1,39 @@
+# Scenario definition for the dashboard's Scenarios tab — see the header of
+# configs/scenarios/explore_fresh.yaml for the schema. `world:` names a layout
+# in configs/worlds/ (simtest/world.py has that schema).
+
+name: moving_obstacles
+
+title: Moving obstacles — single robot (watch live)
+description: >
+  robot_0 in the NVIDIA warehouse with a world layout of props and scripted
+  movers, explorer idle — so the robot only moves when you send it somewhere.
+  Click a goal on the far side of a walker's path and watch whether it sees
+  the walker, yields and gets there. Actors are drawn on the map from
+  /sim/ground_truth (their TRUE position, so you can compare it with what the
+  costmap thinks), and the actor controls restart their clock.
+
+  This is also the scenario the test cases in configs/tests/ build on: they
+  pick the world, reset the actors at their own t=0 and score the run
+  (scripts/simtest.py, docs/testing.md).
+
+status: ready
+
+run:
+  scene: nvidia
+  robots: 1
+  robot_id: robot_0
+  headless: true
+  chase_cam: false       # off for speed, as everywhere; tick it to watch from behind
+  explore: false         # the robot waits for a goal: the run is about avoidance,
+                         # and frontier goals would make every run go somewhere else
+  resume: false          # fresh map: Nav2 plans through unknown space (allow_unknown)
+  localize: false
+  teleop: false
+  map: null
+  world: aisle_crossing
+
+overrides: [world, headless, chase_cam, explore, render_every, lite_render]
+
+capture:
+  bag: false

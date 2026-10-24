@@ -128,9 +128,14 @@
     font-size: 0.68rem; color: #cdd; background: rgba(20,22,26,0.7);
     padding: 2px 6px; border-radius: 4px; pointer-events: none;
   }
-  #feature-toggle { position: absolute; right: 6px; bottom: 6px; z-index: 3;
+  .tile-toggles { position: absolute; right: 6px; bottom: 6px; z-index: 3;
+    display: flex; gap: 4px; }
+  .tile-toggles label {
     font-size: 0.68rem; background: rgba(20,22,26,0.7); color: #cdd;
     padding: 2px 6px; border-radius: 4px; }
+  /* Top-left: the bottom-left tag already belongs to the features. */
+  #obstacle-tag { top: 6px; bottom: auto; }
+  #obstacle-tag.alert { color: #fff; background: rgba(200,40,40,0.85); }
   #stage-label {
     position: absolute; top: 10px; left: 12px; z-index: 6;
     font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em;
@@ -212,6 +217,10 @@
   #trk-nav.ok { color: #2d5; } #trk-nav.bad { color: #f77; } #trk-nav.busy { color: #fb7; }
   #goal-status { color: #9aa; }
   #goal-status:empty { display: none; }
+  .trk-btn {
+    font: inherit; font-size: 0.68rem; padding: 0 5px; margin-left: 4px; cursor: pointer;
+    background: #2a2f37; color: #cdd; border: 1px solid #445; border-radius: 3px;
+  }
 
   /* -- overlay control pads ---------------------------------------------- */
   /* Translucent, sitting on top of whatever the stage is showing. Idle at low
@@ -340,7 +349,7 @@
      them children of that container instead of the body grid, and the whole
      1.7fr/1fr layout above would collapse. Switching views just toggles
      [hidden] on the top-level items (live pair, scenarios, fleet). */
-  #view-scenarios, #view-fleet { grid-column: 1 / -1; min-height: 0; }
+  #view-scenarios, #view-fleet, #view-tests { grid-column: 1 / -1; min-height: 0; }
   #scenario-head { display: flex; align-items: center; gap: 10px; flex: none; flex-wrap: wrap; margin-bottom: 8px; }
   #scenario-head h2 { margin: 0; flex: none; }
   #scenario-hint { font-size: 0.75rem; color: #9aa; }
@@ -426,6 +435,70 @@
     background: #221a10; border: 1px solid #4a3a1a; color: #fb7; font-size: 0.78rem;
   }
   #console-warning code { color: #fd9; }
+
+  /* -- tests view (webui/tests_view.js) ----------------------------------- */
+  #tests-head { display: flex; align-items: center; gap: 10px; flex: none; flex-wrap: wrap; margin-bottom: 8px; }
+  #tests-head h2 { margin: 0; flex: none; }
+  #tests-hint { font-size: 0.75rem; color: #9aa; }
+  #tests-warning {
+    flex: none; margin-bottom: 8px; padding: 8px 10px; border-radius: 6px;
+    background: #221a10; border: 1px solid #4a3a1a; color: #fb7; font-size: 0.78rem;
+  }
+  #tests-body { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; flex: 1 1 auto; min-height: 0; }
+  #tests-list-col, #tests-run-col { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+  #tests-list-col h3, #tests-run-col h3 { margin: 0; font-size: 0.8rem; color: #9aa; font-weight: 600; flex: none; }
+  #tests-list-col h3 .dim, #tests-run-col h3 .dim { font-weight: normal; color: #667; font-family: monospace; }
+  #tests-list, #tests-results { display: flex; flex-direction: column; gap: 8px; overflow-y: auto; min-height: 0; }
+  #tests-list { flex: 1 1 auto; }
+  #tests-results { flex: 0 1 auto; max-height: 40%; }
+  .test-card { background: #14161a; border: 1px solid #2a2e35; border-radius: 6px; padding: 10px; flex: none; }
+  .test-card.invalid { border-color: #622; }
+  .test-card h4 { margin: 0 0 4px; font-size: 0.88rem; font-weight: 600; display: flex; gap: 8px; align-items: center; }
+  .test-card h4 code { font-size: 0.72rem; color: #7bf; font-weight: normal; }
+  .test-card p { margin: 0 0 6px; font-size: 0.75rem; color: #9aa; line-height: 1.4; }
+  .test-card .meta { font-family: monospace; font-size: 0.7rem; color: #889; margin-bottom: 6px; }
+  .test-card ul { margin: 0 0 8px; padding-left: 16px; font-family: monospace; font-size: 0.7rem; color: #cde; }
+  .test-card .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .test-card select, .test-card input {
+    background: #0f1114; color: #e6e6e6; border: 1px solid #2a2e35; border-radius: 4px;
+    padding: 3px 6px; font-size: 0.76rem;
+  }
+  .test-card input { width: 4em; }
+  .test-run-btn {
+    margin-left: auto; background: #2d5; color: #111; border: none; font-weight: 600;
+    border-radius: 5px; padding: 5px 16px; font-size: 0.8rem; cursor: pointer;
+  }
+  .test-run-btn:disabled { background: #2a2e35; color: #778; cursor: not-allowed; }
+  #tests-run-strip {
+    display: flex; align-items: center; gap: 8px; flex: none;
+    font-family: monospace; font-size: 0.76rem; color: #7bf;
+  }
+  #tests-cancel {
+    margin-left: auto; background: #14161a; color: #f77; border: 1px solid #2a2e35;
+    border-radius: 4px; padding: 4px 10px; font-size: 0.78rem; cursor: pointer;
+  }
+  #tests-cancel:disabled { color: #667; cursor: not-allowed; }
+  #tests-log, #tests-report {
+    margin: 0; overflow: auto; background: #000; border: 1px solid #2a2e35; border-radius: 4px;
+    padding: 8px; font-family: monospace; font-size: 0.7rem; line-height: 1.4; color: #9c9;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  #tests-log { flex: 1 1 auto; min-height: 120px; }
+  #tests-report { flex: 0 1 auto; max-height: 40%; color: #cde; }
+  #tests-log:empty::before { content: "No test output yet. Run a test on the left."; color: #556; }
+  .result-row {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap; cursor: pointer;
+    background: #14161a; border: 1px solid #2a2e35; border-radius: 6px; padding: 6px 9px;
+    font-size: 0.76rem; flex: none;
+  }
+  .result-row:hover { background: #1c1f24; }
+  .result-row .when { font-family: monospace; color: #778; font-size: 0.7rem; }
+  .result-row .crit { width: 100%; font-family: monospace; font-size: 0.68rem; color: #889; }
+  .result-row .crit .bad { color: #f77; }
+  .verdict { padding: 1px 6px; border-radius: 3px; font-size: 0.7rem; font-family: monospace; font-weight: 600; }
+  .verdict.pass { background: #043; color: #2d5; }
+  .verdict.fail { background: #400; color: #f77; }
+  .verdict.run { background: #234; color: #7bf; }
 
   /* -- fleet mesh radio view (webui/fleet_comms.js) ---------------------- */
   #fleet-head { display: flex; align-items: center; gap: 10px; flex: none; flex-wrap: wrap; margin-bottom: 8px; }
@@ -539,8 +612,8 @@
     /* The scenario list and its log won't both fit across a phone; stack them
        and give the log a fixed slice so the cards stay reachable. */
     #scenario-body { grid-template-columns: 1fr; grid-auto-rows: auto; }
-    #view-scenarios, #view-fleet { min-height: 70vh; }
-    #fleet-body { grid-template-columns: 1fr; }
+    #view-scenarios, #view-fleet, #view-tests { min-height: 70vh; }
+    #fleet-body, #tests-body { grid-template-columns: 1fr; }
     #session-log { min-height: 140px; }
     #drive-pad { grid-template-columns: repeat(3, 48px); grid-template-rows: repeat(3, 48px); }
     #aim-pad { grid-template-columns: repeat(3, 40px); grid-template-rows: repeat(3, 40px); }
@@ -575,6 +648,8 @@
               title="Monitor /fleet/status and /fleet/intent mesh radio (no TF oracle)">fleet</button>
       <button type="button" data-view="scenarios"
               title="Pick a scenario and start or stop the simulation itself">scenarios</button>
+      <button type="button" data-view="tests"
+              title="Scored test cases (configs/tests/): run one, watch it live, read the verdict">tests</button>
     </div>
     <div id="stage-mode" class="segmented">
       <button type="button" data-stage="camera" class="active"
@@ -604,10 +679,17 @@
       <div class="sensor-tile">
         <img id="sensor-rgb" alt="head camera (waiting for web_video_server)" />
         <canvas id="feature-overlay"></canvas>
+        <canvas id="obstacle-overlay"></canvas>
         <span class="sensor-tag" id="feature-tag">RGB</span>
-        <label id="feature-toggle"
-               title="Draw the features RTAB-Map's visual odometry tracks. Green = inlier (drives the pose), amber = matched, grey = detected only. Real robot only."><input
-               type="checkbox" id="feature-toggle-box" checked /> features</label>
+        <span class="sensor-tag" id="obstacle-tag">obstacles</span>
+        <div class="tile-toggles">
+          <label id="obstacle-toggle"
+                 title="Draw obstacle_detector's clusters. Red = moving (tracked in odom), amber = static. Label: track id, nearest range, speed."><input
+                 type="checkbox" id="obstacle-toggle-box" checked /> obstacles</label>
+          <label id="feature-toggle"
+                 title="Draw the features RTAB-Map's visual odometry tracks. Green = inlier (drives the pose), amber = matched, grey = detected only. Real robot only."><input
+                 type="checkbox" id="feature-toggle-box" checked /> features</label>
+        </div>
       </div>
       <div class="sensor-tile">
         <img id="sensor-depth" alt="depth view (waiting for depth_colorizer)" />
@@ -620,6 +702,8 @@
         <label><input type="checkbox" id="costmap-toggle" checked /> costmap</label>
         <label title="Show where the explorer has written territory off after failed goals. Dashed = will expire; solid = permanent (hit blacklist_permanent_strikes). The number is the strike count."><input
               type="checkbox" id="blacklist-toggle" /> blacklist</label>
+        <label title="Props and scripted movers from the sim's --world layout (configs/worlds/), at their TRUE positions (/sim/ground_truth) — compare with the costmap to see what the robot perceives. Sim only."><input
+              type="checkbox" id="world-toggle" checked /> world</label>
         <!-- What a map click MEANS is chosen per click by a held key, not a
              persistent mode: drag = Nav2 goal, X + click = steer exploration
              (explore_hint, never pauses the explorer — see nodes/explorer.py's
@@ -645,6 +729,11 @@
         <div><span class="trk-k">nav</span> <span id="trk-nav">idle</span></div>
         <div><span class="trk-k">map</span> <span id="trk-map">–</span></div>
         <div><span class="trk-k">explore</span> <span id="trk-explore">not running</span></div>
+        <div id="trk-world-row" hidden><span class="trk-k">world</span> <span id="trk-world"></span>
+          <button type="button" id="world-restart" class="trk-btn"
+                  title="Put every actor back at the start of its path and start them walking (/sim/world_cmd restart)">restart</button>
+          <button type="button" id="world-pause" class="trk-btn"
+                  title="Freeze or resume the actors where they are">pause</button></div>
         <div id="goal-status"></div>
       </div>
     </div>
@@ -818,6 +907,10 @@
           <span class="lf-k">Exploration</span>
           <label class="lf-check" title="The explorer always runs. Checked: it starts driving to unexplored frontiers as soon as the sim is up. Unchecked: it waits — start it any time with the Explore button or X+click on the map."><input type="checkbox" id="lf-explore"> start exploring immediately</label>
         </div>
+        <div class="lf-row" data-field="world">
+          <span class="lf-k">World</span>
+          <select id="lf-world" title="Props and scripted movers added to the warehouse (configs/worlds/). Actors show on the map at their true positions."></select>
+        </div>
         <details id="lf-advanced">
           <summary>Advanced</summary>
           <div class="lf-row">
@@ -857,6 +950,36 @@
                   title="Tear down Isaac Sim and the ROS 2 stack WITHOUT saving. The dashboard console stays up.">Stop</button>
         </div>
         <pre id="session-log" title="Live output from scripts/run_demo.sh for this session (also saved to data/sessions/&lt;id&gt;/console.log)."></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scored test cases (configs/tests/, scripts/simtest.py) — webui/tests_view.js.
+       Plain HTTP to serve.py like the Scenarios tab; a running test is an
+       ordinary session, so "live" shows it while it is being scored. -->
+  <div class="panel" id="view-tests" hidden>
+    <div id="tests-head">
+      <h2>Tests</h2>
+      <span id="tests-hint">Scored, repeatable runs: a world, a scenario, goals and pass criteria.
+        Run one and switch to <b>live</b> to watch it.</span>
+    </div>
+    <div id="tests-warning" hidden></div>
+    <div id="tests-body">
+      <div id="tests-list-col">
+        <h3>Test cases <span class="dim">configs/tests/</span></h3>
+        <div id="tests-list"></div>
+      </div>
+      <div id="tests-run-col">
+        <h3>Run</h3>
+        <div id="tests-run-strip">
+          <span id="tests-run-state">idle</span>
+          <button type="button" id="tests-cancel" disabled
+                  title="Stop the test: the sim is stopped and the runs that finished are reported">Cancel</button>
+        </div>
+        <pre id="tests-log" title="scripts/simtest.py output for the current or last run"></pre>
+        <h3>Results <span class="dim">data/simtests/</span></h3>
+        <div id="tests-results"></div>
+        <pre id="tests-report" hidden></pre>
       </div>
     </div>
   </div>
@@ -932,6 +1055,9 @@
 <!-- Fleet mesh radio monitor tab. Own rosbridge connection (like arm.js) so
      it stays independent of app.js subscriptions. -->
 <script src="fleet_comms.js"></script>
+<!-- Tests tab: scored test cases and their results. Self-contained like
+     scenarios.js (plain HTTP to serve.py, no rosbridge). -->
+<script src="tests_view.js"></script>
 <!-- Manual arm teleop pad + pose capture. Self-mounting and independent of
      app.js (own rosbridge connection, own injected CSS) so it stayed a
      one-line diff here while other branches were editing this file. -->

@@ -21,7 +21,7 @@
 #                       [--no-headless] [--teleop] [--localize | --resume]
 #                       [--no-chase-cam | --chase-cam-robots N]
 #                       [--render-every N] [--lite-render]
-#                       [--map PATH] [--explore] [--keep-console]
+#                       [--map PATH] [--explore] [--world NAME] [--keep-console]
 #   scripts/run_demo.sh stop [--keep-console]   # tear the pipeline down
 #
 # --robots N spawns N robots in Isaac (configs/robots.yaml order) AND brings
@@ -33,6 +33,10 @@
 # so robots explore collaboratively rather than as independent single-robot
 # runs sharing a warehouse. --robot-id (singular) still names which ONE
 # robot --localize/--resume/--map/--teleop apply to.
+#
+# --world NAME adds configs/worlds/NAME.yaml to the scene: static props and
+# scripted movers (see simtest/world.py). Validated by name in
+# spawn_warehouse.py before Isaac boots, so a bad name fails in a second.
 #
 # Default is --robots 2: SortBots is a fleet project, so the plain demo comes
 # up as a collaborative fleet. Pass --robots 1 for the single-robot case
@@ -79,6 +83,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # is no /opt/ros/jazzy to source. Inherited by session.py's runs through the
 # console's environment.
 ROS_SETUP="${ROS_SETUP:-/opt/ros/jazzy/setup.bash}"
+# `bash`, or the same bash inside the jazzy distrobox on hosts without ROS 2
+# (Ubuntu 26.04) — see the header of scripts/ros_bash.sh.
+ROS_BASH="$SCRIPT_DIR/ros_bash.sh"
 SIM_LOG="/tmp/sortbots_demo_sim.log"
 SIM_RESULT="/tmp/isaac_spawn_warehouse_result.txt"
 BRINGUP_LOG="/tmp/sortbots_demo_bringup.log"
@@ -101,6 +108,11 @@ CONSOLE_PATTERNS=(rosbridge_websocket web_video_server "webui/serve.py" \
 # generations of bringup live at once (fleet_radio, dynamic_obstacle_filter and
 # collision_monitor x2 per robot) after several "stopped" runs — the four
 # newest nodes at the time had never been added here.
+# sortbots_bringup.launch.py is here too, hard-killed after the SIGINT grace:
+# a launch that didn't exit in 2 s kept running with its map_handoff.py
+# children (not listed either) — three such generations found 2026-10-22, one
+# 20 h old, any of which could flip a later run's RTAB-Map between mapping and
+# localization.
 PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz2 \
                    controller_server planner_server smoother_server behavior_server \
                    bt_navigator waypoint_follower velocity_smoother lifecycle_manager \
@@ -109,7 +121,8 @@ PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz
                    rtabmap_cloud_pump.py recon_cloud_relay.py wasd_teleop \
                    map_merge.py static_transform_publisher \
                    fleet_radio.py fleet_tasks.py dynamic_obstacle_filter.py recon_cloud_merge.py \
-                   depth_colorizer.py feature_overlay.py \
+                   depth_colorizer.py feature_overlay.py obstacle_detector.py \
+                   map_handoff.py sortbots_bringup.launch.py \
                    "spawn_warehouse.py")
 # Note scripts/save_map.sh --watch is deliberately absent from that list. Its
 # checkpoint loop has to OUTLIVE teardown: rtabmap gets pkill -9'd only 2 s
@@ -193,7 +206,7 @@ CHASE_CAM_ARGS=""
 # CPU-bound one much less — measure with scripts/bench_sim.sh before relying
 # on either (numbers in its header).
 RENDER_ARGS=""
-LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false
+LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false; WORLD_ARGS=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
@@ -212,11 +225,15 @@ while [[ $# -gt 0 ]]; do
     --resume)   RESUME=true; shift;;
     --map)      MAP_DB="$2";  shift 2;;
     --explore)  EXPLORE=true; shift;;
+    # Bare name only: spawn_warehouse.py resolves it under configs/worlds/ and
+    # rejects anything that isn't simtest.world.NAME_RX.
+    --world)    [[ "$2" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]] || { echo "[run_demo] bad --world name: $2"; exit 2; }
+                WORLD_ARGS="--world $2"; shift 2;;
     # Set by webui/session.py when the Scenarios tab launches a run: the
     # dashboard console is already up and owns rosbridge/web_video_server, so
     # don't kill it on teardown and don't start a second copy in the bringup.
     --keep-console) KEEP_CONSOLE=true; shift;;
-    -h|--help) sed -n '2,57p' "$0"; exit 0;;
+    -h|--help) sed -n '2,61p' "$0"; exit 0;;
     *) echo "[run_demo] unknown arg: $1"; exit 2;;
   esac
 done
@@ -289,7 +306,7 @@ echo "[run_demo] launching Isaac Sim ($SCENE, $ROBOTS robot(s), $HEADLESS)..."
 rm -f "$SIM_RESULT"
 setsid bash -c "source '$REPO_ROOT/scripts/activate_isaac.sh' >/dev/null 2>&1; \
   exec python '$REPO_ROOT/scripts/spawn_warehouse.py' $HEADLESS --forever \
-       --robots $ROBOTS --scene $SCENE --drive cmd_vel $CHASE_CAM_ARGS $RENDER_ARGS" \
+       --robots $ROBOTS --scene $SCENE --drive cmd_vel $CHASE_CAM_ARGS $RENDER_ARGS $WORLD_ARGS" \
   >"$SIM_LOG" 2>&1 &
 SIM_PID=$!  # setsid execs (not a group leader here), then bash execs python
 
@@ -339,7 +356,7 @@ echo "[run_demo] launching RTAB-Map + Nav2 + web dashboard + task manager..."
 # so the bringup must NOT start a second one — two rosbridges would fight over
 # port 9090 and the loser dies silently.
 WEBUI=true; [[ "$KEEP_CONSOLE" == "true" ]] && WEBUI=false
-setsid bash -c "source '$ROS_SETUP'; \
+setsid "$ROS_BASH" -c "source '$ROS_SETUP'; \
   export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
   export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
@@ -365,12 +382,12 @@ TELEOP_CMD="source '$ROS_SETUP'; \
 if [[ $TELEOP -eq 1 ]]; then
   if command -v gnome-terminal >/dev/null 2>&1; then
     gnome-terminal --title="SortBots WASD teleop" -- \
-      bash -c "$TELEOP_CMD; echo; echo 'teleop exited — press Enter to close'; read" \
+      "$ROS_BASH" -c "$TELEOP_CMD; echo; echo 'teleop exited — press Enter to close'; read" \
       >/dev/null 2>&1 &
     echo "[run_demo] opened a WASD teleop window."
   else
     echo "[run_demo] no gnome-terminal; drive from a new terminal with:"
-    echo "    source $ROS_SETUP && python3 $REPO_ROOT/scripts/wasd_teleop.py --robot-id $ROBOT_ID"
+    echo "    $ROS_BASH -c \"source $ROS_SETUP && python3 $REPO_ROOT/scripts/wasd_teleop.py --robot-id $ROBOT_ID\""
   fi
 fi
 
@@ -387,6 +404,7 @@ cat <<EOF
 $( [[ $EXPLORE == "true" ]] && echo "    * Explorer          : autonomous frontier exploration — no human input needed" \
                              || echo "    * Explorer          : idle — the dashboard's Explore button (or X+click) starts it" )
 $( [[ $TELEOP -eq 1 ]] && echo "    * WASD teleop       : w/s fwd-back  a/d turn  q/e strafe  space stop  k quit" )
+$( [[ -n "$WORLD_ARGS" ]] && echo "    * World             : ${WORLD_ARGS#--world } (configs/worlds/; true poses on /sim/ground_truth)" )
   Logs : $SIM_LOG
          $BRINGUP_LOG
   Stop : scripts/run_demo.sh stop

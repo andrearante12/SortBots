@@ -4,7 +4,7 @@
 //
 // Talks to two things, like the rest of the webui:
 //   - rosbridge (9090)   live topics: /map, /tf, per-robot plan / explore_status /
-//                        task_status / action status, and the commands this page
+//                        task_status / action status / obstacles, and the commands this page
 //                        sends (dispatch_task, explore_cmd, navigate_to_pose, cmd_vel)
 //                        and the fleet auction's /fleet/task_board (gateway:
 //                        liveness, battery, who owns which task, latched alarms)
@@ -27,6 +27,10 @@
   // explore_status / task_status are heartbeats; silence means the node is gone.
   const EXPLORE_TTL_MS = 6000;
   const COLORS = ["#2f6fed", "#ef7d1a", "#8a5cf0", "#e0457b", "#1aa6a6", "#7a8b1f"];
+  // obstacle_detector.py publishes at ~10 Hz; a robot whose last list is older than
+  // this has its markers dropped rather than left frozen where someone used to be.
+  const OBSTACLE_TTL_MS = 1500;
+  const OBSTACLE_RED = "#e5484d";
   const GOAL_STATES = { 1: "accepted", 2: "navigating", 3: "cancelling", 4: "arrived", 5: "cancelled", 6: "failed" };
 
   const $ = (s) => document.querySelector(s);
@@ -227,6 +231,166 @@
     dirty = true;
   }
 
+  // -- obstacles (nodes/obstacle_detector.py) ----------------------------------------
+  // Positions arrive in <id>/base_link and velocities in the detector's world frame
+  // (<id>/odom, or base_link when it had no odom TF). Both are placed in `map` once, on
+  // arrival, with the poses /tf gives right then, so a marker stays put while the robot
+  // carries on moving instead of swinging around with it until the next message.
+  function obstaclesInMap(p, base, world) {
+    const c = Math.cos(base.yaw), s = Math.sin(base.yaw);
+    const toMap = (x, y) => [base.x + c * x - s * y, base.y + s * x + c * y];
+    const vyaw = world ? world.yaw : base.yaw;
+    const vc = Math.cos(vyaw), vs = Math.sin(vyaw);
+    return (p.obstacles || []).map((o) => {
+      const [x0, y0] = o.min, [x1, y1] = o.max, v = o.vel || [0, 0];
+      return {
+        id: o.track_id, moving: !!o.moving, speed: o.speed_mps || 0, range: o.range_m,
+        at: toMap(o.centroid[0], o.centroid[1]),
+        corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map(([a, b]) => toMap(a, b)),
+        vel: [vc * v[0] - vs * v[1], vs * v[0] + vc * v[1]],
+      };
+    });
+  }
+  function onObstacles(r, p) {
+    r.obstacles = p; r.obstaclesAt = performance.now();
+    const base = lookupPose(`${r.id}/base_link`);
+    const world = p.world_frame ? lookupPose(p.world_frame) : null;
+    const had = r.obstaclesMap.some((o) => o.moving);
+    r.obstaclesMap = base ? obstaclesInMap(p, base, world) : [];
+    if (had || r.obstaclesMap.some((o) => o.moving)) dirty = true;
+    drawCamObstacles(r.id);
+  }
+
+  // Map: only MOVING obstacles. Static ones are mostly shelving the map already shows,
+  // and drawing every cluster would bury the robots under boxes.
+  function drawObstacles() {
+    ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
+    for (const r of robots.values()) {
+      for (const o of r.obstaclesMap) {
+        if (!o.moving) continue;
+        ctx.fillStyle = OBSTACLE_RED; ctx.strokeStyle = OBSTACLE_RED; ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.3; ctx.beginPath();
+        o.corners.forEach(([x, y], i) => { const [a, b] = toPx(x, y); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); });
+        ctx.closePath(); ctx.fill(); ctx.globalAlpha = 1; ctx.stroke();
+        const [a, b] = toPx(o.at[0], o.at[1]);
+        ctx.beginPath(); ctx.arc(a, b, 5, 0, 7); ctx.fill();
+        // A person's footprint is a few pixels at fleet zoom; the halo is what's found.
+        ctx.globalAlpha = 0.35; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(a, b, 12, 0, 7); ctx.stroke();
+        ctx.globalAlpha = 1; ctx.lineWidth = 2;
+        // Where it will be in one second at this velocity, floored so a slow walker's
+        // arrow is still visible at fleet zoom.
+        const len = Math.max(Math.hypot(o.vel[0], o.vel[1]) * view.scale, 14);
+        const ang = Math.atan2(-o.vel[1], o.vel[0]); // canvas y points down
+        const ex = a + Math.cos(ang) * len, ey = b + Math.sin(ang) * len;
+        ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(ex, ey); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(ex, ey);
+        ctx.lineTo(ex - Math.cos(ang - 0.45) * 8, ey - Math.sin(ang - 0.45) * 8);
+        ctx.lineTo(ex - Math.cos(ang + 0.45) * 8, ey - Math.sin(ang + 0.45) * 8);
+        ctx.closePath(); ctx.fill();
+        const label = `moving · ${o.speed.toFixed(1)} m/s`;
+        const tw = ctx.measureText(label).width + 10;
+        ctx.fillRect(a - tw / 2, b - 30, tw, 16);
+        ctx.fillStyle = "#fff"; ctx.fillText(label, a, b - 18);
+      }
+    }
+  }
+
+  // Camera tile: every obstacle, boxed in the depth image's pixels (in sim one camera
+  // makes both images; the D435's depth is aligned to colour). The picture is drawn
+  // `background-size: cover`, so invert a cover crop, not a contain letterbox.
+  function drawCamObstacles(id) {
+    const c = cams.get(id);
+    if (!c || !open.has(id)) return;
+    const cv = c.overlay, w = cv.clientWidth, h = cv.clientHeight;
+    if (!w || !h) return;
+    if (cv.width !== w) cv.width = w;
+    if (cv.height !== h) cv.height = h;
+    const g = cv.getContext("2d");
+    g.clearRect(0, 0, w, h);
+    const r = robots.get(id), p = r && r.obstacles;
+    if (!p || performance.now() - r.obstaclesAt > OBSTACLE_TTL_MS || !p.w || !p.h) return;
+    const k = Math.max(w / p.w, h / p.h), ox = (w - p.w * k) / 2, oy = (h - p.h * k) / 2;
+    g.font = '600 10px "IBM Plex Sans", system-ui, sans-serif'; g.textBaseline = "bottom";
+    for (const o of p.obstacles || []) {
+      const [u0, v0, u1, v1] = o.uv;
+      const x = ox + u0 * k, y = oy + v0 * k, bh = (v1 - v0) * k, color = o.moving ? OBSTACLE_RED : "#f5a524";
+      g.strokeStyle = color; g.lineWidth = o.moving ? 2.5 : 1.5;
+      g.strokeRect(x, y, (u1 - u0) * k, bh);
+      const label = o.moving ? `moving · ${o.range_m.toFixed(1)} m` : `${o.range_m.toFixed(1)} m`;
+      // Inside the box's bottom edge: the top of the tile belongs to the Camera/Depth
+      // switch, and a person's box reaches it.
+      const tw = g.measureText(label).width + 6, ly = Math.min(y + bh, h);
+      g.fillStyle = color; g.fillRect(x, ly - 13, tw, 13);
+      g.fillStyle = o.moving ? "#fff" : "#15191e"; g.fillText(label, x + 3, ly - 1);
+    }
+  }
+
+  // -- world overlay: props and scripted walkers (configs/worlds/, sim only) -----------
+  // From GROUND TRUTH, never from what a robot perceived: /sim/world is the latched
+  // layout (shapes, colours, paths), /sim/ground_truth the 10 Hz poses. Drawn under
+  // the robots, so a running test reads at a glance: the walker, where it is going,
+  // and whether the robot's red obstacle marker sits on it. Same data and look as
+  // app.js's overlay; neither topic exists on a real robot, so nothing draws there.
+  const WORLD_TRUTH_TTL_MS = 3000; // sim gone quiet: stop drawing walkers frozen mid-stride
+  let worldLayout = null, worldTruth = null, worldTruthAt = -Infinity;
+  topic("/sim/world", "std_msgs/String").subscribe((msg) => {
+    try { worldLayout = JSON.parse(msg.data); } catch (e) { return; }
+    dirty = true;
+  });
+  topic("/sim/ground_truth", "std_msgs/String", { throttle_rate: 100, queue_length: 1 }).subscribe((msg) => {
+    try { worldTruth = JSON.parse(msg.data); } catch (e) { return; }
+    worldTruthAt = performance.now(); dirty = true;
+  });
+  const worldLive = () => !!(worldLayout && worldLayout.world && worldTruth && performance.now() - worldTruthAt < WORLD_TRUTH_TTL_MS);
+  const rgba = (c, a) => `rgba(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)},${a})`;
+  // A simtest.geometry shape: ["circle", [x, y], r] | ["poly", [[x, y], ...]].
+  function traceShape(shape) {
+    ctx.beginPath();
+    if (shape[0] === "circle") {
+      const [a, b] = toPx(shape[1][0], shape[1][1]);
+      ctx.arc(a, b, Math.max(3, shape[2] * view.scale), 0, 7);
+      return;
+    }
+    shape[1].forEach(([x, y], i) => { const [a, b] = toPx(x, y); i ? ctx.lineTo(a, b) : ctx.moveTo(a, b); });
+    ctx.closePath();
+  }
+  function actorShape(a, p) {
+    if (a.shape === "cylinder") return ["circle", [p.x, p.y], a.radius];
+    const [sx, sy] = a.size, c = Math.cos(p.yaw), s = Math.sin(p.yaw);
+    return ["poly", [[sx / 2, sy / 2], [-sx / 2, sy / 2], [-sx / 2, -sy / 2], [sx / 2, -sy / 2]]
+      .map(([x, y]) => [p.x + c * x - s * y, p.y + s * x + c * y])];
+  }
+  function drawWorld() {
+    if (!worldLive()) return;
+    ctx.save();
+    for (const p of worldLayout.props || []) {
+      traceShape(p.footprint);
+      ctx.fillStyle = rgba(p.color, 0.35); ctx.strokeStyle = rgba(p.color, 0.9); ctx.lineWidth = 1.5;
+      ctx.fill(); ctx.stroke();
+    }
+    ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
+    for (const a of worldLayout.actors || []) {
+      // The route it walks: dotted and faint, so it never reads as a Nav2 plan.
+      ctx.setLineDash([2, 5]); ctx.strokeStyle = rgba(a.color, 0.5); ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      (a.path || []).forEach(([x, y], i) => { const [px, py] = toPx(x, y); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); });
+      if (a.mode === "loop") ctx.closePath();
+      ctx.stroke(); ctx.setLineDash([]);
+      const pose = worldTruth.actors && worldTruth.actors[a.id];
+      if (!pose) continue;
+      traceShape(actorShape(a, pose));
+      ctx.fillStyle = rgba(a.color, 0.9); ctx.strokeStyle = palette.robotInk; ctx.lineWidth = 1.5;
+      ctx.fill(); ctx.stroke();
+      const [px, py] = toPx(pose.x, pose.y), r = Math.max(5, (a.radius || 0.3) * view.scale);
+      // Heading tick, dashed while it stands still at a waypoint.
+      ctx.strokeStyle = rgba(a.color, 1); ctx.lineWidth = 2; ctx.setLineDash(pose.moving ? [] : [3, 3]);
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px + r * 2 * Math.cos(pose.yaw), py - r * 2 * Math.sin(pose.yaw)); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = palette.ink; ctx.fillText(a.label || a.id, px, py + r + 13);
+    }
+    ctx.restore();
+  }
+
   // -- drawing ----------------------------------------------------------------------
 
   function drawFrame() {
@@ -242,6 +406,8 @@
       ctx.imageSmoothingEnabled = false; // crisp cells
       ctx.drawImage(mapCanvas, dx, dy, w * res * view.scale, h * res * view.scale);
     }
+
+    drawWorld();
 
     for (const r of robots.values()) { // planned routes
       if (!r.plan.length || !r.pose) continue;
@@ -269,6 +435,8 @@
       ctx.fillStyle = palette.ink; ctx.fillText("Gateway", a, b + 21);
     }
 
+    drawObstacles();
+
     for (const r of robots.values()) {
       if (!r.pose) continue;
       const [a, b] = toPx(r.pose.x, r.pose.y), live = online(r);
@@ -285,6 +453,30 @@
       ctx.fillText(nameOf(r.id), a, b + 28);
       ctx.globalAlpha = 1;
     }
+    drawDrag();
+  }
+
+  // The send being dragged: robot -> destination, in the robot's colour, with the
+  // heading it will arrive at.
+  function drawDrag() {
+    const r = drag && robots.get(drag.id);
+    if (!r || !r.pose) return;
+    const [a, b] = toPx(r.pose.x, r.pose.y), [ex, ey] = toPx(drag.wx, drag.wy);
+    const yaw = drag.wp ? -(drag.wp.yaw || 0) : Math.atan2(ey - b, ex - a); // canvas y points down
+    ctx.strokeStyle = r.color; ctx.fillStyle = r.color; ctx.lineWidth = 2.5;
+    ctx.setLineDash([7, 5]); ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(ex, ey); ctx.stroke(); ctx.setLineDash([]);
+    ctx.globalAlpha = 0.25; ctx.beginPath(); ctx.arc(ex, ey, 14, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
+    ctx.beginPath(); ctx.arc(ex, ey, 14, 0, 7); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(ex + Math.cos(yaw) * 12, ey + Math.sin(yaw) * 12);
+    ctx.lineTo(ex + Math.cos(yaw + 2.5) * 7, ey + Math.sin(yaw + 2.5) * 7);
+    ctx.lineTo(ex + Math.cos(yaw - 2.5) * 7, ey + Math.sin(yaw - 2.5) * 7);
+    ctx.fill();
+    const label = drag.wp ? `Send ${nameOf(r.id)} to ${drag.wp.name}` : `Send ${nameOf(r.id)} here`;
+    ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
+    const tw = ctx.measureText(label).width + 12;
+    ctx.fillRect(ex - tw / 2, ey - 38, tw, 18);
+    ctx.fillStyle = "#fff"; ctx.fillText(label, ex, ey - 25);
   }
   requestAnimationFrame(drawFrame);
 
@@ -298,8 +490,17 @@
       id, color: COLORS[robots.size % COLORS.length], pose: null, linkAt: -Infinity, plan: [],
       explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity, queueDepth: 0,
       nav: null, seenStamp: {}, odom: null, odomAt: -Infinity,
+      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [],
     };
     robots.set(id, r);
+
+    // Always subscribed, not just while a card is open: moving obstacles go on the
+    // fleet map. A few KB at 5 Hz per robot.
+    topic(`/${id}/obstacle_tracks`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
+      let p;
+      try { p = JSON.parse(msg.data); } catch (e) { return; }
+      onObstacles(r, p);
+    });
 
     // Only the twist is used (speed / turn rate on the card); the pose comes from /tf.
     // Throttled: the card shows it to two decimals, 4 Hz is plenty.
@@ -609,7 +810,10 @@
       for (let i = 1; i < r.plan.length; i++) d += Math.hypot(r.plan[i][0] - r.plan[i - 1][0], r.plan[i][1] - r.plan[i - 1][1]);
       togo = `${d.toFixed(1)} m`;
     }
+    const ob = r.obstacles && now - r.obstaclesAt < OBSTACLE_TTL_MS ? r.obstacles : null;
+    const nearest = ob && ob.obstacles && ob.obstacles.length ? ` · nearest ${ob.obstacles[0].range_m.toFixed(1)} m` : "";
     return {
+      obst: !ob ? "—" : !ob.count ? "None in view" : `${ob.count}${ob.moving ? `, ${ob.moving} moving` : ""}${nearest}`,
       pos: r.pose ? `${r.pose.x.toFixed(2)}, ${r.pose.y.toFixed(2)} m` : "—",
       heading: r.pose ? `${Math.round(((r.pose.yaw * 180) / Math.PI + 360) % 360)}°` : "—",
       speed: tw ? `${Math.hypot(tw.linear.x, tw.linear.y).toFixed(2)} m/s` : "—",
@@ -618,7 +822,7 @@
       batt: battOf(r) == null ? "—" : `${battOf(r).toFixed(0)}%`,
     };
   }
-  const FACTS = [["pos", "Position"], ["heading", "Heading"], ["speed", "Speed"], ["turn", "Turn rate"], ["togo", "To go"], ["batt", "Battery"]];
+  const FACTS = [["pos", "Position"], ["heading", "Heading"], ["speed", "Speed"], ["turn", "Turn rate"], ["togo", "To go"], ["obst", "Obstacles"], ["batt", "Battery"]];
   // Only the board knows it (fleet_tasks.py: a real BatteryState, or the sim model).
   const battOf = (r) => { const fr = fleetOf(r); return fr && typeof fr.battery_pct === "number" ? fr.battery_pct : null; };
 
@@ -647,7 +851,7 @@
         <div class="l2">${st.tag === "on a task" ? tile.title + (tile.sub ? ` · ${tile.sub}` : "") : esc(st.detail) + (r.queueDepth ? ` · ${r.queueDepth} waiting` : "")}</div>
         ${isOpen ? `<div class="more">
           <div class="cam-slot" data-cam="${esc(r.id)}"></div>
-          <dl class="facts" data-id="${esc(r.id)}">${FACTS.map(([k, label]) => `<div${k === "pos" ? ' class="wide"' : ""}><dt>${label}</dt><dd data-f="${k}">${esc(f[k])}</dd></div>`).join("")}</dl>
+          <dl class="facts" data-id="${esc(r.id)}">${FACTS.map(([k, label]) => `<div${k === "pos" ? ' class="wide"' : k === "obst" ? ' class="full"' : ""}><dt>${label}</dt><dd data-f="${k}">${esc(f[k])}</dd></div>`).join("")}</dl>
           <div class="acts"><button class="btn small" data-act="stop">Stop</button>
             <button class="btn small" data-act="explore">${st.tag === "exploring" ? "Stop exploring" : "Explore"}</button>
             ${busy ? `<button class="btn small" data-act="clear" title="Cancel this robot's current task and everything queued behind it">Clear tasks</button>` : ""}</div>
@@ -672,9 +876,9 @@
     if (c) return c;
     const el = document.createElement("div");
     el.className = "cam";
-    el.innerHTML = `<div class="pic"></div><span class="msg">Connecting to camera…</span>
+    el.innerHTML = `<div class="pic"></div><canvas class="obst"></canvas><span class="msg">Connecting to camera…</span>
       <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button></div>`;
-    c = { el, pic: el.querySelector(".pic"), msg: el.querySelector(".msg"), mode: camDefault, timer: null, token: 0 };
+    c = { el, pic: el.querySelector(".pic"), overlay: el.querySelector("canvas.obst"), msg: el.querySelector(".msg"), mode: camDefault, timer: null, token: 0 };
     cams.set(id, c);
     syncCamButtons(c);
     return c;
@@ -1166,17 +1370,24 @@
 
   // -- tools / map input -------------------------------------------------------------------------------------------
 
-  const HINTS = {
-    select: () => (selected ? "Click the map for waypoints and sends, or pick another robot" : "Click a robot to see its camera"),
-    wp: () => "Click the map to add a waypoint. Drag to set the heading",
-    goto: () => (selected ? `Click the map to send ${nameOf(selected)} there. Drag to set the heading` : "Select a robot first, then click a destination"),
-    gw: () => "Click the map where the fleet's gateway (the access point) stands",
-  };
+  // Sending is not a tool: drag a robot to where it should go, from any tool but the
+  // waypoint one. The old "send" tool needed select-robot, pick-tool, click; three
+  // steps and a mode to forget you were in.
+  const ROBOT_HIT_PX = 16;
+  const robotAt = (px, py) => [...robots.values()].find((b) => {
+    if (!b.pose) return false;
+    const [a, c] = toPx(b.pose.x, b.pose.y);
+    return Math.hypot(a - px, c - py) < ROBOT_HIT_PX;
+  });
+  const waypointAt = (px, py) => waypoints.find((w) => {
+    const [a, c] = toPx(w.x, w.y);
+    return Math.hypot(a - px, c - py) < 12;
+  });
+  let drag = null; // a robot being dragged to a destination: {id, wx, wy, wp}
   function setTool(t) {
     tool = t;
     for (const b of document.querySelectorAll("#tools button")) b.classList.toggle("active", b.dataset.t === t);
-    if (!view3d) $("#hint").textContent = HINTS[t]();
-    canvas.style.cursor = t === "select" ? "grab" : "crosshair";
+    canvas.style.cursor = t === "wp" || t === "gw" ? "crosshair" : "grab";
     dirty = true; // the gateway pin shows with its tool
   }
   for (const b of document.querySelectorAll("#tools button")) b.addEventListener("click", () => setTool(b.dataset.t));
@@ -1185,13 +1396,25 @@
   canvas.addEventListener("pointerdown", (e) => {
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
     const [wx, wy] = toWorld(px, py);
-    press = { px, py, wx, wy, moved: false, cx: view.cx, cy: view.cy };
+    // Pressing on a robot starts a send, not a pan, whatever the tool but waypoints.
+    const robot = tool === "wp" ? null : robotAt(px, py);
+    press = { px, py, wx, wy, moved: false, cx: view.cx, cy: view.cy, robot: robot ? robot.id : null };
     canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener("pointermove", (e) => {
-    if (!press) return;
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+    if (!press) { // hover: say what a press here would do
+      if (tool !== "wp") canvas.style.cursor = robotAt(px, py) ? "pointer" : "grab";
+      return;
+    }
     if (Math.hypot(px - press.px, py - press.py) > 6) press.moved = true;
+    if (press.moved && press.robot) {
+      const [wx, wy] = toWorld(px, py), wp = waypointAt(px, py);
+      drag = { id: press.robot, wx: wp ? wp.x : wx, wy: wp ? wp.y : wy, wp: wp || null };
+      canvas.style.cursor = "grabbing";
+      dirty = true;
+      return;
+    }
     if (press.moved && tool === "select") { // drag pans
       view.moved = true;
       view.cx = press.cx - (px - press.px) / view.scale;
@@ -1202,14 +1425,20 @@
   canvas.addEventListener("pointerup", (e) => {
     if (!press) return;
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
-    const p = press; press = null;
+    const p = press, d = drag; press = null; drag = null;
+    if (d) {
+      dirty = true;
+      canvas.style.cursor = "grab";
+      // Dropped back on the robot: changed its mind.
+      if (robotAt(px, py) && robotAt(px, py).id === d.id) return;
+      const r0 = robots.get(d.id);
+      // A pin keeps its own heading; anywhere else, arrive facing the way it travelled.
+      const yaw = d.wp ? d.wp.yaw || 0 : Math.atan2(d.wy - r0.pose.y, d.wx - r0.pose.x);
+      return sendNav(d.id, d.wx, d.wy, yaw, d.wp ? d.wp.name : `(${d.wx.toFixed(1)}, ${d.wy.toFixed(1)})`);
+    }
     if (tool === "select") {
       if (p.moved) return;
-      const hit = [...robots.values()].find((b) => {
-        if (!b.pose) return false;
-        const [a, c] = toPx(b.pose.x, b.pose.y);
-        return Math.hypot(a - px, c - py) < 16;
-      });
+      const hit = robotAt(px, py);
       // Closed -> open it; open -> give it control; already in control -> close it.
       if (hit) { if (!open.has(hit.id) || selected !== hit.id) openRobot(hit.id); else closeRobot(hit.id); }
       return;
@@ -1220,13 +1449,11 @@
       const name = nextWaypointName();
       saveWaypoints([...waypoints, { name, x: p.wx, y: p.wy, yaw }]);
       toast(`Waypoint ${name} added`);
-    } else if (tool === "goto") {
-      if (!selected) return toast("Select a robot first");
-      sendNav(selected, p.wx, p.wy, yaw, `(${p.wx.toFixed(1)}, ${p.wy.toFixed(1)})`);
     } else if (tool === "gw") {
       saveGateway({ x: p.wx, y: p.wy });
     }
   });
+  canvas.addEventListener("pointercancel", () => { press = null; if (drag) { drag = null; dirty = true; } });
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
@@ -1273,18 +1500,87 @@
       saveWaypoints(waypoints.filter((w) => w.name !== del));
     }
   });
+  // Stop all: halt every robot NOW (it is still the emergency button), then end the
+  // sim, asking only what can't be undone: whether this run's map is kept. Same server
+  // calls as the session panel's Stop and Save & finish, so nobody has to go through
+  // the panel to shut down. A running test is stopped through the test runner
+  // instead, so what it saw is still scored (operator_tests.js has why).
+  let stopMode = null; // "test" | "save" | "plain" while the dialog is open
   $("#estop").addEventListener("click", () => {
     for (const id of robots.keys()) stopRobot(id);
-    toast("Stopped every robot");
+    const test = window.sortbotsTests && window.sortbotsTests.run;
+    if (test && test.running) return openStopDialog("test", test.name);
+    if (!sessionActive() || session.state === "stopping") return toast("Stopped every robot");
+    // Only a running, mapping session has a map worth asking about: a read-only run
+    // can't have changed its map, and one still starting has nothing to save yet.
+    openStopDialog(session.state === "running" && !session.read_only ? "save" : "plain");
+  });
+  function openStopDialog(mode, testName) {
+    stopMode = mode;
+    const name = $("#sd-name"), loaded = session && session.map_name;
+    $("#sd-title").textContent = mode === "test" ? "Stop the test?" : mode === "save" ? "Keep what this run mapped?" : "Stop the sim?";
+    $("#sd-body").textContent = mode === "test"
+      ? `The robots are halted. Stopping ends ${testName.replace(/_/g, " ")} and shuts the sim down; what it saw so far is still scored.`
+      : mode === "save"
+        ? `The robots are halted. Save the map ${loaded ? `back into ${loaded}` : "into the map library"} before the sim shuts down, or throw this run's changes away.`
+        : `The robots are halted. This shuts the sim down${session && session.read_only && loaded ? `; ${loaded} was loaded read-only, so it is unchanged` : ""}.`;
+    $("#sd-name-row").hidden = mode !== "save";
+    $("#sd-save").hidden = mode !== "save";
+    $("#sd-discard").textContent = mode === "test" ? "Stop test" : mode === "save" ? "Discard & stop" : "Stop sim";
+    $("#sd-err").hidden = true;
+    if (mode === "save") {
+      const d = new Date(), p2 = (n) => String(n).padStart(2, "0");
+      name.value = loaded || `map-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}`;
+    }
+    $("#stop-dlg").hidden = false;
+    (mode === "save" ? name : $("#sd-discard")).focus();
+  }
+  const closeStopDialog = () => { $("#stop-dlg").hidden = true; stopMode = null; };
+  async function stopCall(url, body, label) {
+    $("#sd-err").hidden = true;
+    for (const b of document.querySelectorAll(".sd-actions button")) b.disabled = true;
+    try {
+      const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(out.error || res.statusText);
+      closeStopDialog();
+      toast(label);
+      pollSession();
+    } catch (e) {
+      $("#sd-err").textContent = `Couldn't stop: ${e.message}`; $("#sd-err").hidden = false;
+    } finally {
+      for (const b of document.querySelectorAll(".sd-actions button")) b.disabled = false;
+    }
+  }
+  $("#sd-cancel").addEventListener("click", closeStopDialog);
+  $("#stop-dlg").addEventListener("click", (e) => { if (e.target.id === "stop-dlg") closeStopDialog(); });
+  $("#sd-discard").addEventListener("click", () => {
+    if (stopMode === "test") stopCall("/api/tests/cancel", {}, "Stopping the test…");
+    else stopCall("/api/session/stop", {}, "Shutting the sim down…");
+  });
+  $("#stop-dlg form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (stopMode !== "save") return;
+    const name = $("#sd-name").value.trim();
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) {
+      $("#sd-err").textContent = "Use lowercase letters, digits, - and _ (start with a letter or digit)."; $("#sd-err").hidden = false;
+      return;
+    }
+    stopCall("/api/session/finish", { name }, `Saving ${name}, then shutting the sim down…`);
   });
   $("#session-chip").addEventListener("click", openSession);
   $("#empty-go").addEventListener("click", openSession);
   $("#sp-x").addEventListener("click", closeSession);
   $("#session").addEventListener("click", (e) => { if (e.target.id === "session") closeSession(); });
   addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { if (!$("#session").hidden) closeSession(); else if (selected) select(null); return; }
+    if (e.key === "Escape" && !$("#stop-dlg").hidden) { closeStopDialog(); return; }
+    if (e.key === "Escape") {
+      if (drag) { drag = null; press = null; dirty = true; canvas.style.cursor = "grab"; return; } // abandon a send mid-drag
+      if (!$("#session").hidden) closeSession(); else if (selected) select(null);
+      return;
+    }
     if (e.target.closest && e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
-    const t = { v: "select", f: "wp", g: "goto", r: "gw" }[e.key.toLowerCase()];
+    const t = { v: "select", f: "wp", r: "gw" }[e.key.toLowerCase()];
     if (t) setTool(t);
   });
   addEventListener("resize", resize);
@@ -1304,7 +1600,6 @@
     if (view3d) {
       if (!cloudMounted) { window.sortbotsCloud.mount($("#cloud"), ros); cloudMounted = true; }
       window.sortbotsCloud.show(); syncCloudRobots();
-      $("#hint").textContent = "Drag to orbit, scroll to zoom, right-drag to pan";
     } else {
       if (cloudMounted) window.sortbotsCloud.hide();
       setTool(tool); dirty = true;
@@ -1323,7 +1618,7 @@
     window.sortbotsComms.mount({
       canvas: $("#comms"), toPx, scale: () => view.scale, getMap: () => lastMap,
       getRobots: () => [...robots.values()].filter(online), getGateway: () => gateway,
-      hint: (t) => { $("#hint").textContent = t || HINTS[tool](); },
+      hint: (t) => { $("#cm-hint").textContent = t || ""; },
     });
   }
   $("#comms-toggle").addEventListener("click", () => {
@@ -1358,6 +1653,13 @@
       if (p && (!r.pose || Math.hypot(p.x - r.pose.x, p.y - r.pose.y) > 0.01 || Math.abs(p.yaw - r.pose.yaw) > 0.02)) { r.pose = p; moved = true; }
     }
     if (moved) { dirty = true; if (!view.moved) fitView(); if (view3d) syncCloudRobots(); }
+    if (worldTruth && !worldLive() && performance.now() - worldTruthAt < WORLD_TRUTH_TTL_MS + 500) dirty = true; // erase stale walkers
+    for (const r of robots.values()) {
+      if (!r.obstacles || performance.now() - r.obstaclesAt <= OBSTACLE_TTL_MS) continue;
+      if (r.obstaclesMap.some((o) => o.moving)) dirty = true;
+      r.obstacles = null; r.obstaclesMap = [];
+      drawCamObstacles(r.id); // clears it
+    }
     renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending();
     if (window.sortbotsComms) window.sortbotsComms.sync();
   }, 250);
@@ -1372,5 +1674,5 @@
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; } };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; } };
 })();

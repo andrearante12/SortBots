@@ -75,7 +75,10 @@
 
   header { grid-column: 1 / -1; background: var(--surface); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 16px; padding: 0 16px; }
   h1 { margin: 0; font-size: 1rem; font-weight: 600; letter-spacing: -.01em; width: 228px; }
-  #mode-strip { display: flex; align-items: center; gap: 10px; }
+  #mode-strip { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  #mode-strip > * { flex: none; }
+  /* The tile gives way first when the bar gets crowded (a test chip, a narrow window). */
+  #mode-strip #mode-tile { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   header .spacer { flex: 1; }
   .btn.icon { width: 34px; padding: 6px 0; line-height: 1; font-size: 1rem; }
   #session-chip { display: inline-flex; align-items: center; gap: 8px; }
@@ -119,6 +122,7 @@
   .more { cursor: default; }
   .more .cam { width: 100%; aspect-ratio: 16/9; border-radius: 6px; background: #0b0d10; position: relative; overflow: hidden; }
   .more .cam .pic { position: absolute; inset: 0; background: center / cover no-repeat; }
+  .more .cam canvas.obst { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .more .cam .msg { position: absolute; inset: 0; display: grid; place-items: center; color: #8b95a0; font-size: .8rem; pointer-events: none; }
   .more .cam .msg:empty { display: none; }
   /* Over the picture, so fixed dark-glass colours rather than theme tokens. */
@@ -136,6 +140,7 @@
   .pill.exploring { --tc: #8a5cf0; } .pill.failed { --tc: var(--stop); } .pill.off { --tc: var(--faint); }
   .more .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; margin: 0; }
   .more .facts .wide { grid-column: span 2; }
+  .more .facts .full { grid-column: 1 / -1; }
   .more .facts dt { font-size: .7rem; color: var(--muted); }
   .more .facts dd { margin: 0; font-size: .84rem; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .more .acts { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -143,10 +148,7 @@
   #stage { position: relative; min-width: 0; min-height: 0; }
   #map { width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
   .float { position: absolute; background: var(--float); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 2px 8px var(--shadow); }
-  #tools { top: 14px; left: 14px; display: flex; flex-direction: column; padding: 4px; gap: 2px; }
-  #tools button { width: 36px; height: 36px; border: none; background: none; border-radius: 6px; font-size: 1.05rem; color: var(--muted); }
-  #tools button:hover { background: var(--hover2); }
-  #tools button.active { background: var(--ink); color: var(--on-ink); }
+  #tools button { padding: 5px 11px; font-size: .95rem; line-height: 1.2; }
   #view { flex-wrap: nowrap; }
   #mode-tile { display: inline-flex; align-items: baseline; gap: 7px; padding: 5px 12px; border-radius: 8px; border: 1px solid var(--line); font-size: .88rem; cursor: default; }
   #mode-tile[hidden] { display: none; }
@@ -158,9 +160,6 @@
   #cloud canvas { width: 100%; height: 100%; display: block; }
   /* Sits on the always-dark 3D scene, so fixed colours rather than theme tokens. */
   #cloud .cloud-info { position: absolute; bottom: 14px; left: 14px; color: #8b95a0; font-size: .8rem; pointer-events: none; }
-  #coverage { bottom: 14px; left: 14px; padding: 8px 14px; display: flex; gap: 8px; align-items: baseline; }
-  #coverage b { font-weight: 600; font-size: 1rem; }
-  #hint { position: absolute; bottom: 20px; right: 16px; font-size: .82rem; color: var(--muted); }
   #comms { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   /* An on/off switch, not a button: it layers the model over the map, it doesn't
      change view, so it must not read as a third tab next to Map / 3D cloud. */
@@ -173,7 +172,7 @@
   #comms-toggle[aria-checked="true"] { color: var(--ink); }
   #comms-toggle[aria-checked="true"] .sw { background: var(--info); border-color: var(--info); }
   #comms-toggle[aria-checked="true"] .sw::after { transform: translateX(12px); }
-  #comms-bar { top: 14px; left: 64px; right: 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 6px 10px; font-size: .84rem; }
+  #comms-bar { top: 14px; left: 14px; right: 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 6px 10px; font-size: .84rem; }
   #comms-bar .model { font-weight: 600; font-size: .76rem; padding: 2px 8px; border-radius: 99px; border: 1px dashed var(--muted); color: var(--muted); }
   #comms-bar .cm-range { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
   #comms-bar .cm-range input { width: 90px; }
@@ -184,6 +183,9 @@
   #comms-feed:empty { display: none; }
   #comms-feed li { padding: 2px 0; } #comms-feed li:first-child { color: var(--ink); }
   #comms-feed li.error { color: var(--stop); }
+  #coverage { font-size: .86rem; color: var(--muted); white-space: nowrap; }
+  #coverage b { font-weight: 600; color: var(--ink); }
+  #coverage[hidden] { display: none; }
   #empty { position: absolute; inset: 0; background: var(--scrim); display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; z-index: 3; text-align: center; padding: 24px; }
   #empty b { font-size: 1.15rem; font-weight: 600; } #empty .btn { margin-top: 8px; }
   #toast { position: absolute; top: 16px; left: 50%; z-index: 3; transform: translateX(-50%); background: var(--ink); color: var(--on-ink); padding: 6px 14px; border-radius: 6px; font-size: .84rem; opacity: 0; transition: opacity .2s; pointer-events: none; }
@@ -236,6 +238,18 @@
   #newtask label { display: grid; gap: 3px; font-size: .82rem; color: var(--muted); }
   #newtask select { width: 100%; color: var(--ink); }
 
+  /* Stop all dialog */
+  .veil { position: fixed; inset: 0; background: var(--veil); display: flex; align-items: flex-start; justify-content: center; padding-top: 120px; z-index: 11; }
+  .veil[hidden] { display: none; }
+  #stop-dlg .card { background: var(--surface); border-radius: 12px; box-shadow: 0 12px 40px var(--shadow); width: 440px; max-width: calc(100vw - 24px); padding: 20px 22px; display: grid; gap: 12px; }
+  #stop-dlg h3 { margin: 0; font-size: 1.05rem; font-weight: 600; }
+  #stop-dlg p { margin: 0; color: var(--muted); font-size: .9rem; line-height: 1.45; }
+  #sd-name-row { display: grid; gap: 4px; font-size: .84rem; color: var(--muted); }
+  #sd-name-row[hidden], #sd-err[hidden] { display: none; }
+  #sd-name { font: inherit; font-size: .92rem; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--ink); }
+  #sd-err { color: var(--stop) !important; }
+  .sd-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-top: 4px; }
+  .sd-actions [hidden] { display: none; }
   /* session panel: the launch form from scenarios.js, restyled */
   #session { position: fixed; inset: 0; background: var(--veil); display: flex; align-items: flex-start; justify-content: center; padding-top: 64px; z-index: 10; }
   #session .card { background: var(--surface); border-radius: 12px; box-shadow: 0 12px 40px var(--shadow); width: 700px; max-width: calc(100vw - 24px); max-height: calc(100vh - 90px); overflow: auto; padding: 20px 22px; display: grid; gap: 16px; }
@@ -277,6 +291,72 @@
   #session .card:not(.failed) #session-state { display: none; }
   #sp-status[hidden] { display: none; }
   #sp-log summary { cursor: pointer; color: var(--muted); font-size: .84rem; }
+  /* Launch | Tests. The Tests tab shows while a session runs too: a test IS a session. */
+  #sp-tabs { font-size: .84rem; } #sp-tabs button { padding: 3px 12px; }
+  #session .card.tab-tests #launch-form, #session .card.tab-tests #session-pane,
+  #session .card.tab-tests #console-warning, #session .card:not(.tab-tests) #tests-pane { display: none !important; }
+  #tests-pane { display: grid; gap: 18px; }
+  #tp-warn { padding: 8px 12px; border-radius: 6px; background: var(--warnbg); border: 1px solid var(--warnline); color: var(--warnink); font-size: .86rem; }
+  #tp-warn[hidden], #tp-run[hidden], #tp-log[hidden], #sp-test-note { display: none; }
+  button.link { background: none; border: none; padding: 0; color: var(--muted); font-size: .84rem; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+  button.link:hover { color: var(--ink); }
+  /* One line for the test that is running or ran last. */
+  #tp-run { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border-radius: 8px; background: var(--ground); }
+  .tp-run-text { flex: 1 1 200px; min-width: 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  #tp-run-state { color: var(--muted); font-size: .86rem; }
+  #tp-run.fail #tp-run-state { color: var(--stop); } #tp-run.pass #tp-run-state { color: var(--go); }
+  .tp-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--info); animation: tp-pulse 1.2s ease-in-out infinite; }
+  #tp-run.done .tp-dot { animation: none; background: var(--muted); }
+  #tp-run.done.pass .tp-dot { background: var(--go); } #tp-run.done.fail .tp-dot { background: var(--stop); }
+  @keyframes tp-pulse { 50% { opacity: .3; } }
+  #tp-log { flex-basis: 100%; margin: 4px 0 0; max-height: 220px; overflow: auto; font: .72rem/1.45 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; }
+  .tp-h { margin: 0 0 4px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  /* Test cases: a list, not cards. A row is title, one line of what it runs, Run;
+     click it for what it checks and how often. */
+  .tp-test { border-top: 1px solid var(--line); }
+  .tp-test:last-child { border-bottom: 1px solid var(--line); }
+  .tp-row { display: grid; grid-template-columns: 14px 1fr auto; gap: 2px 10px; align-items: center; padding: 10px 4px; cursor: pointer; }
+  .tp-row:hover { background: var(--hover); }
+  .tp-row .chev { color: var(--faint); font-size: .7rem; transition: transform .15s; }
+  .tp-test.open .chev { transform: rotate(90deg); }
+  .tp-row .t { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tp-row .btn { grid-column: 3; }
+  .tp-row .num { display: inline-block; min-width: 1.6em; color: var(--faint); font-variant-numeric: tabular-nums; }
+  .tp-test.invalid .t { color: var(--muted); }
+  .tp-more .err { color: var(--warnink); }
+  .tp-more { display: none; padding: 0 4px 14px 28px; font-size: .84rem; gap: 10px; }
+  .tp-test.open .tp-more { display: grid; }
+  .tp-more p { margin: 0; color: var(--muted); line-height: 1.45; }
+  .tp-more dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; }
+  .tp-more dt { color: var(--muted); } .tp-more dd { margin: 0; }
+  .tp-more ul { margin: 0; padding-left: 16px; } .tp-more li { margin: 1px 0; }
+  .tp-more .opts { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .tp-more .opts label { display: flex; gap: 6px; align-items: center; color: var(--muted); }
+  .tp-more .opts input { width: 4em; }
+  .tp-more code { font-size: .76rem; color: var(--faint); }
+  .tp-empty { color: var(--muted); font-size: .84rem; padding: 6px 4px; }
+  /* A test owns the session it runs: its Stop would abort the run unscored. */
+  #session .card.testing #session-finish, #session .card.testing #session-stop { display: none; }
+  #session .card.testing #sp-test-note { display: block; margin: 0; font-size: .86rem; color: var(--muted); }
+  /* Running test, over the map: what is being scored right now, and the way out. */
+  #test-chip { display: flex; align-items: center; gap: 8px; padding: 4px 4px 4px 12px; font-size: .84rem; border: 1px solid var(--line); border-radius: 8px; white-space: nowrap; }
+  #test-chip[hidden] { display: none; }
+  /* Top left of the map, empty since the tools moved up: toasts own the top centre. */
+  #result-card { top: 14px; left: 14px; width: 340px; max-width: calc(100% - 28px); padding: 12px 14px 14px; display: grid; gap: 8px; z-index: 4; }
+  #result-card[hidden], #rc-err[hidden] { display: none; }
+  .rc-head { display: flex; align-items: center; gap: 8px; }
+  .rc-head .x { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 1.3rem; line-height: 1; padding: 0 2px; }
+  .rc-v { font-size: .7rem; font-weight: 700; letter-spacing: .05em; padding: 2px 8px; border-radius: 4px; color: #fff; background: var(--muted); }
+  .rc-v.pass { background: var(--go); } .rc-v.fail { background: var(--stop); }
+  #rc-meta { margin: 0; font-size: .8rem; color: var(--muted); }
+  #rc-checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 5px; font-size: .86rem; }
+  #rc-checks li { display: grid; grid-template-columns: 16px 1fr auto; gap: 8px; align-items: baseline; }
+  #rc-checks .ok { color: var(--go); font-weight: 700; } #rc-checks .no { color: var(--stop); font-weight: 700; }
+  #rc-checks .got { font-variant-numeric: tabular-nums; color: var(--muted); }
+  #rc-checks li.bad .got { color: var(--stop); }
+  #rc-err { margin: 0; font-size: .84rem; color: var(--stop); }
+  #test-chip .k { font-size: .7rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  #test-chip button.name { background: none; border: none; padding: 0; font-weight: 600; color: var(--ink); cursor: pointer; }
   #sp-log[open] summary { margin-bottom: 6px; }
   /* Startup progress: one segment per run_demo.sh phase (session.py PHASE_ORDER),
      plus a sweep so a long phase (first-run asset streaming) still looks alive. */
@@ -309,20 +389,30 @@
       <button data-v="2d" class="active" title="Occupancy map: tools, waypoints and routes">Map</button>
       <button data-v="3d" title="The fleet's 3D point cloud (/fleet/recon_cloud). Drag to orbit, scroll to zoom, right-drag to pan">3D cloud</button>
     </div>
+    <!-- Map tools live up here, not over the map: the map gets the whole stage. -->
+    <div class="seg" id="tools" role="toolbar" aria-label="Map tools">
+      <button data-t="select" class="active" title="Select (V). Drag a robot to send it somewhere (drop on a pin to use it); click a robot for its camera; drag the map to pan">&#8598;</button>
+      <button data-t="wp" title="Add waypoint (F). Click to place, drag to set its heading">&#9670;</button>
+      <button data-t="gw" title="Place the fleet gateway (R): where the comms overlay puts the access point">&#9650;</button>
+    </div>
     <!-- Comms overlay (operator_comms.js): the commsim model of the fleet radio, fed
          the real robots' poses, the map's obstacles and the gateway pin. Predicted, so it
          only ever draws on the map; the robot cards and alarms stay the real fleet's. -->
     <button id="comms-toggle" type="button" role="switch" aria-checked="false" title="Overlay the comms model on the map: predicted radio links, mesh routes and every message hop, for where the robots are now"><span class="sw"></span>Comms overlay</button>
     <span id="mode-tile" hidden title="How this session was started. Change it from Session"><span class="k">Mode</span><b id="mode-label"></b><span id="map-name"></span></span>
+    <span id="coverage" hidden title="Area of the map the fleet has seen"><b id="cov-n"></b> mapped</span>
   </div>
   <span class="spacer"></span>
+<div id="test-chip" hidden title="A scored test is driving the sim"><span class="tp-dot"></span><span class="k">Test</span>
+    <button type="button" class="name" id="tc-name" title="Open the Tests tab"></button><span id="tc-time" class="muted"></span>
+    <button type="button" class="btn small stop" id="tc-cancel">Stop test</button></div>
   <button class="btn icon" id="theme" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
   <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">No session</span></button>
   <!-- The fleet gateway's latched alarms (/fleet/task_board): red while a condition
        holds, quiet once it has cleared but nobody has acknowledged it. Hidden at none. -->
   <button class="btn" id="alarms" hidden aria-haspopup="true" title="Fleet alarms"><span class="dot"></span><span id="alarms-label"></span></button>
   <div id="alarm-pop" hidden role="dialog" aria-label="Fleet alarms"><h3>Fleet alarms</h3><ul id="alarm-list"></ul></div>
-  <button class="btn stop" id="estop" title="Stop exploring and cancel every robot's navigation goal">Stop all</button>
+  <button class="btn stop" id="estop" title="Halt every robot now, then shut the sim down (you choose whether to keep the map)">Stop all</button>
 </header>
 
 <aside id="left">
@@ -334,15 +424,10 @@
   <canvas id="map"></canvas>
   <canvas id="comms" hidden></canvas>
   <div id="cloud" hidden></div>
-  <div class="float" id="tools" role="toolbar" aria-label="Map tools">
-    <button data-t="select" class="active" title="Select (V)">&#8598;</button>
-    <button data-t="wp" title="Add waypoint (F). Drag to set the heading">&#9670;</button>
-    <button data-t="goto" title="Send the selected robot (G). Drag to set the heading">&#10140;</button>
-    <button data-t="gw" title="Place the fleet gateway (R): where the comms overlay puts the access point">&#9650;</button>
-  </div>
   <div class="float" id="comms-bar" hidden role="toolbar" aria-label="Comms model">
     <span class="model" title="Everything drawn by this overlay is the commsim model's prediction (commsim/des): the real robots' positions and the map's obstacles go in, links, routes and message hops come out. Its what-ifs change the model only, never the robots.">Model</span>
     <span id="cm-state" class="muted"></span>
+    <span id="cm-hint" class="muted"></span>
     <button class="btn small" id="cm-play" type="button">Pause</button>
     <select id="cm-speed" title="Model speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
     <label class="cm-range" title="Open-air radio range. Obstacles from the map shorten real links">Range <input type="range" id="cm-range" min="8" max="120" step="1" value="22"> <span id="cm-range-v">22 m</span></label>
@@ -354,9 +439,15 @@
     <label class="lf-check" title="Mesh routing beacons, transport ACKs and keepalives: most of the airtime, little of the story"><input type="checkbox" id="cm-chatter"> routing chatter</label>
   </div>
   <ul class="float" id="comms-feed" hidden aria-live="polite"></ul>
-  <div class="float" id="coverage" hidden><b id="cov-n"></b><span class="muted">mapped</span></div>
+  <!-- A finished test's score: shown once, until dismissed, never kept (operator_tests.js). -->
+  <div class="float" id="result-card" hidden role="dialog" aria-labelledby="rc-name">
+    <div class="rc-head"><span class="rc-v" id="rc-v"></span><b id="rc-name"></b>
+      <button type="button" class="x" id="rc-x" title="Dismiss" aria-label="Dismiss">&times;</button></div>
+    <p id="rc-meta"></p>
+    <ul id="rc-checks"></ul>
+    <p id="rc-err" hidden></p>
+  </div>
   <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
-  <div id="hint"></div>
   <div id="empty" hidden><b id="empty-title">No session running</b><span class="muted" id="empty-sub">Start a session to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><button class="btn primary" id="empty-go">Start a session</button></div>
   <div id="toast" role="status"></div>
 </main>
@@ -389,9 +480,29 @@
   </details>
 </aside>
 
+<!-- Stop all: the robots are already halted by the time this shows; this is the
+     sim itself, and whether this run's map is kept. operator.js fills it. -->
+<div id="stop-dlg" class="veil" hidden>
+  <form class="card" role="dialog" aria-labelledby="sd-title" autocomplete="off">
+    <h3 id="sd-title"></h3>
+    <p id="sd-body"></p>
+    <label id="sd-name-row" hidden>Save as <input id="sd-name" spellcheck="false" title="lowercase letters, digits, - and _"></label>
+    <p id="sd-err" hidden></p>
+    <div class="sd-actions">
+      <button type="button" class="btn" id="sd-cancel">Keep running</button>
+      <button type="button" class="btn stop" id="sd-discard"></button>
+      <button type="submit" class="btn primary" id="sd-save">Save &amp; stop</button>
+    </div>
+  </form>
+</div>
 <div id="session" hidden>
   <div class="card" role="dialog" aria-label="Session">
-    <h3>Session <button class="x" id="sp-x" title="Close (Esc)" aria-label="Close">&times;</button></h3>
+    <h3>Session
+      <div class="seg" id="sp-tabs" role="tablist" aria-label="Session panel">
+        <button type="button" data-tab="launch" class="active" role="tab">Launch</button>
+        <button type="button" data-tab="tests" role="tab" title="Scored test cases (configs/tests/): launch one and watch it on the map">Tests</button>
+      </div>
+      <button class="x" id="sp-x" title="Close (Esc)" aria-label="Close">&times;</button></h3>
     <div id="console-warning" hidden></div>
     <p id="scenario-hint"></p>
     <form id="launch-form" autocomplete="off">
@@ -462,9 +573,26 @@
           <button type="submit" id="lf-start">Start</button>
         </div>
       </form>
+    <!-- Scored tests (scripts/simtest.py via serve.py's /api/tests*): operator_tests.js. -->
+    <div id="tests-pane">
+      <div id="tp-warn" hidden></div>
+      <div id="tp-run" hidden>
+        <span class="tp-dot"></span>
+        <div class="tp-run-text"><b id="tp-run-name"></b><span id="tp-run-state"></span></div>
+        <button type="button" class="link" id="tp-log-toggle" aria-expanded="false">Log</button>
+        <button type="button" class="btn small" id="tp-watch" title="Close this panel and watch the run on the map">Watch</button>
+        <button type="button" class="btn small stop" id="tp-cancel" title="Stop the sim. What the run saw so far is still scored">Stop test</button>
+        <pre id="tp-log" hidden></pre>
+      </div>
+      <section>
+        <h4 class="tp-h">Test cases <span class="muted" id="tp-count"></span></h4>
+        <div id="tp-list"></div>
+      </section>
+    </div>
     <div id="session-pane">
         <div class="boot" id="sp-boot" hidden><div class="bar"><i></i></div><span class="boot-label"></span></div>
         <span class="boot-label" id="sp-status" hidden></span>
+        <p id="sp-test-note">A test is driving this session. Stop it with <button type="button" class="link" id="sp-test-stop">Stop test</button> so what it saw is still scored.</p>
         <div id="session-strip">
           <span id="session-state">no session</span>
           <button type="button" id="session-finish" disabled
@@ -487,5 +615,6 @@
 <script src="operator_comms.js"></script>
 <script src="operator.js"></script>
 <script src="scenarios.js"></script>
+<script src="operator_tests.js"></script>
 </body>
 </html>

@@ -46,6 +46,7 @@ This is **not a colcon workspace** — there is no `src/`, no `package.xml`, no
 | `webui/` | dashboard (vanilla JS, no build step) + `serve.py` + `session.py` |
 | `scripts/` | Isaac Sim entry points, `run_demo.sh`, `run_console.sh`, `sim_ctl.sh` |
 | `configs/` | tuning YAML, `scenarios/` presets |
+| `simtest/` | scored-test layer: `configs/worlds/` (props + scripted movers), `configs/tests/` (goals + metrics), probe, versioned metrics — `docs/testing.md` |
 | `maps/` | saved map library — named, committed snapshots of explored maps |
 | `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `docs/splat.md`) |
 | `commsim/` | fleet comms simulation (mesh, Zenoh, task auction), system python3 only; `core/protocol.py` is the allocator `nodes/fleet_tasks.py` runs, `viz/demo.py` the model behind the operator's Comms overlay (`commsim/README.md`) |
@@ -119,10 +120,18 @@ Prefer offline. Seconds, no GPU, no display, no ROS:
 node webui/tests/scenarios_test.mjs   # scenarios tab (no fixture needed)
 node webui/tests/operator_test.mjs    # operator view, fake ROSLIB (no fixture needed)
 node webui/tests/splat_test.mjs       # 3D panel splat mode, fake worker (no fixture needed)
+node webui/tests/obstacle_overlay_test.mjs  # obstacle boxes on the sensors view (no fixture needed)
 node webui/tests/dashboard_test.mjs   # dashboard (needs webui/testdata/)
+node webui/tests/world_overlay_test.mjs  # map overlay of sim worlds (no fixture needed)
 python3 webui/session.py --list       # scenario validation
 python3 -m pytest tests/              # pure-python node logic (system python3 — see below)
+scripts/simtest.py validate           # scored test cases (configs/tests/) resolve
 ```
+
+Scored live tests — a world of props and scripted movers
+(`configs/worlds/`), a scenario, goals and pass criteria — run with
+`scripts/simtest.py run NAME`; metrics are versioned and re-scorable from
+recorded events without a sim. See `docs/testing.md`.
 
 `tests/*_test.py` needs the SYSTEM python3 (`/usr/bin/python3 -m pytest`), not
 conda's — conda's base env doesn't have pytest, and this is the same

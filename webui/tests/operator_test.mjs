@@ -50,6 +50,8 @@ window.ROSLIB = {
 // Shims: nav waypoints live in memory (the real endpoint writes data/), the session
 // can be faked per scenario, everything else goes to the real serve.py.
 window.__navWps = [];
+window.__testPosts = []; window.__testResults = []; window.__sessionPosts = [];
+window.__testRun = { running: false, name: null, exit: null, elapsed_s: null, log: '', offset: 0 };
 window.__fakeSession = null;
 const realFetch = window.fetch.bind(window);
 window.fetch = (url, opts) => {
@@ -60,6 +62,23 @@ window.fetch = (url, opts) => {
     return json({ waypoints: window.__navWps });
   }
   if (u.startsWith('/api/session') && !u.startsWith('/api/session/') && window.__fakeSession) return json(window.__fakeSession);
+  // Stop all's dialog: record, never stop anything real.
+  if ((u.startsWith('/api/session/stop') || u.startsWith('/api/session/finish')) && opts && opts.method === 'POST') {
+    window.__sessionPosts.push({ url: u, body: JSON.parse(opts.body || '{}') });
+    return json(window.__fakeSession || {});
+  }
+  // Test runs: never launch scripts/simtest.py from a page test. The list itself
+  // (/api/tests) is real, read from configs/tests/.
+  if (u.startsWith('/api/tests/run')) {
+    if (opts && opts.method === 'POST') {
+      const body = JSON.parse(opts.body); window.__testPosts.push(body);
+      window.__testRun = { running: true, name: body.name, exit: null, elapsed_s: 75, log: '[simtest] launching\\n', offset: 20 };
+    }
+    return json({ ...window.__testRun, log: '' });
+  }
+  if (u.startsWith('/api/tests/cancel')) { window.__testRun = { ...window.__testRun, running: false, exit: 130 }; return json(window.__testRun); }
+  if (u.startsWith('/api/tests/results')) return json({ results: window.__testResults });
+  if (u.startsWith('/api/tests/report')) return json({ markdown: '# crossing_yield\\nrecall 0.12' });
   return realFetch(url, opts);
 };
 window.confirm = () => true;
@@ -73,8 +92,19 @@ function spawnTracked(cmd, argv, opts = {}) {
   children.push(p);
   return p;
 }
+// Every temp dir a run makes (Chrome profile, sessions, seeded maps) is removed on
+// exit: they were never cleaned, and a day of runs filled the disk (2026-10-22).
+const tempDirs = [];
+const tmpDir = (prefix) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tempDirs.push(d); return d; };
 function cleanup() {
   for (const p of children) { try { p.kill('SIGKILL'); } catch {} }
+  // SIGKILL is asynchronous: Chrome writes into its profile while it dies, so wait
+  // (up to 2 s, synchronously: this runs in an 'exit' handler) before deleting.
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  for (const p of children) {
+    for (let i = 0; i < 40 && p.pid; i++) { try { process.kill(p.pid, 0); } catch { break; } Atomics.wait(nap, 0, 0, 50); }
+  }
+  for (const d of tempDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
 }
 process.on('exit', cleanup);
 process.on('SIGINT', () => { cleanup(); process.exit(130); });
@@ -142,7 +172,7 @@ const tf = (parent, child, x, y, yaw = 0) => ({ transforms: [{
   transform: { translation: { x, y, z: 0 }, rotation: { x: 0, y: 0, z: Math.sin(yaw / 2), w: Math.cos(yaw / 2) } } }] });
 
 async function main() {
-  const sessionsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sortbots-sessions-'));
+  const sessionsDir = tmpDir('sortbots-sessions-');
   spawnTracked('python3', [path.join(WEBUI_DIR, 'serve.py'), '--control', '--platform', 'sim',
                            '--port', String(PORT), '--host', '127.0.0.1'],
                { cwd: REPO_ROOT, env: { ...process.env, SORTBOTS_SESSIONS_DIR: sessionsDir,
@@ -156,7 +186,7 @@ async function main() {
   // The map test below places A and B; a task dispatches between those two.
   const pick = 'A', drop = 'B';
 
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'sortbots-chrome-'));
+  const profile = tmpDir('sortbots-chrome-');
   const chromeBin = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']
     .find((b) => { try { return spawn(b, ['--version']).pid; } catch { return false; } }) || 'google-chrome';
   spawnTracked(chromeBin, ['--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--enable-unsafe-swiftshader',
@@ -294,10 +324,150 @@ async function main() {
     await emit(`/${r0}/task_status`, { data: JSON.stringify({ task_id: null, state: 'IDLE', queue_depth: 0, queue: [] }) });
     await sleep(300);
     check(`${vp.label}: an idle robot's pill is the idle colour`, await page.eval(`document.querySelector('#fleet .robot[data-id="${r0}"] .tag').classList.contains('idle')`));
+
+    // -- obstacles (nodes/obstacle_detector.py) ---------------------------------------------
+    // r0 sits at (-3, 2) facing 0.5 rad. One person 2 m dead ahead crossing to its right,
+    // one static box; no world_frame, so velocity is in base_link like a detector without
+    // odom TF would send it.
+    const ahead = [-3 + 2 * Math.cos(0.5), 2 + 2 * Math.sin(0.5)];
+    const obstacles = (moving) => ({ data: JSON.stringify({ stamp: 1, frame: `${r0}/base_link`, world_frame: null, floor_z: 0,
+      w: 848, h: 480, count: 2, moving: moving ? 1 : 0, obstacles: [
+        { track_id: 4, moving, speed_mps: 1.2, vel: [0, -1.2], centroid: [2.0, 0, 0.9], min: [1.9, -0.2, 0.1], max: [2.1, 0.2, 1.7],
+          extent_m: 0.4, height_m: 1.7, range_m: 1.9, bearing_deg: 0, n: 900, uv: [380, 60, 470, 470], clipped: false, hits: 8 },
+        { track_id: 2, moving: false, speed_mps: 0, vel: [0, 0], centroid: [3.0, 1.0, 0.3], min: [2.9, 0.8, 0.1], max: [3.1, 1.2, 0.5],
+          extent_m: 0.4, height_m: 0.5, range_m: 3.0, bearing_deg: 18, n: 200, uv: [100, 300, 200, 400], clipped: false, hits: 30 },
+      ] }) });
+    // Obstacle red (#e5484d) on a canvas, optionally only within `rad` px of (cx, cy).
+    const redPx = (sel, cx = null, cy = null, rad = 0) => page.eval(`(() => {
+      const c = document.querySelector(${JSON.stringify(sel)});
+      if (!c || !c.width) return -1;
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data, s = c.width / c.clientWidth;
+      let n = 0;
+      for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) {
+        if (${cx} !== null && Math.hypot(x / s - ${cx}, y / s - ${cy}) > ${rad}) continue;
+        const i = (y * c.width + x) * 4;
+        if (d[i] > 200 && d[i + 1] < 100 && d[i + 2] < 100 && d[i + 3] > 128) n++;
+      }
+      return n;
+    })()`);
+    check(`${vp.label}: no obstacle red on the map before any detection`, (await redPx('#map')) === 0);
+    await emit(`/${r0}/obstacle_tracks`, obstacles(true));
+    await sleep(400);
+    const [ax, ay] = await page.eval(`window.__operator.toPx(${ahead[0]}, ${ahead[1]})`);
+    // The marker, its 1 s velocity arrow and its label, all around the obstacle.
+    const near = await redPx('#map', ax, ay, 90), all = await redPx('#map');
+    check(`${vp.label}: a moving obstacle is marked on the map 2 m ahead of its robot`, near > 30 && near === all, `near=${near} all=${all}`);
+    check(`${vp.label}: the card counts obstacles, moving ones and the nearest`, (await f0('obst')) === '2, 1 moving · nearest 1.9 m', await f0('obst'));
+    check(`${vp.label}: the camera tile boxes the obstacles`, (await redPx(`#fleet .robot[data-id="${r0}"] canvas.obst`)) > 50);
+    await emit(`/${r0}/obstacle_tracks`, obstacles(false));
+    await sleep(300);
+    check(`${vp.label}: static obstacles are left off the map`, (await redPx('#map')) === 0);
+    check(`${vp.label}: a static-only frame still counts them on the card`, (await f0('obst')) === '2 · nearest 1.9 m', await f0('obst'));
+    await emit(`/${r0}/obstacle_tracks`, obstacles(true));
+    await sleep(2000); // > OBSTACLE_TTL_MS with nothing new
+    check(`${vp.label}: a silent detector's markers expire from the map`, (await redPx('#map')) === 0);
+    check(`${vp.label}: ... from the camera tile`, (await redPx(`#fleet .robot[data-id="${r0}"] canvas.obst`)) === 0);
+    check(`${vp.label}: ... and from the card`, (await f0('obst')) === '—', await f0('obst'));
+    const tfm = await page.eval(`JSON.stringify([
+      window.__operator.obstaclesInMap({ obstacles: [{ track_id: 1, centroid: [1, 0, 0], min: [1, 0, 0], max: [1, 0, 0], vel: [1, 0] }] }, { x: 1, y: 2, yaw: Math.PI / 2 }, { yaw: 0 })[0],
+      window.__operator.obstaclesInMap({ obstacles: [{ track_id: 1, centroid: [1, 0, 0], min: [1, 0, 0], max: [1, 0, 0], vel: [1, 0] }] }, { x: 1, y: 2, yaw: Math.PI / 2 }, null)[0]])`);
+    const [wOdom, wBase] = JSON.parse(tfm), close = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-9);
+    check(`${vp.label}: obstacle positions go base_link -> map, velocity stays in its world frame`, close(wOdom.at, [1, 3]) && close(wOdom.vel, [1, 0]), tfm);
+    check(`${vp.label}: velocity without a world frame is rotated like a position`, close(wBase.vel, [0, 1]), tfm);
+    // That wait also outlasted ONLINE_TTL_MS for both robots; a live one keeps sending /tf.
+    await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+    await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+    await emit(`/${r0}/obstacle_tracks`, obstacles(true));
+    await sleep(300);
+    await shot(`${vp.label}-obstacles`);
     await shot(`${vp.label}-two-cards`);
     await click(`#fleet .robot[data-id="${r0}"] .l1`);
     await sleep(200);
     check(`${vp.label}: closing a card hands control back to the other open one`, (await page.eval(`window.__operator.selected`)) === r1 && (await page.eval(`document.querySelectorAll('#fleet .robot.sel').length`)) === 1);
+
+    // -- scored tests: the Session panel's Tests tab, the map chip, the walkers ----------------
+    await click('#session-chip');
+    await sleep(300);
+    await click('#sp-tabs [data-tab="tests"]');
+    await sleep(900);
+    check(`${vp.label}: the session panel has a Tests tab`, await visible('#tests-pane') && !(await visible('#launch-form')));
+    const cards = await page.eval(`[...document.querySelectorAll('#tp-list .tp-test')].map((c) => c.dataset.name || 'invalid')`);
+    const onDisk = fs.readdirSync(path.join(REPO_ROOT, 'configs', 'tests')).filter((f) => f.endsWith('.yaml')).length;
+    check(`${vp.label}: it lists every test case in configs/tests/`, cards.length === onDisk, cards.join(','));
+    check(`${vp.label}: the smoke test is runnable here`,
+      await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"] [data-run]'); return !!c && !c.disabled; })()`));
+    const smokeTitle = await $text('#tp-list .tp-test[data-name="pipeline_smoke"] .t');
+    check(`${vp.label}: rows are numbered short names`, /^\d+Pipeline smoke$/.test(smokeTitle), smokeTitle);
+    check(`${vp.label}: no time/variant line under the names`, !(await page.eval(`!!document.querySelector('#tp-list .tp-row .m')`)));
+    const smokeName = 'Pipeline smoke';
+    check(`${vp.label}: rows start collapsed`, !(await visible('#tp-list .tp-test[data-name="pipeline_smoke"] .tp-more')));
+    await click('#tp-list .tp-test[data-name="crossing_yield"] .tp-row .t');
+    await sleep(100);
+    const more = await $text('#tp-list .tp-test[data-name="crossing_yield"] .tp-more');
+    check(`${vp.label}: clicking a row shows what it checks`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Passes when/.test(more) && /recall ≥ 0.3/.test(more), more.slice(0, 160));
+    await click('#tp-list .tp-test[data-name="pipeline_smoke"] .tp-row .t');
+    await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"]'); c.querySelector('[data-repeats]').value = '2'; c.querySelector('[data-run]').click(); })()`);
+    await sleep(400);
+    const posted = JSON.parse(await page.eval(`JSON.stringify(window.__testPosts)`));
+    check(`${vp.label}: Run starts that test with the chosen repeats`, posted.length === 1 && posted[0].name === 'pipeline_smoke' && posted[0].repeats === 2, JSON.stringify(posted));
+    check(`${vp.label}: ... and closes the panel to watch it on the map`, !(await visible('#session')));
+    check(`${vp.label}: a chip over the map names the running test and its clock`,
+      await visible('#test-chip') && (await $text('#tc-name')) === smokeName && (await $text('#tc-time')) === '1:15', `${await $text('#tc-name')} ${await $text('#tc-time')}`);
+    await shot(`${vp.label}-test-running`);
+    await click('#tc-name');
+    await sleep(500);
+    check(`${vp.label}: the chip's name reopens the Tests tab`, await visible('#tests-pane') && await visible('#tp-run') && /running · 1:15/.test(await $text('#tp-run-state')));
+    check(`${vp.label}: ... where Run is disabled while a test runs`,
+      await page.eval(`[...document.querySelectorAll('#tp-list [data-run]')].every((b) => b.disabled)`));
+    check(`${vp.label}: while a test runs, the session's own Stop gives way to Stop test`,
+      await page.eval(`document.querySelector('#session .card').classList.contains('testing')`) &&
+      await page.eval(`getComputedStyle(document.getElementById('session-stop')).display === 'none' && getComputedStyle(document.getElementById('sp-test-note')).display !== 'none'`));
+    await page.eval(`window.__testResults = [{ dir: '20261022T190000Z_pipeline_smoke', name: 'pipeline_smoke', state: 'done', complete: true, verdict: 'FAIL', done: 1, planned: 1,
+      runs: [{ ok: false, error: null, sim_s: 41.2, criteria: [{ label: 'clearance.contacts == 0', ok: false, actual: 3 }, { label: 'goals.success_rate >= 1', ok: true, actual: 1 }] }] }]`);
+    await click('#sp-x');
+    await click('#tc-cancel');
+    await sleep(300);
+    check(`${vp.label}: Stop test cancels it and the chip goes`, !(await visible('#test-chip')) && (await page.eval(`window.__testRun.exit`)) === 130);
+    await sleep(300);
+    const card = await $text('#result-card');
+    check(`${vp.label}: a finished test opens a result card with every check`, await visible('#result-card') && /STOPPED/.test(card) &&
+      /Clearance contacts = 0/.test(card) && /got 3/.test(card) && /Goals success rate ≥ 1/.test(card), card.slice(0, 200));
+    check(`${vp.label}: ... marking the failed ones`, (await page.eval(`document.querySelectorAll('#rc-checks li.bad').length`)) === 1 && (await page.eval(`document.querySelectorAll('#rc-checks .ok').length`)) === 1);
+    await shot(`${vp.label}-result-card`);
+    await sleep(4500);
+    check(`${vp.label}: ... and stays until dismissed`, await visible('#result-card'));
+    await click('#rc-x');
+    check(`${vp.label}: the × dismisses it`, !(await visible('#result-card')));
+
+    await click('#session-chip');
+    await sleep(900);
+    check(`${vp.label}: the panel remembers the Tests tab`, await visible('#tests-pane'));
+    check(`${vp.label}: no results list, and no status line once the test is over`, !(await page.eval(`!!document.getElementById('tp-results')`)) && !(await visible('#tp-run')));
+    await shot(`${vp.label}-tests-tab`);
+    await click('#sp-tabs [data-tab="launch"]');
+    check(`${vp.label}: the Launch tab brings the form back`, await visible('#launch-form') && !(await visible('#tests-pane')));
+    await click('#sp-x');
+
+    // Walkers come from sim ground truth; one green walker at (1, 1).
+    const greenNear = (x, y, rad) => page.eval(`(() => {
+      const c = document.getElementById('map'), s = c.width / c.clientWidth, [cx, cy] = window.__operator.toPx(${x}, ${y});
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0;
+      for (let py = 0; py < c.height; py++) for (let px = 0; px < c.width; px++) {
+        if (Math.hypot(px / s - cx, py / s - cy) > ${rad}) continue;
+        const i = (py * c.width + px) * 4; if (d[i + 1] > 150 && d[i] < 60 && d[i + 2] < 90) n++;
+      }
+      return n; })()`);
+    check(`${vp.label}: no walker drawn without a sim world`, (await greenNear(1, 1, 30)) === 0);
+    await emit('/sim/world', { data: JSON.stringify({ world: 'aisle_crossing', title: 'Aisle crossing', props: [],
+      actors: [{ id: 'walker_1', label: 'walker', shape: 'cylinder', radius: 0.3, color: [0.1, 0.75, 0.2], path: [[-1, 1], [3, 1]], mode: 'pingpong' }] }) });
+    await emit('/sim/ground_truth', { data: JSON.stringify({ wt: 4.2, running: true, actors: { walker_1: { x: 1, y: 1, yaw: 0, moving: true } } }) });
+    await sleep(300);
+    check(`${vp.label}: a walker is drawn at its ground-truth position`, (await greenNear(1, 1, 12)) > 40, String(await greenNear(1, 1, 12)));
+    await shot(`${vp.label}-walker`);
+    await sleep(3600); // > WORLD_TRUTH_TTL_MS with no ground truth
+    check(`${vp.label}: walkers vanish when the sim stops sending ground truth`, (await greenNear(1, 1, 30)) === 0);
+    await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); // that wait outlasted ONLINE_TTL_MS
+    await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
 
     // -- waypoints ------------------------------------------------------------------------
     await page.eval(`document.querySelector('#tools [data-t="wp"]').click()`);
@@ -317,13 +487,68 @@ async function main() {
     check(`${vp.label}: a waypoint chip sends the selected robot`, sent.length === 1 && sent[0].op === 'send_action_goal' &&
           sent[0].action === `/${r1}/navigate_to_pose` && sent[0].args.pose.header.frame_id === 'map', ops.slice(0, 160));
     await sleep(300);
-    check(`${vp.label}: the robot row says where it is going`, /Going to A/.test(await page.eval(`document.querySelector('#fleet .robot.sel .l2').textContent`)));
+    const rowGoing = await page.eval(`document.querySelector('#fleet .robot.sel .l2').textContent`);
+    check(`${vp.label}: the robot row says where it is going`, /Going to A/.test(rowGoing), rowGoing);
+    // -- drag a robot to send it (no send tool) ---------------------------------------------------
+    check(`${vp.label}: there is no send tool any more`, await page.eval(`!document.querySelector('#tools [data-t="goto"]')`));
+    await page.eval(`document.querySelector('#tools [data-t="select"]').click()`);
+    const goals = async () => JSON.parse(await page.eval(`JSON.stringify(window.__ops.filter((o) => o.op === 'send_action_goal'))`));
+    const at = (x, y) => page.eval(`(() => { const r = document.getElementById('map').getBoundingClientRect(); const [a, b] = window.__operator.toPx(${x}, ${y}); return [r.left + a, r.top + b]; })()`);
+    const mouse = (type, [x, y]) => page.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 });
     await page.eval(`window.__ops.length = 0`);
-    await page.eval(`document.querySelector('#tools [data-t="goto"]').click()`);
-    await mapPointer(2, 4);
-    const sent2 = JSON.parse(await page.eval(`JSON.stringify(window.__ops)`));
-    check(`${vp.label}: the send tool sends a goal where you click`, sent2.length === 1 && Math.abs(sent2[0].args.pose.pose.position.x - 2) < 0.1 &&
-          Math.abs(sent2[0].args.pose.pose.position.y - 4) < 0.1, JSON.stringify(sent2[0]?.args?.pose?.pose?.position));
+    await mouse('mousePressed', await at(4, -2)); // r1
+    await mouse('mouseMoved', await at(3, 1));
+    await mouse('mouseMoved', await at(2, 4));
+    const mid = JSON.parse(await page.eval(`JSON.stringify(window.__operator.drag)`));
+    check(`${vp.label}: dragging a robot previews the send`, !!mid && mid.id === r1 && Math.abs(mid.wx - 2) < 0.1 && Math.abs(mid.wy - 4) < 0.1, JSON.stringify(mid));
+    check(`${vp.label}: ... and sends nothing until it is dropped`, (await goals()).length === 0);
+    await shot(`${vp.label}-drag-send`);
+    await mouse('mouseReleased', await at(2, 4));
+    await sleep(150);
+    let g = await goals();
+    const sp = g[0]?.args?.pose?.pose, gyaw = sp ? 2 * Math.atan2(sp.orientation.z, sp.orientation.w) : NaN;
+    check(`${vp.label}: dropping it sends that robot there`, g.length === 1 && g[0].action === `/${r1}/navigate_to_pose` &&
+          Math.abs(sp.position.x - 2) < 0.1 && Math.abs(sp.position.y - 4) < 0.1, JSON.stringify(sp?.position));
+    check(`${vp.label}: ... arriving facing the way it travelled`, Math.abs(gyaw - Math.atan2(6, -2)) < 0.05, `yaw ${gyaw}`);
+    check(`${vp.label}: a drag-send leaves the view where it was (no pan)`, await page.eval(`!window.__operator.drag`));
+
+    await page.eval(`window.__ops.length = 0`);
+    await mapPointer(4, -2, -5, -5); // onto pin B
+    g = await goals();
+    const bp = g[0]?.args?.pose?.pose, byaw = bp ? 2 * Math.atan2(bp.orientation.z, bp.orientation.w) : NaN;
+    check(`${vp.label}: dropping on a pin sends it to that waypoint, with the pin's heading`, g.length === 1 &&
+          Math.abs(bp.position.x + 5) < 1e-6 && Math.abs(bp.position.y + 5) < 1e-6 && Math.abs(byaw - Math.PI / 2) < 0.1, JSON.stringify(bp));
+    check(`${vp.label}: ... and names it`, /Going to B/.test(await page.eval(`document.querySelector('#fleet .robot[data-id="${r1}"] .l2').textContent`)));
+
+    await page.eval(`window.__ops.length = 0`);
+    const openBefore = await page.eval(`[...window.__operator.open].join()`);
+    await mapPointer(-3, 2, -1, 0); // r0, whose card isn't the selected one
+    g = await goals();
+    check(`${vp.label}: any robot can be dragged, not just the selected one`, g.length === 1 && g[0].action === `/${r0}/navigate_to_pose`, g[0]?.action);
+    check(`${vp.label}: ... without opening or closing cards`, (await page.eval(`[...window.__operator.open].join()`)) === openBefore);
+
+    await page.eval(`window.__ops.length = 0`);
+    const [r1x, r1y] = await at(4, -2); // a real drag (> 6 px) that ends back on the robot (< 16 px)
+    await mouse('mousePressed', [r1x, r1y]);
+    await mouse('mouseMoved', [r1x + 10, r1y]);
+    await mouse('mouseReleased', [r1x + 10, r1y]);
+    await sleep(150);
+    check(`${vp.label}: dropping a robot back on itself sends nothing`, (await goals()).length === 0);
+
+    await mouse('mousePressed', await at(4, -2));
+    await mouse('mouseMoved', await at(0, 3));
+    await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+    await mouse('mouseReleased', await at(0, 3));
+    await sleep(150);
+    check(`${vp.label}: Escape abandons a drag-send`, (await goals()).length === 0 && await page.eval(`!window.__operator.drag`));
+
+    const vc = await page.eval(`JSON.stringify([window.__operator.view.cx, window.__operator.view.cy])`);
+    await mapPointer(0, 3, 1, 4); // empty map
+    check(`${vp.label}: dragging empty map still pans`, (await page.eval(`JSON.stringify([window.__operator.view.cx, window.__operator.view.cy])`)) !== vc && (await goals()).length === 0);
+    check(`${vp.label}: no instruction text over the map; the select tool's tooltip teaches the drag`,
+      !(await page.eval(`!!document.getElementById('hint')`)) && /Drag a robot/.test(await page.eval(`document.querySelector('#tools [data-t="select"]').title`)));
+    check(`${vp.label}: map tools, mapped area and the test chip sit in the top bar`,
+      await page.eval(`['tools', 'coverage', 'test-chip'].every((id) => document.getElementById(id).closest('header'))`));
 
     // -- tasks --------------------------------------------------------------------------------------
     // A and B are both still placed here (deletion is exercised after the demo
@@ -340,7 +565,8 @@ async function main() {
     await emit(`/${r1}/task_status`, { data: JSON.stringify({ task_id: payload.task_id, state: 'NAV_TO_PICKUP', queue_depth: 0 }) });
     await sleep(200);
     check(`${vp.label}: task status moves it to en route`, /en route/.test(await $text('#tasks')));
-    check(`${vp.label}: the robot row follows its task`, /Heading to pick-up/.test(await page.eval(`document.querySelector('#fleet .robot.sel .l2').textContent`)));
+    const rowTask = await page.eval(`document.querySelector('#fleet .robot.sel .l2').textContent`);
+    check(`${vp.label}: the robot row follows its task`, /Heading to pick-up/.test(rowTask), rowTask);
     await emit(`/${r1}/task_status`, { data: JSON.stringify({ task_id: payload.task_id, state: 'DONE', queue_depth: 0 }) });
     await sleep(200);
     check(`${vp.label}: DONE finishes the task`, /done/.test(await $text('#tasks')));
@@ -525,6 +751,7 @@ async function main() {
     check(`${vp.label}: Stop all zeroes every robot's velocity`, roster.every((id) => stopped.some((p) => p.topic === `/${id}/cmd_vel` && p.msg.linear.x === 0)));
     const svc = JSON.parse(await page.eval(`JSON.stringify(window.__services)`));
     check(`${vp.label}: Stop all cancels navigation goals`, roster.every((id) => svc.some((s) => s.name === `/${id}/navigate_to_pose/_action/cancel_goal`)));
+    check(`${vp.label}: with no session, Stop all only halts the robots (no dialog)`, !(await visible('#stop-dlg')));
 
     // -- starting up: progress bar ---------------------------------------------------------------------------
     await page.eval(`window.__fakeSession = { state: 'starting', phase: 'sim_loading', phase_label: 'loading the warehouse', session_id: 's0', scenario: 'custom', config: { map: 'warehouse', mode: 'readonly', robots: 2 } }`);
@@ -550,6 +777,39 @@ async function main() {
     await sleep(400);
     check(`${vp.label}: the bar is gone once the robots are up`, await page.eval(`document.getElementById('sp-boot').hidden`));
     check(`${vp.label}: once running, a short status replaces the bar`, /^Running · /.test(await page.eval(`document.getElementById('sp-status').textContent`)) && await page.eval(`!document.getElementById('sp-status').hidden`));
+
+    // -- Stop all ends the sim: save or discard the map ----------------------------------------------------
+    await page.eval(`window.__fakeSession = { ...window.__fakeSession, read_only: false, map_name: 'warehouse' }`);
+    await sleep(3400);
+    await page.eval(`window.__published.length = 0; window.__sessionPosts.length = 0`);
+    await click('#estop');
+    await sleep(100);
+    check(`${vp.label}: Stop all still halts every robot first`, await page.eval(`${JSON.stringify(roster)}.every((id) => window.__published.some((p) => p.topic === '/' + id + '/cmd_vel'))`));
+    check(`${vp.label}: ... then asks whether to keep what a mapping run mapped`, await visible('#stop-dlg') && (await $text('#sd-title')) === 'Keep what this run mapped?' &&
+      (await page.eval(`document.getElementById('sd-name').value`)) === 'warehouse' && await visible('#sd-save') && await visible('#sd-discard'));
+    await shot(`${vp.label}-stop-dialog`);
+    await page.eval(`document.getElementById('sd-name').value = 'Bad Name'`);
+    await click('#sd-save');
+    await sleep(100);
+    check(`${vp.label}: a bad map name is refused in the dialog`, await visible('#sd-err') && (await page.eval(`window.__sessionPosts.length`)) === 0);
+    await page.eval(`document.getElementById('sd-name').value = 'warehouse-v2'`);
+    await click('#sd-save');
+    await sleep(200);
+    let sposts = JSON.parse(await page.eval(`JSON.stringify(window.__sessionPosts)`));
+    check(`${vp.label}: Save & stop saves under that name and ends the session`, sposts.length === 1 && sposts[0].url === '/api/session/finish' && sposts[0].body.name === 'warehouse-v2' && !(await visible('#stop-dlg')), JSON.stringify(sposts));
+    await click('#estop'); await sleep(100);
+    await click('#sd-discard'); await sleep(200);
+    sposts = JSON.parse(await page.eval(`JSON.stringify(window.__sessionPosts)`));
+    check(`${vp.label}: Discard & stop ends the session without saving`, sposts.length === 2 && sposts[1].url === '/api/session/stop');
+    await page.eval(`window.__fakeSession = { ...window.__fakeSession, read_only: true }`);
+    await sleep(3400);
+    await click('#estop'); await sleep(100);
+    check(`${vp.label}: a read-only run just asks to stop the sim`, (await $text('#sd-title')) === 'Stop the sim?' && !(await visible('#sd-name-row')) && !(await visible('#sd-save')) && /unchanged/.test(await $text('#sd-body')));
+    await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+    await sleep(100);
+    check(`${vp.label}: Escape keeps it running`, !(await visible('#stop-dlg')) && (await page.eval(`window.__sessionPosts.length`)) === 2);
+    await page.eval(`window.__fakeSession = { ...window.__fakeSession, read_only: undefined, map_name: undefined }`);
+    await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1)); // those waits outlasted ONLINE_TTL_MS
     // A demo: true session (the Fleet demo preset) starts the task demo by itself, once.
     await page.eval(`window.__published.length = 0; window.__fakeSession = { ...window.__fakeSession, session_id: 's-demo', config: { ...window.__fakeSession.config, demo: true } }`);
     await sleep(3600);
@@ -625,7 +885,7 @@ async function main() {
   await waitFor(async () => Math.abs((await vz()).nodes[2][0] - 16) < 0.3, { what: 'a pose update to move the model', tries: 30 });
   check('comms: a robot that drives moves in the model too', true);
   await click('#cm-kill');
-  check('comms: a what-if asks you to pick a robot', (await vz()).pick === 'node' && /switch it off/.test(await $text('#hint')), await $text('#hint'));
+  check('comms: a what-if asks you to pick a robot', (await vz()).pick === 'node' && /switch it off/.test(await $text('#cm-hint')), await $text('#cm-hint'));
   const node2 = await page.eval(`(() => { const r = document.getElementById('comms').getBoundingClientRect(); const [a, b] = window.__operator.toPx(6, -2); return [r.left + a, r.top + b]; })()`);
   await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: node2[0], y: node2[1], button: 'left', clickCount: 1 });
   await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: node2[0], y: node2[1], button: 'left', clickCount: 1 });
@@ -667,7 +927,7 @@ async function main() {
     check('3d: a cloud message is decoded and counted', /^2 points/.test(await $text('#cloud .cloud-info')), await $text('#cloud .cloud-info'));
     await shot('3d-cloud');
   }
-  check('3d: the hint explains orbiting', /orbit/.test(await $text('#hint')));
+  check('3d: the 3D button\'s tooltip explains orbiting (no instruction text on the stage)', /orbit/.test(await page.eval(`document.querySelector('#view [data-v="3d"]').title`)));
   await load();
   check('3d: the chosen view survives a reload', await visible('#cloud'));
   await click('#view [data-v="2d"]'); await sleep(200);
