@@ -250,7 +250,7 @@ async function main() {
     // -- nothing running --------------------------------------------------------
     check(`${vp.label}: no session shows the empty state`, await visible('#empty') && (await $text('#empty-title')) === 'No session running');
     check(`${vp.label}: header says no session`, (await $text('#s-label')) === 'No session', await $text('#s-label'));
-    check(`${vp.label}: no mode tile without a session`, !(await visible('#mode-tile')));
+    check(`${vp.label}: no mode on the session chip without a session`, (await page.eval(`document.getElementById('session-chip').dataset.mode || ''`)) === '');
     check(`${vp.label}: page does not scroll`, await page.eval(`document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight`));
     await shot(`${vp.label}-empty`);
 
@@ -769,8 +769,8 @@ async function main() {
     await page.eval(`window.__fakeSession = { state: 'running', phase: 'running', phase_label: 'running', session_id: 's1', scenario: 'library_localize', config: { map: 'warehouse', mode: 'readonly', robots: 2 } }`);
     await sleep(3400);
     check(`${vp.label}: running session shows in the header`, (await $text('#s-label')) === 'Session running', await $text('#s-label'));
-    check(`${vp.label}: a read-only saved map reads as Premapped`, (await $text('#mode-label')) === 'Premapped' && (await $text('#map-name')) === 'warehouse' && await visible('#mode-tile'));
-    check(`${vp.label}: the mode tile is a status, not a control`, await page.eval(`!document.querySelector('#mode-tile button')`));
+    check(`${vp.label}: a read-only saved map reads as Premapped on the session chip`, (await page.eval(`document.getElementById('session-chip').title`)).startsWith('Premapped · warehouse'), await page.eval(`document.getElementById('session-chip').title`));
+    check(`${vp.label}: no mode tile in the header any more`, !(await page.eval(`!!document.getElementById('mode-tile')`)));
     check(`${vp.label}: the view toggle sits in the header`, await page.eval(`!!document.querySelector('header #view')`));
     check(`${vp.label}: running but robots silent still shows the last stretch`, (await $text('#sp-boot .boot-label')).startsWith('Waiting for the robots'), await $text('#sp-boot .boot-label'));
     await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
@@ -865,6 +865,10 @@ async function main() {
   check('comms: the model\'s robots stand where the real ones are (map origin removed)',
         Math.abs(cs.nodes[1][0] - 7) < 0.3 && Math.abs(cs.nodes[1][1] - 12) < 0.3 && Math.abs(cs.nodes[2][0] - 14) < 0.3 && Math.abs(cs.nodes[2][1] - 8) < 0.3, JSON.stringify(cs.nodes));
   check('comms: the gateway pin is the model\'s gateway', Math.abs(cs.nodes[0][0] - 10.5) < 0.3 && Math.abs(cs.nodes[0][1] - 18) < 0.3, JSON.stringify(cs.nodes[0]));
+  // The default range is 8 m; robot_1 here is 10.6 m from the gateway. Set what the
+  // routing checks below assume rather than lean on the default.
+  check('comms: the model starts at 8 m open-air range', Math.round((await vz()).range.robot) === 8, JSON.stringify((await vz()).range));
+  await page.eval(`window.__viz.cmd({ op: 'range', metres: 22 })`);
   await waitFor(async () => { const s = await vz(); return s.routes[1] && s.routes[1][0] && s.routes[2] && s.routes[2][0] && s.airCount > 0; }, { what: 'model routes', tries: 40 });
   check('comms: every robot has a predicted route to the gateway, and messages fly', true);
   const atWorld = (x, y) => page.eval(`(() => { const r = document.getElementById('comms').getBoundingClientRect(); const [a, b] = window.__operator.toPx(${x}, ${y}); return [r.left + a, r.top + b]; })()`);

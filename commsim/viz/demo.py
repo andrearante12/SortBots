@@ -439,7 +439,7 @@ class Hub:
     the Jetson too, and a DES spinning for nobody would burn its CPU."""
 
     def __init__(self, n: int = 2, variant: str = "V3", layout: "str | Layout" = "open_floor",
-                 range_m: float | None = 22.0):
+                 range_m: float | None = 8.0):
         self.clients: list[queue.Queue] = []
         self.cmds: queue.Queue = queue.Queue()
         self.lock = threading.Lock()

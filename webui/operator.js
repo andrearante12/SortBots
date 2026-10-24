@@ -1390,12 +1390,14 @@
   function renderHeader() {
     const s = session, cfg = s && sessionActive() ? s.config : null;
     const premapped = !!cfg && cfg.map && cfg.map !== "new" && cfg.mode === "readonly";
-    $("#mode-tile").hidden = !cfg;
-    $("#mode-tile").className = premapped ? "loc" : "map";
-    $("#mode-label").textContent = premapped ? "Premapped" : "Mapping";
-    $("#map-name").textContent = cfg && cfg.map && cfg.map !== "new" ? (cfg.map === "working" ? "last map" : cfg.map) : "";
+    // How the session was started, on hover: Mapping (building/extending a map) or
+    // Premapped on a saved, read-only map. Changing it means a restart, from Session.
+    const mapName = cfg && cfg.map && cfg.map !== "new" ? (cfg.map === "working" ? "last map" : cfg.map) : "";
+    const mode = cfg ? (premapped ? "Premapped" : "Mapping") + (mapName ? ` · ${mapName}` : "") : "";
     const label = !s ? "No session" : { starting: `Starting: ${s.phase_label || "…"}`, running: "Session running", stopping: "Stopping…", failed: "Session failed" }[s.state] || "No session";
     $("#s-label").textContent = controlAvailable ? label : "Session";
+    $("#session-chip").dataset.mode = mode;
+    $("#session-chip").title = mode ? `${mode}. Start, stop or save the session` : "Start, stop or save the session";
     $("#s-dot").className = "dot " + (s && s.state === "running" ? "" : s && ["starting", "stopping"].includes(s.state) ? "busy" : "idle");
     const card = $("#session .card");
     card.classList.toggle("live", sessionActive());

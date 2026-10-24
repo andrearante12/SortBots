@@ -338,7 +338,7 @@
       ctx.setLineDash([3, 3]); ctx.strokeStyle = cut ? stop : muted; ctx.lineWidth = cut ? 2 : 1;
       ctx.beginPath(); ctx.arc(a[0], a[1], 22, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
       if (dead.has(i)) { ctx.fillStyle = stop; ctx.fillText("model: switched off", a[0], a[1] - 27); }
-      else if (gwSilent.has(i)) { ctx.fillStyle = stop; ctx.fillText("model: cut off", a[0], a[1] - 27); }
+      else if (gwSilent.has(i)) { ctx.fillStyle = stop; ctx.fillText("model: can't reach gateway", a[0], a[1] - 27); }
       if (pick && pick.got.includes(i)) { ctx.strokeStyle = css("--info"); ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(a[0], a[1], 25, 0, Math.PI * 2); ctx.stroke(); }
     }
     // With a pin, operator.js draws the gateway. Without one the model still has a
