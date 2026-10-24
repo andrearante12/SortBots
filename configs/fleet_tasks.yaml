@@ -1,0 +1,55 @@
+# Fleet task auction on the robots (nodes/fleet_tasks.py). The protocol block
+# feeds commsim's Params — same keys and meaning as commsim/configs/base.yaml
+# `protocol:`, where each value's reasoning and measurement live. Anything not
+# set here takes the Params default.
+
+protocol:
+  bid_window_s: 1.0
+  bid_radius_m: 15.0            # whole Isaac warehouse fits; rounds widen it anyway
+  task_lease_s: 10.0
+  reclaim_margin_s: 2.0
+  status_timeout_s: 6.0
+  # Up to 3 tasks per robot (team decision 2026-10-19). task_manager queues
+  # them and works them in order; a bid for another one includes the backlog
+  # (commsim protocol.py Params.max_owned_tasks), and each task still has to
+  # pass the radius and battery criteria on its own.
+  max_owned_tasks: 3
+  lease_beacon_hz: 1.0          # the ONLY lease renewal here — see fleet_tasks.py
+  max_open_bids: 3              # commsim sim_log step 17: unlimited stormed the channel
+  # Majority quorum: every node in the fleet list, gateway included (team
+  # decision 2026-10-20: no duplicate ownership, even across a split). 3 =
+  # the 2-robot + gateway fleet. Change it with the fleet list: too small and
+  # the cut-off side of a split reclaims; too large and nobody can claim.
+  quorum_nodes: 3
+  # Battery (commsim protocol.py Params): placeholders until measured on the
+  # real XLeRobot pack.
+  battery_drain_pct_per_s: 0.05
+  battery_reserve_pct: 20.0
+  battery_penalty_s: 30.0
+
+# Turns bid distance into seconds. Nav2's max_velocity x
+# (configs/nav2_params.yaml); bids compare robots, so only consistency matters,
+# but battery_penalty_s is in the same seconds.
+speed_mps: 0.5
+
+# After task_manager reports FAILED, this robot skips that pickup->dropoff for
+# this long so the re-auction can reach a robot that might succeed. With the
+# item already on board the task is not released; the same robot retries the
+# dropoff after this backoff instead.
+failed_backoff_s: 60.0
+
+# No map->base_link TF for this long = localization lost. Bidding from the
+# last known pose would mis-price every task, so the robot stops bidding
+# until TF is back.
+pose_stale_s: 5.0
+
+# Gateway: repeat unowned announces this often (late joiners), and heartbeat
+# so a robot with no peer in range is not "isolated".
+reannounce_s: 5.0
+gateway_status_hz: 1.0
+
+battery:
+  # Isaac has no battery. Set a start % to simulate one (drains while the
+  # odometry says the robot moves); a real sensor_msgs/BatteryState on
+  # /<robot>/battery_state always overrides it. null = no battery model.
+  sim_start_pct: null

@@ -2,7 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<!-- Installable: iPhone Safari has no Fullscreen API for pages, so "Share > Add to Home
+     Screen" is how an operator gets the view with no browser chrome; these make that
+     launch standalone. Android/desktop also get the full-screen button (#fullscreen). -->
+<link rel="manifest" href="manifest.webmanifest" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="SortBots" />
 <title>SortBots</title>
 <script>
   // Apply a pinned theme before first paint so there is no flash. Nothing pinned = follow the system.
@@ -49,7 +57,7 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.4 "IBM Plex Sans", system-ui, sans-serif;
-         font-variant-numeric: tabular-nums; display: grid; grid-template-columns: 260px 1fr 296px; grid-template-rows: 50px 1fr; overflow: hidden; }
+         font-variant-numeric: tabular-nums; display: grid; grid-template-columns: var(--left-w, 260px) 1fr var(--right-w, 296px); grid-template-rows: 50px 1fr; overflow: hidden; }
   button, select, input { font: inherit; color: inherit; }
   button { cursor: pointer; }
   button:disabled { cursor: not-allowed; opacity: .5; }
@@ -76,15 +84,47 @@
   h1 { margin: 0; font-size: 1rem; font-weight: 600; letter-spacing: -.01em; width: 228px; }
   #mode-strip { display: flex; align-items: center; gap: 10px; min-width: 0; }
   #mode-strip > * { flex: none; }
+  /* The header must never wrap a button: at 1366 px "Stop all" broke onto two lines once
+     the full-screen button joined it. Buttons hold their width; the map-control strip
+     scrolls; below 1480 px the mapped-area figure and the column-wide title go first. */
+  header > .btn, header > #test-chip { flex: none; white-space: nowrap; }
+  #mode-strip { overflow-x: auto; scrollbar-width: none; }
+  #mode-strip::-webkit-scrollbar { display: none; }
+  @media (max-width: 1480px) { h1 { width: auto; } #coverage { display: none !important; } }
+  /* Symbol plus word: the shapes alone (arrow, diamond, triangle) didn't say what they do. */
+  #tools button { display: inline-flex; align-items: center; gap: 6px; }
+  #tools button .ic { font-size: .9em; }
   /* The tile gives way first when the bar gets crowded (a test chip, a narrow window). */
   #mode-strip #mode-tile { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   header .spacer { flex: 1; }
   .btn.icon { width: 34px; padding: 6px 0; line-height: 1; font-size: 1rem; }
   #session-chip { display: inline-flex; align-items: center; gap: 8px; }
+  #alarms { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
+  #alarms .dot { background: var(--faint); }
+  #alarms.on { color: var(--stop); border-color: var(--stopb); font-weight: 600; }
+  #alarms.on .dot { background: var(--stop); }
+  #alarm-pop { position: fixed; top: 54px; right: 16px; z-index: 6; width: 340px; max-height: 60vh; overflow-y: auto;
+               background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 24px var(--shadow); }
+  #alarm-pop h3 { margin: 0; padding: 12px 16px 8px; font-size: .9rem; font-weight: 600; }
+  #alarm-list { list-style: none; margin: 0; padding: 0; }
+  #alarm-list .al { padding: 10px 16px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; font-size: .86rem; }
+  #alarm-list .al b { font-weight: 600; color: var(--muted); }
+  #alarm-list .al.on b { color: var(--stop); }
+  #alarm-list .al span { grid-column: 1; color: var(--ink); }
+  #alarm-list .al .age { color: var(--muted); font-size: .8rem; }
+  #alarm-list .al .btn { grid-column: 2; grid-row: 1 / 4; align-self: center; }
 
   aside { background: var(--surface); display: flex; flex-direction: column; min-height: 0; overflow: auto; }
   #left { border-right: 1px solid var(--line); }
   #right { border-left: 1px solid var(--line); }
+  /* Drag handles on the inner edge of each side bar (operator.js: drag to resize,
+     double-click to reset). Outside the asides, which scroll. */
+  .resizer { position: fixed; top: 50px; bottom: 0; width: 9px; z-index: 4; cursor: col-resize; touch-action: none; }
+  .resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 4px; width: 1px; background: transparent; transition: background .1s; }
+  .resizer:hover::after, .resizer.drag::after { background: var(--info); width: 2px; left: 3.5px; }
+  #rz-left { left: calc(var(--left-w, 260px) - 5px); }
+  #rz-right { right: calc(var(--right-w, 296px) - 4px); }
+  body.resizing { cursor: col-resize; user-select: none; }
   .head { display: flex; align-items: baseline; gap: 8px; padding: 14px 16px 8px; position: sticky; top: 0; background: var(--surface); z-index: 1; }
   .head h2 { margin: 0; font-size: .95rem; font-weight: 600; }
   .head .muted { font-size: .82rem; margin-left: auto; white-space: nowrap; }
@@ -111,6 +151,17 @@
   .more .cam .msg { position: absolute; inset: 0; display: grid; place-items: center; color: #8b95a0; font-size: .8rem; pointer-events: none; }
   .more .cam .msg:empty { display: none; }
   /* Over the picture, so fixed dark-glass colours rather than theme tokens. */
+  /* Drive pad over the camera (operator.js wireDrivePad): faint until hovered or touched,
+     so the picture stays readable; held buttons light up. */
+  .cam .drive { position: absolute; left: 6px; bottom: 6px; display: grid; grid-template-columns: repeat(3, 26px); gap: 3px;
+                opacity: .75; transition: opacity .15s; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .cam:hover .drive, .cam .drive.on { opacity: 1; }
+  .cam .drive button { width: 26px; height: 24px; padding: 0; border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65);
+                       color: #e6ebf0; font-size: .72rem; line-height: 1; touch-action: none; }
+  .cam .drive button:hover { background: rgba(10,12,16,.85); }
+  .cam .drive button.held { background: rgba(255,255,255,.9); color: #15191e; }
+  .cam .drive [data-drive="stop"] { color: #ff8a80; }
+  @media (pointer: coarse) { .cam .drive { grid-template-columns: repeat(3, 36px); } .cam .drive button { width: 36px; height: 32px; font-size: .9rem; } }
   .camsel { position: absolute; top: 6px; right: 6px; display: flex; background: rgba(10,12,16,.6); border-radius: 6px; padding: 2px; }
   .camsel button { background: none; border: none; color: #c3cad2; font-size: .72rem; padding: 2px 8px; border-radius: 4px; }
   .camsel button.on { background: rgba(255,255,255,.9); color: #15191e; font-weight: 600; }
@@ -118,6 +169,10 @@
   .robot .tag.pill { --tc: var(--faint); color: var(--tc); background: color-mix(in srgb, var(--tc) 14%, var(--surface));
                      border-radius: 10px; padding: 1px 8px; font-weight: 600; font-size: .74rem; }
   .pill.idle { --tc: var(--muted); } .pill.moving { --tc: var(--info); } .pill.working { --tc: #b88a00; }
+  .robot .batt { font-size: .76rem; color: var(--muted); }
+  .robot .batt.low { color: var(--stop); font-weight: 600; }
+  .robot .batt + .tag { margin-left: 8px; }
+  .robot .l1 .batt { margin-left: auto; }
   .pill.exploring { --tc: #8a5cf0; } .pill.failed { --tc: var(--stop); } .pill.off { --tc: var(--faint); }
   .more .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; margin: 0; }
   .more .facts .wide { grid-column: span 2; }
@@ -141,6 +196,29 @@
   #cloud canvas { width: 100%; height: 100%; display: block; }
   /* Sits on the always-dark 3D scene, so fixed colours rather than theme tokens. */
   #cloud .cloud-info { position: absolute; bottom: 14px; left: 14px; color: #8b95a0; font-size: .8rem; pointer-events: none; }
+  #comms { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  /* An on/off switch, not a button: it layers the model over the map, it doesn't
+     change view, so it must not read as a third tab next to Map / 3D cloud. */
+  #comms-toggle { display: inline-flex; align-items: center; gap: 8px; margin-left: 6px; padding: 4px 6px;
+                  background: none; border: none; color: var(--muted); font-weight: 500; }
+  #comms-toggle .sw { position: relative; width: 30px; height: 18px; border-radius: 99px; background: var(--segbg);
+                      border: 1px solid var(--border); transition: background .15s; flex: none; }
+  #comms-toggle .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%;
+                             background: var(--surface); box-shadow: 0 1px 2px var(--shadow); transition: transform .15s; }
+  #comms-toggle[aria-checked="true"] { color: var(--ink); }
+  #comms-toggle[aria-checked="true"] .sw { background: var(--info); border-color: var(--info); }
+  #comms-toggle[aria-checked="true"] .sw::after { transform: translateX(12px); }
+  #comms-bar { top: 14px; left: 14px; right: 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 6px 10px; font-size: .84rem; }
+  #comms-bar .model { font-weight: 600; font-size: .76rem; padding: 2px 8px; border-radius: 99px; border: 1px dashed var(--muted); color: var(--muted); }
+  #comms-bar .cm-range { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+  #comms-bar .cm-range input { width: 90px; }
+  #comms-bar .cm-what { display: inline-flex; gap: 6px; }
+  #comms-bar select { padding: 2px 6px; }
+  #comms-bar:not([hidden]) ~ #toast { top: 108px; } /* below the bar, which wraps to two rows */
+  #comms-feed { bottom: 64px; left: 14px; max-width: 360px; margin: 0; padding: 6px 12px; list-style: none; font-size: .8rem; color: var(--muted); }
+  #comms-feed:empty { display: none; }
+  #comms-feed li { padding: 2px 0; } #comms-feed li:first-child { color: var(--ink); }
+  #comms-feed li.error { color: var(--stop); }
   #coverage { font-size: .86rem; color: var(--muted); white-space: nowrap; }
   #coverage b { font-weight: 600; color: var(--ink); }
   #coverage[hidden] { display: none; }
@@ -158,7 +236,7 @@
   .tk { padding: 10px 16px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 1px 10px; }
   .tk .t1 { font-weight: 500; } .tk .t2 { color: var(--muted); font-size: .84rem; }
   .tk .st { font-size: .8rem; text-align: right; color: var(--muted); }
-  .tk .st.active { color: var(--info); font-weight: 600; } .tk .st.done { color: var(--go); } .tk .st.failed { color: var(--stop); font-weight: 600; }
+  .tk .st.active { color: var(--info); font-weight: 600; } .tk .st.bid { color: var(--warnink); font-weight: 600; } .tk .st.done { color: var(--go); } .tk .st.failed { color: var(--stop); font-weight: 600; }
   .tk .who { font-size: .8rem; color: var(--muted); text-align: right; display: flex; align-items: center; gap: 5px; justify-content: flex-end; }
   .tk .who i { width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
   .tk.finished { opacity: .6; }
@@ -325,6 +403,67 @@
   .boot .bar i::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.45), transparent); animation: sweep 1.6s linear infinite; }
   @keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
   @media (prefers-reduced-motion: reduce) { .boot .bar i::after { animation: none; } }
+
+  /* -- phones / narrow tablets ------------------------------------------------------------
+     Three fixed columns leave the map no width on a phone, so below 760 px the page shows
+     ONE pane at a time (Map, Robots or Tasks; body[data-pane], set by operator.js) with a
+     bottom bar to switch. The header wraps: session, alarms and Stop all stay on the first
+     row, always one tap away; the map controls scroll sideways on the second. */
+  #mnav { display: none; }
+  @media (max-width: 760px), (max-height: 520px) and (orientation: landscape) {
+    /* minmax(0, 1fr), not 1fr: a bare 1fr column grows to its widest child's min-content,
+       and the scrolling tool row made the whole page 495 px wide on a 390 px phone,
+       pushing Stop all off screen (caught by the phone test, 2026-10-24). */
+    body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; height: 100dvh; }
+    header { flex-wrap: wrap; gap: 8px; padding: 8px 10px; row-gap: 6px; min-width: 0; }
+    h1 { width: auto; font-size: .95rem; }
+    header .spacer { flex: 1 0 0; }
+    #mode-strip { order: 10; flex: 1 0 100%; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
+    #mode-strip::-webkit-scrollbar { display: none; }
+    #session-chip #s-label { max-width: 34vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #session-chip, #estop, #alarms, #theme { flex: none; }
+    #left, #stage, #right { grid-row: 2; grid-column: 1; border: none; }
+    body:not([data-pane="robots"]) #left, body:not([data-pane="tasks"]) #right { display: none; }
+    body[data-pane="robots"] #stage, body[data-pane="tasks"] #stage { visibility: hidden; }
+    .resizer { display: none; }
+    #mnav { display: flex; grid-row: 3; grid-column: 1; background: var(--surface); border-top: 1px solid var(--line);
+            padding: 4px 6px calc(4px + env(safe-area-inset-bottom)); gap: 4px; }
+    #mnav button { flex: 1; background: none; border: none; border-radius: 8px; padding: 9px 4px; font-weight: 600; color: var(--muted);
+                   display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: .78rem; }
+    #mnav button .ic { font-size: 1.15rem; line-height: 1; }
+    #mnav button.active { color: var(--ink); background: var(--segbg); }
+    #mnav .badge { font-size: .7rem; color: var(--muted); font-weight: 500; }
+    #alarm-pop { top: auto; bottom: 70px; left: 8px; right: 8px; width: auto; }
+    #comms-bar { top: 8px; left: 8px; right: 8px; font-size: .8rem; gap: 6px 8px; }
+    #comms-bar .cm-range input { width: 70px; }
+    #comms-feed { left: 8px; right: 8px; bottom: 56px; max-width: none; }
+    #hint { display: none; }
+    #session { padding-top: 12px; }
+    #session .card { max-height: calc(100dvh - 24px); padding: 16px; }
+    .veil { padding-top: 40px; }
+    /* Touch targets: 40 px is the floor for a thumb. */
+    .tk .x { font-size: 1.4rem; padding: 0 8px; }
+    #tools button, .seg button { padding: 8px 12px; }
+    /* Launched from the home screen the page runs under the status bar / notch. */
+    header { padding-top: max(8px, env(safe-area-inset-top)); }
+  }
+  /* Phone held sideways: every pixel of height counts. One header row (the map controls
+     scroll in the middle, session and Stop all stay pinned right), and the pane switcher
+     becomes a rail on the left instead of a bar along the bottom. */
+  @media (max-height: 520px) and (orientation: landscape) {
+    body { grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+    header { flex-wrap: nowrap; padding: max(4px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) 4px max(8px, env(safe-area-inset-left)); gap: 6px; }
+    h1, header .spacer { display: none; }
+    #mode-strip { order: 0; flex: 1 1 auto; min-width: 0; padding-bottom: 0; }
+    header .btn { padding: 5px 10px; }
+    #tools button, .seg button { padding: 5px 10px; }
+    #left, #stage, #right { grid-row: 2; grid-column: 2; }
+    #mnav { grid-row: 2; grid-column: 1; flex-direction: column; justify-content: flex-start; width: calc(64px + env(safe-area-inset-left));
+            border-top: none; border-right: 1px solid var(--line); padding: 6px 4px max(6px, env(safe-area-inset-bottom)) max(4px, env(safe-area-inset-left)); }
+    #mnav button { flex: 0 0 auto; padding: 8px 2px; }
+    #alarm-pop { top: 50px; bottom: auto; left: auto; right: 8px; width: 340px; max-height: calc(100dvh - 60px); }
+    #comms-feed { bottom: 8px; right: auto; max-width: 60%; }
+  }
   .boot-label { font-size: .82rem; color: var(--muted); }
   #empty .boot { width: 280px; margin-top: 6px; }
   #session-strip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: .88rem; }
@@ -349,9 +488,15 @@
     </div>
     <!-- Map tools live up here, not over the map: the map gets the whole stage. -->
     <div class="seg" id="tools" role="toolbar" aria-label="Map tools">
-      <button data-t="select" class="active" title="Select (V). Drag a robot to send it somewhere (drop on a pin to use it); click a robot for its camera; drag the map to pan">&#8598;</button>
-      <button data-t="wp" title="Add waypoint (F). Click to place, drag to set its heading">&#9670;</button>
+      <button data-t="select" class="active" title="Drive (V). Drag a robot to send it driving there (drop on a pin to use it); click a robot for its camera; drag the map to pan"><span class="ic">&#8598;</span>Drive</button>
+      <button data-t="tp" hidden title="Teleport (T), sim only. Drag a robot and drop it to move it there instantly (drop on a pin to take its heading). For setting a scene up; localization follows"><span class="ic">&#10070;</span>Teleport</button>
+      <button data-t="wp" title="Add waypoint (F). Click to place, drag to set its heading"><span class="ic">&#9670;</span>Waypoint</button>
+      <button data-t="gw" title="Place the fleet gateway (R): where the comms overlay puts the access point"><span class="ic">&#9650;</span>Gateway</button>
     </div>
+    <!-- Comms overlay (operator_comms.js): the commsim model of the fleet radio, fed
+         the real robots' poses, the map's obstacles and the gateway pin. Predicted, so it
+         only ever draws on the map; the robot cards and alarms stay the real fleet's. -->
+    <button id="comms-toggle" type="button" role="switch" aria-checked="false" title="Overlay the comms model on the map: predicted radio links, mesh routes and every message hop, for where the robots are now"><span class="sw"></span>Comms overlay</button>
     <span id="mode-tile" hidden title="How this session was started. Change it from Session"><span class="k">Mode</span><b id="mode-label"></b><span id="map-name"></span></span>
     <span id="coverage" hidden title="Area of the map the fleet has seen"><b id="cov-n"></b> mapped</span>
   </div>
@@ -359,8 +504,13 @@
 <div id="test-chip" hidden title="A scored test is driving the sim"><span class="tp-dot"></span><span class="k">Test</span>
     <button type="button" class="name" id="tc-name" title="Open the Tests tab"></button><span id="tc-time" class="muted"></span>
     <button type="button" class="btn small stop" id="tc-cancel">Stop test</button></div>
+  <button class="btn icon" id="fullscreen" hidden aria-label="Full screen" title="Full screen">&#x26F6;</button>
   <button class="btn icon" id="theme" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
   <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">No session</span></button>
+  <!-- The fleet gateway's latched alarms (/fleet/task_board): red while a condition
+       holds, quiet once it has cleared but nobody has acknowledged it. Hidden at none. -->
+  <button class="btn" id="alarms" hidden aria-haspopup="true" title="Fleet alarms"><span class="dot"></span><span id="alarms-label"></span></button>
+  <div id="alarm-pop" hidden role="dialog" aria-label="Fleet alarms"><h3>Fleet alarms</h3><ul id="alarm-list"></ul></div>
   <button class="btn stop" id="estop" title="Halt every robot now, then shut the sim down (you choose whether to keep the map)">Stop all</button>
 </header>
 
@@ -369,9 +519,36 @@
   <div id="fleet"></div>
 </aside>
 
+<div class="resizer" id="rz-left" role="separator" aria-orientation="vertical" aria-label="Resize the robot list" title="Drag to resize · double-click to reset"></div>
+<div class="resizer" id="rz-right" role="separator" aria-orientation="vertical" aria-label="Resize the task list" title="Drag to resize · double-click to reset"></div>
+
+<!-- Phones: one pane at a time, switched here (operator.js setPane). Hidden on wide screens. -->
+<nav id="mnav" aria-label="Panes">
+  <button type="button" data-pane="map" class="active"><span class="ic">&#9634;</span>Map</button>
+  <button type="button" data-pane="robots"><span class="ic">&#9679;</span>Robots<span class="badge" id="mn-robots"></span></button>
+  <button type="button" data-pane="tasks"><span class="ic">&#9776;</span>Tasks<span class="badge" id="mn-tasks"></span></button>
+</nav>
+
 <main id="stage">
   <canvas id="map"></canvas>
+  <canvas id="comms" hidden></canvas>
   <div id="cloud" hidden></div>
+  <div class="float" id="comms-bar" hidden role="toolbar" aria-label="Comms model">
+    <span class="model" title="Everything drawn by this overlay is the commsim model's prediction (commsim/des): the real robots' positions and the map's obstacles go in, links, routes and message hops come out. Its what-ifs change the model only, never the robots.">Model</span>
+    <span id="cm-state" class="muted"></span>
+    <span id="cm-hint" class="muted"></span>
+    <button class="btn small" id="cm-play" type="button">Pause</button>
+    <select id="cm-speed" title="Model speed"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select>
+    <label class="cm-range" title="Open-air radio range. Obstacles from the map shorten real links">Range <input type="range" id="cm-range" min="8" max="120" step="1" value="22"> <span id="cm-range-v">22 m</span></label>
+    <span class="cm-what" title="What-ifs: change the model, not the robots">
+      <button class="btn small" id="cm-link" type="button">Pull a link</button>
+      <button class="btn small" id="cm-kill" type="button">Switch off</button>
+      <button class="btn small" id="cm-send" type="button">Send A&rarr;B</button>
+    </span>
+    <label class="lf-check" title="Each radio's open-air range as a circle. Obstacles on the map cut real links shorter than this"><input type="checkbox" id="cm-show-range"> show range</label>
+    <label class="lf-check" title="Mesh routing beacons, transport ACKs and keepalives: most of the airtime, little of the story"><input type="checkbox" id="cm-chatter"> routing chatter</label>
+  </div>
+  <ul class="float" id="comms-feed" hidden aria-live="polite"></ul>
   <!-- A finished test's score: shown once, until dismissed, never kept (operator_tests.js). -->
   <div class="float" id="result-card" hidden role="dialog" aria-labelledby="rc-name">
     <div class="rc-head"><span class="rc-v" id="rc-v"></span><b id="rc-name"></b>
@@ -545,6 +722,7 @@
 <script src="vendor/three.min.js"></script>
 <script src="vendor/OrbitControls.js"></script>
 <script src="operator_cloud.js"></script>
+<script src="operator_comms.js"></script>
 <script src="operator.js"></script>
 <script src="scenarios.js"></script>
 <script src="operator_tests.js"></script>

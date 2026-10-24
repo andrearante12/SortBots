@@ -38,8 +38,8 @@ class _Node:
     def get_logger(self):
         return _Logger()
 
-    def create_publisher(self, _type, topic, _qos):
-        pub = types.SimpleNamespace(sent=[])
+    def create_publisher(self, _type, topic, qos):
+        pub = types.SimpleNamespace(sent=[], qos=qos)
         pub.publish = lambda m: pub.sent.append(json.loads(m.data) if topic.endswith("task_status") else m.data)
         self.pubs[topic] = pub
         return pub
@@ -121,6 +121,9 @@ def _install_stubs():
     mod("rclpy", init=lambda: None, spin=lambda n: None, shutdown=lambda: None)
     mod("rclpy.node", Node=_Node)
     mod("rclpy.action", ActionClient=_ActionClient)
+    mod("rclpy.qos", QoSProfile=lambda **kw: types.SimpleNamespace(**kw),
+        QoSReliabilityPolicy=types.SimpleNamespace(RELIABLE="reliable"),
+        QoSDurabilityPolicy=types.SimpleNamespace(TRANSIENT_LOCAL="transient_local"))
     mod("action_msgs")
     mod("action_msgs.msg", GoalStatus=types.SimpleNamespace(STATUS_SUCCEEDED=4))
     mod("geometry_msgs")
@@ -244,3 +247,43 @@ def test_rejection_after_the_grace_window_fails(tm):
     tm.clock["t"] += tm.mod.NAV_STARTUP_GRACE_SEC + 1
     answer(tm, accepted=False)
     assert statuses(tm)[-2]["state"] == "FAILED"
+
+
+def test_task_status_is_latched(tm):
+    # fleet_tasks.py adopts what task_manager still holds after a restart of
+    # its own: that only works if the last status reaches a late subscriber.
+    qos = tm.pubs["/robot_0/task_status"].qos
+    assert qos.durability == "transient_local" and qos.depth == 1
+
+
+def test_carrying_task_skips_the_pickup_leg(tm):
+    dispatch(tm, pickup="A", dropoff="B", task_id="fleet-7", carrying=True)
+    assert statuses(tm)[-1]["queue"][0]["carrying"] is True
+    tm._tick()
+    assert tm.state == "NAV_TO_DROPOFF"
+    assert tm.nav_client.goals[-1][0].pose.pose.position.x == 3.0  # B, not A
+
+
+def test_exploration_resumes_only_after_the_task_that_stopped_it(tm):
+    cmds = tm.pubs["/robot_0/explore_cmd"].sent
+    explore = tm.subs["/robot_0/explore_status"]
+    explore(_Msg(json.dumps({"state": "exploring"})))
+    dispatch(tm, goto="A", task_id="t1")
+    assert cmds == ["stop"]
+    tm._tick()
+    assert tm.state == "IDLE"   # explorer hasn't confirmed the stop yet
+    explore(_Msg(json.dumps({"state": "stopped"})))
+    tm._tick()
+    answer(tm, succeeded=True)
+    tm._tick()
+    assert cmds == ["stop", "start"]
+    tm._tick()
+    assert cmds == ["stop", "start"]   # once, not every idle tick
+
+
+def test_idle_never_starts_an_explorer_nobody_stopped(tm):
+    dispatch(tm, goto="A", task_id="t1")
+    tm._tick()
+    answer(tm, succeeded=True)
+    tm._tick()
+    assert tm.pubs["/robot_0/explore_cmd"].sent == []

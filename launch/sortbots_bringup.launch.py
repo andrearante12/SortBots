@@ -9,6 +9,8 @@ including the three existing launch files plus the task-dispatch node:
                                                                web_video_server +
                                                                serve.py
   4. nodes/task_manager.py — the pickup->dropoff dispatch FSM
+  5. nodes/fleet_tasks.py  — the fleet task auction feeding it (per robot),
+                             plus one gateway taking /fleet/task_request
 
 This does NOT start Isaac Sim (`scripts/spawn_warehouse.py`) — that runs in
 its own Python venv and must stay a separate process. Launch the sim first
@@ -341,6 +343,21 @@ def _make_per_robot_actions(
             condition=IfCondition(task_manager),
         ))
 
+        # Fleet auction (commsim's allocator): wins tasks for this robot and
+        # hands them to task_manager as `fleet-<id>`. Every robot bids: tasks
+        # are nav-only, so any robot can finish any of them. --platform picks
+        # the same waypoint set task_manager resolves against, so a bid prices
+        # the pose the robot will actually drive to.
+        actions.append(ExecuteProcess(
+            cmd=[
+                "python3",
+                os.path.join(REPO_ROOT, "nodes", "fleet_tasks.py"),
+                "--robot-id", rid, "--platform", platform,
+            ],
+            output="screen",
+            condition=IfCondition(task_manager),
+        ))
+
         # The other half of the dispatch loop: task_manager publishes
         # pick_request and blocks on pick_result, so without this every task
         # stalls in PICKING until PICK_TIMEOUT_SEC. Primary robot only —
@@ -384,6 +401,19 @@ def _make_per_robot_actions(
                                condition=UnlessCondition(explore_autostart)),
             ]
         actions.append(GroupAction(condition=IfCondition(explore), actions=explorers))
+
+    # Fleet gateway: takes /fleet/task_request, announces, keeps
+    # /fleet/task_board. Once per bringup, like the operator's laptop it stands
+    # in for. Sim only: a real robot's bringup is one of several on the mesh,
+    # and each starting a gateway would put several wire-id-0 senders on
+    # /fleet/tasks. The real gateway is the laptop (commsim/hw/README.md).
+    if platform != "real":
+        actions.append(ExecuteProcess(
+            cmd=["python3", os.path.join(REPO_ROOT, "nodes", "fleet_tasks.py"), "--gateway",
+                 "--platform", platform],
+            output="screen",
+            condition=IfCondition(task_manager),
+        ))
 
     # Fuses every robot's own /<rid>/map into the world-anchored /map (see
     # that node's docstring). Once per bringup, not per robot — it needs the
@@ -509,7 +539,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "task_manager",
             default_value="true",
-            description="Start nodes/task_manager.py, the pickup->dropoff dispatch FSM.",
+            description=(
+                "Start nodes/task_manager.py, the pickup->dropoff dispatch FSM, "
+                "and the fleet auction that feeds it (nodes/fleet_tasks.py: one "
+                "per robot plus the gateway)."
+            ),
         ),
         DeclareLaunchArgument(
             "scripted_pick",

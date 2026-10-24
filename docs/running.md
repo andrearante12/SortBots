@@ -1126,6 +1126,49 @@ pad, fleet-radio tab and splat viewer) was removed 2026-10-23; recover it from g
   parallel. The sequencing lives in the browser tab; Stop demo cancels what it queued.
 - Offline test: `node webui/tests/operator_test.mjs [--screenshot DIR]`.
 
+### Fleet auction (nodes/fleet_tasks.py)
+
+With `task_manager:=true` (the default), every robot runs `nodes/fleet_tasks.py`, and the sim
+bringup adds one `fleet_tasks.py --gateway`. There is no central dispatcher. Each robot runs
+commsim's allocator (`commsim/core/protocol.py`) on the same messages, so they all reach the
+same winner. The gateway announces a task. Robots within range bid their drive time, plus what
+they already hold, plus a battery penalty. After a 1 s window the cheapest robot claims it, and
+its own task_manager works it as `fleet-<id>`. Leases (1 Hz beacons, 10 s) move a task off a
+robot that went silent. Once the load is on board it never moves; the others raise
+`owner_missing` instead. A majority quorum keeps a network split from putting two robots on
+one task. Tuning: `configs/fleet_tasks.yaml`. Design and failure testing: `commsim/README.md`.
+
+- **"Any robot" in Pick & drop** goes to the auction whenever the gateway's board is arriving
+  (the option reads "Any robot (fleet auction)"). Picking a robot by name still dispatches
+  directly. Moves always go to the first free robot, because the allocator only models
+  pickup -> dropoff. With no board (the real robot has no gateway yet, or `task_manager:=false`),
+  everything behaves as before.
+- **The board** (`/fleet/task_board`, latched, 1 Hz) is what the robot cards and the task list
+  read. A robot the fleet hasn't heard for `status_timeout_s` (6 s) reads **silent**, by the
+  same rule the robots apply to each other. Battery shows when known, red below the 20 %
+  reserve, where a robot stops bidding. Fleet tasks show "bidding" and "Fleet" until claimed,
+  and "loaded" once committed. × withdraws one fleet-wide (`/fleet/task_cancel`). Cancelling on
+  the robot instead (Clear tasks, Stop demo) withdraws it fleet-wide too, rather than handing it
+  to the next robot.
+- **Alarms** (robot_silent, owner_missing, lease_expired, task_stalled) latch at the gateway. The
+  header chip counts them and opens a list with **Acknowledge** (`/fleet/alarm_ack`). An alarm
+  leaves once it is both acknowledged and cleared. While a session runs, a board that stops
+  arriving shows as "Fleet gateway silent".
+- From a shell: `ros2 topic pub --once /fleet/task_request std_msgs/String '{data: "{\"pickup\": \"A\", \"dropoff\": \"B\"}"}'`
+  and `ros2 topic echo /fleet/task_board`.
+
+### Comms overlay (the commsim model on the map)
+
+**Comms** in the header (2D only) overlays commsim's discrete-event model of the fleet radio
+(`commsim/viz/demo.py`, served by `serve.py` on `/api/commsim/*`). It shows predicted links,
+each robot's mesh route to the gateway, and every message hop. Its inputs are real: the robots'
+live poses, the explored map's obstacles (each blob of occupied cells costs one rack's
+attenuation), and the **gateway pin** (map tool ▲ or `R`, saved to `data/comms_gateway.json`;
+the map centre until placed). Everything it draws is dashed, and it never changes the robot
+cards or alarms: those are the real fleet's. What-ifs act on the model only: **Pull a link**,
+**Switch off**, **Send A→B**, and the **Range** slider. The model steps only while a page has
+the overlay on. Details: `commsim/viz/README.md`.
+
 ## Testing the operator view without the sim
 
 Checking a UI change shouldn't need Isaac Sim, a GPU and a display:

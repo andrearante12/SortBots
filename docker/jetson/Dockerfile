@@ -34,7 +34,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       sqlite3 \
       procps \
       usbutils \
+      curl \
+      unzip \
+      ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# zenoh-bridge-ros2dds: carries /fleet/* (and nothing else) between this
+# robot's local DDS and the mesh — scripts/fleet_bridge.sh, run here via
+# `scripts/jetson.sh bridge`. In the image, not on the host, because the
+# binary needs glibc 2.38 and JetPack 6 has 2.35. Version and checksum match
+# scripts/fleet_bridge.sh.
+ARG ZENOH_BRIDGE_VERSION=1.10.1
+ARG ZENOH_BRIDGE_SHA256=fdb64d942d4b6beccbe9b1f8a359a01a2fca95a023c27535bf97b233603fad5f
+RUN zip=zenoh-plugin-ros2dds-${ZENOH_BRIDGE_VERSION}-aarch64-unknown-linux-gnu-standalone.zip \
+    && curl -fsSL -o /tmp/$zip \
+       https://github.com/eclipse-zenoh/zenoh-plugin-ros2dds/releases/download/${ZENOH_BRIDGE_VERSION}/$zip \
+    && echo "${ZENOH_BRIDGE_SHA256}  /tmp/$zip" | sha256sum -c - \
+    && unzip -q /tmp/$zip -d /opt/zenoh-bridge-ros2dds \
+    && rm /tmp/$zip
 
 # The image's ros_entrypoint.sh sources /opt/ros/jazzy/setup.bash, which sets
 # AMENT_PREFIX_PATH — and scripts/run_console.sh exits 1 when that is set

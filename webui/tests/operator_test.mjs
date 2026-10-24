@@ -59,7 +59,7 @@ window.fetch = (url, opts) => {
   const json = (b) => Promise.resolve(new Response(JSON.stringify(b), { status: 200, headers: { 'Content-Type': 'application/json' } }));
   if (u.startsWith('/api/nav_waypoints')) {
     if (opts && opts.method === 'POST') window.__navWps = JSON.parse(opts.body).waypoints;
-    return json({ waypoints: window.__navWps });
+    return json({ platform: window.__platform || 'sim', waypoints: window.__navWps });
   }
   if (u.startsWith('/api/session') && !u.startsWith('/api/session/') && window.__fakeSession) return json(window.__fakeSession);
   // Stop all's dialog: record, never stop anything real.
@@ -175,7 +175,9 @@ async function main() {
   const sessionsDir = tmpDir('sortbots-sessions-');
   spawnTracked('python3', [path.join(WEBUI_DIR, 'serve.py'), '--control', '--platform', 'sim',
                            '--port', String(PORT), '--host', '127.0.0.1'],
-               { cwd: REPO_ROOT, env: { ...process.env, SORTBOTS_SESSIONS_DIR: sessionsDir } });
+               { cwd: REPO_ROOT, env: { ...process.env, SORTBOTS_SESSIONS_DIR: sessionsDir,
+                 // The gateway pin is saved by the real serve.py: never into data/.
+                 SORTBOTS_COMMS_GATEWAY: path.join(sessionsDir, 'comms_gateway.json') } });
   await waitFor(async () => (await fetch(`http://127.0.0.1:${PORT}/operator.html`)).ok, { what: 'serve.py' });
   const roster = (await (await fetch(`http://127.0.0.1:${PORT}/api/robots`)).json()).robots || [];
   check('roster has at least two robots', roster.length >= 2, roster.join(','));
@@ -643,6 +645,72 @@ async function main() {
     await sleep(200);
     check(`${vp.label}: a rejected task is marked failed`, await page.eval(`window.__operator.tasks.find((t) => t.id === 'ext1').state === 'FAILED'`));
 
+    // -- fleet auction board ------------------------------------------------------------------------
+    // nodes/fleet_tasks.py --gateway's /fleet/task_board: liveness by the fleet's own
+    // rule, battery, who holds which task, latched alarms. Without one the page is
+    // exactly the pre-auction page; with one, "Any robot" goes to the auction.
+    await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+    await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+    await sleep(300);
+    const autoLabel = () => page.eval(`document.querySelector('#nt-who option[value="auto"]').textContent`);
+    check(`${vp.label}: with no fleet board, auto means any free robot`, (await autoLabel()) === 'Any free robot', await autoLabel());
+    check(`${vp.label}: with no fleet board there is no alarm chip`, !(await visible('#alarms')));
+    const fboard = (tasks, alarms = [], r0alive = true) => ({ data: JSON.stringify({ t: 100.0,
+      robots: [{ id: r0, alive: r0alive, last_heard_s: r0alive ? 0.2 : 9.0, battery_pct: 14.0, mode: 'idle', owned: [], carrying: [] },
+               { id: r1, alive: true, last_heard_s: 0.1, battery_pct: 81.5, mode: 'nav', owned: [], carrying: [] }],
+      tasks, alarms }) });
+    await emit('/fleet/task_board', fboard([], [
+      { id: 1, kind: 'robot_silent', robot: r0, task_id: null, t: 95.0, active: true, acked: false, text: `${r0} silent for 6 s` },
+      { id: 2, kind: 'lease_expired', robot: r0, task_id: 9, t: 60.0, active: false, acked: false, text: 'task 9: lease expired, re-auctioned' }], false));
+    await sleep(400);
+    const rowOf = (id) => page.eval(`(() => { const e = document.querySelector('#fleet .robot[data-id="${id}"]'); return e ? e.querySelector('.l1').textContent + ' | ' + e.querySelector('.l2').textContent : ''; })()`);
+    check(`${vp.label}: a robot the fleet calls silent reads silent`, /silent/.test(await rowOf(r0)) && /fleet radio/.test(await rowOf(r0)), await rowOf(r0));
+    check(`${vp.label}: robot rows show battery from the board`, /14%/.test(await rowOf(r0)) && /82%/.test(await rowOf(r1)), `${await rowOf(r0)} / ${await rowOf(r1)}`);
+    check(`${vp.label}: a battery under the reserve is flagged`, await page.eval(`!!document.querySelector('#fleet .robot[data-id="${r0}"] .batt.low') && !document.querySelector('#fleet .robot[data-id="${r1}"] .batt.low')`));
+    check(`${vp.label}: the alarm chip counts active alarms`, (await visible('#alarms')) && (await $text('#alarms-label')) === '1 alarm' && await page.eval(`document.getElementById('alarms').classList.contains('on')`), await $text('#alarms-label'));
+    await click('#alarms'); await sleep(150);
+    check(`${vp.label}: the alarm list puts the active one first`, (await page.eval(`[...document.querySelectorAll('#alarm-list .al')].map((e) => e.dataset.alarm).join(',')`)) === '1,2');
+    await page.eval(`window.__published.length = 0`);
+    await click('#alarm-list [data-ack="2"]');
+    const ack = JSON.parse(await page.eval(`JSON.stringify(window.__published)`)).find((x) => x.topic === '/fleet/alarm_ack');
+    check(`${vp.label}: acknowledging publishes the alarm id`, !!ack && JSON.parse(ack.msg.data).id === 2, JSON.stringify(ack));
+    await page.eval(`document.getElementById('tasks').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))`); await sleep(100);
+    check(`${vp.label}: clicking elsewhere closes the alarm list`, !(await visible('#alarm-pop')));
+    await shot(`${vp.label}-fleet-alarms`);
+
+    check(`${vp.label}: with the fleet up, auto means the auction`, (await autoLabel()) === 'Any robot (fleet auction)', await autoLabel());
+    await page.eval(`document.getElementById('newtask').open = true; document.querySelector('#nt-kind [data-k="pick"]').click()`);
+    await page.eval(`document.getElementById('nt-who').value = 'auto'; document.getElementById('nt-from').value = 'A'; document.getElementById('nt-to').value = 'B'`);
+    await page.eval(`window.__published.length = 0; document.getElementById('task-form').requestSubmit()`);
+    const fpub = JSON.parse(await page.eval(`JSON.stringify(window.__published)`));
+    const req = fpub.find((x) => x.topic === '/fleet/task_request');
+    check(`${vp.label}: an auto pick & drop is requested from the fleet, not dispatched`,
+          !!req && JSON.parse(req.msg.data).pickup === 'A' && JSON.parse(req.msg.data).dropoff === 'B' && !fpub.some((x) => /dispatch_task$/.test(x.topic)), JSON.stringify(fpub));
+    check(`${vp.label}: the request waits as sent to the fleet`, /sent to the fleet/.test(await $text('#tasks')) && /bidding/.test(await $text('#tasks')), (await $text('#tasks')).slice(0, 160));
+    await emit('/fleet/task_board', fboard([{ task_id: 4242, pickup: 'A', dropoff: 'B', state: 'bidding', owner: null, committed: false, age_s: 0.5 }]));
+    await sleep(200);
+    check(`${vp.label}: the board names the pending row`, await page.eval(`window.__operator.tasks.some((t) => t.id === 'fleet-4242' && t.state === 'BIDDING' && !t.pending) && !window.__operator.tasks.some((t) => t.pending)`));
+    check(`${vp.label}: an unclaimed fleet task belongs to the fleet`, await page.eval(`[...document.querySelectorAll('#tasks .tk')].some((e) => /fleet-4242/.test(e.textContent) && e.querySelector('.who').textContent === 'Fleet')`));
+    await emit('/fleet/task_board', fboard([{ task_id: 4242, pickup: 'A', dropoff: 'B', state: 'claimed', owner: r1, committed: false, age_s: 2.0 }]));
+    await sleep(200);
+    check(`${vp.label}: a claim assigns it to the winner`, await page.eval(`(() => { const t = window.__operator.tasks.find((t) => t.id === 'fleet-4242'); return t.state === 'CLAIMED' && t.robot === ${JSON.stringify(r1)}; })()`));
+    await emit(`/${r1}/task_status`, { data: JSON.stringify({ task_id: 'fleet-4242', state: 'NAV_TO_DROPOFF', queue_depth: 0, queue: [],
+      task: { task_id: 'fleet-4242', kind: 'pickup', pickup: 'A', dropoff: 'B' } }) });
+    await emit('/fleet/task_board', fboard([{ task_id: 4242, pickup: 'A', dropoff: 'B', state: 'claimed', owner: r1, committed: true, age_s: 9.0 }]));
+    await sleep(200);
+    check(`${vp.label}: the winner's own status takes over, loaded once committed`, await page.eval(`window.__operator.tasks.find((t) => t.id === 'fleet-4242').state === 'NAV_TO_DROPOFF'`) && /fleet-4242 · loaded/.test(await $text('#tasks')), (await $text('#tasks')).slice(0, 200));
+    await page.eval(`window.__published.length = 0`);
+    await click('#tasks [data-cancel="fleet-4242"]');
+    const fpub2 = JSON.parse(await page.eval(`JSON.stringify(window.__published)`));
+    const fc = fpub2.find((x) => x.topic === '/fleet/task_cancel');
+    check(`${vp.label}: cancelling a fleet task withdraws it at the gateway`, !!fc && JSON.parse(fc.msg.data).task_id === 4242 && !fpub2.some((x) => /\/cancel_task$/.test(x.topic)), JSON.stringify(fpub2));
+    await emit('/fleet/task_board', fboard([{ task_id: 4242, pickup: 'A', dropoff: 'B', state: 'cancelled', owner: r1, committed: true, age_s: 10.0 }]));
+    await sleep(200);
+    check(`${vp.label}: the board's cancel finishes the row`, await page.eval(`window.__operator.tasks.find((t) => t.id === 'fleet-4242').state === 'CANCELLED'`));
+    await emit('/fleet/task_board', fboard([]));   // leave a quiet, healthy fleet for what follows
+    await sleep(200);
+    check(`${vp.label}: no alarms, no chip`, !(await visible('#alarms')));
+
     // -- renaming a waypoint ------------------------------------------------------------------------------
     await pickStop('B'); // a draft stop follows the rename
     await click('#wps [data-ren="B"]');
@@ -760,9 +828,269 @@ async function main() {
   }
 
 
+  // -- comms overlay ---------------------------------------------------------------------------
+  // operator_comms.js against the REAL commsim model in this serve.py (no stub): the
+  // robots' poses, the map's obstacles and the gateway pin go in; links, routes and
+  // what-ifs come out, drawn on the map only.
+  console.log('\n--- comms overlay ---');
+  const load = async () => { await page.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/operator.html` }); await sleep(1200); };
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+  await page.eval(`localStorage.clear()`); await load();
+  const vz = async () => JSON.parse(await page.eval(`JSON.stringify(window.__viz.state())`));
+  // 30 x 20 m floor (border wall) plus a free-standing wall between the two robots.
+  const walled = grid(60, 40, 0.5, -10, -10);
+  for (let row = 8; row < 32; row++) { walled.data[row * 60 + 21] = 100; walled.data[row * 60 + 22] = 100; }
+  await emit('/map', walled);
+  await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+  await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+  await sleep(500);
+  check('comms: off by default, no overlay, no model stream', !(await visible('#comms')) && !(await visible('#comms-bar')) && !(await vz()).on);
+  await page.eval(`document.querySelector('#tools [data-t="gw"]').click()`);
+  await mapPointer(0.5, 8);
+  await waitFor(async () => (await page.eval(`JSON.stringify(window.__operator.gateway)`)) !== 'null', { what: 'gateway pin save', tries: 20 });
+  const gwPin = JSON.parse(await page.eval(`JSON.stringify(window.__operator.gateway)`));
+  check('comms: the gateway tool drops a pin and saves it', Math.abs(gwPin.x - 0.5) < 0.2 && Math.abs(gwPin.y - 8) < 0.2, JSON.stringify(gwPin));
+  const saved = await (await fetch(`http://127.0.0.1:${PORT}/api/comms_gateway`)).json();
+  check('comms: serve.py keeps the pin per platform', saved.platform === 'sim' && Math.abs(saved.gateway.x - 0.5) < 0.2, JSON.stringify(saved));
+  await page.eval(`document.querySelector('#tools [data-t="select"]').click()`);
+  await click('#comms-toggle');
+  await waitFor(async () => { const s = await vz(); return s.connected && s.n === 3 && s.racks >= 2 && s.origin; }, { what: 'the comms model to take the fleet', tries: 60 });
+  let cs = await vz();
+  check('comms: toggling on shows the overlay and its bar', (await visible('#comms')) && (await visible('#comms-bar')) && cs.on);
+  check('comms: the model gets one node per robot plus the gateway', cs.n === 3, `n=${cs.n}`);
+  check('comms: the map\'s obstacles become the model\'s racks', cs.racks === 2, `${cs.racks}`);
+  check('comms: the bar only speaks up when there is something to do', (await $text('#cm-state')) === '', await $text('#cm-state'));
+  await waitFor(async () => { const s = await vz(); return Math.abs(s.nodes[1][0] - 7) < 0.3 && Math.abs(s.nodes[0][0] - 10.5) < 0.3; }, { what: 'model positions', tries: 30 });
+  cs = await vz();
+  check('comms: the model\'s robots stand where the real ones are (map origin removed)',
+        Math.abs(cs.nodes[1][0] - 7) < 0.3 && Math.abs(cs.nodes[1][1] - 12) < 0.3 && Math.abs(cs.nodes[2][0] - 14) < 0.3 && Math.abs(cs.nodes[2][1] - 8) < 0.3, JSON.stringify(cs.nodes));
+  check('comms: the gateway pin is the model\'s gateway', Math.abs(cs.nodes[0][0] - 10.5) < 0.3 && Math.abs(cs.nodes[0][1] - 18) < 0.3, JSON.stringify(cs.nodes[0]));
+  await waitFor(async () => { const s = await vz(); return s.routes[1] && s.routes[1][0] && s.routes[2] && s.routes[2][0] && s.airCount > 0; }, { what: 'model routes', tries: 40 });
+  check('comms: every robot has a predicted route to the gateway, and messages fly', true);
+  const atWorld = (x, y) => page.eval(`(() => { const r = document.getElementById('comms').getBoundingClientRect(); const [a, b] = window.__operator.toPx(${x}, ${y}); return [r.left + a, r.top + b]; })()`);
+  const tap = async ([x, y]) => {
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+  };
+  await click('#cm-send');
+  await tap(await atWorld(-3, 2)); await tap(await atWorld(4, -2));
+  await waitFor(async () => (await vz()).feed.some((t) => /Robot 1 got the message from Robot 0/.test(t)), { what: 'a message A -> B', tries: 40 });
+  check('comms: send A->B delivers a message through the model and says how', /hop/.test((await vz()).feed.find((t) => /got the message/.test(t))), (await vz()).feed.join(' | '));
+  await click('#cm-link');
+  await tap(await atWorld(-3, 2)); await tap(await atWorld(0.5, 8));
+  await waitFor(async () => (await vz()).blocked.includes('0-1'), { what: 'a pulled link', tries: 30 });
+  check('comms: pulling a link blocks it in the model', (await vz()).blocked.includes('0-1'));
+  await click('#cm-show-range'); await sleep(150);
+  check('comms: show range turns on the range circles, sized by the model', (await vz()).showRange && (await vz()).range.robot > 5, JSON.stringify((await vz()).range));
+  await shot('comms-range');
+  await click('#cm-show-range');
+  await page.eval(`window.__viz.cmd({ op: 'link', a: 0, b: 1, action: 'unblock' })`);
+  await waitFor(async () => !(await vz()).blocked.includes('0-1'), { what: 'a restored link', tries: 30 });
+  await emit('/tf', tf('map', `${r1}/base_link`, 6, -2, 3.1));
+  await waitFor(async () => Math.abs((await vz()).nodes[2][0] - 16) < 0.3, { what: 'a pose update to move the model', tries: 30 });
+  check('comms: a robot that drives moves in the model too', true);
+  await click('#cm-kill');
+  check('comms: a what-if asks you to pick a robot', (await vz()).pick === 'node' && /switch it off/.test(await $text('#cm-hint')), await $text('#cm-hint'));
+  const node2 = await page.eval(`(() => { const r = document.getElementById('comms').getBoundingClientRect(); const [a, b] = window.__operator.toPx(6, -2); return [r.left + a, r.top + b]; })()`);
+  await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: node2[0], y: node2[1], button: 'left', clickCount: 1 });
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: node2[0], y: node2[1], button: 'left', clickCount: 1 });
+  await waitFor(async () => (await vz()).dead.includes(2), { what: 'model kill', tries: 30 });
+  check('comms: switching a robot off kills it in the model', (await vz()).dead.includes(2) && !(await vz()).pick);
+  const row1 = await page.eval(`document.querySelector('#fleet .robot[data-id="${r1}"] .l1').textContent`);
+  check('comms: a model what-if never touches the real robot\'s card', !/silent|offline/.test(row1), row1);
+  await page.eval(`window.__viz.cmd({ op: 'node', id: 2, action: 'revive' })`);
+  await waitFor(async () => !(await vz()).dead.includes(2), { what: 'model revive', tries: 30 });
+  await shot('comms-overlay');
+  await page.eval(`localStorage.setItem('sortbots.comms', 'on')`); await load();
+  await emit('/map', walled);
+  await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+  check('comms: the toggle survives a reload', (await page.eval(`document.getElementById('comms-toggle').getAttribute('aria-checked')`)) === 'true' && (await vz()).on);
+  await click('#view [data-v="3d"]'); await sleep(200);
+  check('comms: the 3D view turns the overlay off', !(await vz()).on && !(await visible('#comms-toggle')));
+  await click('#view [data-v="2d"]'); await sleep(200);
+  check('comms: back to 2D brings it back', (await vz()).on);
+  await click('#comms-toggle'); await sleep(300);
+  check('comms: toggling off closes the model stream', !(await vz()).on && !(await vz()).connected && !(await visible('#comms')));
+  await page.eval(`localStorage.clear()`);
+
+  // -- teleport (sim only) ------------------------------------------------------------------------
+  console.log('\n--- teleport ---');
+  await page.eval(`localStorage.clear()`); await load();
+  await emit('/map', walled);
+  await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+  await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+  await sleep(600);
+  check('teleport: the default tool is called Drive', /Drive/.test(await $text('#tools [data-t="select"]')), await $text('#tools [data-t="select"]'));
+  check('teleport: the tool shows on the sim', await visible('#tools [data-t="tp"]'));
+  const dragWorld = async (x0, y0, x1, y1) => {
+    const at = (x, y) => page.eval(`(() => { const r = document.getElementById('map').getBoundingClientRect(); const [a, b] = window.__operator.toPx(${x}, ${y}); return [r.left + a, r.top + b]; })()`);
+    const [ax, ay] = await at(x0, y0), [bx, by] = await at(x1, y1);
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: ax, y: ay, button: 'left', clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: (ax + bx) / 2, y: (ay + by) / 2, button: 'left' });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: bx, y: by, button: 'left' });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: bx, y: by, button: 'left', clickCount: 1 });
+  };
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 't' }))`);
+  check('teleport: T picks the tool', await page.eval(`document.querySelector('#tools [data-t="tp"]').classList.contains('active')`));
+  await page.eval(`window.__published.length = 0; window.__services.length = 0; window.__ops.length = 0`);
+  await dragWorld(4, -2, 7, 4);
+  const tpPub = JSON.parse(await page.eval(`JSON.stringify(window.__published)`));
+  const tpMsg = tpPub.find((x) => x.topic === '/sim/teleport');
+  const tpBody = tpMsg && JSON.parse(tpMsg.msg.data);
+  check('teleport: dropping a robot asks the sim to move it there, in map coordinates, keeping its heading',
+        !!tpBody && tpBody.robot === r1 && Math.abs(tpBody.x - 7) < 0.2 && Math.abs(tpBody.y - 4) < 0.2 && Math.abs(tpBody.yaw - 3.1) < 0.05, JSON.stringify(tpBody));
+  check('teleport: it never sends a nav goal or a task', !tpPub.some((x) => /dispatch_task/.test(x.topic)) && !(await page.eval(`window.__ops.some((o) => o.op === 'send_action_goal')`)));
+  check('teleport: the robot is stopped first (goals cancelled, explorer told to stop)',
+        tpPub.some((x) => x.topic === `/${r1}/explore_cmd` && x.msg.data === 'stop') && (await page.eval(`window.__services.some((s) => s.name === '/${r1}/navigate_to_pose/_action/cancel_goal')`)));
+  await page.eval(`window.__published.length = 0`);
+  await dragWorld(-3, 2, 1.0, 0);   // onto the free-standing wall
+  check('teleport: an occupied spot is refused', !JSON.parse(await page.eval(`JSON.stringify(window.__published)`)).some((x) => x.topic === '/sim/teleport') && /occupied/i.test(await $text('#toast')), await $text('#toast'));
+  await page.eval(`window.__platform = 'real'; window.__operator.loadWaypoints()`); await sleep(300);
+  check('teleport: not offered on the real robot, and the tool falls back to Drive',
+        !(await visible('#tools [data-t="tp"]')) && await page.eval(`document.querySelector('#tools [data-t="select"]').classList.contains('active')`));
+  await page.eval(`window.__platform = null; window.__operator.loadWaypoints()`); await sleep(200);
+
+  // -- manual drive (pad on the camera tile) ----------------------------------------------------------
+  console.log('\n--- manual drive ---');
+  await page.eval(`window.__operator.select(${JSON.stringify(r1)})`); await sleep(400);
+  check('drive: an open robot card has a drive pad on its camera', await page.eval(`!!document.querySelector('#fleet .robot[data-id="${r1}"] .cam .drive [data-drive="fwd"]')`));
+  const twists = () => page.eval(`window.__published.filter((x) => x.topic === '/${r1}/cmd_vel').map((x) => [x.msg.linear.x, x.msg.linear.y, x.msg.angular.z])`);
+  const padBtn = (cmd) => page.eval(`(() => { const r = document.querySelector('#fleet .robot[data-id="${r1}"] .cam .drive [data-drive="${cmd}"]').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+  await page.eval(`window.__published.length = 0`);
+  const [fx, fy] = await padBtn('fwd');
+  await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: fx, y: fy, button: 'left', clickCount: 1 });
+  await sleep(350);
+  const held = await twists();
+  check('drive: holding forward publishes 0.5 m/s, repeatedly', held.length >= 3 && held.every((t) => t[0] === 0.5 && t[1] === 0 && t[2] === 0), JSON.stringify(held));
+  check('drive: the held button lights up', await page.eval(`document.querySelector('#fleet .robot[data-id="${r1}"] .drive [data-drive="fwd"]').classList.contains('held')`));
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: fx, y: fy, button: 'left', clickCount: 1 });
+  await sleep(250);
+  const afterUp = await twists(), n = afterUp.length;
+  check('drive: letting go stops it at once', JSON.stringify(afterUp[n - 1]) === '[0,0,0]', JSON.stringify(afterUp.slice(-2)));
+  await sleep(300);
+  check('drive: and nothing more is sent once stopped', (await twists()).length === n);
+  check('drive: the pad never opens or closes the card', await page.eval(`window.__operator.open.has(${JSON.stringify(r1)})`));
+  await page.eval(`window.__published.length = 0`);
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w' })); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'a' }))`);
+  await sleep(150);
+  check('drive: W+A drives the robot in control diagonally', (await twists()).some((t) => t[0] === 0.5 && t[1] === 0.5), JSON.stringify(await twists()));
+  await page.eval(`window.dispatchEvent(new Event('blur'))`); await sleep(100);
+  check('drive: losing focus mid-drive stops the robot', JSON.stringify((await twists()).slice(-1)[0]) === '[0,0,0]');
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'w' })); window.dispatchEvent(new KeyboardEvent('keyup', { key: 'a' }))`);
+  // Taking the wheel from an exploring robot stops the explorer first.
+  await emit(`/${r1}/explore_status`, { data: JSON.stringify({ state: 'exploring' }) }); await sleep(300);
+  await page.eval(`window.__published.length = 0`);
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'e' }))`); await sleep(150);
+  const pubs = JSON.parse(await page.eval(`JSON.stringify(window.__published)`));
+  check('drive: taking the wheel stops the explorer, then turns', pubs.some((x) => x.topic === `/${r1}/explore_cmd` && x.msg.data === 'stop') && (await twists()).some((t) => t[2] < 0));
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'e' }))`);
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', bubbles: true }))`);
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'w' }))`);
+  await shot('drive-pad');
+  await page.eval(`window.__operator.select(null)`);
+
+  // -- phones ---------------------------------------------------------------------------------------
+  console.log('\n--- phone ---');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+  await page.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  await page.eval(`localStorage.clear()`); await load();
+  await emit('/map', walled);
+  await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+  await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+  await sleep(600);
+  const inView = (sel) => page.eval(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= -1 && r.right <= innerWidth + 1 && r.top >= -1 && r.bottom <= innerHeight + 1; })()`);
+  check('phone: the bottom bar switches panes', await visible('#mnav'));
+  check('phone: the map gets the screen by default, the lists are tucked away',
+        (await page.eval(`document.getElementById('map').getBoundingClientRect().width`)) > 370 && !(await visible('#left')) && !(await visible('#right')));
+  // Against the DEVICE width: a phone widens its layout viewport to fit overflowing content,
+  // so innerWidth itself grows with the bug (it read 495 on a 390 px screen).
+  check('phone: nothing scrolls sideways', await page.eval(`innerWidth <= 391 && document.documentElement.scrollWidth <= 391`), await page.eval(`'innerWidth ' + innerWidth + ', scrollWidth ' + document.documentElement.scrollWidth`));
+  check('phone: Stop all and the session chip are always on screen', (await inView('#estop')) && (await inView('#session-chip')));
+  await shot('phone-map');
+  const zoom0 = await page.eval(`window.__operator.view.scale`);
+  const mid = await page.eval(`(() => { const r = document.getElementById('map').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+  const tp2 = (dx) => [{ x: mid[0] - dx, y: mid[1], id: 1 }, { x: mid[0] + dx, y: mid[1], id: 2 }];
+  await page.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: tp2(30) });
+  for (const dx of [45, 60, 80]) await page.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: tp2(dx) });
+  await page.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await sleep(150);
+  const zoom1 = await page.eval(`window.__operator.view.scale`);
+  check('phone: pinching out zooms the map in', zoom1 > zoom0 * 2, `${zoom0.toFixed(1)} -> ${zoom1.toFixed(1)}`);
+  check('phone: a pinch never turns into a send', !(await page.eval(`JSON.stringify(window.__published)`)).includes('dispatch_task') && !(await page.eval(`!!window.__operator.drag`)));
+  await click('#mnav [data-pane="robots"]'); await sleep(200);
+  check('phone: Robots shows the robot list full width', (await visible('#left')) && (await page.eval(`document.getElementById('left').getBoundingClientRect().width`)) > 370);
+  check('phone: the bottom bar counts robots online', /2\/2/.test(await $text('#mn-robots')), await $text('#mn-robots'));
+  await shot('phone-robots');
+  await click('#mnav [data-pane="tasks"]'); await sleep(200);
+  check('phone: Tasks shows the task list', (await visible('#right')) && !(await visible('#left')));
+  await shot('phone-tasks');
+  await load();
+  check('phone: the pane survives a reload', await visible('#right'));
+  await click('#mnav [data-pane="map"]'); await sleep(300);
+  check('phone: back to the map, it is sized again', (await page.eval(`document.getElementById('map').width`)) > 370);
+  await click('#session-chip'); await sleep(400);
+  check('phone: the session panel fits the screen', await page.eval(`(() => { const r = document.querySelector('#session .card').getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth + 1; })()`));
+  await shot('phone-session');
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+  // Sideways: how an operator holds a phone to drive.
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 844, height: 390, deviceScaleFactor: 3, mobile: true, screenOrientation: { type: 'landscapePrimary', angle: 90 } });
+  await page.eval(`localStorage.clear()`); await load();
+  await emit('/map', walled);
+  await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+  await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+  await sleep(500);
+  const box = (sel) => page.eval(`(() => { const r = document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect(); return { l: r.left, t: r.top, w: r.width, h: r.height }; })()`);
+  check('landscape: one header row, so the map keeps the height', (await box('header')).h < 56, JSON.stringify(await box('header')));
+  check('landscape: the pane switcher is a rail on the left', (await visible('#mnav')) && (await box('#mnav')).l < 2 && (await box('#mnav')).h > 250, JSON.stringify(await box('#mnav')));
+  check('landscape: the map fills the rest', (await box('#map')).w > 700 && (await box('#map')).h > 300, JSON.stringify(await box('#map')));
+  check('landscape: Stop all and the session chip are on screen, nothing scrolls sideways',
+        (await inView('#estop')) && (await inView('#session-chip')) && await page.eval(`innerWidth <= 845 && document.documentElement.scrollWidth <= 845`));
+  const aspect = () => page.eval(`(() => { const c = document.getElementById('map'), r = c.getBoundingClientRect(); return [c.width / c.height, r.width / r.height]; })()`);
+  check('landscape: the map is not stretched (pixel and screen aspect agree)', Math.abs((await aspect())[0] - (await aspect())[1]) < 0.02, JSON.stringify(await aspect()));
+  await shot('phone-landscape');
+  await click('#mnav [data-pane="robots"]'); await sleep(200);
+  check('landscape: Robots from the rail', (await visible('#left')) && (await box('#left')).w > 700);
+  check('landscape: installable full screen (manifest, home-screen meta)',
+        await page.eval(`!!document.querySelector('link[rel="manifest"]') && document.querySelector('meta[name="apple-mobile-web-app-capable"]').content === 'yes'`)
+        && (await (await fetch(`http://127.0.0.1:${PORT}/manifest.webmanifest`)).json()).display === 'fullscreen');
+  await page.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+  await page.eval(`localStorage.clear()`); await load();
+
+  // -- resizable side bars ------------------------------------------------------------------------
+  console.log('\n--- side bars ---');
+  await page.eval(`localStorage.clear()`); await load();
+  const widths = () => page.eval(`[document.getElementById('left').getBoundingClientRect().width, document.getElementById('right').getBoundingClientRect().width, document.getElementById('map').getBoundingClientRect().width]`);
+  const [l0, r0w, m0] = await widths();
+  const dragX = async (sel, dx) => {
+    const [x, y] = await page.eval(`(() => { const r = document.querySelector('${sel}').getBoundingClientRect(); return [r.left + r.width / 2, r.top + 200]; })()`);
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x + dx / 2, y, button: 'left' });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x + dx, y, button: 'left' });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: x + dx, y, button: 'left', clickCount: 1 });
+  };
+  await dragX('#rz-left', 120); await dragX('#rz-right', -100); await sleep(200);
+  const [l1, r1w, m1] = await widths();
+  check('side bars: dragging the left edge widens the robot list', Math.abs(l1 - (l0 + 120)) < 4, `${l0} -> ${l1}`);
+  check('side bars: dragging the right edge widens the task list', Math.abs(r1w - (r0w + 100)) < 4, `${r0w} -> ${r1w}`);
+  check('side bars: the map gives up the room', Math.abs(m1 - (m0 - 220)) < 6, `${m0} -> ${m1}`);
+  await dragX('#rz-left', -600); await sleep(100);
+  check('side bars: a bar never shrinks past its minimum', Math.abs((await widths())[0] - 200) < 2, String((await widths())[0]));
+  await load();
+  check('side bars: widths survive a reload', Math.abs((await widths())[0] - 200) < 2 && Math.abs((await widths())[1] - r1w) < 4, JSON.stringify(await widths()));
+  await page.eval(`document.getElementById('rz-left').dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); document.getElementById('rz-right').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await sleep(100);
+  // The stage changing size with NO window resize event (an iPhone rotation fires it
+  // before the layout settles): the map must still follow, or CSS stretches it.
+  await page.eval(`document.body.style.setProperty('--left-w', '420px')`); await sleep(300);
+  check('side bars: the map re-fits when its pane changes size without a window resize',
+        await page.eval(`(() => { const c = document.getElementById('map'), r = c.getBoundingClientRect(); return Math.abs(c.width / (window.devicePixelRatio || 1) - r.width) < 2 && Math.abs(c.height / (window.devicePixelRatio || 1) - r.height) < 2; })()`));
+  await page.eval(`document.body.style.removeProperty('--left-w')`); await sleep(200);
+  check('side bars: double-click resets both', Math.abs((await widths())[0] - l0) < 2 && Math.abs((await widths())[1] - r0w) < 2, JSON.stringify(await widths()));
+  await page.eval(`localStorage.clear()`);
+
   // -- 2D map / 3D cloud -----------------------------------------------------------------------
   console.log('\n--- 3d view ---');
-  const load = async () => { await page.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/operator.html` }); await sleep(1200); };
   await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
   await page.eval(`localStorage.clear()`);
   await page.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/operator.html` }); await sleep(1200);

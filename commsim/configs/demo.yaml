@@ -1,0 +1,6 @@
+# The 2-robot + gateway demo, layered over base.yaml. open_floor stands in for
+# the lab until its layout is measured (docs/plan.md question 2). The task
+# rate is raised so a robot owns a task when a failure is injected; at the
+# base rate (1 per 200 s per robot) relay_dies/isolated at n=2 judged nothing.
+commsim_des:
+  task_rate_per_robot_hz: 0.033

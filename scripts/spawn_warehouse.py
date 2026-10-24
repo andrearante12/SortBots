@@ -22,6 +22,8 @@ plus, once for the whole sim (see _WorldRuntime):
 and subscribing:
 
     /sim/world_cmd             std_msgs/String JSON {"cmd": "reset"|"start"|"pause"}
+    /sim/teleport              std_msgs/String JSON {"robot", "x", "y", "yaw"} in the map frame
+                                                     (operator view's Teleport tool; see _teleport)
     /<robot>/cmd_vel           geometry_msgs/Twist  (--drive cmd_vel; holonomic x/y/yaw)
     /<robot>/pick_cmd          std_msgs/String      ("attach"/"detach"; robot_0 only,
                                                       see nodes/task_manager.py)
@@ -1240,6 +1242,8 @@ class _WorldRuntime:
         self.gt_pub = self.node.create_publisher(String, "/sim/ground_truth", 10)
         self.world_pub = self.node.create_publisher(String, "/sim/world", latched)
         self.node.create_subscription(String, "/sim/world_cmd", self._on_cmd, 10)
+        self.node.create_subscription(String, "/sim/teleport", self._on_teleport, 10)
+        self.teleports: list[dict] = []
         self.world_msg = String(data=json.dumps(self._describe()))
         self.world_pub.publish(self.world_msg)
         self.world_sent_at = time.monotonic()
@@ -1271,6 +1275,51 @@ class _WorldRuntime:
             cmd = msg.data.strip()
         if cmd in ("reset", "start", "pause", "restart"):
             self.pending.append(cmd)
+
+    def _on_teleport(self, msg) -> None:
+        try:
+            t = self._json.loads(msg.data)
+            self.teleports.append({"robot": str(t["robot"]), "x": float(t["x"]), "y": float(t["y"]),
+                                   "yaw": float(t["yaw"])})
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            emit(f"  bad /sim/teleport {msg.data!r}: {exc}")
+
+    def _teleport(self, t: dict, robots: dict) -> None:
+        """Put a robot somewhere else, instantly (operator view's Teleport tool, for
+        setting a scene up). The target is in the fused `map` frame, which in the sim
+        IS this world frame: nodes/map_merge.py anchors each robot's map at its spawn,
+        and the robots spawn at those same poses (checked live 2026-10-24: both robots'
+        map pose and /sim/ground_truth agreed to the centimetre). So no offset is taken
+        from the robot's own map pose. A first version did that, and a robot not yet
+        localized (a secondary robot reads the PRIMARY's pose for its first seconds,
+        nodes/map_handoff.py) landed 8.6 m off target.
+
+        Localization needs nothing: odometry is IsaacComputeOdometry on base_link's
+        world pose (scripts/_ros2_graphs.py), so the jump shows up as one big odom
+        step, RTAB-Map's map->odom correction stays valid, and the robot lands where
+        it was dropped. The base is three world-frame joints (root_x, root_y,
+        root_z_rotation, see the cmd_vel comment in the step loop): set them and
+        zero their velocities, or the drive carries the old motion on."""
+        import math
+
+        import numpy as np
+
+        entry = robots.get(t["robot"])
+        if entry is None:
+            emit(f"  teleport: no robot {t['robot']!r}")
+            return
+        robot = entry[0]
+        q = robot.get_joint_positions()
+        sx, sy = self.spawn[t["robot"]][:2]
+        wx, wy, wyaw = sx + float(q[0]), sy + float(q[1]), float(q[2])
+        tx, ty, tyaw = t["x"], t["y"], t["yaw"]
+        # Continuous joint: move by the wrapped difference, never a full turn.
+        q2 = wyaw + math.atan2(math.sin(tyaw - wyaw), math.cos(tyaw - wyaw))
+        idx = np.array([0, 1, 2])
+        robot.set_joint_positions(np.array([tx - sx, ty - sy, q2]), joint_indices=idx)
+        robot.set_joint_velocities(np.zeros(3), joint_indices=idx)
+        emit(f"  teleport {t['robot']}: world ({wx:.2f}, {wy:.2f}) -> ({tx:.2f}, {ty:.2f}), "
+             f"yaw {math.degrees(tyaw):.0f} deg")
 
     def _apply(self, cmd: str) -> None:
         if cmd in ("reset", "restart"):
@@ -1309,6 +1358,8 @@ class _WorldRuntime:
         rclpy.spin_once(self.node, timeout_sec=0.001)  # see _start_extra_ros_subscribers
         while self.pending:
             self._apply(self.pending.pop(0))
+        while self.teleports:
+            self._teleport(self.teleports.pop(0), robots)
         out = {"t": round(sim_t, 4), "wt": round(self.wt, 4), "running": self.running,
                "world": self.world["name"] if self.world else None,
                "robots": {}, "actors": {}}

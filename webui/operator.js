@@ -7,6 +7,8 @@
 //   - rosbridge (9090)   live topics: /map, /tf, per-robot plan / explore_status /
 //                        task_status / action status / obstacles, and the commands this page
 //                        sends (dispatch_task, explore_cmd, navigate_to_pose, cmd_vel)
+//                        and the fleet auction's /fleet/task_board (gateway:
+//                        liveness, battery, who owns which task, latched alarms)
 //   - serve.py (HTTP)    /api/robots, /api/nav_waypoints (waypoints, which are
 //                        also the task endpoints), /api/session (console control)
 // The session panel itself is scenarios.js, unchanged apart from tolerating the
@@ -46,6 +48,8 @@
   let tool = "select";
   let view3d = false; // main stage: 2D occupancy map, or the 3D point cloud
   let waypoints = []; // [{name, x, y, yaw}], the server's copy — also the task endpoints
+  let gateway = null; // {x, y}: the fleet gateway pin (comms overlay), server's copy
+  let platform = null; // "sim" | "real", from serve.py; the Teleport tool is sim-only
   let tasks = []; // [{id, kind: "goto"|"pickup", goto, pickup, dropoff, robot, state, at, reason}]
   let session = null; // last /api/session body, null until the first answer
   let controlAvailable = true; // false once /api/session answers 503
@@ -423,6 +427,15 @@
       ctx.fill(); ctx.stroke();
       ctx.fillStyle = palette.ink; ctx.fillText(w.name, a, b - 14);
     }
+    // The gateway pin only matters to the comms overlay; shown while it or the tool is on.
+    if (gateway && (tool === "gw" || (window.sortbotsComms && window.sortbotsComms.on))) {
+      const [a, b] = toPx(gateway.x, gateway.y);
+      ctx.fillStyle = palette.ink; ctx.strokeStyle = palette.bg; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(a, b - 10); ctx.lineTo(a + 9, b + 7); ctx.lineTo(a - 9, b + 7); ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = palette.ink; ctx.lineWidth = 1.2;
+      for (const r of [14, 19]) { ctx.beginPath(); ctx.arc(a, b - 2, r, -2.2, -0.95); ctx.stroke(); }
+      ctx.fillStyle = palette.ink; ctx.fillText("Gateway", a, b + 21);
+    }
 
     drawObstacles();
 
@@ -451,9 +464,11 @@
     const r = drag && robots.get(drag.id);
     if (!r || !r.pose) return;
     const [a, b] = toPx(r.pose.x, r.pose.y), [ex, ey] = toPx(drag.wx, drag.wy);
-    const yaw = drag.wp ? -(drag.wp.yaw || 0) : Math.atan2(ey - b, ex - a); // canvas y points down
+    // A teleport keeps the robot's heading (or a pin's); a send faces the way it travels.
+    const tp = drag.tp, yaw = drag.wp ? -(drag.wp.yaw || 0) : tp ? -r.pose.yaw : Math.atan2(ey - b, ex - a); // canvas y points down
     ctx.strokeStyle = r.color; ctx.fillStyle = r.color; ctx.lineWidth = 2.5;
-    ctx.setLineDash([7, 5]); ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(ex, ey); ctx.stroke(); ctx.setLineDash([]);
+    // No path line for a teleport: it doesn't travel, it appears.
+    if (!tp) { ctx.setLineDash([7, 5]); ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(ex, ey); ctx.stroke(); ctx.setLineDash([]); }
     ctx.globalAlpha = 0.25; ctx.beginPath(); ctx.arc(ex, ey, 14, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
     ctx.beginPath(); ctx.arc(ex, ey, 14, 0, 7); ctx.stroke();
     ctx.beginPath();
@@ -461,7 +476,9 @@
     ctx.lineTo(ex + Math.cos(yaw + 2.5) * 7, ey + Math.sin(yaw + 2.5) * 7);
     ctx.lineTo(ex + Math.cos(yaw - 2.5) * 7, ey + Math.sin(yaw - 2.5) * 7);
     ctx.fill();
-    const label = drag.wp ? `Send ${nameOf(r.id)} to ${drag.wp.name}` : `Send ${nameOf(r.id)} here`;
+    const verb = tp ? "Teleport" : "Send";
+    const label = drag.blocked ? "Occupied: can't teleport here" : drag.wp ? `${verb} ${nameOf(r.id)} to ${drag.wp.name}` : `${verb} ${nameOf(r.id)} here`;
+    if (drag.blocked) ctx.fillStyle = palette.stop || "#d63b2f";
     ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
     const tw = ctx.measureText(label).width + 12;
     ctx.fillRect(ex - tw / 2, ey - 38, tw, 18);
@@ -533,6 +550,10 @@
 
   function statusOf(r) {
     if (!online(r)) return { tag: "offline", detail: r.pose ? "Not responding" : "Waiting for the robot" };
+    // The fleet's verdict, not ours: its TF is fine but its radio has gone quiet, so
+    // the other robots treat it as gone (its tasks lease out to them).
+    const fr = fleetOf(r);
+    if (fr && fr.alive === false) return { tag: "silent", detail: "Not heard on the fleet radio" };
     const now = performance.now();
     // DONE / FAILED are one-message transients task_manager publishes just before IDLE.
     const busy = r.task && r.task.state && !FINISHED.includes(r.task.state) && r.task.state !== "IDLE";
@@ -597,7 +618,7 @@
   }
 
   const TASK_LABEL = (t) => ({
-    QUEUED: ["waiting", ""], NAV_TO_PICKUP: ["en route", "active"], PICKING: ["picking up", "active"],
+    BIDDING: ["bidding", "bid"], CLAIMED: ["assigned", ""], QUEUED: ["waiting", ""], NAV_TO_PICKUP: ["en route", "active"], PICKING: ["picking up", "active"],
     NAV_TO_DROPOFF: ["en route", "active"], PLACING: ["placing", "active"], NAV_TO_GOAL: ["en route", "active"],
     DONE: ["done", "done"], FAILED: ["failed", "failed"], CANCELLED: ["cancelled", ""],
   }[t.state] || [t.state.toLowerCase(), "active"]);
@@ -605,29 +626,158 @@
     : t.pickup ? `${esc(t.pickup)} to ${esc(t.dropoff)}` : `Task ${esc(t.id)}`);
 
   function renderTasks() {
-    const rank = (t) => (FINISHED.includes(t.state) ? 2 : t.state === "QUEUED" ? 1 : 0);
+    const rank = (t) => (FINISHED.includes(t.state) ? 2 : ["QUEUED", "BIDDING", "CLAIMED"].includes(t.state) ? 1 : 0);
     // Waiting tasks keep dispatch order (that IS the run order, per robot); `at` is
     // only the tie-break between robots.
     const list = [...tasks].sort((a, b) => rank(a) - rank(b) || (rank(a) === 1 ? 0 : a.at - b.at));
     $("#tasks").innerHTML = list.length ? list.map((t) => {
       const [label, cls] = TASK_LABEL(t), r = robots.get(t.robot), done = rank(t) === 2;
       return `<div class="tk ${done ? "finished" : ""}"><span class="t1">${taskTitle(t)}</span><span class="st ${cls}">${label}</span>
-        ${done ? "" : `<button class="x" data-cancel="${esc(t.id)}" title="Cancel this task" aria-label="Cancel task ${esc(t.id)}">&times;</button>`}
-        <span class="t2"${t.reason ? ` title="${esc(t.reason)}"` : ""}>${t.reason ? "rejected: unknown waypoint" : esc(t.id)}</span><span class="who">${r ? `<i style="--c:${r.color}"></i>${esc(nameOf(r.id))}` : ""}</span></div>`;
+        ${done || t.pending ? "" : `<button class="x" data-cancel="${esc(t.id)}" title="Cancel this task" aria-label="Cancel task ${esc(t.id)}">&times;</button>`}
+        <span class="t2"${t.reason ? ` title="${esc(t.reason)}"` : ""}>${t.reason ? esc(t.reasonShort || "rejected: unknown waypoint") : esc(t.pending ? "sent to the fleet" : t.id) + (t.loaded && !done ? " · loaded" : "")}</span><span class="who">${r ? `<i style="--c:${r.color}"></i>${esc(nameOf(r.id))}` : t.fleet ? "Fleet" : ""}</span></div>`;
     }).join("") : `<div class="none">No tasks yet. Queue some below.</div>`;
-    const active = tasks.filter((t) => rank(t) === 0).length, waiting = tasks.filter((t) => t.state === "QUEUED").length;
+    const active = tasks.filter((t) => rank(t) === 0).length, waiting = tasks.filter((t) => rank(t) === 1).length;
     $("#tk-count").textContent = tasks.length ? `${active} running, ${waiting} waiting` : "";
   }
 
   function cancelTask(id) {
     const t = tasks.find((x) => x.id === id);
     if (!t) return;
+    if (id.startsWith(FLEET_PREFIX)) {
+      // The fleet's task: withdraw it fleet-wide at the gateway. Cancelling it on the
+      // robot alone would also work (fleet_tasks.py withdraws a hand-cancelled task),
+      // but an unclaimed one has no robot to cancel it on.
+      publishString("/fleet/task_cancel", JSON.stringify({ task_id: Number(id.slice(FLEET_PREFIX.length)) }));
+      if (["BIDDING", "CLAIMED"].includes(t.state)) { t.state = "CANCELLED"; t.at = Date.now(); }
+      return renderTasks();
+    }
     publishString(`/${t.robot}/cancel_task`, id);
     // A waiting task is simply dropped, and nothing reports on it again. A running one
     // ends with a CANCELLED status, so leave its row to that.
     if (t.state === "QUEUED") { t.state = "CANCELLED"; t.at = Date.now(); }
     renderTasks();
   }
+
+  // -- fleet auction board ----------------------------------------------------------------------
+  // nodes/fleet_tasks.py --gateway publishes /fleet/task_board (latched, 1 Hz): every
+  // robot the fleet hears (alive by the SAME silence rule the robots apply to each
+  // other, battery, owned tasks), every auctioned task with its owner, and latched
+  // alarms. It is the fleet's own state, so this page never disagrees with the robots
+  // about who is gone. A task the fleet won is `fleet-<id>` on the robot's
+  // task_status, so its row is one row whichever source spoke last.
+  // No board (the real robot has no gateway, or task_manager:=false) = everything
+  // below is inert and the page behaves exactly as it did before the auction.
+
+  const FLEET_PREFIX = "fleet-";
+  const BOARD_STALE_MS = 5000; // 1 Hz board; this much silence means the gateway is gone
+  const LOW_BATTERY_PCT = 20;  // configs/fleet_tasks.yaml battery_reserve_pct: below it, no bids
+  const PENDING_MS = 10000;    // a request the gateway never announced (unknown waypoint) gives up
+  let board = null, boardAt = -Infinity, boardSeen = false;
+  const seenAlarms = new Set();
+  const fleetUp = () => !!board && performance.now() - boardAt < BOARD_STALE_MS;
+  const fleetOf = (r) => (fleetUp() ? (board.robots || []).find((b) => b.id === r.id) || null : null);
+
+  function onBoard(msg) {
+    let b;
+    try { b = JSON.parse(msg.data); } catch (e) { return; }
+    if (!b || !Array.isArray(b.robots) || !Array.isArray(b.tasks)) return;
+    board = b; boardAt = performance.now();
+    for (const fr of b.robots) if (/^robot_\d+$/.test(fr.id || "")) addRobot(fr.id);
+    for (const bt of b.tasks) mergeBoardTask(bt);
+    // Toast only alarms raised while this page is open: on the first board, every
+    // already-latched one is simply shown in the chip.
+    for (const a of b.alarms || []) {
+      if (seenAlarms.has(a.id)) continue;
+      seenAlarms.add(a.id);
+      if (boardSeen && a.active) toast(`Alarm: ${a.text || a.kind}`);
+    }
+    boardSeen = true;
+    trimTasks(); renderTasks(); renderFleet(); renderAlarms();
+  }
+  topic("/fleet/task_board", "std_msgs/String").subscribe(onBoard);
+
+  function mergeBoardTask(bt) {
+    const id = FLEET_PREFIX + bt.task_id;
+    let t = tasks.find((x) => x.id === id);
+    if (!t) {
+      // Ours, still waiting for its id? The gateway names it; match on the route.
+      t = tasks.find((x) => x.pending && x.pickup === bt.pickup && x.dropoff === bt.dropoff);
+      if (t) { t.id = id; delete t.pending; }
+    }
+    const owner = bt.owner && bt.owner !== "gateway" ? bt.owner : null;
+    if (!t) {
+      if (["done", "cancelled"].includes(bt.state)) return; // history from before this page opened
+      t = { id, kind: "pickup", pickup: bt.pickup, dropoff: bt.dropoff, robot: owner, state: "BIDDING", at: Date.now() };
+      tasks.push(t);
+    }
+    t.fleet = true; t.loaded = !!bt.committed;
+    const set = (st) => { if (t.state !== st) { t.state = st; t.at = Date.now(); } };
+    // The robot's own task_status is the finer source once it has the task (QUEUED,
+    // NAV_TO_PICKUP, ...); the board only fills in what no robot reports: the auction
+    // itself, a new owner after a re-auction, and how it ended.
+    if (bt.state === "open" || bt.state === "bidding") {
+      if (!FINISHED.includes(t.state)) { set("BIDDING"); t.robot = null; }
+    } else if (bt.state === "claimed" && owner) {
+      if (t.state === "BIDDING" || t.robot !== owner) set("CLAIMED");
+      t.robot = owner;
+    } else if (bt.state === "done" || bt.state === "cancelled") {
+      if (!FINISHED.includes(t.state)) set(bt.state.toUpperCase());
+    }
+  }
+
+  // "Any robot" with the fleet up: the gateway announces it, the robots bid, and the
+  // winner's task_manager gets it as fleet-<id>. The row waits as "sent to the fleet"
+  // until the board names it.
+  function requestFleet(pickup, dropoff) {
+    publishString("/fleet/task_request", JSON.stringify({ pickup, dropoff }));
+    tasks.push({ id: `pending-${Math.random().toString(16).slice(2, 10)}`, kind: "pickup", pickup, dropoff,
+      robot: null, state: "BIDDING", fleet: true, pending: true, at: Date.now() });
+  }
+  function expirePending() {
+    let changed = false;
+    for (const t of tasks) {
+      if (!t.pending || t.state !== "BIDDING" || Date.now() - t.at < PENDING_MS) continue;
+      Object.assign(t, { state: "FAILED", at: Date.now(), reasonShort: "the fleet didn't take it",
+        reason: "The fleet gateway never announced this task: an unknown waypoint, or the gateway is down" });
+      changed = true;
+    }
+    if (changed) renderTasks();
+  }
+
+  // -- alarms --
+  const ALARM_KIND = { robot_silent: "Robot silent", owner_missing: "Owner missing", lease_expired: "Lease expired", task_stalled: "Task stalled" };
+  let lastAlarmSig = "";
+  function renderAlarms() {
+    const alarms = fleetUp() ? board.alarms || [] : [];
+    // A gateway that WAS publishing and stopped is itself the alarm: its own alarms can
+    // no longer arrive. Only while a session runs; between runs silence is expected.
+    const gwSilent = boardSeen && !fleetUp() && sessionActive();
+    const active = alarms.filter((a) => a.active).length;
+    const sig = JSON.stringify([alarms.map((a) => [a.id, a.active, a.acked]), gwSilent]);
+    if (sig === lastAlarmSig) return;
+    lastAlarmSig = sig;
+    const chip = $("#alarms");
+    chip.hidden = !alarms.length && !gwSilent;
+    chip.classList.toggle("on", !!active || gwSilent);
+    $("#alarms-label").textContent = gwSilent && !alarms.length ? "Fleet gateway silent"
+      : active ? `${active} alarm${active > 1 ? "s" : ""}` : `${alarms.length} to acknowledge`;
+    if (chip.hidden) $("#alarm-pop").hidden = true;
+    const t0 = board ? board.t : 0;
+    // Active first, newest first within each: the operator reads the top row.
+    const list = [...alarms].sort((a, b) => (b.active - a.active) || (b.t - a.t));
+    $("#alarm-list").innerHTML = (gwSilent ? `<li class="al on"><b>Fleet gateway silent</b><span>No task board for over ${BOARD_STALE_MS / 1000} s. Alarms can't reach this page until it's back.</span></li>` : "") +
+      list.map((a) => `<li class="al ${a.active ? "on" : ""}" data-alarm="${esc(a.id)}"><b>${esc(ALARM_KIND[a.kind] || a.kind)}</b>
+        <span>${esc(a.text || "")}</span><span class="age">${Math.round(Math.max(0, t0 - a.t))} s ago${a.active ? "" : " · cleared"}</span>
+        <button class="btn small" data-ack="${esc(a.id)}" title="Acknowledge. The alarm leaves once its condition has also cleared">Acknowledge</button></li>`).join("");
+  }
+  $("#alarms").addEventListener("click", () => { $("#alarm-pop").hidden = !$("#alarm-pop").hidden; });
+  $("#alarm-pop").addEventListener("click", (e) => {
+    const id = e.target.dataset.ack;
+    if (id !== undefined) publishString("/fleet/alarm_ack", JSON.stringify({ id: Number(id) }));
+  });
+  addEventListener("pointerdown", (e) => {
+    if (!$("#alarm-pop").hidden && !e.target.closest("#alarm-pop, #alarms")) $("#alarm-pop").hidden = true;
+  });
 
   // -- fleet list ---------------------------------------------------------------------------
 
@@ -640,6 +790,7 @@
     const st = statusOf(r), s = r.task;
     const waiting = r.queueDepth ? ` · ${r.queueDepth} waiting` : "";
     if (st.tag === "offline") return { cls: "off", title: "Offline", sub: st.detail };
+    if (st.tag === "silent") return { cls: "failed", title: "Silent", sub: st.detail };
     if (st.tag === "on a task") {
       const t = s.task ? { id: s.task_id, ...s.task } : tasks.find((x) => x.id === s.task_id) || { id: s.task_id };
       const cls = ["PICKING", "PLACING"].includes(s.state) ? "working" : "moving";
@@ -674,9 +825,12 @@
       speed: tw ? `${Math.hypot(tw.linear.x, tw.linear.y).toFixed(2)} m/s` : "—",
       turn: tw ? `${Math.round((tw.angular.z * 180) / Math.PI)}°/s` : "—",
       togo,
+      batt: battOf(r) == null ? "—" : `${battOf(r).toFixed(0)}%`,
     };
   }
-  const FACTS = [["pos", "Position"], ["heading", "Heading"], ["speed", "Speed"], ["turn", "Turn rate"], ["togo", "To go"], ["obst", "Obstacles"]];
+  const FACTS = [["pos", "Position"], ["heading", "Heading"], ["speed", "Speed"], ["turn", "Turn rate"], ["togo", "To go"], ["obst", "Obstacles"], ["batt", "Battery"]];
+  // Only the board knows it (fleet_tasks.py: a real BatteryState, or the sim model).
+  const battOf = (r) => { const fr = fleetOf(r); return fr && typeof fr.battery_pct === "number" ? fr.battery_pct : null; };
 
   function renderFleet() {
     const list = [...robots.values()];
@@ -690,7 +844,7 @@
       for (const dd of el.querySelectorAll("dd[data-f]")) if (dd.textContent !== f[dd.dataset.f]) dd.textContent = f[dd.dataset.f];
     }
     const rows = list.map((r) => ({ r, st: statusOf(r), isOpen: open.has(r.id), tile: tileOf(r) }));
-    const sig = JSON.stringify(rows.map((x) => [x.r.id, x.st, x.isOpen, x.r.id === selected, online(x.r), x.tile, x.r.queueDepth]));
+    const sig = JSON.stringify([fleetUp(), rows.map((x) => [x.r.id, x.st, x.isOpen, x.r.id === selected, online(x.r), x.tile, x.r.queueDepth, battOf(x.r) == null ? null : Math.round(battOf(x.r))])]);
     if (sig === lastFleetSig) return;
     lastFleetSig = sig;
     const onlineN = list.filter(online).length;
@@ -699,7 +853,7 @@
       const f = isOpen ? factsOf(r) : null, busy = st.tag === "on a task" || r.queueDepth > 0;
       return `
       <div class="robot ${isOpen ? "sel" : ""} ${r.id === selected ? "active" : ""} ${online(r) ? "" : "offline"}" data-id="${esc(r.id)}" style="--c:${r.color}">
-        <div class="l1" tabindex="0" role="button" aria-expanded="${isOpen}"><span class="sw"></span><span class="name">${esc(nameOf(r.id))}</span>${r.id === selected && open.size > 1 ? `<span class="ctl" title="Map clicks and waypoint sends go to this robot">controls</span>` : ""}<span class="tag pill ${tile.cls}">${esc(st.tag)}</span></div>
+        <div class="l1" tabindex="0" role="button" aria-expanded="${isOpen}"><span class="sw"></span><span class="name">${esc(nameOf(r.id))}</span>${r.id === selected && open.size > 1 ? `<span class="ctl" title="Map clicks and waypoint sends go to this robot">controls</span>` : ""}${battOf(r) == null ? "" : `<span class="batt ${battOf(r) < LOW_BATTERY_PCT ? "low" : ""}" title="Battery${battOf(r) < LOW_BATTERY_PCT ? ": below the reserve, so it won't bid for new tasks" : ""}">${battOf(r).toFixed(0)}%</span>`}<span class="tag pill ${tile.cls}">${esc(st.tag)}</span></div>
         <div class="l2">${st.tag === "on a task" ? tile.title + (tile.sub ? ` · ${tile.sub}` : "") : esc(st.detail) + (r.queueDepth ? ` · ${r.queueDepth} waiting` : "")}</div>
         ${isOpen ? `<div class="more">
           <div class="cam-slot" data-cam="${esc(r.id)}"></div>
@@ -729,12 +883,103 @@
     const el = document.createElement("div");
     el.className = "cam";
     el.innerHTML = `<div class="pic"></div><canvas class="obst"></canvas><span class="msg">Connecting to camera…</span>
-      <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button></div>`;
+      <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button></div>
+      <div class="drive" role="group" aria-label="Drive by hand" title="Drive by hand: hold an arrow. Keys W/A/S/D move, Q/E rotate, Space stops (they drive the robot in control)">
+        <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
+        <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
+        <button type="button" data-drive="rot-left" aria-label="Rotate left">&#8634;</button><button type="button" data-drive="back" aria-label="Back">&#9660;</button><button type="button" data-drive="rot-right" aria-label="Rotate right">&#8635;</button>
+      </div>`;
     c = { el, pic: el.querySelector(".pic"), overlay: el.querySelector("canvas.obst"), msg: el.querySelector(".msg"), mode: camDefault, timer: null, token: 0 };
     cams.set(id, c);
     syncCamButtons(c);
+    wireDrivePad(id, el.querySelector(".drive"));
     return c;
   }
+
+  // -- manual drive (the camera tile's pad) ------------------------------------------------------
+  // Ported from the deleted per-robot dashboard (app.js): Twist on /<id>/cmd_vel while a
+  // direction is held, republished at DRIVE_HZ so one dropped rosbridge message can't
+  // leave the robot creeping, and a zero Twist the moment nothing is held. The base is
+  // holonomic (spawn_warehouse.py), so strafe is real; held directions add up (fwd +
+  // strafe = diagonal). 0.5 m/s is the base joints' URDF velocity limit, the sim's ceiling.
+  // Taking the wheel stops the explorer and cancels the robot's goals first: Nav2 or the
+  // explorer would otherwise fight the operator for cmd_vel (a running task fails, and a
+  // fleet task goes back to the auction).
+  const DRIVE_LINEAR_MPS = 0.5, DRIVE_ANGULAR_RADPS = 1.2, DRIVE_HZ = 10;
+  const DRIVE_VECTORS = {
+    fwd: [DRIVE_LINEAR_MPS, 0, 0], back: [-DRIVE_LINEAR_MPS, 0, 0], left: [0, DRIVE_LINEAR_MPS, 0], right: [0, -DRIVE_LINEAR_MPS, 0],
+    "rot-left": [0, 0, DRIVE_ANGULAR_RADPS], "rot-right": [0, 0, -DRIVE_ANGULAR_RADPS],
+  };
+  const DRIVE_KEYS = { w: "fwd", s: "back", a: "left", d: "right", q: "rot-left", e: "rot-right" };
+  const drives = new Map(); // id -> {held: Set, timer}
+  const driveOf = (id) => drives.get(id) || drives.set(id, { held: new Set(), timer: null }).get(id);
+
+  function drivePublish(id) {
+    const d = driveOf(id);
+    let x = 0, y = 0, z = 0;
+    for (const cmd of d.held) { const v = DRIVE_VECTORS[cmd]; x += v[0]; y += v[1]; z += v[2]; }
+    publish(`/${id}/cmd_vel`, "geometry_msgs/Twist", { linear: { x, y, z: 0 }, angular: { x: 0, y: 0, z } });
+    const c = cams.get(id);
+    if (c) for (const b of c.el.querySelectorAll("[data-drive]")) b.classList.toggle("held", d.held.has(b.dataset.drive));
+  }
+  function driveStart(id, cmd) {
+    const d = driveOf(id);
+    if (cmd === "stop") return driveRelease(id);
+    if (!DRIVE_VECTORS[cmd] || d.held.has(cmd)) return;
+    if (!d.held.size) {
+      const r = robots.get(id), st = r ? statusOf(r).tag : "idle";
+      if (["on a task", "navigating", "exploring"].includes(st)) {
+        stopRobot(id);
+        toast(`${nameOf(id)}: manual control (its goal is cancelled)`);
+      }
+    }
+    d.held.add(cmd);
+    drivePublish(id);
+    if (!d.timer) d.timer = setInterval(() => drivePublish(id), 1000 / DRIVE_HZ);
+  }
+  function driveStop(id, cmd) {
+    const d = driveOf(id);
+    if (!d.held.delete(cmd)) return;
+    drivePublish(id); // stop now, not on the next tick
+    if (!d.held.size && d.timer) { clearInterval(d.timer); d.timer = null; }
+  }
+  function driveRelease(id) {
+    const d = driveOf(id);
+    d.held.clear();
+    if (d.timer) { clearInterval(d.timer); d.timer = null; }
+    drivePublish(id);
+  }
+  function wireDrivePad(id, pad) {
+    for (const b of pad.querySelectorAll("[data-drive]")) {
+      const cmd = b.dataset.drive;
+      b.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); b.setPointerCapture(e.pointerId); driveStart(id, cmd); });
+      const up = (e) => { if (cmd !== "stop") driveStop(id, cmd); };
+      b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up); b.addEventListener("lostpointercapture", up);
+      b.addEventListener("click", (e) => e.stopPropagation()); // not a card click
+    }
+    // Faint until used: hover for a mouse; touch has none, so a touch lights it a while.
+    let fade = null;
+    pad.addEventListener("pointerdown", () => { pad.classList.add("on"); clearTimeout(fade); });
+    pad.addEventListener("pointerup", () => { clearTimeout(fade); fade = setTimeout(() => pad.classList.remove("on"), 3000); });
+  }
+  // Keys drive the robot in control (the open card clicked into last), from anywhere on
+  // the page except a form field; losing focus mid-drive releases everything, since the
+  // keyup would never arrive.
+  addEventListener("keydown", (e) => {
+    if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.target.closest && e.target.closest("input, select, textarea")) return;
+    if (!selected || !open.has(selected)) return;
+    if (e.code === "Space") { e.preventDefault(); return driveRelease(selected); }
+    const cmd = DRIVE_KEYS[e.key.toLowerCase()];
+    if (cmd) { e.preventDefault(); driveStart(selected, cmd); }
+  });
+  addEventListener("keyup", (e) => {
+    const cmd = DRIVE_KEYS[e.key.toLowerCase()];
+    if (cmd) for (const id of drives.keys()) driveStop(id, cmd);
+  });
+  const releaseAllDrives = () => { for (const [id, d] of drives) if (d.held.size) driveRelease(id); };
+  addEventListener("blur", releaseAllDrives);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAllDrives(); });
   function syncCamButtons(c) {
     for (const b of c.el.querySelectorAll("[data-cam-mode]")) b.classList.toggle("on", b.dataset.camMode === c.mode);
   }
@@ -835,10 +1080,59 @@
     lastFleetSig = ""; renderFleet();
   }
 
+  // -- teleport (sim only) ----------------------------------------------------------------------
+  // For setting a scene up: Isaac moves the robot instantly (scripts/spawn_warehouse.py,
+  // /sim/teleport). The target goes out in the map frame, which in the sim is Isaac's
+  // world frame (map_merge anchors each robot's map at its spawn). Odometry there is
+  // the base's true pose, so localization just follows.
+  // The robot is stopped first: a goal or the explorer would otherwise drive it straight
+  // back off the spot (and a fleet task it held fails and goes back to the auction).
+  const TP_CLEAR_M = 0.25; // robot base radius-ish: no landing on a shelf
+  function occupiedAt(x, y) {
+    if (!lastMap || !lastMap.info) return false;
+    const { width: w, height: h, resolution: res, origin } = lastMap.info;
+    const c0 = Math.floor((x - origin.position.x) / res), r0 = Math.floor((y - origin.position.y) / res);
+    const k = Math.ceil(TP_CLEAR_M / res);
+    for (let dr = -k; dr <= k; dr++) for (let dc = -k; dc <= k; dc++) {
+      if ((dr * dr + dc * dc) * res * res > TP_CLEAR_M * TP_CLEAR_M) continue;
+      const r = r0 + dr, c = c0 + dc;
+      if (r >= 0 && r < h && c >= 0 && c < w && lastMap.data[r * w + c] >= 65) return true;
+    }
+    return false;
+  }
+  function teleport(id, x, y, yaw, label) {
+    const r = robots.get(id);
+    if (!r || !r.pose) return;
+    if (occupiedAt(x, y)) return toast("That spot is occupied on the map");
+    stopRobot(id);
+    publishString("/sim/teleport", JSON.stringify({ robot: id, x, y, yaw }));
+    toast(`${nameOf(id)} teleported to ${label}`);
+  }
+
   function toggleExplore(id) {
     const r = robots.get(id);
     const exploring = r && r.explore && r.explore.state === "exploring" && performance.now() - r.exploreAt < EXPLORE_TTL_MS;
     publishString(`/${id}/explore_cmd`, exploring ? "stop" : "start");
+  }
+
+  // -- gateway pin (comms overlay) -------------------------------------------------------------------
+  // Where the fleet's gateway / access point stands, per platform (serve.py:
+  // data/comms_gateway.json). Not a waypoint: nothing drives there.
+  async function loadGateway() {
+    try {
+      const body = await (await fetch("/api/comms_gateway")).json();
+      const next = body.gateway || null;
+      if (JSON.stringify(next) !== JSON.stringify(gateway)) { gateway = next; dirty = true; if (window.sortbotsComms) window.sortbotsComms.gatewayMoved(); }
+    } catch (e) { /* older serve.py, or offline: no pin */ }
+  }
+  async function saveGateway(g) {
+    try {
+      const res = await fetch("/api/comms_gateway", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ gateway: g }) });
+      if (!res.ok) throw new Error((await res.json()).error || res.status);
+      gateway = (await res.json()).gateway; dirty = true;
+      if (window.sortbotsComms) window.sortbotsComms.gatewayMoved();
+      toast("Gateway placed");
+    } catch (e) { toast(`Couldn't save the gateway: ${e.message || e}`); }
   }
 
   // -- waypoints ------------------------------------------------------------------------------------
@@ -847,6 +1141,11 @@
     try {
       const body = await (await fetch("/api/nav_waypoints")).json();
       waypoints = body.waypoints || [];
+      if (body.platform && body.platform !== platform) {
+        platform = body.platform;
+        $('#tools [data-t="tp"]').hidden = platform !== "sim";
+        if (platform !== "sim" && tool === "tp") setTool("select");
+      }
       renderWaypoints(); dirty = true;
     } catch (e) { console.error("failed to load waypoints", e); }
   }
@@ -954,7 +1253,9 @@
 
   function renderTargets() {
     const keep = $("#nt-who").value;
-    $("#nt-who").innerHTML = `<option value="auto">Any free robot</option>` +
+    // With the fleet gateway up, "auto" for a pick & drop goes to the auction; a move
+    // still goes to the first free robot (the allocator only models pickup -> dropoff).
+    $("#nt-who").innerHTML = `<option value="auto">${fleetUp() ? "Any robot (fleet auction)" : "Any free robot"}</option>` +
       [...robots.values()].map((r) => `<option value="${esc(r.id)}">${esc(nameOf(r.id))}</option>`).join("");
     if ([...$("#nt-who").options].some((o) => o.value === keep)) $("#nt-who").value = keep;
   }
@@ -976,6 +1277,11 @@
     const pickup = $("#nt-from").value, dropoff = $("#nt-to").value;
     if (!pickup || !dropoff) return;
     if (pickup === dropoff) return toast("Pick-up and drop-off can't be the same waypoint.");
+    if ($("#nt-who").value === "auto" && fleetUp()) {
+      requestFleet(pickup, dropoff);
+      renderTasks();
+      return toast("Task sent to the fleet");
+    }
     const who = resolveRobot($("#nt-who").value);
     if (!who) return toast("No robot is free. Pick one to queue the task on it.");
     queueTask({ pickup, dropoff }, who);
@@ -1212,12 +1518,30 @@
   function setTool(t) {
     tool = t;
     for (const b of document.querySelectorAll("#tools button")) b.classList.toggle("active", b.dataset.t === t);
-    canvas.style.cursor = t === "wp" ? "crosshair" : "grab";
+    canvas.style.cursor = t === "wp" || t === "gw" ? "crosshair" : "grab";
+    dirty = true; // the gateway pin shows with its tool
   }
   for (const b of document.querySelectorAll("#tools button")) b.addEventListener("click", () => setTool(b.dataset.t));
 
   let press = null; // {px, py, wx, wy, moved, panStart}
+  // Pinch to zoom (phones have no wheel): two fingers down drop whatever one finger
+  // started (pan, send, teleport) and zoom about their midpoint instead.
+  const touches = new Map(); // pointerId -> [px, py]
+  let pinch = null;          // {d0, scale0, wx, wy}
+  const pinchGeom = () => {
+    const [[ax, ay], [bx, by]] = [...touches.values()];
+    return { d: Math.hypot(ax - bx, ay - by), mx: (ax + bx) / 2, my: (ay + by) / 2 };
+  };
+  const touchAt = (e) => { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
   canvas.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "touch") touches.set(e.pointerId, touchAt(e));
+    if (touches.size === 2) {
+      const g = pinchGeom(), [wx, wy] = toWorld(g.mx, g.my);
+      pinch = { d0: Math.max(g.d, 1), scale0: view.scale, wx, wy };
+      press = null; if (drag) { drag = null; dirty = true; }
+      return;
+    }
+    if (touches.size > 2) return;
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
     const [wx, wy] = toWorld(px, py);
     // Pressing on a robot starts a send, not a pan, whatever the tool but waypoints.
@@ -1226,6 +1550,14 @@
     canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener("pointermove", (e) => {
+    if (touches.has(e.pointerId)) touches.set(e.pointerId, touchAt(e));
+    if (pinch && touches.size === 2) {
+      const g = pinchGeom();
+      view.scale = Math.min(200, Math.max(2, pinch.scale0 * g.d / pinch.d0));
+      view.cx = pinch.wx - (g.mx - cssW / 2) / view.scale; view.cy = pinch.wy + (g.my - cssH / 2) / view.scale;
+      view.moved = true; dirty = true;
+      return;
+    }
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
     if (!press) { // hover: say what a press here would do
       if (tool !== "wp") canvas.style.cursor = robotAt(px, py) ? "pointer" : "grab";
@@ -1234,19 +1566,22 @@
     if (Math.hypot(px - press.px, py - press.py) > 6) press.moved = true;
     if (press.moved && press.robot) {
       const [wx, wy] = toWorld(px, py), wp = waypointAt(px, py);
-      drag = { id: press.robot, wx: wp ? wp.x : wx, wy: wp ? wp.y : wy, wp: wp || null };
+      drag = { id: press.robot, wx: wp ? wp.x : wx, wy: wp ? wp.y : wy, wp: wp || null, tp: tool === "tp" };
+      if (drag.tp) drag.blocked = occupiedAt(drag.wx, drag.wy);
       canvas.style.cursor = "grabbing";
       dirty = true;
       return;
     }
-    if (press.moved && tool === "select") { // drag pans
+    if (press.moved && (tool === "select" || tool === "tp")) { // drag pans
       view.moved = true;
       view.cx = press.cx - (px - press.px) / view.scale;
       view.cy = press.cy + (py - press.py) / view.scale;
       dirty = true;
     }
   });
+  const untouch = (e) => { touches.delete(e.pointerId); if (touches.size < 2) pinch = null; };
   canvas.addEventListener("pointerup", (e) => {
+    untouch(e);
     if (!press) return;
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
     const p = press, d = drag; press = null; drag = null;
@@ -1256,15 +1591,19 @@
       // Dropped back on the robot: changed its mind.
       if (robotAt(px, py) && robotAt(px, py).id === d.id) return;
       const r0 = robots.get(d.id);
+      if (d.tp) return teleport(d.id, d.wx, d.wy, d.wp ? d.wp.yaw || 0 : r0.pose.yaw, d.wp ? d.wp.name : `(${d.wx.toFixed(1)}, ${d.wy.toFixed(1)})`);
       // A pin keeps its own heading; anywhere else, arrive facing the way it travelled.
       const yaw = d.wp ? d.wp.yaw || 0 : Math.atan2(d.wy - r0.pose.y, d.wx - r0.pose.x);
       return sendNav(d.id, d.wx, d.wy, yaw, d.wp ? d.wp.name : `(${d.wx.toFixed(1)}, ${d.wy.toFixed(1)})`);
     }
-    if (tool === "select") {
+    if (tool === "tp" && !p.moved && !robotAt(px, py)) return toast("Drag a robot to where it should be");
+    if (tool === "select" || tool === "tp") {
       if (p.moved) return;
       const hit = robotAt(px, py);
       // Closed -> open it; open -> give it control; already in control -> close it.
-      if (hit) { if (!open.has(hit.id) || selected !== hit.id) openRobot(hit.id); else closeRobot(hit.id); }
+      if (hit) {
+        if (!open.has(hit.id) || selected !== hit.id) { openRobot(hit.id); if (narrow()) setPane("robots"); } else closeRobot(hit.id);
+      }
       return;
     }
     const [wx, wy] = toWorld(px, py);
@@ -1273,9 +1612,11 @@
       const name = nextWaypointName();
       saveWaypoints([...waypoints, { name, x: p.wx, y: p.wy, yaw }]);
       toast(`Waypoint ${name} added`);
+    } else if (tool === "gw") {
+      saveGateway({ x: p.wx, y: p.wy });
     }
   });
-  canvas.addEventListener("pointercancel", () => { press = null; if (drag) { drag = null; dirty = true; } });
+  canvas.addEventListener("pointercancel", (e) => { untouch(e); press = null; if (drag) { drag = null; dirty = true; } });
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
@@ -1402,10 +1743,14 @@
       return;
     }
     if (e.target.closest && e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
-    const t = { v: "select", f: "wp" }[e.key.toLowerCase()];
-    if (t) setTool(t);
+    const t = { v: "select", f: "wp", r: "gw", t: "tp" }[e.key.toLowerCase()];
+    if (t && !(t === "tp" && platform !== "sim")) setTool(t);
   });
   addEventListener("resize", resize);
+  // The window resize event isn't enough: on iPhone it fires on rotation BEFORE the new
+  // layout settles, so the map kept its portrait pixel size and CSS stretched it across
+  // the landscape stage (robots drawn as ellipses, 2026-10-24). Watch the stage itself.
+  new ResizeObserver(() => resize()).observe(canvas.parentElement);
 
   // -- 2D map / 3D cloud --------------------------------------------------------------------------------------------
   // The 3D view is look-only: the tools (waypoints, sends) work on the 2D map, so they
@@ -1417,6 +1762,8 @@
     // style.display, not [hidden]: #map / #tools set their own display, which beats the attribute.
     canvas.style.display = $("#tools").style.display = view3d ? "none" : "";
     $("#cloud").hidden = !view3d;
+    $("#comms-toggle").hidden = view3d; // the overlay draws on the 2D map only
+    setComms(!view3d && commsWanted);
     if (view3d) {
       if (!cloudMounted) { window.sortbotsCloud.mount($("#cloud"), ros); cloudMounted = true; }
       window.sortbotsCloud.show(); syncCloudRobots();
@@ -1426,8 +1773,101 @@
     }
     try { localStorage.setItem("sortbots.mapView", view3d ? "3d" : "2d"); } catch (e) { /* this tab only */ }
   }
+  // -- comms overlay (operator_comms.js) ----------------------------------------------------------
+  let commsWanted = false;
+  function setComms(v) {
+    if (!window.sortbotsComms) return;
+    window.sortbotsComms.set(v);
+    $("#comms-toggle").setAttribute("aria-checked", String(v));
+    dirty = true;
+  }
+  if (window.sortbotsComms) {
+    window.sortbotsComms.mount({
+      canvas: $("#comms"), toPx, scale: () => view.scale, getMap: () => lastMap,
+      getRobots: () => [...robots.values()].filter(online), getGateway: () => gateway,
+      hint: (t) => { $("#cm-hint").textContent = t || ""; },
+    });
+  }
+  $("#comms-toggle").addEventListener("click", () => {
+    commsWanted = !commsWanted;
+    setComms(commsWanted && !view3d);
+    try { localStorage.setItem("sortbots.comms", commsWanted ? "on" : "off"); } catch (e) { /* this tab only */ }
+  });
+
   const syncCloudRobots = () => window.sortbotsCloud.setRobots([...robots.values()].map((r) => ({ id: r.id, color: r.color, pose: r.pose })));
   $("#view").addEventListener("click", (e) => { if (e.target.dataset.v) setView(e.target.dataset.v === "3d"); });
+
+  // -- phone panes ----------------------------------------------------------------------------------
+  // Below 760 px (operator.html's media query) one pane shows at a time. The map keeps
+  // running hidden (visibility, not display) so its canvas keeps its size, and a resize
+  // re-fits it when it comes back.
+  // Same query as operator.html's phone block: narrow, or a phone held sideways.
+  const narrow = () => matchMedia("(max-width: 760px), (max-height: 520px) and (orientation: landscape)").matches;
+  function setPane(p) {
+    document.body.dataset.pane = p;
+    for (const b of document.querySelectorAll("#mnav button")) b.classList.toggle("active", b.dataset.pane === p);
+    if (p === "map") dispatchEvent(new Event("resize"));
+    try { localStorage.setItem("sortbots.pane", p); } catch (e) { /* this tab only */ }
+  }
+  $("#mnav").addEventListener("click", (e) => { const b = e.target.closest("button[data-pane]"); if (b) setPane(b.dataset.pane); });
+  try { setPane(localStorage.getItem("sortbots.pane") || "map"); } catch (e) { setPane("map"); }
+  // Full screen where the browser allows it (Android, iPad, desktop; NOT iPhone Safari,
+  // where Add to Home Screen does the job: see the manifest in operator.html). On a
+  // touch device it also asks for landscape, how an operator holds a phone to drive.
+  const fsOn = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+  if (document.fullscreenEnabled || document.webkitFullscreenEnabled) {
+    const btn = $("#fullscreen");
+    btn.hidden = false;
+    btn.addEventListener("click", async () => {
+      try {
+        if (fsOn()) await (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+        else {
+          const el = document.documentElement;
+          await (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+          if (matchMedia("(pointer: coarse)").matches && screen.orientation && screen.orientation.lock) {
+            screen.orientation.lock("landscape").catch(() => { /* not allowed here: the user rotates */ });
+          }
+        }
+      } catch (e) { toast("Full screen isn't available here"); }
+    });
+    const sync = () => { btn.title = btn.ariaLabel = fsOn() ? "Exit full screen" : "Full screen"; btn.classList.toggle("on", fsOn()); dispatchEvent(new Event("resize")); };
+    document.addEventListener("fullscreenchange", sync); document.addEventListener("webkitfullscreenchange", sync);
+  }
+
+  function renderPaneBadges() {
+    const list = [...robots.values()], up = list.filter(online).length;
+    const t = $("#mn-robots"); if (t) t.textContent = list.length ? `${up}/${list.length}` : "";
+    const busy = tasks.filter((x) => !FINISHED.includes(x.state)).length;
+    const k = $("#mn-tasks"); if (k) k.textContent = busy ? String(busy) : "";
+  }
+
+  // -- resizable side bars -----------------------------------------------------------------------
+  // The grid's outer columns are --left-w / --right-w on <body>. Each handle drags its
+  // bar's inner edge; widths persist per browser, double-click resets. The stage
+  // canvases size from their parent, so a resize event re-fits the map and overlay.
+  const SIDES = { left: { min: 200, max: 520, dflt: 260 }, right: { min: 240, max: 560, dflt: 296 } };
+  function setSide(side, w, save = true) {
+    const { min, max, dflt } = SIDES[side];
+    const v = w == null ? dflt : Math.round(Math.min(max, Math.max(min, w)));
+    document.body.style.setProperty(`--${side}-w`, `${v}px`);
+    if (save) { try { if (w == null) localStorage.removeItem(`sortbots.${side}W`); else localStorage.setItem(`sortbots.${side}W`, String(v)); } catch (e) { /* this tab only */ } }
+    dispatchEvent(new Event("resize"));
+  }
+  for (const side of ["left", "right"]) {
+    try { const w = Number(localStorage.getItem(`sortbots.${side}W`)); if (w) setSide(side, w, false); } catch (e) { /* defaults */ }
+    const h = $(`#rz-${side}`);
+    h.addEventListener("pointerdown", (e) => {
+      e.preventDefault(); h.setPointerCapture(e.pointerId);
+      h.classList.add("drag"); document.body.classList.add("resizing");
+    });
+    h.addEventListener("pointermove", (e) => {
+      if (!h.hasPointerCapture(e.pointerId)) return;
+      setSide(side, side === "left" ? e.clientX : innerWidth - e.clientX);
+    });
+    const end = (e) => { if (h.hasPointerCapture(e.pointerId)) h.releasePointerCapture(e.pointerId); h.classList.remove("drag"); document.body.classList.remove("resizing"); };
+    h.addEventListener("pointerup", end); h.addEventListener("pointercancel", end);
+    h.addEventListener("dblclick", () => setSide(side, null));
+  }
 
   let toastTimer = null;
   function toast(msg) {
@@ -1459,16 +1899,19 @@
       r.obstacles = null; r.obstaclesMap = [];
       drawCamObstacles(r.id); // clears it
     }
-    renderFleet(); renderEmpty(); maybeAutoDemo();
+    renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending(); renderPaneBadges();
+    if (window.sortbotsComms) window.sortbotsComms.sync();
   }, 250);
 
   // -- boot ----------------------------------------------------------------------------------------------------------------------
   applyTheme(); resize(); setTool("select"); renderTasks(); renderWaypoints();
-  refreshRoster(); loadWaypoints(); pollSession();
+  refreshRoster(); loadWaypoints(); loadGateway(); pollSession();
   try { if (localStorage.getItem("sortbots.mapView") === "3d") setView(true); } catch (e) { /* default: 2D */ }
   setInterval(loadWaypoints, 10000); // another operator may have added pins
+  setInterval(loadGateway, 10000);
+  try { if (localStorage.getItem("sortbots.comms") === "on") $("#comms-toggle").click(); } catch (e) { /* default: off */ }
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, view, toPx, toWorld, obstaclesInMap, onObstacles, get drag() { return drag; } };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane };
 })();

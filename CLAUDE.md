@@ -49,11 +49,23 @@ This is **not a colcon workspace** — there is no `src/`, no `package.xml`, no
 | `simtest/` | scored-test layer: `configs/worlds/` (props + scripted movers), `configs/tests/` (goals + metrics), probe, versioned metrics — `docs/testing.md` |
 | `maps/` | saved map library — named, committed snapshots of explored maps |
 | `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `docs/splat.md`) |
+| `commsim/` | fleet comms simulation (mesh, Zenoh, task auction), system python3 only; `core/protocol.py` is the allocator `nodes/fleet_tasks.py` runs, `viz/demo.py` the model behind the operator's Comms overlay (`commsim/README.md`) |
 | `docs/running.md` | the full runbook |
 
 No custom `.msg`/`.srv`: inter-node protocol is `std_msgs/String` carrying JSON.
 Node tuning is plain YAML loaded by the node itself, not ROS params. Nodes take
 `--robot-id` and prefix topics by f-string, not `PushRosNamespace`.
+
+### One GUI: the operator view
+
+`webui/operator.html` (served by `webui/serve.py`) is the ONLY user-facing GUI.
+New UI is a view, panel or popover inside it, built on its CSS tokens, its
+light/dark theme and `webui/tests/operator_test.mjs`. Never a new standalone HTML
+page, a second HTTP server, or another port. A backend feature exposes `/api/...`
+routes on serve.py or ROS topics over rosbridge, and the operator view renders
+it. The old per-robot dashboard (`index.html` + `app.js`) was deleted 2026-10-23;
+don't bring a second page back. A tool that shipped its own page gets folded into the operator view, not kept
+beside it: commsim's live demo became the Comms overlay (2026-10-23).
 
 ## Invariants that cost the most time when violated
 

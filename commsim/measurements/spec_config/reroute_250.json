@@ -1,0 +1,31 @@
+{
+ "orig_interval_ms": 250,
+ "trials": [
+  {
+   "trial": 0,
+   "blocked": "n0-n2",
+   "outage_s": 0.35000000000000003,
+   "received": 1163
+  },
+  {
+   "trial": 1,
+   "blocked": "n0-n1",
+   "outage_s": 1.94,
+   "received": 878
+  },
+  {
+   "trial": 2,
+   "blocked": "n0-n2",
+   "outage_s": 1.93,
+   "received": 879
+  },
+  {
+   "trial": 3,
+   "blocked": "n0-n1",
+   "outage_s": 1.95,
+   "received": 877
+  }
+ ],
+ "outage_median_s": 1.94,
+ "outage_max_s": 1.95
+}
