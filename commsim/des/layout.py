@@ -89,7 +89,7 @@ def open_floor(width=30.0, height=20.0) -> Layout:
 
 
 def from_occupancy(occ: str, w: int, h: int, cell: float, *, min_area_m2: float = 0.5,
-                   gateway_pos: tuple | None = None) -> Layout:
+                   rack_min_area_m2: float = 2.0, gateway_pos: tuple | None = None) -> Layout:
     """Racks from an occupancy grid: every connected blob of occupied cells.
 
     `occ` is row-major, row 0 at the BOTTOM (the OccupancyGrid convention),
@@ -103,6 +103,12 @@ def from_occupancy(occ: str, w: int, h: int, cell: float, *, min_area_m2: float 
     A blob's bounding box is NOT used as the rack: the warehouse's outer wall
     is one blob, and its box is the whole floor — every link would cross it.
     Blobs under `min_area_m2` are dropped: scan speckle must not attenuate.
+
+    Only blobs of `rack_min_area_m2` or more are racks (rack_db, 15 dB at 2.4 GHz).
+    Smaller ones (table legs, boxes, clutter) are light shelving (shelf_db, 3 dB), one
+    rectangle each (their bounding box: they are small, so the box is the blob). Live
+    2026-10-24: with every blob a rack, the clutter round a table cost a link 4 racks
+    (60 dB) and the overlay called a robot 6.6 m from the gateway cut off.
     """
     if len(occ) != w * h:
         raise ValueError(f"occupancy has {len(occ)} cells, expected {w}x{h}")
@@ -125,7 +131,13 @@ def from_occupancy(occ: str, w: int, h: int, cell: float, *, min_area_m2: float 
                         label[j] = gid
                         stack.append(j)
         blobs.append(cells)
-    keep = {g for g, cells in enumerate(blobs) if len(cells) * cell * cell >= min_area_m2}
+    area = {g: len(cells) * cell * cell for g, cells in enumerate(blobs)}
+    keep = {g for g, a in area.items() if a >= rack_min_area_m2}
+    shelves = []
+    for g, cells in enumerate(blobs):
+        if min_area_m2 <= area[g] < rack_min_area_m2:
+            xs, ys = [i % w for i in cells], [i // w for i in cells]
+            shelves.append((min(xs) * cell, min(ys) * cell, (max(xs) + 1) * cell, (max(ys) + 1) * cell))
     # Row runs per blob, then merge each run into the rectangle directly below
     # it when that one spans exactly the same columns.
     racks, groups = [], []
@@ -153,7 +165,7 @@ def from_occupancy(occ: str, w: int, h: int, cell: float, *, min_area_m2: float 
             nxt[key] = k
         open_rects = nxt
     width, height = w * cell, h * cell
-    return Layout(width, height, racks=racks, groups=groups,
+    return Layout(width, height, racks=racks, groups=groups, shelves=shelves,
                   aisles_y=[height / 2], cross_x=(cell, width - cell),
                   gateway_pos=tuple(gateway_pos) if gateway_pos else (width / 2, height / 2))
 

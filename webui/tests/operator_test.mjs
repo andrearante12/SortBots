@@ -250,7 +250,7 @@ async function main() {
     // -- nothing running --------------------------------------------------------
     check(`${vp.label}: no session shows the empty state`, await visible('#empty') && (await $text('#empty-title')) === 'No session running');
     check(`${vp.label}: header says no session`, (await $text('#s-label')) === 'No session', await $text('#s-label'));
-    check(`${vp.label}: no mode tile without a session`, !(await visible('#mode-tile')));
+    check(`${vp.label}: no mode on the session chip without a session`, (await page.eval(`document.getElementById('session-chip').dataset.mode || ''`)) === '');
     check(`${vp.label}: page does not scroll`, await page.eval(`document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight`));
     await shot(`${vp.label}-empty`);
 
@@ -769,8 +769,8 @@ async function main() {
     await page.eval(`window.__fakeSession = { state: 'running', phase: 'running', phase_label: 'running', session_id: 's1', scenario: 'library_localize', config: { map: 'warehouse', mode: 'readonly', robots: 2 } }`);
     await sleep(3400);
     check(`${vp.label}: running session shows in the header`, (await $text('#s-label')) === 'Session running', await $text('#s-label'));
-    check(`${vp.label}: a read-only saved map reads as Premapped`, (await $text('#mode-label')) === 'Premapped' && (await $text('#map-name')) === 'warehouse' && await visible('#mode-tile'));
-    check(`${vp.label}: the mode tile is a status, not a control`, await page.eval(`!document.querySelector('#mode-tile button')`));
+    check(`${vp.label}: a read-only saved map reads as Premapped on the session chip`, (await page.eval(`document.getElementById('session-chip').title`)).startsWith('Premapped · warehouse'), await page.eval(`document.getElementById('session-chip').title`));
+    check(`${vp.label}: no mode tile in the header any more`, !(await page.eval(`!!document.getElementById('mode-tile')`)));
     check(`${vp.label}: the view toggle sits in the header`, await page.eval(`!!document.querySelector('header #view')`));
     check(`${vp.label}: running but robots silent still shows the last stretch`, (await $text('#sp-boot .boot-label')).startsWith('Waiting for the robots'), await $text('#sp-boot .boot-label'));
     await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
@@ -865,6 +865,10 @@ async function main() {
   check('comms: the model\'s robots stand where the real ones are (map origin removed)',
         Math.abs(cs.nodes[1][0] - 7) < 0.3 && Math.abs(cs.nodes[1][1] - 12) < 0.3 && Math.abs(cs.nodes[2][0] - 14) < 0.3 && Math.abs(cs.nodes[2][1] - 8) < 0.3, JSON.stringify(cs.nodes));
   check('comms: the gateway pin is the model\'s gateway', Math.abs(cs.nodes[0][0] - 10.5) < 0.3 && Math.abs(cs.nodes[0][1] - 18) < 0.3, JSON.stringify(cs.nodes[0]));
+  // The default range is 8 m; robot_1 here is 10.6 m from the gateway. Set what the
+  // routing checks below assume rather than lean on the default.
+  check('comms: the model starts at 8 m open-air range', Math.round((await vz()).range.robot) === 8, JSON.stringify((await vz()).range));
+  await page.eval(`window.__viz.cmd({ op: 'range', metres: 22 })`);
   await waitFor(async () => { const s = await vz(); return s.routes[1] && s.routes[1][0] && s.routes[2] && s.routes[2][0] && s.airCount > 0; }, { what: 'model routes', tries: 40 });
   check('comms: every robot has a predicted route to the gateway, and messages fly', true);
   const atWorld = (x, y) => page.eval(`(() => { const r = document.getElementById('comms').getBoundingClientRect(); const [a, b] = window.__operator.toPx(${x}, ${y}); return [r.left + a, r.top + b]; })()`);
@@ -880,6 +884,15 @@ async function main() {
   await tap(await atWorld(-3, 2)); await tap(await atWorld(0.5, 8));
   await waitFor(async () => (await vz()).blocked.includes('0-1'), { what: 'a pulled link', tries: 30 });
   check('comms: pulling a link blocks it in the model', (await vz()).blocked.includes('0-1'));
+  // Why a link is down: robot 0 and 1 are 8 m apart (inside 22 m) with the free-standing
+  // wall between them, so the model drops that link and the overlay says it's the wall.
+  await waitFor(async () => (await vz()).hurt.some((h) => h.a === 1 && h.b === 2), { what: 'the wall-blocked link', tries: 30 });
+  const wallLink = (await vz()).hurt.find((h) => h.a === 1 && h.b === 2);
+  check('comms: a link the wall kills is reported as down because of one rack', wallLink.down && wallLink.racks === 1 && wallLink.db === 15, JSON.stringify(wallLink));
+  await click('#cm-show-obst'); await sleep(150);
+  check('comms: show obstacles shades what the model counts', (await vz()).showObstacles && (await vz()).obstacles.racks >= 2, JSON.stringify((await vz()).obstacles));
+  await shot('comms-obstacles');
+  await click('#cm-show-obst');
   await click('#cm-show-range'); await sleep(150);
   check('comms: show range turns on the range circles, sized by the model', (await vz()).showRange && (await vz()).range.robot > 5, JSON.stringify((await vz()).range));
   await shot('comms-range');
@@ -949,6 +962,66 @@ async function main() {
   check('teleport: not offered on the real robot, and the tool falls back to Drive',
         !(await visible('#tools [data-t="tp"]')) && await page.eval(`document.querySelector('#tools [data-t="select"]').classList.contains('active')`));
   await page.eval(`window.__platform = null; window.__operator.loadWaypoints()`); await sleep(200);
+
+  // -- the Sim view (Isaac's own render, only while watched) -------------------------------------
+  console.log('\n--- sim view ---');
+  check('sim view: offered on the sim', await visible('#view [data-v="sim"]'));
+  const beats = () => page.eval(`window.__published.filter((x) => x.topic === '/sim/view_cmd').map((x) => JSON.parse(x.msg.data).on)`);
+  await page.eval(`window.__published.length = 0`);
+  await click('#view [data-v="sim"]'); await sleep(300);
+  check('sim view: opening it shows the sim picture instead of the map',
+        (await visible('#simview')) && !(await visible('#map')) && !(await visible('#comms-toggle')) && !(await visible('#tools')));
+  check('sim view: opening it asks Isaac to render', JSON.stringify(await beats()) === '[true]', JSON.stringify(await beats()));
+  check('sim view: says it is waiting for the first frame', /Starting the sim camera/.test(await $text('#simview .msg')), await $text('#simview .msg'));
+  await sleep(2300);
+  check('sim view: keeps asking while open (a heartbeat, so a closed tab stops costing)', (await beats()).filter((b) => b).length >= 2, JSON.stringify(await beats()));
+  // Steering: Isaac reports the camera on /sim/ground_truth; the page orbits/pans/zooms from it.
+  await emit('/sim/ground_truth', { data: JSON.stringify({ t: 1, robots: {}, actors: {}, view: { on: true, follow: null, eye: [2, 5, 6.5], target: [-3, 13.5, 0] } }) });
+  await sleep(200);
+  const moves = () => page.eval(`window.__published.filter((x) => x.topic === '/sim/view_cmd').map((x) => JSON.parse(x.msg.data)).filter((m) => m.eye)`);
+  const svAt = await page.eval(`(() => { const r = document.getElementById('simview').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+  const dist = (m) => Math.hypot(m.eye[0] - m.target[0], m.eye[1] - m.target[1], m.eye[2] - m.target[2]);
+  const dragSv = async (dx, dy, mods = 0) => {
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: svAt[0], y: svAt[1], button: 'left', clickCount: 1, modifiers: mods });
+    for (let i = 1; i <= 6; i++) { await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: svAt[0] + dx * i / 6, y: svAt[1] + dy * i / 6, button: 'left', modifiers: mods }); await sleep(30); }
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: svAt[0] + dx, y: svAt[1] + dy, button: 'left', clickCount: 1, modifiers: mods });
+    await sleep(250);
+  };
+  await page.eval(`window.__published.length = 0`);
+  await dragSv(120, 0);
+  let mv = await moves(), last = mv[mv.length - 1];
+  check('sim view: dragging orbits the camera about its target (same distance, same target)',
+        !!last && Math.abs(dist(last) - Math.hypot(5, 8.5, 6.5)) < 0.05 && Math.abs(last.target[0] + 3) < 0.01 && Math.abs(last.eye[0] - 2) > 1, JSON.stringify(last));
+  check('sim view: camera moves are throttled, not one per mouse event', mv.length >= 1 && mv.length <= 5, String(mv.length));
+  await page.eval(`window.__published.length = 0`);
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: svAt[0], y: svAt[1], deltaX: 0, deltaY: -400 }); await sleep(250);
+  mv = await moves(); last = mv[mv.length - 1];
+  check('sim view: scrolling zooms in (shorter distance, same target)', !!last && dist(last) < 11.0 && Math.abs(last.target[1] - 13.5) < 0.01, JSON.stringify(last));
+  await page.eval(`window.__published.length = 0`);
+  await dragSv(0, 80, 8 /* shift */);
+  mv = await moves(); last = mv[mv.length - 1];
+  check('sim view: Shift-drag pans (the target moves, the distance does not)', !!last && Math.hypot(last.target[0] + 3, last.target[1] - 13.5) > 0.3 && Math.abs(last.target[2]) < 1e-6, JSON.stringify(last));
+  await page.eval(`window.__published.length = 0`);
+  await page.eval(`(() => { const s = document.getElementById('sv-follow'); s.value = ${JSON.stringify(r1)}; s.dispatchEvent(new Event('change')); })()`);
+  check('sim view: Follow asks Isaac to ride along with a robot', await page.eval(`window.__published.some((x) => x.topic === '/sim/view_cmd' && JSON.parse(x.msg.data).follow === ${JSON.stringify(r1)})`));
+  await click('#sv-reset');
+  check('sim view: Reset view asks for the default camera', await page.eval(`window.__published.some((x) => x.topic === '/sim/view_cmd' && JSON.parse(x.msg.data).reset === true)`) && (await page.eval(`document.getElementById('sv-follow').value`)) === '');
+  await shot('sim-view');
+  await click('#view [data-v="2d"]'); await sleep(200);
+  check('sim view: leaving tells Isaac to stop', (await beats()).slice(-1)[0] === false && (await visible('#map')) && !(await visible('#simview')));
+  const n0 = (await beats()).length; await sleep(2300);
+  check('sim view: and the heartbeat stops', (await beats()).length === n0);
+  await click('#view [data-v="sim"]'); await sleep(200);
+  await load();
+  await sleep(600);
+  check('sim view: the choice survives a reload once the platform is known', (await page.eval(`window.__operator.stageView`)) === 'sim' && await visible('#simview'));
+  await page.eval(`window.__platform = 'real'; window.__operator.loadWaypoints()`); await sleep(300);
+  check('sim view: not offered on the real robot (and falls back to the map)', !(await visible('#view [data-v="sim"]')) && (await page.eval(`window.__operator.stageView`)) === '2d');
+  await page.eval(`window.__platform = null; window.__operator.loadWaypoints(); localStorage.removeItem('sortbots.mapView')`); await sleep(200);
+  await emit('/map', walled);
+  await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+  await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+  await sleep(300);
 
   // -- manual drive (pad on the camera tile) ----------------------------------------------------------
   console.log('\n--- manual drive ---');

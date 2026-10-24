@@ -57,9 +57,19 @@ def test_an_l_shaped_blob_is_not_its_bounding_box():
 
 def test_separate_blobs_each_count_and_specks_are_dropped():
     occ = grid(12, 4, [(3, y) for y in range(4)] + [(7, y) for y in range(4)] + [(10, 1)])
-    lay = from_occupancy(occ, 12, 4, 0.5, min_area_m2=0.5)
+    lay = from_occupancy(occ, 12, 4, 0.5, min_area_m2=0.5, rack_min_area_m2=0.5)
     assert len(set(lay.groups)) == 2          # the 1-cell speck at (10, 1) is gone
     assert lay.crossings((0.25, 1.0), (5.75, 1.0)) == (2, 0)
+
+
+def test_small_clutter_is_light_shelving_not_a_rack():
+    # A rack row (4 x 0.5 by 10 x 0.5 = 10 m^2... here 2 x 8 cells = 4 m^2) and a 2 x 2
+    # cell box (1 m^2) on one line: the rack costs a rack, the box only a shelf.
+    occ = grid(20, 10, [(x, y) for x in (4, 5) for y in range(1, 9)] + [(x, y) for x in (12, 13) for y in (4, 5)])
+    lay = from_occupancy(occ, 20, 10, 0.5)
+    assert len(set(lay.groups)) == 1 and len(lay.shelves) == 1
+    assert lay.shelves[0] == (6.0, 2.0, 7.0, 3.0)
+    assert lay.crossings((0.25, 2.5), (9.75, 2.5)) == (1, 1)
 
 
 def test_bad_occupancy_size_is_refused():

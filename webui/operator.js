@@ -46,7 +46,8 @@
   const open = new Set();
   let selected = null;
   let tool = "select";
-  let view3d = false; // main stage: 2D occupancy map, or the 3D point cloud
+  let view3d = false; // main stage is the 3D point cloud
+  let stageView = "2d"; // "2d" map | "3d" cloud | "sim" (Isaac's own render, sim only)
   let waypoints = []; // [{name, x, y, yaw}], the server's copy — also the task endpoints
   let gateway = null; // {x, y}: the fleet gateway pin (comms overlay), server's copy
   let platform = null; // "sim" | "real", from serve.py; the Teleport tool is sim-only
@@ -342,6 +343,9 @@
   topic("/sim/ground_truth", "std_msgs/String", { throttle_rate: 100, queue_length: 1 }).subscribe((msg) => {
     try { worldTruth = JSON.parse(msg.data); } catch (e) { return; }
     worldTruthAt = performance.now(); dirty = true;
+    // The Sim camera's pose as Isaac has it, unless the viewer is mid-move (their
+    // newer pose would be overwritten by one the sim hasn't caught up to yet).
+    if (stageView === "sim" && !$("#simview").classList.contains("dragging") && performance.now() - simCam.lastSend > 1000) simCamFromTruth();
   });
   const worldLive = () => !!(worldLayout && worldLayout.world && worldTruth && performance.now() - worldTruthAt < WORLD_TRUTH_TTL_MS);
   const rgba = (c, a) => `rgba(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)},${a})`;
@@ -1145,6 +1149,9 @@
         platform = body.platform;
         $('#tools [data-t="tp"]').hidden = platform !== "sim";
         if (platform !== "sim" && tool === "tp") setTool("select");
+        $('#view [data-v="sim"]').hidden = platform !== "sim";
+        if (platform !== "sim" && stageView === "sim") setView("2d");
+        try { if (platform === "sim" && stageView === "2d" && localStorage.getItem("sortbots.mapView") === "sim") setView("sim"); } catch (e) { /* stay on the map */ }
       }
       renderWaypoints(); dirty = true;
     } catch (e) { console.error("failed to load waypoints", e); }
@@ -1383,12 +1390,14 @@
   function renderHeader() {
     const s = session, cfg = s && sessionActive() ? s.config : null;
     const premapped = !!cfg && cfg.map && cfg.map !== "new" && cfg.mode === "readonly";
-    $("#mode-tile").hidden = !cfg;
-    $("#mode-tile").className = premapped ? "loc" : "map";
-    $("#mode-label").textContent = premapped ? "Premapped" : "Mapping";
-    $("#map-name").textContent = cfg && cfg.map && cfg.map !== "new" ? (cfg.map === "working" ? "last map" : cfg.map) : "";
+    // How the session was started, on hover: Mapping (building/extending a map) or
+    // Premapped on a saved, read-only map. Changing it means a restart, from Session.
+    const mapName = cfg && cfg.map && cfg.map !== "new" ? (cfg.map === "working" ? "last map" : cfg.map) : "";
+    const mode = cfg ? (premapped ? "Premapped" : "Mapping") + (mapName ? ` · ${mapName}` : "") : "";
     const label = !s ? "No session" : { starting: `Starting: ${s.phase_label || "…"}`, running: "Session running", stopping: "Stopping…", failed: "Session failed" }[s.state] || "No session";
     $("#s-label").textContent = controlAvailable ? label : "Session";
+    $("#session-chip").dataset.mode = mode;
+    $("#session-chip").title = mode ? `${mode}. Start, stop or save the session` : "Start, stop or save the session";
     $("#s-dot").className = "dot " + (s && s.state === "running" ? "" : s && ["starting", "stopping"].includes(s.state) ? "busy" : "idle");
     const card = $("#session .card");
     card.classList.toggle("live", sessionActive());
@@ -1756,23 +1765,143 @@
   // The 3D view is look-only: the tools (waypoints, sends) work on the 2D map, so they
   // hide with it. operator_cloud.js subscribes to the cloud only while it is showing.
   let cloudMounted = false;
-  function setView(v3) {
-    view3d = v3 && !!window.sortbotsCloud;
-    for (const b of document.querySelectorAll("#view button")) b.classList.toggle("active", (b.dataset.v === "3d") === view3d);
+  function setView(v) {
+    if (v === true) v = "3d"; else if (v === false) v = "2d";
+    if (v === "3d" && !window.sortbotsCloud) v = "2d";
+    if (v === "sim" && platform !== "sim") v = "2d";
+    stageView = v; view3d = v === "3d";
+    const onMap = v === "2d";
+    for (const b of document.querySelectorAll("#view button")) b.classList.toggle("active", b.dataset.v === v);
     // style.display, not [hidden]: #map / #tools set their own display, which beats the attribute.
-    canvas.style.display = $("#tools").style.display = view3d ? "none" : "";
+    canvas.style.display = $("#tools").style.display = onMap ? "" : "none";
     $("#cloud").hidden = !view3d;
-    $("#comms-toggle").hidden = view3d; // the overlay draws on the 2D map only
-    setComms(!view3d && commsWanted);
+    $("#comms-toggle").hidden = !onMap; // the overlay draws on the 2D map only
+    setComms(onMap && commsWanted);
     if (view3d) {
       if (!cloudMounted) { window.sortbotsCloud.mount($("#cloud"), ros); cloudMounted = true; }
       window.sortbotsCloud.show(); syncCloudRobots();
-    } else {
-      if (cloudMounted) window.sortbotsCloud.hide();
-      setTool(tool); dirty = true;
-    }
-    try { localStorage.setItem("sortbots.mapView", view3d ? "3d" : "2d"); } catch (e) { /* this tab only */ }
+    } else if (cloudMounted) window.sortbotsCloud.hide();
+    setSimView(v === "sim");
+    if (onMap) { setTool(tool); dirty = true; }
+    try { localStorage.setItem("sortbots.mapView", v); } catch (e) { /* this tab only */ }
   }
+
+  // -- the Sim view: Isaac's own render (scripts/spawn_warehouse.py, configs/sim_view.yaml) ----------
+  // Every rendered camera slows the sim (bench_sim.sh: a third one took 2 robots from 0.47x
+  // to 0.33x), so Isaac builds this one disabled and renders it only while a heartbeat
+  // arrives on /sim/view_cmd. The page beats every SIM_BEAT_MS while the view is open AND
+  // the tab is visible, and says "off" on the way out; a closed tab or a phone gone to
+  // sleep just stops beating, and Isaac switches the camera off a few seconds later.
+  const SIM_BEAT_MS = 2000;
+  const simView = { on: false, beat: null, timer: null, token: 0 };
+  function setSimView(on) {
+    const want = on && !document.hidden;
+    $("#simview").hidden = !on;
+    if (want === simView.on) return;
+    simView.on = want;
+    clearInterval(simView.beat); clearTimeout(simView.timer); simView.token++;
+    if (!want) { simView.beat = null; publishString("/sim/view_cmd", JSON.stringify({ on: false })); return; }
+    const beat = () => publishString("/sim/view_cmd", JSON.stringify({ on: true }));
+    beat(); simView.beat = setInterval(beat, SIM_BEAT_MS);
+    const token = simView.token, pic = $("#simview .pic"), msg = $("#simview .msg");
+    const tick = () => {
+      if (token !== simView.token) return;
+      const probe = new Image();
+      probe.onload = () => { if (token !== simView.token) return; pic.style.backgroundImage = `url(${probe.src})`; msg.textContent = ""; simView.timer = setTimeout(tick, 250); };
+      // The first frames take a moment: the render product is created on the first beat.
+      probe.onerror = () => { if (token !== simView.token) return; if (!pic.style.backgroundImage) msg.textContent = "Starting the sim camera…"; simView.timer = setTimeout(tick, 1500); };
+      probe.src = `http://${HOST}:${VIDEO_PORT}/snapshot?topic=/sim/view/rgb&qos_profile=sensor_data&_=${Date.now()}`;
+    };
+    tick();
+  }
+  document.addEventListener("visibilitychange", () => setSimView(stageView === "sim"));
+
+  // Steering the Sim camera: the same gestures as the 3D cloud (drag orbits, right-drag
+  // or Shift pans, wheel / pinch zoom), but the picture is Isaac's, so every move goes
+  // to the sim (/sim/view_cmd {eye, target}) and comes back as the next frame. Moves
+  // are sent at most every SIM_MOVE_MS; the camera state lives here while dragging and
+  // re-syncs from /sim/ground_truth's "view" (where Isaac says the camera is) otherwise.
+  const SIM_MOVE_MS = 100;
+  const simCam = { yaw: 0, pitch: 0.6, dist: 12, tx: 0, ty: 0, tz: 0, synced: false, lastSend: 0, pending: false, follow: "" };
+  function simCamFromTruth() {
+    const v = worldTruth && worldTruth.view;
+    if (!v || !v.eye || !v.target) return;
+    const [ex, ey, ez] = v.eye, [tx, ty, tz] = v.target, dx = ex - tx, dy = ey - ty, dz = ez - tz;
+    const dist = Math.hypot(dx, dy, dz);
+    Object.assign(simCam, { tx, ty, tz, dist, yaw: Math.atan2(dy, dx), pitch: Math.asin(Math.max(-1, Math.min(1, dz / dist))), synced: true });
+    const f = v.follow || "";
+    if (f !== simCam.follow) { simCam.follow = f; $("#sv-follow").value = f; }
+  }
+  const simEye = () => [simCam.tx + simCam.dist * Math.cos(simCam.pitch) * Math.cos(simCam.yaw),
+                        simCam.ty + simCam.dist * Math.cos(simCam.pitch) * Math.sin(simCam.yaw),
+                        simCam.tz + simCam.dist * Math.sin(simCam.pitch)];
+  function simSend(force) {
+    const now = performance.now();
+    if (!force && now - simCam.lastSend < SIM_MOVE_MS) {
+      if (!simCam.pending) { simCam.pending = true; setTimeout(() => { simCam.pending = false; simSend(true); }, SIM_MOVE_MS); }
+      return;
+    }
+    simCam.lastSend = now;
+    publishString("/sim/view_cmd", JSON.stringify({ on: true, eye: simEye().map((v) => +v.toFixed(3)), target: [simCam.tx, simCam.ty, simCam.tz].map((v) => +v.toFixed(3)) }));
+  }
+  function simMoved() {
+    if (simCam.follow) { simCam.follow = ""; $("#sv-follow").value = ""; } // a manual move takes the camera back
+    simSend(false);
+  }
+  {
+    const sv = $("#simview"), pts = new Map();
+    let drag = null, pinchD = 0;
+    sv.addEventListener("pointerdown", (e) => {
+      if (e.target.closest(".sv-bar")) return;
+      if (!simCam.synced) simCamFromTruth();
+      sv.setPointerCapture(e.pointerId);
+      pts.set(e.pointerId, [e.clientX, e.clientY]);
+      if (pts.size === 2) { const [a, b] = [...pts.values()]; pinchD = Math.hypot(a[0] - b[0], a[1] - b[1]); drag = { pan: true, x: (a[0] + b[0]) / 2, y: (a[1] + b[1]) / 2 }; return; }
+      drag = { pan: e.button === 2 || e.shiftKey, x: e.clientX, y: e.clientY };
+      sv.classList.add("dragging");
+    });
+    sv.addEventListener("pointermove", (e) => {
+      if (!drag || !pts.has(e.pointerId)) return;
+      pts.set(e.pointerId, [e.clientX, e.clientY]);
+      let x = e.clientX, y = e.clientY;
+      if (pts.size === 2) {
+        const [a, b] = [...pts.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+        if (pinchD) simCam.dist = Math.min(60, Math.max(1.5, simCam.dist * pinchD / Math.max(d, 1)));
+        pinchD = d; x = (a[0] + b[0]) / 2; y = (a[1] + b[1]) / 2;
+      }
+      const dx = x - drag.x, dy = y - drag.y; drag.x = x; drag.y = y;
+      if (drag.pan) { // grab the floor: it follows the pointer. forward = (-c, -s), right = (-s, c)
+        const k = simCam.dist * 0.0018, c = Math.cos(simCam.yaw), s = Math.sin(simCam.yaw);
+        simCam.tx += (s * dx - c * dy) * k; simCam.ty += (-c * dx - s * dy) * k;
+      } else {
+        simCam.yaw -= dx * 0.006;
+        simCam.pitch = Math.min(1.5, Math.max(0.08, simCam.pitch + dy * 0.005));
+      }
+      simMoved();
+    });
+    const up = (e) => { pts.delete(e.pointerId); if (pts.size < 2) pinchD = 0; if (!pts.size) { drag = null; sv.classList.remove("dragging"); } };
+    sv.addEventListener("pointerup", up); sv.addEventListener("pointercancel", up);
+    sv.addEventListener("contextmenu", (e) => e.preventDefault()); // right-drag pans
+    sv.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      if (!simCam.synced) simCamFromTruth();
+      simCam.dist = Math.min(60, Math.max(1.5, simCam.dist * Math.exp(e.deltaY * 0.0012)));
+      simMoved();
+    }, { passive: false });
+  }
+  $("#sv-reset").addEventListener("click", () => { simCam.synced = false; simCam.follow = ""; $("#sv-follow").value = ""; publishString("/sim/view_cmd", JSON.stringify({ on: true, reset: true })); });
+  $("#sv-follow").addEventListener("change", (e) => {
+    simCam.follow = e.target.value; simCam.synced = false;
+    publishString("/sim/view_cmd", JSON.stringify({ on: true, follow: e.target.value || null }));
+  });
+  function renderSimFollow() { // robot list for the Follow picker
+    const sel = $("#sv-follow"), want = [...robots.keys()].join(",");
+    if (sel.dataset.ids === want) return;
+    sel.dataset.ids = want;
+    sel.innerHTML = `<option value="">Free camera</option>` + [...robots.keys()].map((id) => `<option value="${esc(id)}">Follow ${esc(nameOf(id))}</option>`).join("");
+    sel.value = simCam.follow;
+  }
+
   // -- comms overlay (operator_comms.js) ----------------------------------------------------------
   let commsWanted = false;
   function setComms(v) {
@@ -1790,12 +1919,12 @@
   }
   $("#comms-toggle").addEventListener("click", () => {
     commsWanted = !commsWanted;
-    setComms(commsWanted && !view3d);
+    setComms(commsWanted && stageView === "2d");
     try { localStorage.setItem("sortbots.comms", commsWanted ? "on" : "off"); } catch (e) { /* this tab only */ }
   });
 
   const syncCloudRobots = () => window.sortbotsCloud.setRobots([...robots.values()].map((r) => ({ id: r.id, color: r.color, pose: r.pose })));
-  $("#view").addEventListener("click", (e) => { if (e.target.dataset.v) setView(e.target.dataset.v === "3d"); });
+  $("#view").addEventListener("click", (e) => { if (e.target.dataset.v) setView(e.target.dataset.v); });
 
   // -- phone panes ----------------------------------------------------------------------------------
   // Below 760 px (operator.html's media query) one pane shows at a time. The map keeps
@@ -1899,19 +2028,20 @@
       r.obstacles = null; r.obstaclesMap = [];
       drawCamObstacles(r.id); // clears it
     }
-    renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending(); renderPaneBadges();
+    renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending(); renderPaneBadges(); renderSimFollow();
     if (window.sortbotsComms) window.sortbotsComms.sync();
   }, 250);
 
   // -- boot ----------------------------------------------------------------------------------------------------------------------
   applyTheme(); resize(); setTool("select"); renderTasks(); renderWaypoints();
   refreshRoster(); loadWaypoints(); loadGateway(); pollSession();
-  try { if (localStorage.getItem("sortbots.mapView") === "3d") setView(true); } catch (e) { /* default: 2D */ }
+  // "sim" waits for loadWaypoints to learn the platform (it's sim-only), see there.
+  try { const v = localStorage.getItem("sortbots.mapView"); if (v === "3d") setView("3d"); } catch (e) { /* default: 2D */ }
   setInterval(loadWaypoints, 10000); // another operator may have added pins
   setInterval(loadGateway, 10000);
   try { if (localStorage.getItem("sortbots.comms") === "on") $("#comms-toggle").click(); } catch (e) { /* default: off */ }
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane, setView, get stageView() { return stageView; }, simCam };
 })();

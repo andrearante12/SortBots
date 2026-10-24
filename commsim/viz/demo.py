@@ -281,7 +281,7 @@ class DemoSim:
             "hz": sim.status_hz, "orig_ms": int(sim.orig_s * 1000), "duration_s": None, "t0_ns": 0,
             "live": True, "variant": self.variant, "bands": sim.bands,
             "layout": {"name": self.layout_name, "width": lay.width, "height": lay.height,
-                       "racks": lay.racks, "shelves": lay.shelves, "aisles_y": lay.aisles_y,
+                       "racks": lay.racks, "groups": lay.groups, "shelves": lay.shelves, "aisles_y": lay.aisles_y,
                        "cross_x": list(lay.cross_x), "gateway_pos": list(lay.gateway_pos)},
             "nodes": [{"id": i, "ns": f"n{i}", "ip": f"10.42.0.{i + 1}", "mac": f"02:00:00:00:{i:02x}:00",
                        "pos": list(r.pos), "gateway": r.is_gw, "alive": r.alive}
@@ -296,7 +296,10 @@ class DemoSim:
                       "orig_interval_ms": int(sim.orig_s * 1000),
                       "zenoh_lease_ms": int(sim.lease_s * 1000), "task_lease_s": sim.params.task_lease_s,
                       "bid_window_s": sim.params.bid_window_s, "snr_link_min_db": 4.0,
-                      "speed_mps": sim.speed},
+                      "speed_mps": sim.speed,
+                      # What an obstacle costs a link, so the overlay can say why one failed.
+                      "rack_db": sim.rp.rack_db_g24, "shelf_db": sim.rp.shelf_db,
+                      "gateway_rack_factor": sim.rp.gateway_rack_factor},
             "counts": {"air_by_kind": {}},
             "tasks": [dict(task_id=k, **v) for k, v in self.task_info.items()],
             "limits": [
@@ -325,7 +328,9 @@ class DemoSim:
         self.sim.topo()
         t = self.us(self.sim.now)
         self.emit({"t": t, "k": "layout", "width": layout.width, "height": layout.height,
-                   "racks": len(set(layout.groups)) if layout.groups else len(layout.racks)})
+                   "racks": len(set(layout.groups)) if layout.groups else len(layout.racks),
+                   # The geometry itself, for the overlay's "which obstacle hurt this link".
+                   "rects": layout.racks, "groups": layout.groups, "shelves": layout.shelves})
         for i, r in sorted(self.sim.nodes.items()):
             self.emit({"t": t, "k": "pos", "id": i, "pos": list(r.pos)})
         self.emit({"t": t, "k": "snr", "snr": self.snr_matrix()})
@@ -439,7 +444,7 @@ class Hub:
     the Jetson too, and a DES spinning for nobody would burn its CPU."""
 
     def __init__(self, n: int = 2, variant: str = "V3", layout: "str | Layout" = "open_floor",
-                 range_m: float | None = 22.0):
+                 range_m: float | None = 8.0):
         self.clients: list[queue.Queue] = []
         self.cmds: queue.Queue = queue.Queue()
         self.lock = threading.Lock()
