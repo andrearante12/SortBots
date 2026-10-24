@@ -1433,7 +1433,24 @@
   for (const b of document.querySelectorAll("#tools button")) b.addEventListener("click", () => setTool(b.dataset.t));
 
   let press = null; // {px, py, wx, wy, moved, panStart}
+  // Pinch to zoom (phones have no wheel): two fingers down drop whatever one finger
+  // started (pan, send, teleport) and zoom about their midpoint instead.
+  const touches = new Map(); // pointerId -> [px, py]
+  let pinch = null;          // {d0, scale0, wx, wy}
+  const pinchGeom = () => {
+    const [[ax, ay], [bx, by]] = [...touches.values()];
+    return { d: Math.hypot(ax - bx, ay - by), mx: (ax + bx) / 2, my: (ay + by) / 2 };
+  };
+  const touchAt = (e) => { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
   canvas.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "touch") touches.set(e.pointerId, touchAt(e));
+    if (touches.size === 2) {
+      const g = pinchGeom(), [wx, wy] = toWorld(g.mx, g.my);
+      pinch = { d0: Math.max(g.d, 1), scale0: view.scale, wx, wy };
+      press = null; if (drag) { drag = null; dirty = true; }
+      return;
+    }
+    if (touches.size > 2) return;
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
     const [wx, wy] = toWorld(px, py);
     // Pressing on a robot starts a send, not a pan, whatever the tool but waypoints.
@@ -1442,6 +1459,14 @@
     canvas.setPointerCapture(e.pointerId);
   });
   canvas.addEventListener("pointermove", (e) => {
+    if (touches.has(e.pointerId)) touches.set(e.pointerId, touchAt(e));
+    if (pinch && touches.size === 2) {
+      const g = pinchGeom();
+      view.scale = Math.min(200, Math.max(2, pinch.scale0 * g.d / pinch.d0));
+      view.cx = pinch.wx - (g.mx - cssW / 2) / view.scale; view.cy = pinch.wy + (g.my - cssH / 2) / view.scale;
+      view.moved = true; dirty = true;
+      return;
+    }
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
     if (!press) { // hover: say what a press here would do
       if (tool !== "wp") canvas.style.cursor = robotAt(px, py) ? "pointer" : "grab";
@@ -1463,7 +1488,9 @@
       dirty = true;
     }
   });
+  const untouch = (e) => { touches.delete(e.pointerId); if (touches.size < 2) pinch = null; };
   canvas.addEventListener("pointerup", (e) => {
+    untouch(e);
     if (!press) return;
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
     const p = press, d = drag; press = null; drag = null;
@@ -1483,7 +1510,9 @@
       if (p.moved) return;
       const hit = robotAt(px, py);
       // Closed -> open it; open -> give it control; already in control -> close it.
-      if (hit) { if (!open.has(hit.id) || selected !== hit.id) openRobot(hit.id); else closeRobot(hit.id); }
+      if (hit) {
+        if (!open.has(hit.id) || selected !== hit.id) { openRobot(hit.id); if (narrow()) setPane("robots"); } else closeRobot(hit.id);
+      }
       return;
     }
     const [wx, wy] = toWorld(px, py);
@@ -1496,7 +1525,7 @@
       saveGateway({ x: p.wx, y: p.wy });
     }
   });
-  canvas.addEventListener("pointercancel", () => { press = null; if (drag) { drag = null; dirty = true; } });
+  canvas.addEventListener("pointercancel", (e) => { untouch(e); press = null; if (drag) { drag = null; dirty = true; } });
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
@@ -1673,6 +1702,26 @@
   const syncCloudRobots = () => window.sortbotsCloud.setRobots([...robots.values()].map((r) => ({ id: r.id, color: r.color, pose: r.pose })));
   $("#view").addEventListener("click", (e) => { if (e.target.dataset.v) setView(e.target.dataset.v === "3d"); });
 
+  // -- phone panes ----------------------------------------------------------------------------------
+  // Below 760 px (operator.html's media query) one pane shows at a time. The map keeps
+  // running hidden (visibility, not display) so its canvas keeps its size, and a resize
+  // re-fits it when it comes back.
+  const narrow = () => matchMedia("(max-width: 760px)").matches;
+  function setPane(p) {
+    document.body.dataset.pane = p;
+    for (const b of document.querySelectorAll("#mnav button")) b.classList.toggle("active", b.dataset.pane === p);
+    if (p === "map") dispatchEvent(new Event("resize"));
+    try { localStorage.setItem("sortbots.pane", p); } catch (e) { /* this tab only */ }
+  }
+  $("#mnav").addEventListener("click", (e) => { const b = e.target.closest("button[data-pane]"); if (b) setPane(b.dataset.pane); });
+  try { setPane(localStorage.getItem("sortbots.pane") || "map"); } catch (e) { setPane("map"); }
+  function renderPaneBadges() {
+    const list = [...robots.values()], up = list.filter(online).length;
+    const t = $("#mn-robots"); if (t) t.textContent = list.length ? `${up}/${list.length}` : "";
+    const busy = tasks.filter((x) => !FINISHED.includes(x.state)).length;
+    const k = $("#mn-tasks"); if (k) k.textContent = busy ? String(busy) : "";
+  }
+
   // -- resizable side bars -----------------------------------------------------------------------
   // The grid's outer columns are --left-w / --right-w on <body>. Each handle drags its
   // bar's inner edge; widths persist per browser, double-click resets. The stage
@@ -1731,7 +1780,7 @@
       r.obstacles = null; r.obstaclesMap = [];
       drawCamObstacles(r.id); // clears it
     }
-    renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending();
+    renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending(); renderPaneBadges();
     if (window.sortbotsComms) window.sortbotsComms.sync();
   }, 250);
 
@@ -1745,5 +1794,5 @@
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; } };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane };
 })();

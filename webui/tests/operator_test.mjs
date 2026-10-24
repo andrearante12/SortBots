@@ -950,6 +950,53 @@ async function main() {
         !(await visible('#tools [data-t="tp"]')) && await page.eval(`document.querySelector('#tools [data-t="select"]').classList.contains('active')`));
   await page.eval(`window.__platform = null; window.__operator.loadWaypoints()`); await sleep(200);
 
+  // -- phones ---------------------------------------------------------------------------------------
+  console.log('\n--- phone ---');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+  await page.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  await page.eval(`localStorage.clear()`); await load();
+  await emit('/map', walled);
+  await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+  await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+  await sleep(600);
+  const inView = (sel) => page.eval(`(() => { const e = document.querySelector(${JSON.stringify(sel)}); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.left >= -1 && r.right <= innerWidth + 1 && r.top >= -1 && r.bottom <= innerHeight + 1; })()`);
+  check('phone: the bottom bar switches panes', await visible('#mnav'));
+  check('phone: the map gets the screen by default, the lists are tucked away',
+        (await page.eval(`document.getElementById('map').getBoundingClientRect().width`)) > 370 && !(await visible('#left')) && !(await visible('#right')));
+  // Against the DEVICE width: a phone widens its layout viewport to fit overflowing content,
+  // so innerWidth itself grows with the bug (it read 495 on a 390 px screen).
+  check('phone: nothing scrolls sideways', await page.eval(`innerWidth <= 391 && document.documentElement.scrollWidth <= 391`), await page.eval(`'innerWidth ' + innerWidth + ', scrollWidth ' + document.documentElement.scrollWidth`));
+  check('phone: Stop all and the session chip are always on screen', (await inView('#estop')) && (await inView('#session-chip')));
+  await shot('phone-map');
+  const zoom0 = await page.eval(`window.__operator.view.scale`);
+  const mid = await page.eval(`(() => { const r = document.getElementById('map').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+  const tp2 = (dx) => [{ x: mid[0] - dx, y: mid[1], id: 1 }, { x: mid[0] + dx, y: mid[1], id: 2 }];
+  await page.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: tp2(30) });
+  for (const dx of [45, 60, 80]) await page.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: tp2(dx) });
+  await page.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await sleep(150);
+  const zoom1 = await page.eval(`window.__operator.view.scale`);
+  check('phone: pinching out zooms the map in', zoom1 > zoom0 * 2, `${zoom0.toFixed(1)} -> ${zoom1.toFixed(1)}`);
+  check('phone: a pinch never turns into a send', !(await page.eval(`JSON.stringify(window.__published)`)).includes('dispatch_task') && !(await page.eval(`!!window.__operator.drag`)));
+  await click('#mnav [data-pane="robots"]'); await sleep(200);
+  check('phone: Robots shows the robot list full width', (await visible('#left')) && (await page.eval(`document.getElementById('left').getBoundingClientRect().width`)) > 370);
+  check('phone: the bottom bar counts robots online', /2\/2/.test(await $text('#mn-robots')), await $text('#mn-robots'));
+  await shot('phone-robots');
+  await click('#mnav [data-pane="tasks"]'); await sleep(200);
+  check('phone: Tasks shows the task list', (await visible('#right')) && !(await visible('#left')));
+  await shot('phone-tasks');
+  await load();
+  check('phone: the pane survives a reload', await visible('#right'));
+  await click('#mnav [data-pane="map"]'); await sleep(300);
+  check('phone: back to the map, it is sized again', (await page.eval(`document.getElementById('map').width`)) > 370);
+  await click('#session-chip'); await sleep(400);
+  check('phone: the session panel fits the screen', await page.eval(`(() => { const r = document.querySelector('#session .card').getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth + 1; })()`));
+  await shot('phone-session');
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+  await page.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+  await page.eval(`localStorage.clear()`); await load();
+
   // -- resizable side bars ------------------------------------------------------------------------
   console.log('\n--- side bars ---');
   await page.eval(`localStorage.clear()`); await load();

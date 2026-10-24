@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>SortBots</title>
 <script>
   // Apply a pinned theme before first paint so there is no flash. Nothing pinned = follow the system.
@@ -377,6 +377,48 @@
   .boot .bar i::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.45), transparent); animation: sweep 1.6s linear infinite; }
   @keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
   @media (prefers-reduced-motion: reduce) { .boot .bar i::after { animation: none; } }
+
+  /* -- phones / narrow tablets ------------------------------------------------------------
+     Three fixed columns leave the map no width on a phone, so below 760 px the page shows
+     ONE pane at a time (Map, Robots or Tasks; body[data-pane], set by operator.js) with a
+     bottom bar to switch. The header wraps: session, alarms and Stop all stay on the first
+     row, always one tap away; the map controls scroll sideways on the second. */
+  #mnav { display: none; }
+  @media (max-width: 760px) {
+    /* minmax(0, 1fr), not 1fr: a bare 1fr column grows to its widest child's min-content,
+       and the scrolling tool row made the whole page 495 px wide on a 390 px phone,
+       pushing Stop all off screen (caught by the phone test, 2026-10-24). */
+    body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; height: 100dvh; }
+    header { flex-wrap: wrap; gap: 8px; padding: 8px 10px; row-gap: 6px; min-width: 0; }
+    h1 { width: auto; font-size: .95rem; }
+    header .spacer { flex: 1 0 0; }
+    #mode-strip { order: 10; flex: 1 0 100%; overflow-x: auto; scrollbar-width: none; padding-bottom: 2px; }
+    #mode-strip::-webkit-scrollbar { display: none; }
+    #session-chip #s-label { max-width: 34vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #session-chip, #estop, #alarms, #theme { flex: none; }
+    #left, #stage, #right { grid-row: 2; grid-column: 1; border: none; }
+    body:not([data-pane="robots"]) #left, body:not([data-pane="tasks"]) #right { display: none; }
+    body[data-pane="robots"] #stage, body[data-pane="tasks"] #stage { visibility: hidden; }
+    .resizer { display: none; }
+    #mnav { display: flex; grid-row: 3; grid-column: 1; background: var(--surface); border-top: 1px solid var(--line);
+            padding: 4px 6px calc(4px + env(safe-area-inset-bottom)); gap: 4px; }
+    #mnav button { flex: 1; background: none; border: none; border-radius: 8px; padding: 9px 4px; font-weight: 600; color: var(--muted);
+                   display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: .78rem; }
+    #mnav button .ic { font-size: 1.15rem; line-height: 1; }
+    #mnav button.active { color: var(--ink); background: var(--segbg); }
+    #mnav .badge { font-size: .7rem; color: var(--muted); font-weight: 500; }
+    #alarm-pop { top: auto; bottom: 70px; left: 8px; right: 8px; width: auto; }
+    #comms-bar { top: 8px; left: 8px; right: 8px; font-size: .8rem; gap: 6px 8px; }
+    #comms-bar .cm-range input { width: 70px; }
+    #comms-feed { left: 8px; right: 8px; bottom: 56px; max-width: none; }
+    #hint { display: none; }
+    #session { padding-top: 12px; }
+    #session .card { max-height: calc(100dvh - 24px); padding: 16px; }
+    .veil { padding-top: 40px; }
+    /* Touch targets: 40 px is the floor for a thumb. */
+    .tk .x { font-size: 1.4rem; padding: 0 8px; }
+    #tools button, .seg button { padding: 8px 12px; }
+  }
   .boot-label { font-size: .82rem; color: var(--muted); }
   #empty .boot { width: 280px; margin-top: 6px; }
   #session-strip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: .88rem; }
@@ -433,6 +475,13 @@
 
 <div class="resizer" id="rz-left" role="separator" aria-orientation="vertical" aria-label="Resize the robot list" title="Drag to resize · double-click to reset"></div>
 <div class="resizer" id="rz-right" role="separator" aria-orientation="vertical" aria-label="Resize the task list" title="Drag to resize · double-click to reset"></div>
+
+<!-- Phones: one pane at a time, switched here (operator.js setPane). Hidden on wide screens. -->
+<nav id="mnav" aria-label="Panes">
+  <button type="button" data-pane="map" class="active"><span class="ic">&#9634;</span>Map</button>
+  <button type="button" data-pane="robots"><span class="ic">&#9679;</span>Robots<span class="badge" id="mn-robots"></span></button>
+  <button type="button" data-pane="tasks"><span class="ic">&#9776;</span>Tasks<span class="badge" id="mn-tasks"></span></button>
+</nav>
 
 <main id="stage">
   <canvas id="map"></canvas>
