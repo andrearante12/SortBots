@@ -85,6 +85,28 @@ _HUB = None
 _HUB_LOCK = threading.Lock()
 
 
+def _git(*args: str) -> str:
+    import subprocess
+    try:
+        return subprocess.run(["git", "-C", str(WEBUI_DIR.parent), *args], capture_output=True,
+                              text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _git_state() -> dict:
+    return {"branch": _git("rev-parse", "--abbrev-ref", "HEAD") or None,
+            "commit": _git("rev-parse", "--short", "HEAD") or None,
+            # Tracked files only: untracked local maps/ etc. aren't "changes to the code".
+            "dirty": bool(_git("status", "--porcelain", "--untracked-files=no"))}
+
+
+# What this process was started from. The page's HTML/JS are read from disk on every
+# request, but this file, session.py and the comms model were imported at startup, so
+# a branch switch since then is only half live until the console restarts.
+_STARTED = _git_state()
+
+
 def _commsim_hub():
     """The comms model, started on first use. Lazy because importing commsim
     (and its YAML config) is wasted on a dashboard nobody opens the overlay on."""
@@ -192,6 +214,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_splat_config()
         elif route == "/api/comms_gateway":
             self._serve_json(_load_comms_gateway())
+        elif route == "/api/version":
+            now = _git_state()
+            self._serve_json({**now, "started": _STARTED,
+                              "restart_needed": now["commit"] != _STARTED["commit"]})
         elif route == "/api/commsim/events":
             self._serve_commsim_events()
         elif route == "/api/session":

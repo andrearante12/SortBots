@@ -98,6 +98,11 @@
   header .spacer { flex: 1; }
   .btn.icon { width: 34px; padding: 6px 0; line-height: 1; font-size: 1rem; }
   #session-chip { display: inline-flex; align-items: center; gap: 8px; }
+  #build { flex: 0 1 auto; min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+           font: 500 .76rem ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+           padding: 3px 8px; border: 1px solid var(--line); border-radius: 99px; margin-left: -6px; cursor: default; }
+  #build.stale { color: var(--warnink); background: var(--warnbg); border-color: var(--warnline); }
+  @media (max-width: 1100px) { #build { max-width: 120px; } }
   #alarms { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
   #alarms .dot { background: var(--faint); }
   #alarms.on { color: var(--stop); border-color: var(--stopb); font-weight: 600; }
@@ -481,6 +486,10 @@
 
 <header>
   <h1>SortBots</h1>
+  <!-- Which branch this console serves (serve.py /api/version): the site is whatever is
+       checked out on the host, so say so. Amber when the server code is older than the
+       checkout and a console restart is needed. -->
+  <span id="build" hidden></span>
   <!-- Map / 3D cloud / Sim picks what the stage shows. How the session was started
        (mapping vs. a premapped, read-only map) is the session chip's tooltip: it was a
        header tile until 2026-10-24, squeezed to an unreadable "MODE" at laptop widths. -->
@@ -500,7 +509,7 @@
     <!-- Comms overlay (operator_comms.js): the commsim model of the fleet radio, fed
          the real robots' poses, the map's obstacles and the gateway pin. Predicted, so it
          only ever draws on the map; the robot cards and alarms stay the real fleet's. -->
-    <button id="comms-toggle" type="button" role="switch" aria-checked="false" title="Overlay the comms model on the map: predicted radio links, mesh routes and every message hop, for where the robots are now"><span class="sw"></span>Comms overlay</button>
+    <button id="comms-toggle" type="button" role="switch" aria-checked="false" title="Overlay the comms model on the map: predicted radio links, mesh routes and every message hop, for where the robots are now"><span class="sw"></span>Comms</button>
     <span id="coverage" hidden title="Area of the map the fleet has seen"><b id="cov-n"></b> mapped</span>
   </div>
   <span class="spacer"></span>

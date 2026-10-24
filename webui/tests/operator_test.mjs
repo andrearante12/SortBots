@@ -62,6 +62,7 @@ window.fetch = (url, opts) => {
     return json({ platform: window.__platform || 'sim', waypoints: window.__navWps });
   }
   if (u.startsWith('/api/session') && !u.startsWith('/api/session/') && window.__fakeSession) return json(window.__fakeSession);
+  if (u.startsWith('/api/version') && window.__fakeVersion) return json(window.__fakeVersion);
   // Stop all's dialog: record, never stop anything real.
   if ((u.startsWith('/api/session/stop') || u.startsWith('/api/session/finish')) && opts && opts.method === 'POST') {
     window.__sessionPosts.push({ url: u, body: JSON.parse(opts.body || '{}') });
@@ -1068,6 +1069,18 @@ async function main() {
   await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'w' }))`);
   await shot('drive-pad');
   await page.eval(`window.__operator.select(null)`);
+
+  // -- which branch the site is serving -------------------------------------------------------------
+  console.log('\n--- branch chip ---');
+  const { execSync } = await import('node:child_process');
+  const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: REPO_ROOT }).toString().trim();
+  await waitFor(async () => /\S/.test(await $text('#build')), { what: 'the branch chip', tries: 20 });
+  check('branch: the header says which branch the site serves', (await visible('#build')) && (await $text('#build')).includes(branch.split('/').pop()) && (await page.eval(`document.getElementById('build').title`)).includes(branch), `${await $text('#build')} vs ${branch}`);
+  await page.eval(`window.__fakeVersion = { branch: 'main', commit: 'bbbbbbb', dirty: false, started: { branch: 'old', commit: 'aaaaaaa', dirty: false }, restart_needed: true }; window.__operator.loadVersion()`);
+  await sleep(200);
+  check('branch: amber, with the restart command, when the server code is older than the checkout',
+        await page.eval(`document.getElementById('build').classList.contains('stale') && /systemctl --user restart sortbots-console/.test(document.getElementById('build').title)`));
+  await page.eval(`window.__fakeVersion = null; window.__operator.loadVersion()`); await sleep(200);
 
   // -- phones ---------------------------------------------------------------------------------------
   console.log('\n--- phone ---');

@@ -1119,6 +1119,28 @@
     publishString(`/${id}/explore_cmd`, exploring ? "stop" : "start");
   }
 
+  // -- which branch is served (serve.py /api/version) --------------------------------------------
+  // The site is whatever is checked out on the host (scripts/console_service.sh keeps it up),
+  // so a teammate switching branches there changes what everyone sees. Show it. Amber when
+  // the console's server code predates the checkout: page files are live, Python isn't.
+  async function loadVersion() {
+    let v;
+    try { const r = await fetch("/api/version"); if (!r.ok) return; v = await r.json(); } catch (e) { return; }
+    const el = $("#build");
+    if (!v.branch) { el.hidden = true; return; }
+    el.hidden = false;
+    // Last path part only (andre/sim-view -> sim-view): the header has no room for more,
+    // and the tooltip carries the full name.
+    el.textContent = `\u2387 ${v.branch.split("/").pop()}${v.dirty ? " *" : ""}`;
+    el.classList.toggle("stale", !!v.restart_needed);
+    const lines = [`Branch ${v.branch} @ ${v.commit}${v.dirty ? ", with uncommitted changes" : ""}`];
+    if (v.restart_needed) {
+      lines.push(`The console was started on ${v.started.branch} @ ${v.started.commit}: the page is current, the server code isn't.`,
+                 "Restart it to catch up: systemctl --user restart sortbots-console");
+    } else lines.push("This is what the site is running.");
+    el.title = lines.join("\n");
+  }
+
   // -- gateway pin (comms overlay) -------------------------------------------------------------------
   // Where the fleet's gateway / access point stands, per platform (serve.py:
   // data/comms_gateway.json). Not a waypoint: nothing drives there.
@@ -2034,14 +2056,15 @@
 
   // -- boot ----------------------------------------------------------------------------------------------------------------------
   applyTheme(); resize(); setTool("select"); renderTasks(); renderWaypoints();
-  refreshRoster(); loadWaypoints(); loadGateway(); pollSession();
+  refreshRoster(); loadWaypoints(); loadGateway(); pollSession(); loadVersion();
   // "sim" waits for loadWaypoints to learn the platform (it's sim-only), see there.
   try { const v = localStorage.getItem("sortbots.mapView"); if (v === "3d") setView("3d"); } catch (e) { /* default: 2D */ }
   setInterval(loadWaypoints, 10000); // another operator may have added pins
   setInterval(loadGateway, 10000);
+  setInterval(loadVersion, 30000); // someone may switch branches on the host
   try { if (localStorage.getItem("sortbots.comms") === "on") $("#comms-toggle").click(); } catch (e) { /* default: off */ }
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane, setView, get stageView() { return stageView; }, simCam };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane, setView, get stageView() { return stageView; }, simCam, loadVersion };
 })();
