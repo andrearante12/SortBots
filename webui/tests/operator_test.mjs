@@ -404,7 +404,14 @@ async function main() {
     await click('#tp-list .tp-test[data-name="crossing_yield"] .tp-row .t');
     await sleep(100);
     const more = await $text('#tp-list .tp-test[data-name="crossing_yield"] .tp-more');
-    check(`${vp.label}: clicking a row shows what it checks`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Passes when/.test(more) && /recall ≥ 0.3/.test(more), more.slice(0, 160));
+    // crossing_yield localizes on the fleet_warehouse_test library map, which is local
+    // to the machines that recorded it (not in git, docs/testing.md). Without it the
+    // row must say why it can't run, not what it checks; both are the page working.
+    if (fs.existsSync(path.join(REPO_ROOT, 'maps', 'fleet_warehouse_test', 'map.json'))) {
+      check(`${vp.label}: clicking a row shows what it checks`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Passes when/.test(more) && /recall ≥ 0.3/.test(more), more.slice(0, 160));
+    } else {
+      check(`${vp.label}: clicking a row whose map is missing says why it can't run`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Can't run here/.test(more) && /fleet_warehouse_test/.test(more), more.slice(0, 160));
+    }
     await click('#tp-list .tp-test[data-name="pipeline_smoke"] .tp-row .t');
     await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"]'); c.querySelector('[data-repeats]').value = '2'; c.querySelector('[data-run]').click(); })()`);
     await sleep(400);
