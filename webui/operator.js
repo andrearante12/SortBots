@@ -343,6 +343,9 @@
   topic("/sim/ground_truth", "std_msgs/String", { throttle_rate: 100, queue_length: 1 }).subscribe((msg) => {
     try { worldTruth = JSON.parse(msg.data); } catch (e) { return; }
     worldTruthAt = performance.now(); dirty = true;
+    // The Sim camera's pose as Isaac has it, unless the viewer is mid-move (their
+    // newer pose would be overwritten by one the sim hasn't caught up to yet).
+    if (stageView === "sim" && !$("#simview").classList.contains("dragging") && performance.now() - simCam.lastSend > 1000) simCamFromTruth();
   });
   const worldLive = () => !!(worldLayout && worldLayout.world && worldTruth && performance.now() - worldTruthAt < WORLD_TRUTH_TTL_MS);
   const rgba = (c, a) => `rgba(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)},${a})`;
@@ -1811,6 +1814,92 @@
   }
   document.addEventListener("visibilitychange", () => setSimView(stageView === "sim"));
 
+  // Steering the Sim camera: the same gestures as the 3D cloud (drag orbits, right-drag
+  // or Shift pans, wheel / pinch zoom), but the picture is Isaac's, so every move goes
+  // to the sim (/sim/view_cmd {eye, target}) and comes back as the next frame. Moves
+  // are sent at most every SIM_MOVE_MS; the camera state lives here while dragging and
+  // re-syncs from /sim/ground_truth's "view" (where Isaac says the camera is) otherwise.
+  const SIM_MOVE_MS = 100;
+  const simCam = { yaw: 0, pitch: 0.6, dist: 12, tx: 0, ty: 0, tz: 0, synced: false, lastSend: 0, pending: false, follow: "" };
+  function simCamFromTruth() {
+    const v = worldTruth && worldTruth.view;
+    if (!v || !v.eye || !v.target) return;
+    const [ex, ey, ez] = v.eye, [tx, ty, tz] = v.target, dx = ex - tx, dy = ey - ty, dz = ez - tz;
+    const dist = Math.hypot(dx, dy, dz);
+    Object.assign(simCam, { tx, ty, tz, dist, yaw: Math.atan2(dy, dx), pitch: Math.asin(Math.max(-1, Math.min(1, dz / dist))), synced: true });
+    const f = v.follow || "";
+    if (f !== simCam.follow) { simCam.follow = f; $("#sv-follow").value = f; }
+  }
+  const simEye = () => [simCam.tx + simCam.dist * Math.cos(simCam.pitch) * Math.cos(simCam.yaw),
+                        simCam.ty + simCam.dist * Math.cos(simCam.pitch) * Math.sin(simCam.yaw),
+                        simCam.tz + simCam.dist * Math.sin(simCam.pitch)];
+  function simSend(force) {
+    const now = performance.now();
+    if (!force && now - simCam.lastSend < SIM_MOVE_MS) {
+      if (!simCam.pending) { simCam.pending = true; setTimeout(() => { simCam.pending = false; simSend(true); }, SIM_MOVE_MS); }
+      return;
+    }
+    simCam.lastSend = now;
+    publishString("/sim/view_cmd", JSON.stringify({ on: true, eye: simEye().map((v) => +v.toFixed(3)), target: [simCam.tx, simCam.ty, simCam.tz].map((v) => +v.toFixed(3)) }));
+  }
+  function simMoved() {
+    if (simCam.follow) { simCam.follow = ""; $("#sv-follow").value = ""; } // a manual move takes the camera back
+    simSend(false);
+  }
+  {
+    const sv = $("#simview"), pts = new Map();
+    let drag = null, pinchD = 0;
+    sv.addEventListener("pointerdown", (e) => {
+      if (e.target.closest(".sv-bar")) return;
+      if (!simCam.synced) simCamFromTruth();
+      sv.setPointerCapture(e.pointerId);
+      pts.set(e.pointerId, [e.clientX, e.clientY]);
+      if (pts.size === 2) { const [a, b] = [...pts.values()]; pinchD = Math.hypot(a[0] - b[0], a[1] - b[1]); drag = { pan: true, x: (a[0] + b[0]) / 2, y: (a[1] + b[1]) / 2 }; return; }
+      drag = { pan: e.button === 2 || e.shiftKey, x: e.clientX, y: e.clientY };
+      sv.classList.add("dragging");
+    });
+    sv.addEventListener("pointermove", (e) => {
+      if (!drag || !pts.has(e.pointerId)) return;
+      pts.set(e.pointerId, [e.clientX, e.clientY]);
+      let x = e.clientX, y = e.clientY;
+      if (pts.size === 2) {
+        const [a, b] = [...pts.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+        if (pinchD) simCam.dist = Math.min(60, Math.max(1.5, simCam.dist * pinchD / Math.max(d, 1)));
+        pinchD = d; x = (a[0] + b[0]) / 2; y = (a[1] + b[1]) / 2;
+      }
+      const dx = x - drag.x, dy = y - drag.y; drag.x = x; drag.y = y;
+      if (drag.pan) { // grab the floor: it follows the pointer. forward = (-c, -s), right = (-s, c)
+        const k = simCam.dist * 0.0018, c = Math.cos(simCam.yaw), s = Math.sin(simCam.yaw);
+        simCam.tx += (s * dx - c * dy) * k; simCam.ty += (-c * dx - s * dy) * k;
+      } else {
+        simCam.yaw -= dx * 0.006;
+        simCam.pitch = Math.min(1.5, Math.max(0.08, simCam.pitch + dy * 0.005));
+      }
+      simMoved();
+    });
+    const up = (e) => { pts.delete(e.pointerId); if (pts.size < 2) pinchD = 0; if (!pts.size) { drag = null; sv.classList.remove("dragging"); } };
+    sv.addEventListener("pointerup", up); sv.addEventListener("pointercancel", up);
+    sv.addEventListener("contextmenu", (e) => e.preventDefault()); // right-drag pans
+    sv.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      if (!simCam.synced) simCamFromTruth();
+      simCam.dist = Math.min(60, Math.max(1.5, simCam.dist * Math.exp(e.deltaY * 0.0012)));
+      simMoved();
+    }, { passive: false });
+  }
+  $("#sv-reset").addEventListener("click", () => { simCam.synced = false; simCam.follow = ""; $("#sv-follow").value = ""; publishString("/sim/view_cmd", JSON.stringify({ on: true, reset: true })); });
+  $("#sv-follow").addEventListener("change", (e) => {
+    simCam.follow = e.target.value; simCam.synced = false;
+    publishString("/sim/view_cmd", JSON.stringify({ on: true, follow: e.target.value || null }));
+  });
+  function renderSimFollow() { // robot list for the Follow picker
+    const sel = $("#sv-follow"), want = [...robots.keys()].join(",");
+    if (sel.dataset.ids === want) return;
+    sel.dataset.ids = want;
+    sel.innerHTML = `<option value="">Free camera</option>` + [...robots.keys()].map((id) => `<option value="${esc(id)}">Follow ${esc(nameOf(id))}</option>`).join("");
+    sel.value = simCam.follow;
+  }
+
   // -- comms overlay (operator_comms.js) ----------------------------------------------------------
   let commsWanted = false;
   function setComms(v) {
@@ -1937,7 +2026,7 @@
       r.obstacles = null; r.obstaclesMap = [];
       drawCamObstacles(r.id); // clears it
     }
-    renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending(); renderPaneBadges();
+    renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending(); renderPaneBadges(); renderSimFollow();
     if (window.sortbotsComms) window.sortbotsComms.sync();
   }, 250);
 
@@ -1952,5 +2041,5 @@
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane, setView, get stageView() { return stageView; } };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane, setView, get stageView() { return stageView; }, simCam };
 })();

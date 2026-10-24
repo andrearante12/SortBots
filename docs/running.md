@@ -1166,7 +1166,13 @@ while a page has the view open. The page sends `{"on": true}` on `/sim/view_cmd`
 Isaac switches the camera off 6 s after the last heartbeat, so a closed tab or a sleeping phone
 stops costing on its own. Measured 2026-10-24, 2 robots on the warehouse map, full stack:
 0.333× real time with it closed, 0.324× while watched (about 3%), back to 0.334× after.
-To re-aim it, edit `eye` and `target` (world == map frame, metres) and restart the run.
+The camera can be steered from the page, the same gestures as the 3D cloud: drag to orbit,
+right-drag or Shift-drag (two fingers on a phone) to pan, scroll or pinch to zoom. Each move is
+sent to Isaac (`/sim/view_cmd` with `eye`/`target`, at most 10/s) and comes back as the next
+frame, about 0.2 s later, plus the page's 0.25 s snapshot poll. **Follow** rides above and just
+behind a robot, steep enough to see down into its aisle. The racks have no colliders, so a
+low chase-cam would sit inside them. **Reset view** returns to the default pose: edit `eye` and
+`target` (world == map frame, metres) to change it, and restart the run.
 `--no-sim-view` on `spawn_warehouse.py` skips building it at all.
 
 ### Comms overlay (the commsim model on the map)

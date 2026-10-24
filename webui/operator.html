@@ -198,6 +198,12 @@
   #simview .pic { position: absolute; inset: 0; background: center / contain no-repeat; }
   #simview .msg { position: absolute; inset: 0; display: grid; place-items: center; color: #8b95a0; font-size: .9rem; pointer-events: none; }
   #simview .msg:empty { display: none; }
+  #simview { touch-action: none; cursor: grab; }
+  #simview.dragging { cursor: grabbing; }
+  #simview .sv-bar { top: 12px; right: 12px; display: flex; gap: 8px; align-items: center; padding: 5px 8px; font-size: .84rem; cursor: default; }
+  #simview .sv-bar select { padding: 3px 6px; }
+  #simview .sv-help { position: absolute; right: 12px; bottom: 10px; font-size: .76rem; color: #8b95a0; background: rgba(10,12,16,.6); padding: 3px 8px; border-radius: 5px; pointer-events: none; }
+  @media (pointer: coarse) { #simview .sv-help { display: none; } }
   #simview .note { position: absolute; left: 12px; bottom: 10px; font-size: .76rem; color: #8b95a0; background: rgba(10,12,16,.6); padding: 3px 8px; border-radius: 5px; }
   /* Sits on the always-dark 3D scene, so fixed colours rather than theme tokens. */
   #cloud .cloud-info { position: absolute; bottom: 14px; left: 14px; color: #8b95a0; font-size: .8rem; pointer-events: none; }
@@ -542,7 +548,12 @@
   <!-- The Sim view: Isaac's own render of the floor, /sim/view/rgb via /snapshot polls.
        Isaac renders that camera only while this view sends its heartbeat (operator.js). -->
   <div id="simview" hidden><div class="pic"></div><span class="msg">Starting the sim camera&hellip;</span>
-    <span class="note" title="Every rendered camera slows the sim (scripts/bench_sim.sh). This one is switched off a few seconds after the last viewer leaves">Rendered only while this view is open</span></div>
+    <span class="note" title="Every rendered camera slows the sim (scripts/bench_sim.sh). This one is switched off a few seconds after the last viewer leaves">Rendered only while this view is open</span>
+    <div class="sv-bar float" role="toolbar" aria-label="Sim camera">
+      <label>Follow <select id="sv-follow"><option value="">Free camera</option></select></label>
+      <button type="button" class="btn small" id="sv-reset" title="Back to the default view (configs/sim_view.yaml)">Reset view</button>
+    </div>
+    <span class="sv-help" id="sv-help">Drag to orbit · right-drag or Shift to pan · scroll to zoom</span></div>
   <div class="float" id="comms-bar" hidden role="toolbar" aria-label="Comms model">
     <span class="model" title="Everything drawn by this overlay is the commsim model's prediction (commsim/des): the real robots' positions and the map's obstacles go in, links, routes and message hops come out. Its what-ifs change the model only, never the robots.">Model</span>
     <span id="cm-state" class="muted"></span>

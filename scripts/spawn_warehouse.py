@@ -26,8 +26,9 @@ and subscribing:
     /sim/world_cmd             std_msgs/String JSON {"cmd": "reset"|"start"|"pause"}
     /sim/teleport              std_msgs/String JSON {"robot", "x", "y", "yaw"} in the map frame
                                                      (operator view's Teleport tool; see _teleport)
-    /sim/view_cmd              std_msgs/String JSON {"on": bool}, a heartbeat while the
-                                                     operator's Sim view is open (see _view)
+    /sim/view_cmd              std_msgs/String JSON {"on": bool, "eye"/"target": [x, y, z],
+                                                     "follow": robot | null, "reset": true}: the
+                                                     operator's Sim view heartbeat + camera moves
     /<robot>/cmd_vel           geometry_msgs/Twist  (--drive cmd_vel; holonomic x/y/yaw)
     /<robot>/pick_cmd          std_msgs/String      ("attach"/"detach"; robot_0 only,
                                                       see nodes/task_manager.py)
@@ -710,12 +711,29 @@ CHASE_CAM_ORIENTATION = (0.5647, 0.4255, -0.4255, -0.5647)
 
 
 SIM_VIEW_CONFIG = REPO_ROOT / "configs" / "sim_view.yaml"
+# Follow mode: the camera rides this far behind and above the followed robot, looking
+# down at a point a little ahead of it (base_link frame, metres). Steep, nearly overhead,
+# on purpose: a chase-cam 3 m back at 2.2 m sat INSIDE a rack whenever the robot was in
+# an aisle (live 2026-10-24, a frame of nothing but boxes), and a PhysX raycast can't
+# pull it clear because the NVIDIA warehouse racks have no colliders. The robot stands in
+# free aisle space, so a camera almost straight above it is in the aisle too.
+SIM_VIEW_FOLLOW_BACK_M, SIM_VIEW_FOLLOW_UP_M, SIM_VIEW_FOLLOW_AHEAD_M = 1.2, 5.0, 0.8
+
+
+def _look_at(eye, target):
+    """Camera prim transform looking from `eye` at `target`, +Z up. SetLookAt builds
+    world->camera with the camera looking down -Z and +Y up, which is a USD camera's
+    own convention; its inverse is the prim's transform."""
+    from pxr import Gf
+
+    return Gf.Matrix4d().SetLookAt(Gf.Vec3d(*eye), Gf.Vec3d(*target), Gf.Vec3d(0, 0, 1)).GetInverse()
 
 
 def _spawn_sim_view(scene: str, build_graph):
     """The operator view's Sim camera: a look-at camera from configs/sim_view.yaml,
-    and its (disabled) RGB graph. Returns the graph's `enabled` attribute path, or
-    None when the scene has no entry."""
+    and its (disabled) RGB graph. Returns {attr: the graph's `enabled` attribute path,
+    path: the camera prim, eye, target: its default pose}, or None when the scene has
+    no entry."""
     import yaml
     from pxr import Gf, UsdGeom
     import omni.usd
@@ -732,14 +750,12 @@ def _spawn_sim_view(scene: str, build_graph):
     cam.CreateClippingRangeAttr(Gf.Vec2f(0.1, 200.0))
     # SetLookAt builds world->camera with the camera looking down -Z and +Y up,
     # which is a USD camera's own convention; its inverse is the prim's transform.
-    eye, target = Gf.Vec3d(*sc["eye"]), Gf.Vec3d(*sc["target"])
-    view = Gf.Matrix4d().SetLookAt(eye, target, Gf.Vec3d(0, 0, 1))
-    UsdGeom.Xformable(cam.GetPrim()).AddTransformOp().Set(view.GetInverse())
+    UsdGeom.Xformable(cam.GetPrim()).AddTransformOp().Set(_look_at(sc["eye"], sc["target"]))
     attr = build_graph(graph_path="/World/SimViewGraph", camera_prim_path=path, topic="/sim/view/rgb",
                        width=int(cfg.get("width", 640)), height=int(cfg.get("height", 360)),
                        frame_id="sim_view")
     emit(f"  sim view camera at {tuple(sc['eye'])} -> {tuple(sc['target'])} (off until watched)")
-    return attr
+    return {"attr": attr, "path": path, "eye": tuple(sc["eye"]), "target": tuple(sc["target"])}
 
 
 def _spawn_chase_camera(robot_prim_path: str, d435: dict):
@@ -1262,7 +1278,7 @@ class _WorldRuntime:
     """
 
     def __init__(self, w: dict | None, actor_ops: dict, spawn_positions: dict,
-                 sim_view_attr: str | None = None):
+                 sim_view: dict | None = None):
         import json
 
         import rclpy
@@ -1292,10 +1308,16 @@ class _WorldRuntime:
         self.node.create_subscription(String, "/sim/world_cmd", self._on_cmd, 10)
         self.node.create_subscription(String, "/sim/teleport", self._on_teleport, 10)
         self.teleports: list[dict] = []
-        self.view_attr = sim_view_attr
+        self.view = sim_view      # {attr, path, eye, target} from _spawn_sim_view, or None
+        self.view_attr = sim_view["attr"] if sim_view else None
         self.view_until = 0.0     # wall clock: render the Sim view until then
         self.view_on = False
-        if sim_view_attr:
+        # The camera the viewer is steering: a look-at pose, or a robot to follow.
+        self.view_eye = sim_view["eye"] if sim_view else None
+        self.view_target = sim_view["target"] if sim_view else None
+        self.view_follow: str | None = None
+        self.view_dirty = False
+        if sim_view:
             self.node.create_subscription(String, "/sim/view_cmd", self._on_view, 10)
         self.world_msg = String(data=json.dumps(self._describe()))
         self.world_pub.publish(self.world_msg)
@@ -1381,10 +1403,26 @@ class _WorldRuntime:
 
     def _on_view(self, msg) -> None:
         try:
-            on = bool(self._json.loads(msg.data).get("on"))
-        except (ValueError, AttributeError):
-            on = msg.data.strip() == "on"
-        self.view_until = time.monotonic() + self.VIEW_HOLD_S if on else 0.0
+            d = self._json.loads(msg.data)
+        except ValueError:
+            d = {"on": msg.data.strip() == "on"}
+        if not isinstance(d, dict):
+            return
+        if "on" in d:
+            self.view_until = time.monotonic() + self.VIEW_HOLD_S if d["on"] else 0.0
+        try:
+            if d.get("reset"):
+                self.view_eye, self.view_target, self.view_follow = self.view["eye"], self.view["target"], None
+                self.view_dirty = True
+            elif "eye" in d and "target" in d:
+                eye, target = tuple(float(v) for v in d["eye"]), tuple(float(v) for v in d["target"])
+                if len(eye) == 3 and len(target) == 3 and eye != target:
+                    self.view_eye, self.view_target, self.view_follow = eye, target, None
+                    self.view_dirty = True
+            if "follow" in d:
+                self.view_follow = str(d["follow"]) if d["follow"] else None
+        except (TypeError, ValueError) as exc:
+            emit(f"  bad /sim/view_cmd {msg.data!r}: {exc}")
 
     def _view(self) -> None:
         want = time.monotonic() < self.view_until
@@ -1394,7 +1432,36 @@ class _WorldRuntime:
 
         og.Controller.attribute(self.view_attr).set(want)
         self.view_on = want
+        self.view_dirty = True
         emit(f"  sim view {'on' if want else 'off'}")
+
+    def _steer_view(self, robots: dict | None) -> None:
+        """Every physics step while the Sim view is watched: take camera moves straight
+        away (the 10 Hz ground-truth tick is ~3 Hz of wall time at this RTF, which a
+        viewer dragging the camera would feel) and keep a followed robot in frame."""
+        import math
+
+        import rclpy
+
+        rclpy.spin_once(self.node, timeout_sec=0.001)  # see _start_extra_ros_subscribers
+        if self.view_follow and robots and self.view_follow in robots:
+            q = robots[self.view_follow][0].get_joint_positions()
+            sx, sy = self.spawn[self.view_follow][:2]
+            x, y, yaw = sx + float(q[0]), sy + float(q[1]), float(q[2])
+            c, s = math.cos(yaw), math.sin(yaw)
+            self.view_eye = (x - SIM_VIEW_FOLLOW_BACK_M * c, y - SIM_VIEW_FOLLOW_BACK_M * s, SIM_VIEW_FOLLOW_UP_M)
+            self.view_target = (x + SIM_VIEW_FOLLOW_AHEAD_M * c, y + SIM_VIEW_FOLLOW_AHEAD_M * s, 0.0)
+            self.view_dirty = True
+        if not self.view_dirty:
+            return
+        from pxr import UsdGeom
+        import omni.usd
+
+        prim = omni.usd.get_context().get_stage().GetPrimAtPath(self.view["path"])
+        ops = UsdGeom.Xformable(prim).GetOrderedXformOps()
+        if ops:
+            ops[0].Set(_look_at(self.view_eye, self.view_target))
+        self.view_dirty = False
 
     def _apply(self, cmd: str) -> None:
         if cmd in ("reset", "restart"):
@@ -1406,8 +1473,10 @@ class _WorldRuntime:
             self.running = False
         emit(f"  world clock: {cmd} -> wt={self.wt:.2f} running={self.running}")
 
-    def step(self, sim_t: float) -> None:
-        """Every physics step: advance the clock and move the actors."""
+    def step(self, sim_t: float, robots: dict | None = None) -> None:
+        """Every physics step: advance the clock, move the actors, steer the Sim view."""
+        if self.view_on:
+            self._steer_view(robots)
         if self.running and self.last_sim is not None:
             self.wt += max(0.0, sim_t - self.last_sim)
         self.last_sim = sim_t
@@ -1440,6 +1509,11 @@ class _WorldRuntime:
         out = {"t": round(sim_t, 4), "wt": round(self.wt, 4), "running": self.running,
                "world": self.world["name"] if self.world else None,
                "robots": {}, "actors": {}}
+        if self.view:
+            # Where the Sim view's camera is, so the page's orbit controls start from it.
+            out["view"] = {"on": self.view_on, "follow": self.view_follow,
+                           "eye": [round(v, 3) for v in self.view_eye],
+                           "target": [round(v, 3) for v in self.view_target]}
         for name, (robot, *_rest) in robots.items():
             q = robot.get_joint_positions()
             sx, sy = self.spawn[name][:2]
@@ -1617,10 +1691,10 @@ def main() -> int:
 
     # The operator view's Sim view: one camera on the whole floor, built DISABLED
     # (build_view_camera_graph) and switched by _WorldRuntime on /sim/view_cmd.
-    sim_view_attr = None
+    sim_view = None
     if args.sim_view:
         try:
-            sim_view_attr = _spawn_sim_view(args.scene, build_view_camera_graph)
+            sim_view = _spawn_sim_view(args.scene, build_view_camera_graph)
         except Exception as exc:  # cosmetic: never fail a run over it
             emit(f"  sim view camera skipped: {exc}")
 
@@ -1714,7 +1788,7 @@ def main() -> int:
         emit(f"  world={WORLD['name']}: {len(WORLD['props'])} prop(s), "
              f"{len(WORLD['actors'])} actor(s), autostart={WORLD['autostart']}")
         actor_ops = _spawn_world(stage, WORLD)
-    world_rt = _WorldRuntime(WORLD, actor_ops, spawn_positions, sim_view_attr)
+    world_rt = _WorldRuntime(WORLD, actor_ops, spawn_positions, sim_view)
     emit("  /sim/ground_truth + /sim/world publishers started")
 
     # Global /clock publisher so external ROS 2 nodes can `use_sim_time:=true`.
@@ -1860,7 +1934,7 @@ def main() -> int:
         # them at this step's pose. world.current_time is the same clock
         # /clock publishes (IsaacReadSimulationTime), so ground-truth stamps
         # line up with every other sim-time message.
-        world_rt.step(world.current_time)
+        world_rt.step(world.current_time, robots)
         world.step(render=(step % args.render_every == 0))
         step += 1
         if step % GROUND_TRUTH_EVERY == 0:

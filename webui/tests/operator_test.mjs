@@ -962,6 +962,38 @@ async function main() {
   check('sim view: says it is waiting for the first frame', /Starting the sim camera/.test(await $text('#simview .msg')), await $text('#simview .msg'));
   await sleep(2300);
   check('sim view: keeps asking while open (a heartbeat, so a closed tab stops costing)', (await beats()).filter((b) => b).length >= 2, JSON.stringify(await beats()));
+  // Steering: Isaac reports the camera on /sim/ground_truth; the page orbits/pans/zooms from it.
+  await emit('/sim/ground_truth', { data: JSON.stringify({ t: 1, robots: {}, actors: {}, view: { on: true, follow: null, eye: [2, 5, 6.5], target: [-3, 13.5, 0] } }) });
+  await sleep(200);
+  const moves = () => page.eval(`window.__published.filter((x) => x.topic === '/sim/view_cmd').map((x) => JSON.parse(x.msg.data)).filter((m) => m.eye)`);
+  const svAt = await page.eval(`(() => { const r = document.getElementById('simview').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+  const dist = (m) => Math.hypot(m.eye[0] - m.target[0], m.eye[1] - m.target[1], m.eye[2] - m.target[2]);
+  const dragSv = async (dx, dy, mods = 0) => {
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: svAt[0], y: svAt[1], button: 'left', clickCount: 1, modifiers: mods });
+    for (let i = 1; i <= 6; i++) { await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: svAt[0] + dx * i / 6, y: svAt[1] + dy * i / 6, button: 'left', modifiers: mods }); await sleep(30); }
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: svAt[0] + dx, y: svAt[1] + dy, button: 'left', clickCount: 1, modifiers: mods });
+    await sleep(250);
+  };
+  await page.eval(`window.__published.length = 0`);
+  await dragSv(120, 0);
+  let mv = await moves(), last = mv[mv.length - 1];
+  check('sim view: dragging orbits the camera about its target (same distance, same target)',
+        !!last && Math.abs(dist(last) - Math.hypot(5, 8.5, 6.5)) < 0.05 && Math.abs(last.target[0] + 3) < 0.01 && Math.abs(last.eye[0] - 2) > 1, JSON.stringify(last));
+  check('sim view: camera moves are throttled, not one per mouse event', mv.length >= 1 && mv.length <= 5, String(mv.length));
+  await page.eval(`window.__published.length = 0`);
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: svAt[0], y: svAt[1], deltaX: 0, deltaY: -400 }); await sleep(250);
+  mv = await moves(); last = mv[mv.length - 1];
+  check('sim view: scrolling zooms in (shorter distance, same target)', !!last && dist(last) < 11.0 && Math.abs(last.target[1] - 13.5) < 0.01, JSON.stringify(last));
+  await page.eval(`window.__published.length = 0`);
+  await dragSv(0, 80, 8 /* shift */);
+  mv = await moves(); last = mv[mv.length - 1];
+  check('sim view: Shift-drag pans (the target moves, the distance does not)', !!last && Math.hypot(last.target[0] + 3, last.target[1] - 13.5) > 0.3 && Math.abs(last.target[2]) < 1e-6, JSON.stringify(last));
+  await page.eval(`window.__published.length = 0`);
+  await page.eval(`(() => { const s = document.getElementById('sv-follow'); s.value = ${JSON.stringify(r1)}; s.dispatchEvent(new Event('change')); })()`);
+  check('sim view: Follow asks Isaac to ride along with a robot', await page.eval(`window.__published.some((x) => x.topic === '/sim/view_cmd' && JSON.parse(x.msg.data).follow === ${JSON.stringify(r1)})`));
+  await click('#sv-reset');
+  check('sim view: Reset view asks for the default camera', await page.eval(`window.__published.some((x) => x.topic === '/sim/view_cmd' && JSON.parse(x.msg.data).reset === true)`) && (await page.eval(`document.getElementById('sv-follow').value`)) === '');
+  await shot('sim-view');
   await click('#view [data-v="2d"]'); await sleep(200);
   check('sim view: leaving tells Isaac to stop', (await beats()).slice(-1)[0] === false && (await visible('#map')) && !(await visible('#simview')));
   const n0 = (await beats()).length; await sleep(2300);
