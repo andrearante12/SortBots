@@ -12,6 +12,7 @@ even in a "clean" shell — the same trap as ros2's python shebangs.
 from __future__ import annotations
 
 import importlib
+import os
 import json
 import sqlite3
 import sys
@@ -31,11 +32,21 @@ def maps(tmp_path, monkeypatch):
     var has to be set BEFORE the reload — setting it afterwards would silently
     leave the module pointing at the repo's own maps/.
     """
+    prior = os.environ.get("SORTBOTS_MAPS_DIR")
     monkeypatch.setenv("SORTBOTS_MAPS_DIR", str(tmp_path))
     import maps_lib
     importlib.reload(maps_lib)
     assert maps_lib.MAPS_DIR == tmp_path
     yield maps_lib
+    # Reload again with the caller's env restored (monkeypatch undoes it AFTER
+    # this teardown, so do it here — CI points it at fixture maps): otherwise every later test in the session
+    # sees MAPS_DIR frozen at this test's tmp_path, which made
+    # simtest_spec_test skip its saved-map checks depending on file order.
+    if prior is None:
+        monkeypatch.delenv("SORTBOTS_MAPS_DIR", raising=False)
+    else:
+        monkeypatch.setenv("SORTBOTS_MAPS_DIR", prior)
+    importlib.reload(maps_lib)
 
 
 # --------------------------------------------------------------------------

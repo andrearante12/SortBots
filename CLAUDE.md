@@ -109,7 +109,13 @@ node webui/tests/operator_test.mjs    # operator view, fake ROSLIB (no fixture n
 python3 webui/session.py --list       # scenario validation
 python3 -m pytest tests/              # pure-python node logic (system python3 — see below)
 scripts/simtest.py validate           # scored test cases (configs/tests/) resolve
+make ci                               # all of the above + ruff, shellcheck, compileall (what CI runs)
 ```
+
+`make ci` points `SORTBOTS_MAPS_DIR` at synthetic stand-in maps
+(`scripts/make_fixture_maps.py`) because the real ones are git-lfs and not in a
+hosted checkout; the dashboard test needs a chrome (`CHROME_BIN=...` if it isn't
+on PATH). Unexpected pytest skips fail the run (`scripts/check_skips.py`).
 
 Scored live tests — a world of props and scripted movers
 (`configs/worlds/`), a scenario, goals and pass criteria — run with

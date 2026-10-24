@@ -162,7 +162,7 @@ def replace_wheel_colliders(
     if not wheel_links:
         return 0
 
-    from pxr import PhysxSchema, Sdf, UsdGeom, UsdPhysics
+    from pxr import PhysxSchema, UsdGeom, UsdPhysics
 
     root = stage.GetPrimAtPath(robot_prim_path)
     if not root or not root.IsValid():

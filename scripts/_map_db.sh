@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Sourced (not executed) by scripts/run_demo.sh and scripts/run_robot.sh:
 # resolves which RTAB-Map database a run opens, and enforces COPY-ON-USE for
 # the saved-map library. Both launchers need exactly the same rules, and the

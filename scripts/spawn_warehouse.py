@@ -551,7 +551,6 @@ def _resolve_nvidia_warehouse() -> str:
 
 
 def _spawn_robot(world, name: str, position, xlerobot_usd: Path, d435: dict, mpu: dict):
-    import numpy as np
     import omni.kit.commands
     import omni.usd
     from isaacsim.core.api.robots import Robot
@@ -632,7 +631,7 @@ def _base_to_prim_transform(stage, base_prim_path: str, child_prim_path: str):
     base_link -> camera_optical so the prefixed frame the camera images are
     stamped with actually exists in the TF tree.
     """
-    from pxr import Gf, UsdGeom
+    from pxr import UsdGeom
 
     xc = UsdGeom.XformCache()
     base_w = xc.GetLocalToWorldTransform(stage.GetPrimAtPath(base_prim_path))

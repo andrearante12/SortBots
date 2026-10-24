@@ -123,7 +123,7 @@ _SPLIT_BRANCHES = '''        if self.robot_uids == "fetch":
 def _split_render_cam_branch(base_env_path: Path) -> None:
     text = base_env_path.read_text()
     if _SPLIT_BRANCHES.splitlines()[0] in text and 'self.robot_uids == "xlerobot":' in text and "torso_lift_link" in text:
-        print(f"  ok  base_env.py render-cam branches already split for fetch+xlerobot")
+        print("  ok  base_env.py render-cam branches already split for fetch+xlerobot")
         return
     if _COMBINED_BRANCH not in text:
         print(
@@ -133,7 +133,7 @@ def _split_render_cam_branch(base_env_path: Path) -> None:
         return
     new = text.replace(_COMBINED_BRANCH, _SPLIT_BRANCHES, 1)
     base_env_path.write_text(new)
-    print(f"  +   split fetch/xlerobot render-cam branches in base_env.py (Fetch demos restored)")
+    print("  +   split fetch/xlerobot render-cam branches in base_env.py (Fetch demos restored)")
 
 
 def patch_init(init_path: Path) -> None:
@@ -161,7 +161,7 @@ def patch_replicacad_scene_builder(sb_path: Path) -> None:
     needle_done = 'self.env.robot_uids in ("fetch", "xlerobot")'
     needle_orig = 'if self.env.robot_uids == "fetch":'
     if needle_done in text:
-        print(f"  ok  scene_builder.py already accepts xlerobot")
+        print("  ok  scene_builder.py already accepts xlerobot")
         return
     if needle_orig not in text:
         sys.exit(
@@ -178,7 +178,7 @@ def patch_replicacad_scene_builder(sb_path: Path) -> None:
         1,
     )
     sb_path.write_text(new)
-    print(f"  +   patched scene_builder.py to accept xlerobot in ReplicaCAD init")
+    print("  +   patched scene_builder.py to accept xlerobot in ReplicaCAD init")
 
 
 def sanity_check() -> None:

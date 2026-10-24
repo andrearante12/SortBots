@@ -131,7 +131,6 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
 
 def cmd_drive(args: argparse.Namespace) -> int:
-    import numpy as np
     from _robot_configs import ROBOT_CONFIGS
 
     cfg = ROBOT_CONFIGS[args.robot]

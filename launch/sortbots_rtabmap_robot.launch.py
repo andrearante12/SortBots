@@ -432,7 +432,6 @@ def generate_launch_description():
                 # rgbd_odometry on raw /camera/depth tracked at once (quality
                 # ~180, 0 failures). SLAM keeps depth_static; odometry gets raw.
                 "visual_odometry":    "false",
-                "subscribe_rgbd":     "false",
                 "approx_sync":        "true",
                 "rviz":               rviz,
                 # Upstream's rtabmap_viz is a SEPARATE argument from rviz and

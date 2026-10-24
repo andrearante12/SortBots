@@ -367,7 +367,7 @@ def _make_per_robot_actions(
         # in SIM time. On the wall clock they are worth ~45% of their configured
         # value — see nodes/explorer.py's _now() for the live failure that caused.
         explorer_cmd = lambda autostart: [
-            "python3", os.path.join(REPO_ROOT, "nodes", "explorer.py"), "--robot-id", rid,
+            "python3", os.path.join(REPO_ROOT, "nodes", "explorer.py"), "--robot-id", rid,  # noqa: B023 — called within this iteration, before rid rebinds
             *(["--autostart"] if autostart else []),
             "--ros-args", "-p", ["use_sim_time:=", use_sim_time],
         ]

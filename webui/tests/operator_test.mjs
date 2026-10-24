@@ -185,9 +185,20 @@ async function main() {
   const pick = 'A', drop = 'B';
 
   const profile = tmpDir('sortbots-chrome-');
-  const chromeBin = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']
-    .find((b) => { try { return spawn(b, ['--version']).pid; } catch { return false; } }) || 'google-chrome';
-  spawnTracked(chromeBin, ['--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--enable-unsafe-swiftshader',
+  // CHROME_BIN wins so CI (and boxes without a system chrome) can point at any
+  // chromium. spawn() reports a missing binary asynchronously, so a bare
+  // `.pid` probe only ever worked by accident — resolve via PATH ourselves.
+  const onPath = (b) => (process.env.PATH || '').split(path.delimiter)
+    .some((d) => { try { fs.accessSync(path.join(d, b), fs.constants.X_OK); return true; } catch { return false; } });
+  const chromeBin = process.env.CHROME_BIN
+    || ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'].find(onPath);
+  if (!chromeBin) {
+    console.error('no chrome found: install one or set CHROME_BIN=/path/to/chrome');
+    process.exit(2);
+  }
+  // Hosted CI runs as a user without the setuid sandbox; the page is our own static UI.
+  const noSandbox = process.env.CI ? ['--no-sandbox'] : [];
+  spawnTracked(chromeBin, [...noSandbox, '--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--enable-unsafe-swiftshader',
     '--no-first-run', '--no-default-browser-check', '--disable-gpu-sandbox', `--user-data-dir=${profile}`, 'about:blank']);
   let target;
   await waitFor(async () => {

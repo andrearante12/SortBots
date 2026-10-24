@@ -109,7 +109,10 @@ wait_for_stable_file() {
 }
 
 save_grid() {
-  local name="$1" out="$MAPS_DIR/$name/grid"
+  # Two statements: in one `local a=.. b=$a` the $a is expanded before `a` is
+  # assigned, so `out` silently used the CALLER's $name (shellcheck SC2318).
+  local name="$1"
+  local out="$MAPS_DIR/$name/grid"
   mkdir -p "$MAPS_DIR/$name"
   echo "[maps] capturing /map -> $out.{pgm,yaml}"
   # /map, not /<rid>/map: nodes/map_merge.py's fused, world-anchored grid is

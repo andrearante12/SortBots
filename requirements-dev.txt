@@ -6,3 +6,7 @@ pytest>=7.4
 numpy>=1.26
 PyYAML>=6.0
 opencv-python-headless>=4.8
+
+# lint (make lint / make shellcheck)
+ruff>=0.6
+shellcheck-py>=0.10

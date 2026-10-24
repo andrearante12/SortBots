@@ -1,0 +1,4 @@
+# Intentional, not oversights:
+#  SC2064 ros_bash.sh expands $sig at trap-definition time on purpose (one trap per signal).
+#  SC2155 `local x="$(cmd)"` masking a return value is accepted where the script ignores failure anyway.
+disable=SC2064,SC2155

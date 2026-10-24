@@ -1,0 +1,18 @@
+# Lint is a correctness gate, not a style gate: pyflakes errors (F), syntax
+# errors (E9) and the bugbear checks that find real defects (B). Style rules are
+# off on purpose — the repo's comment-heavy house style would drown them, and a
+# gate that fails on taste gets disabled. Widen deliberately, with a clean tree.
+line-length = 120
+extend-exclude = ["third_party", "XLeRobot", "site", "splat/vendor"]
+
+[lint]
+select = ["F", "E9", "B"]
+ignore = [
+  "B905",  # zip() strict=: py3.10+ only, and our zips are of equal-length sequences
+  "B007",  # unused loop variable: used for readability in tuple unpacking
+  "B904",  # raise-from inside except: nodes re-raise as plain messages on purpose
+]
+
+[lint.per-file-ignores]
+# pxr/omni only import inside Isaac's python; quoted annotations name them.
+"scripts/*.py" = ["F821"]
