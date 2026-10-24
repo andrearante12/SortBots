@@ -18,12 +18,16 @@ plus, once for the whole sim (see _WorldRuntime):
 
     /sim/ground_truth          std_msgs/String JSON, 10 Hz sim: true robot + actor poses
     /sim/world                 std_msgs/String JSON, latched: the --world layout
+    /sim/view/rgb              sensor_msgs/Image, the operator view's "Sim" view
+                                                     (configs/sim_view.yaml); ONLY while watched
 
 and subscribing:
 
     /sim/world_cmd             std_msgs/String JSON {"cmd": "reset"|"start"|"pause"}
     /sim/teleport              std_msgs/String JSON {"robot", "x", "y", "yaw"} in the map frame
                                                      (operator view's Teleport tool; see _teleport)
+    /sim/view_cmd              std_msgs/String JSON {"on": bool}, a heartbeat while the
+                                                     operator's Sim view is open (see _view)
     /<robot>/cmd_vel           geometry_msgs/Twist  (--drive cmd_vel; holonomic x/y/yaw)
     /<robot>/pick_cmd          std_msgs/String      ("attach"/"detach"; robot_0 only,
                                                       see nodes/task_manager.py)
@@ -312,6 +316,16 @@ def parse_args() -> argparse.Namespace:
             "inside NVIDIA warehouse geometry — the station poses are estimates "
             "and have never been confirmed against the real rack layout. The "
             "package then spawns on the floor at the first pickup pose instead."
+        ),
+    )
+    p.add_argument(
+        "--no-sim-view",
+        dest="sim_view",
+        action="store_false",
+        help=(
+            "Don't build the operator view's Sim camera (configs/sim_view.yaml). It "
+            "renders nothing until a page opens that view, so this only matters for "
+            "isolating render-product problems."
         ),
     )
     p.add_argument(
@@ -693,6 +707,39 @@ CHASE_CAM_OFFSET_M = (-2.2, 0.0, 1.5)  # behind + above, in base_link's local fr
 # (not hand-waved) each time; only the distance/tilt magnitude needed
 # empirical tuning against a live snapshot, not the axis mapping itself.
 CHASE_CAM_ORIENTATION = (0.5647, 0.4255, -0.4255, -0.5647)
+
+
+SIM_VIEW_CONFIG = REPO_ROOT / "configs" / "sim_view.yaml"
+
+
+def _spawn_sim_view(scene: str, build_graph):
+    """The operator view's Sim camera: a look-at camera from configs/sim_view.yaml,
+    and its (disabled) RGB graph. Returns the graph's `enabled` attribute path, or
+    None when the scene has no entry."""
+    import yaml
+    from pxr import Gf, UsdGeom
+    import omni.usd
+
+    cfg = yaml.safe_load(SIM_VIEW_CONFIG.read_text()) or {}
+    sc = (cfg.get("scenes") or {}).get(scene)
+    if not sc:
+        emit(f"  sim view: no camera for scene {scene!r} in {SIM_VIEW_CONFIG.name}")
+        return None
+    stage = omni.usd.get_context().get_stage()
+    path = "/World/sim_view_cam"
+    cam = UsdGeom.Camera.Define(stage, path)
+    cam.CreateFocalLengthAttr(float(cfg.get("focal_length_mm", 14.0)))
+    cam.CreateClippingRangeAttr(Gf.Vec2f(0.1, 200.0))
+    # SetLookAt builds world->camera with the camera looking down -Z and +Y up,
+    # which is a USD camera's own convention; its inverse is the prim's transform.
+    eye, target = Gf.Vec3d(*sc["eye"]), Gf.Vec3d(*sc["target"])
+    view = Gf.Matrix4d().SetLookAt(eye, target, Gf.Vec3d(0, 0, 1))
+    UsdGeom.Xformable(cam.GetPrim()).AddTransformOp().Set(view.GetInverse())
+    attr = build_graph(graph_path="/World/SimViewGraph", camera_prim_path=path, topic="/sim/view/rgb",
+                       width=int(cfg.get("width", 640)), height=int(cfg.get("height", 360)),
+                       frame_id="sim_view")
+    emit(f"  sim view camera at {tuple(sc['eye'])} -> {tuple(sc['target'])} (off until watched)")
+    return attr
 
 
 def _spawn_chase_camera(robot_prim_path: str, d435: dict):
@@ -1214,7 +1261,8 @@ class _WorldRuntime:
     "ACTOR TIME"). Commands are applied on the next ground-truth tick.
     """
 
-    def __init__(self, w: dict | None, actor_ops: dict, spawn_positions: dict):
+    def __init__(self, w: dict | None, actor_ops: dict, spawn_positions: dict,
+                 sim_view_attr: str | None = None):
         import json
 
         import rclpy
@@ -1244,6 +1292,11 @@ class _WorldRuntime:
         self.node.create_subscription(String, "/sim/world_cmd", self._on_cmd, 10)
         self.node.create_subscription(String, "/sim/teleport", self._on_teleport, 10)
         self.teleports: list[dict] = []
+        self.view_attr = sim_view_attr
+        self.view_until = 0.0     # wall clock: render the Sim view until then
+        self.view_on = False
+        if sim_view_attr:
+            self.node.create_subscription(String, "/sim/view_cmd", self._on_view, 10)
         self.world_msg = String(data=json.dumps(self._describe()))
         self.world_pub.publish(self.world_msg)
         self.world_sent_at = time.monotonic()
@@ -1321,6 +1374,28 @@ class _WorldRuntime:
         emit(f"  teleport {t['robot']}: world ({wx:.2f}, {wy:.2f}) -> ({tx:.2f}, {ty:.2f}), "
              f"yaw {math.degrees(tyaw):.0f} deg")
 
+    # How long one heartbeat keeps the Sim view rendering. The page re-sends every 2 s;
+    # a closed tab or a phone gone to sleep sends nothing, and the camera switches off
+    # on its own instead of costing a render product until the run ends.
+    VIEW_HOLD_S = 6.0
+
+    def _on_view(self, msg) -> None:
+        try:
+            on = bool(self._json.loads(msg.data).get("on"))
+        except (ValueError, AttributeError):
+            on = msg.data.strip() == "on"
+        self.view_until = time.monotonic() + self.VIEW_HOLD_S if on else 0.0
+
+    def _view(self) -> None:
+        want = time.monotonic() < self.view_until
+        if want == self.view_on:
+            return
+        import omni.graph.core as og
+
+        og.Controller.attribute(self.view_attr).set(want)
+        self.view_on = want
+        emit(f"  sim view {'on' if want else 'off'}")
+
     def _apply(self, cmd: str) -> None:
         if cmd in ("reset", "restart"):
             self.wt = 0.0
@@ -1360,6 +1435,8 @@ class _WorldRuntime:
             self._apply(self.pending.pop(0))
         while self.teleports:
             self._teleport(self.teleports.pop(0), robots)
+        if self.view_attr:
+            self._view()
         out = {"t": round(sim_t, 4), "wt": round(self.wt, 4), "running": self.running,
                "world": self.world["name"] if self.world else None,
                "robots": {}, "actors": {}}
@@ -1403,7 +1480,7 @@ def main() -> int:
     from isaacsim.core.utils.types import ArticulationAction
 
     sys.path.insert(0, str(SCRIPTS_DIR))
-    from _ros2_graphs import build_chase_camera_graph, build_robot_graphs
+    from _ros2_graphs import build_chase_camera_graph, build_robot_graphs, build_view_camera_graph
 
     emit(f"spawn_warehouse | GPU: {gpu_name()}")
     emit(f"  scene={args.scene}  robots={args.robots}")
@@ -1538,6 +1615,15 @@ def main() -> int:
         )
         emit(f"  chase_cam graph built (/{name}/camera/chase/*)")
 
+    # The operator view's Sim view: one camera on the whole floor, built DISABLED
+    # (build_view_camera_graph) and switched by _WorldRuntime on /sim/view_cmd.
+    sim_view_attr = None
+    if args.sim_view:
+        try:
+            sim_view_attr = _spawn_sim_view(args.scene, build_view_camera_graph)
+        except Exception as exc:  # cosmetic: never fail a run over it
+            emit(f"  sim view camera skipped: {exc}")
+
     # Station props + the mock pick package (robot_0 only). Every station in
     # configs/waypoints.yaml carrying a `prop:` block gets a shelf authored at
     # its pose, and the package starts resting on the first pickup station's
@@ -1628,7 +1714,7 @@ def main() -> int:
         emit(f"  world={WORLD['name']}: {len(WORLD['props'])} prop(s), "
              f"{len(WORLD['actors'])} actor(s), autostart={WORLD['autostart']}")
         actor_ops = _spawn_world(stage, WORLD)
-    world_rt = _WorldRuntime(WORLD, actor_ops, spawn_positions)
+    world_rt = _WorldRuntime(WORLD, actor_ops, spawn_positions, sim_view_attr)
     emit("  /sim/ground_truth + /sim/world publishers started")
 
     # Global /clock publisher so external ROS 2 nodes can `use_sim_time:=true`.

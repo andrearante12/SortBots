@@ -1,0 +1,24 @@
+# The operator view's "Sim" stage view (webui/operator.html): one camera looking at
+# the whole floor, rendered by Isaac ONLY while a page has that view open
+# (scripts/spawn_warehouse.py, /sim/view_cmd heartbeat). Each render product costs
+# real time (scripts/bench_sim.sh: a third camera took 2 robots from 0.47x to 0.33x),
+# so it starts disabled and switches itself off a few seconds after the last viewer.
+#
+# Per scene: where the camera stands (eye), what it looks at (target), both in the
+# world == map frame, metres. A high oblique view, like a CCTV camera in a corner,
+# so the shelving reads as 3D rather than as a floor plan.
+width: 640
+height: 360
+focal_length_mm: 14.0          # with the 20.955 mm aperture: ~73 deg horizontal
+scenes:
+  nvidia:
+    # Inside, below the roof: at 16 m the camera saw the warehouse ROOF from above
+    # (2026-10-24). The explored floor spans x -23..5, y -4..31; the aisles and the
+    # robots' spawns are in its east half. Steep enough to see down between the racks
+    # (a shallower view from the SE corner showed racks and no robots), and below the
+    # hanging light fixtures (at 9 m one filled half the frame).
+    eye: [2.0, 5.0, 6.5]
+    target: [-3.0, 13.5, 0.0]
+  primitive:
+    eye: [0.0, -12.0, 9.0]
+    target: [0.0, 0.0, 0.0]

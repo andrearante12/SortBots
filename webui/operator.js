@@ -46,7 +46,8 @@
   const open = new Set();
   let selected = null;
   let tool = "select";
-  let view3d = false; // main stage: 2D occupancy map, or the 3D point cloud
+  let view3d = false; // main stage is the 3D point cloud
+  let stageView = "2d"; // "2d" map | "3d" cloud | "sim" (Isaac's own render, sim only)
   let waypoints = []; // [{name, x, y, yaw}], the server's copy — also the task endpoints
   let gateway = null; // {x, y}: the fleet gateway pin (comms overlay), server's copy
   let platform = null; // "sim" | "real", from serve.py; the Teleport tool is sim-only
@@ -1145,6 +1146,9 @@
         platform = body.platform;
         $('#tools [data-t="tp"]').hidden = platform !== "sim";
         if (platform !== "sim" && tool === "tp") setTool("select");
+        $('#view [data-v="sim"]').hidden = platform !== "sim";
+        if (platform !== "sim" && stageView === "sim") setView("2d");
+        try { if (platform === "sim" && stageView === "2d" && localStorage.getItem("sortbots.mapView") === "sim") setView("sim"); } catch (e) { /* stay on the map */ }
       }
       renderWaypoints(); dirty = true;
     } catch (e) { console.error("failed to load waypoints", e); }
@@ -1756,23 +1760,57 @@
   // The 3D view is look-only: the tools (waypoints, sends) work on the 2D map, so they
   // hide with it. operator_cloud.js subscribes to the cloud only while it is showing.
   let cloudMounted = false;
-  function setView(v3) {
-    view3d = v3 && !!window.sortbotsCloud;
-    for (const b of document.querySelectorAll("#view button")) b.classList.toggle("active", (b.dataset.v === "3d") === view3d);
+  function setView(v) {
+    if (v === true) v = "3d"; else if (v === false) v = "2d";
+    if (v === "3d" && !window.sortbotsCloud) v = "2d";
+    if (v === "sim" && platform !== "sim") v = "2d";
+    stageView = v; view3d = v === "3d";
+    const onMap = v === "2d";
+    for (const b of document.querySelectorAll("#view button")) b.classList.toggle("active", b.dataset.v === v);
     // style.display, not [hidden]: #map / #tools set their own display, which beats the attribute.
-    canvas.style.display = $("#tools").style.display = view3d ? "none" : "";
+    canvas.style.display = $("#tools").style.display = onMap ? "" : "none";
     $("#cloud").hidden = !view3d;
-    $("#comms-toggle").hidden = view3d; // the overlay draws on the 2D map only
-    setComms(!view3d && commsWanted);
+    $("#comms-toggle").hidden = !onMap; // the overlay draws on the 2D map only
+    setComms(onMap && commsWanted);
     if (view3d) {
       if (!cloudMounted) { window.sortbotsCloud.mount($("#cloud"), ros); cloudMounted = true; }
       window.sortbotsCloud.show(); syncCloudRobots();
-    } else {
-      if (cloudMounted) window.sortbotsCloud.hide();
-      setTool(tool); dirty = true;
-    }
-    try { localStorage.setItem("sortbots.mapView", view3d ? "3d" : "2d"); } catch (e) { /* this tab only */ }
+    } else if (cloudMounted) window.sortbotsCloud.hide();
+    setSimView(v === "sim");
+    if (onMap) { setTool(tool); dirty = true; }
+    try { localStorage.setItem("sortbots.mapView", v); } catch (e) { /* this tab only */ }
   }
+
+  // -- the Sim view: Isaac's own render (scripts/spawn_warehouse.py, configs/sim_view.yaml) ----------
+  // Every rendered camera slows the sim (bench_sim.sh: a third one took 2 robots from 0.47x
+  // to 0.33x), so Isaac builds this one disabled and renders it only while a heartbeat
+  // arrives on /sim/view_cmd. The page beats every SIM_BEAT_MS while the view is open AND
+  // the tab is visible, and says "off" on the way out; a closed tab or a phone gone to
+  // sleep just stops beating, and Isaac switches the camera off a few seconds later.
+  const SIM_BEAT_MS = 2000;
+  const simView = { on: false, beat: null, timer: null, token: 0 };
+  function setSimView(on) {
+    const want = on && !document.hidden;
+    $("#simview").hidden = !on;
+    if (want === simView.on) return;
+    simView.on = want;
+    clearInterval(simView.beat); clearTimeout(simView.timer); simView.token++;
+    if (!want) { simView.beat = null; publishString("/sim/view_cmd", JSON.stringify({ on: false })); return; }
+    const beat = () => publishString("/sim/view_cmd", JSON.stringify({ on: true }));
+    beat(); simView.beat = setInterval(beat, SIM_BEAT_MS);
+    const token = simView.token, pic = $("#simview .pic"), msg = $("#simview .msg");
+    const tick = () => {
+      if (token !== simView.token) return;
+      const probe = new Image();
+      probe.onload = () => { if (token !== simView.token) return; pic.style.backgroundImage = `url(${probe.src})`; msg.textContent = ""; simView.timer = setTimeout(tick, 250); };
+      // The first frames take a moment: the render product is created on the first beat.
+      probe.onerror = () => { if (token !== simView.token) return; if (!pic.style.backgroundImage) msg.textContent = "Starting the sim camera…"; simView.timer = setTimeout(tick, 1500); };
+      probe.src = `http://${HOST}:${VIDEO_PORT}/snapshot?topic=/sim/view/rgb&qos_profile=sensor_data&_=${Date.now()}`;
+    };
+    tick();
+  }
+  document.addEventListener("visibilitychange", () => setSimView(stageView === "sim"));
+
   // -- comms overlay (operator_comms.js) ----------------------------------------------------------
   let commsWanted = false;
   function setComms(v) {
@@ -1790,12 +1828,12 @@
   }
   $("#comms-toggle").addEventListener("click", () => {
     commsWanted = !commsWanted;
-    setComms(commsWanted && !view3d);
+    setComms(commsWanted && stageView === "2d");
     try { localStorage.setItem("sortbots.comms", commsWanted ? "on" : "off"); } catch (e) { /* this tab only */ }
   });
 
   const syncCloudRobots = () => window.sortbotsCloud.setRobots([...robots.values()].map((r) => ({ id: r.id, color: r.color, pose: r.pose })));
-  $("#view").addEventListener("click", (e) => { if (e.target.dataset.v) setView(e.target.dataset.v === "3d"); });
+  $("#view").addEventListener("click", (e) => { if (e.target.dataset.v) setView(e.target.dataset.v); });
 
   // -- phone panes ----------------------------------------------------------------------------------
   // Below 760 px (operator.html's media query) one pane shows at a time. The map keeps
@@ -1906,12 +1944,13 @@
   // -- boot ----------------------------------------------------------------------------------------------------------------------
   applyTheme(); resize(); setTool("select"); renderTasks(); renderWaypoints();
   refreshRoster(); loadWaypoints(); loadGateway(); pollSession();
-  try { if (localStorage.getItem("sortbots.mapView") === "3d") setView(true); } catch (e) { /* default: 2D */ }
+  // "sim" waits for loadWaypoints to learn the platform (it's sim-only), see there.
+  try { const v = localStorage.getItem("sortbots.mapView"); if (v === "3d") setView("3d"); } catch (e) { /* default: 2D */ }
   setInterval(loadWaypoints, 10000); // another operator may have added pins
   setInterval(loadGateway, 10000);
   try { if (localStorage.getItem("sortbots.comms") === "on") $("#comms-toggle").click(); } catch (e) { /* default: off */ }
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane, setView, get stageView() { return stageView; } };
 })();

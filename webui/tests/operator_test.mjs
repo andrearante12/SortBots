@@ -950,6 +950,34 @@ async function main() {
         !(await visible('#tools [data-t="tp"]')) && await page.eval(`document.querySelector('#tools [data-t="select"]').classList.contains('active')`));
   await page.eval(`window.__platform = null; window.__operator.loadWaypoints()`); await sleep(200);
 
+  // -- the Sim view (Isaac's own render, only while watched) -------------------------------------
+  console.log('\n--- sim view ---');
+  check('sim view: offered on the sim', await visible('#view [data-v="sim"]'));
+  const beats = () => page.eval(`window.__published.filter((x) => x.topic === '/sim/view_cmd').map((x) => JSON.parse(x.msg.data).on)`);
+  await page.eval(`window.__published.length = 0`);
+  await click('#view [data-v="sim"]'); await sleep(300);
+  check('sim view: opening it shows the sim picture instead of the map',
+        (await visible('#simview')) && !(await visible('#map')) && !(await visible('#comms-toggle')) && !(await visible('#tools')));
+  check('sim view: opening it asks Isaac to render', JSON.stringify(await beats()) === '[true]', JSON.stringify(await beats()));
+  check('sim view: says it is waiting for the first frame', /Starting the sim camera/.test(await $text('#simview .msg')), await $text('#simview .msg'));
+  await sleep(2300);
+  check('sim view: keeps asking while open (a heartbeat, so a closed tab stops costing)', (await beats()).filter((b) => b).length >= 2, JSON.stringify(await beats()));
+  await click('#view [data-v="2d"]'); await sleep(200);
+  check('sim view: leaving tells Isaac to stop', (await beats()).slice(-1)[0] === false && (await visible('#map')) && !(await visible('#simview')));
+  const n0 = (await beats()).length; await sleep(2300);
+  check('sim view: and the heartbeat stops', (await beats()).length === n0);
+  await click('#view [data-v="sim"]'); await sleep(200);
+  await load();
+  await sleep(600);
+  check('sim view: the choice survives a reload once the platform is known', (await page.eval(`window.__operator.stageView`)) === 'sim' && await visible('#simview'));
+  await page.eval(`window.__platform = 'real'; window.__operator.loadWaypoints()`); await sleep(300);
+  check('sim view: not offered on the real robot (and falls back to the map)', !(await visible('#view [data-v="sim"]')) && (await page.eval(`window.__operator.stageView`)) === '2d');
+  await page.eval(`window.__platform = null; window.__operator.loadWaypoints(); localStorage.removeItem('sortbots.mapView')`); await sleep(200);
+  await emit('/map', walled);
+  await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+  await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+  await sleep(300);
+
   // -- manual drive (pad on the camera tile) ----------------------------------------------------------
   console.log('\n--- manual drive ---');
   await page.eval(`window.__operator.select(${JSON.stringify(r1)})`); await sleep(400);

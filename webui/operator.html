@@ -194,6 +194,11 @@
   #mode-tile #map-name:not(:empty)::before { content: "\00b7  "; }
   #mode-tile.loc b { color: var(--go); } #mode-tile.map b { color: var(--info); }  #cloud { position: absolute; inset: 0; background: #0a0c10; }
   #cloud canvas { width: 100%; height: 100%; display: block; }
+  #simview { position: absolute; inset: 0; background: #0a0c10; }
+  #simview .pic { position: absolute; inset: 0; background: center / contain no-repeat; }
+  #simview .msg { position: absolute; inset: 0; display: grid; place-items: center; color: #8b95a0; font-size: .9rem; pointer-events: none; }
+  #simview .msg:empty { display: none; }
+  #simview .note { position: absolute; left: 12px; bottom: 10px; font-size: .76rem; color: #8b95a0; background: rgba(10,12,16,.6); padding: 3px 8px; border-radius: 5px; }
   /* Sits on the always-dark 3D scene, so fixed colours rather than theme tokens. */
   #cloud .cloud-info { position: absolute; bottom: 14px; left: 14px; color: #8b95a0; font-size: .8rem; pointer-events: none; }
   #comms { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -485,6 +490,7 @@
     <div class="seg" id="view" role="group" aria-label="Map view">
       <button data-v="2d" class="active" title="Occupancy map: tools, waypoints and routes">Map</button>
       <button data-v="3d" title="The fleet's 3D point cloud (/fleet/recon_cloud). Drag to orbit, scroll to zoom, right-drag to pan">3D cloud</button>
+      <button data-v="sim" hidden title="What Isaac Sim actually renders: one camera on the whole floor (configs/sim_view.yaml). Rendered only while this view is open, so it costs nothing otherwise">Sim</button>
     </div>
     <!-- Map tools live up here, not over the map: the map gets the whole stage. -->
     <div class="seg" id="tools" role="toolbar" aria-label="Map tools">
@@ -533,6 +539,10 @@
   <canvas id="map"></canvas>
   <canvas id="comms" hidden></canvas>
   <div id="cloud" hidden></div>
+  <!-- The Sim view: Isaac's own render of the floor, /sim/view/rgb via /snapshot polls.
+       Isaac renders that camera only while this view sends its heartbeat (operator.js). -->
+  <div id="simview" hidden><div class="pic"></div><span class="msg">Starting the sim camera&hellip;</span>
+    <span class="note" title="Every rendered camera slows the sim (scripts/bench_sim.sh). This one is switched off a few seconds after the last viewer leaves">Rendered only while this view is open</span></div>
   <div class="float" id="comms-bar" hidden role="toolbar" aria-label="Comms model">
     <span class="model" title="Everything drawn by this overlay is the commsim model's prediction (commsim/des): the real robots' positions and the map's obstacles go in, links, routes and message hops come out. Its what-ifs change the model only, never the robots.">Model</span>
     <span id="cm-state" class="muted"></span>
