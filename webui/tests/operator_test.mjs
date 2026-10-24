@@ -858,7 +858,8 @@ async function main() {
   let cs = await vz();
   check('comms: toggling on shows the overlay and its bar', (await visible('#comms')) && (await visible('#comms-bar')) && cs.on);
   check('comms: the model gets one node per robot plus the gateway', cs.n === 3, `n=${cs.n}`);
-  check('comms: the map\'s obstacles become the model\'s racks', cs.racks === 2 && /2 obstacles from the map/.test(await $text('#cm-state')), `${cs.racks} / ${await $text('#cm-state')}`);
+  check('comms: the map\'s obstacles become the model\'s racks', cs.racks === 2, `${cs.racks}`);
+  check('comms: the bar only speaks up when there is something to do', (await $text('#cm-state')) === '', await $text('#cm-state'));
   await waitFor(async () => { const s = await vz(); return Math.abs(s.nodes[1][0] - 7) < 0.3 && Math.abs(s.nodes[0][0] - 10.5) < 0.3; }, { what: 'model positions', tries: 30 });
   cs = await vz();
   check('comms: the model\'s robots stand where the real ones are (map origin removed)',

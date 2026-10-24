@@ -377,8 +377,9 @@
   function renderBar() {
     const bar = $("#comms-bar"); if (!bar) return;
     const map = opts && opts.getMap();
+    // Only what the operator can act on; the obstacle count is in __viz.state() for tests.
     $("#cm-state").textContent = !connected ? "Connecting to the model…" : !map ? "Waiting for a map"
-      : `${racks} obstacle${racks === 1 ? "" : "s"} from the map${opts.getGateway() ? "" : " · no gateway pin, using the map centre"}`;
+      : opts.getGateway() ? "" : "No gateway pin: using the map centre";
     $("#cm-play").textContent = playing ? "Pause" : "Play";
     $("#cm-speed").value = String(speed);
     const rng = header && header.range_m ? Math.round(header.range_m.robot) : null;
