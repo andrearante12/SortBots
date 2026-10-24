@@ -6,6 +6,8 @@
 //   - rosbridge (9090)   live topics: /map, /tf, per-robot plan / explore_status /
 //                        task_status / action status, and the commands this page
 //                        sends (dispatch_task, explore_cmd, navigate_to_pose, cmd_vel)
+//                        and the fleet auction's /fleet/task_board (gateway:
+//                        liveness, battery, who owns which task, latched alarms)
 //   - serve.py (HTTP)    /api/robots, /api/nav_waypoints (waypoints, which are
 //                        also the task endpoints), /api/session (console control)
 // The session panel itself is scenarios.js, unchanged apart from tolerating the
@@ -331,6 +333,10 @@
 
   function statusOf(r) {
     if (!online(r)) return { tag: "offline", detail: r.pose ? "Not responding" : "Waiting for the robot" };
+    // The fleet's verdict, not ours: its TF is fine but its radio has gone quiet, so
+    // the other robots treat it as gone (its tasks lease out to them).
+    const fr = fleetOf(r);
+    if (fr && fr.alive === false) return { tag: "silent", detail: "Not heard on the fleet radio" };
     const now = performance.now();
     // DONE / FAILED are one-message transients task_manager publishes just before IDLE.
     const busy = r.task && r.task.state && !FINISHED.includes(r.task.state) && r.task.state !== "IDLE";
@@ -395,7 +401,7 @@
   }
 
   const TASK_LABEL = (t) => ({
-    QUEUED: ["waiting", ""], NAV_TO_PICKUP: ["en route", "active"], PICKING: ["picking up", "active"],
+    BIDDING: ["bidding", "bid"], CLAIMED: ["assigned", ""], QUEUED: ["waiting", ""], NAV_TO_PICKUP: ["en route", "active"], PICKING: ["picking up", "active"],
     NAV_TO_DROPOFF: ["en route", "active"], PLACING: ["placing", "active"], NAV_TO_GOAL: ["en route", "active"],
     DONE: ["done", "done"], FAILED: ["failed", "failed"], CANCELLED: ["cancelled", ""],
   }[t.state] || [t.state.toLowerCase(), "active"]);
@@ -403,29 +409,158 @@
     : t.pickup ? `${esc(t.pickup)} to ${esc(t.dropoff)}` : `Task ${esc(t.id)}`);
 
   function renderTasks() {
-    const rank = (t) => (FINISHED.includes(t.state) ? 2 : t.state === "QUEUED" ? 1 : 0);
+    const rank = (t) => (FINISHED.includes(t.state) ? 2 : ["QUEUED", "BIDDING", "CLAIMED"].includes(t.state) ? 1 : 0);
     // Waiting tasks keep dispatch order (that IS the run order, per robot); `at` is
     // only the tie-break between robots.
     const list = [...tasks].sort((a, b) => rank(a) - rank(b) || (rank(a) === 1 ? 0 : a.at - b.at));
     $("#tasks").innerHTML = list.length ? list.map((t) => {
       const [label, cls] = TASK_LABEL(t), r = robots.get(t.robot), done = rank(t) === 2;
       return `<div class="tk ${done ? "finished" : ""}"><span class="t1">${taskTitle(t)}</span><span class="st ${cls}">${label}</span>
-        ${done ? "" : `<button class="x" data-cancel="${esc(t.id)}" title="Cancel this task" aria-label="Cancel task ${esc(t.id)}">&times;</button>`}
-        <span class="t2"${t.reason ? ` title="${esc(t.reason)}"` : ""}>${t.reason ? "rejected: unknown waypoint" : esc(t.id)}</span><span class="who">${r ? `<i style="--c:${r.color}"></i>${esc(nameOf(r.id))}` : ""}</span></div>`;
+        ${done || t.pending ? "" : `<button class="x" data-cancel="${esc(t.id)}" title="Cancel this task" aria-label="Cancel task ${esc(t.id)}">&times;</button>`}
+        <span class="t2"${t.reason ? ` title="${esc(t.reason)}"` : ""}>${t.reason ? esc(t.reasonShort || "rejected: unknown waypoint") : esc(t.pending ? "sent to the fleet" : t.id) + (t.loaded && !done ? " · loaded" : "")}</span><span class="who">${r ? `<i style="--c:${r.color}"></i>${esc(nameOf(r.id))}` : t.fleet ? "Fleet" : ""}</span></div>`;
     }).join("") : `<div class="none">No tasks yet. Queue some below.</div>`;
-    const active = tasks.filter((t) => rank(t) === 0).length, waiting = tasks.filter((t) => t.state === "QUEUED").length;
+    const active = tasks.filter((t) => rank(t) === 0).length, waiting = tasks.filter((t) => rank(t) === 1).length;
     $("#tk-count").textContent = tasks.length ? `${active} running, ${waiting} waiting` : "";
   }
 
   function cancelTask(id) {
     const t = tasks.find((x) => x.id === id);
     if (!t) return;
+    if (id.startsWith(FLEET_PREFIX)) {
+      // The fleet's task: withdraw it fleet-wide at the gateway. Cancelling it on the
+      // robot alone would also work (fleet_tasks.py withdraws a hand-cancelled task),
+      // but an unclaimed one has no robot to cancel it on.
+      publishString("/fleet/task_cancel", JSON.stringify({ task_id: Number(id.slice(FLEET_PREFIX.length)) }));
+      if (["BIDDING", "CLAIMED"].includes(t.state)) { t.state = "CANCELLED"; t.at = Date.now(); }
+      return renderTasks();
+    }
     publishString(`/${t.robot}/cancel_task`, id);
     // A waiting task is simply dropped, and nothing reports on it again. A running one
     // ends with a CANCELLED status, so leave its row to that.
     if (t.state === "QUEUED") { t.state = "CANCELLED"; t.at = Date.now(); }
     renderTasks();
   }
+
+  // -- fleet auction board ----------------------------------------------------------------------
+  // nodes/fleet_tasks.py --gateway publishes /fleet/task_board (latched, 1 Hz): every
+  // robot the fleet hears (alive by the SAME silence rule the robots apply to each
+  // other, battery, owned tasks), every auctioned task with its owner, and latched
+  // alarms. It is the fleet's own state, so this page never disagrees with the robots
+  // about who is gone. A task the fleet won is `fleet-<id>` on the robot's
+  // task_status, so its row is one row whichever source spoke last.
+  // No board (the real robot has no gateway, or task_manager:=false) = everything
+  // below is inert and the page behaves exactly as it did before the auction.
+
+  const FLEET_PREFIX = "fleet-";
+  const BOARD_STALE_MS = 5000; // 1 Hz board; this much silence means the gateway is gone
+  const LOW_BATTERY_PCT = 20;  // configs/fleet_tasks.yaml battery_reserve_pct: below it, no bids
+  const PENDING_MS = 10000;    // a request the gateway never announced (unknown waypoint) gives up
+  let board = null, boardAt = -Infinity, boardSeen = false;
+  const seenAlarms = new Set();
+  const fleetUp = () => !!board && performance.now() - boardAt < BOARD_STALE_MS;
+  const fleetOf = (r) => (fleetUp() ? (board.robots || []).find((b) => b.id === r.id) || null : null);
+
+  function onBoard(msg) {
+    let b;
+    try { b = JSON.parse(msg.data); } catch (e) { return; }
+    if (!b || !Array.isArray(b.robots) || !Array.isArray(b.tasks)) return;
+    board = b; boardAt = performance.now();
+    for (const fr of b.robots) if (/^robot_\d+$/.test(fr.id || "")) addRobot(fr.id);
+    for (const bt of b.tasks) mergeBoardTask(bt);
+    // Toast only alarms raised while this page is open: on the first board, every
+    // already-latched one is simply shown in the chip.
+    for (const a of b.alarms || []) {
+      if (seenAlarms.has(a.id)) continue;
+      seenAlarms.add(a.id);
+      if (boardSeen && a.active) toast(`Alarm: ${a.text || a.kind}`);
+    }
+    boardSeen = true;
+    trimTasks(); renderTasks(); renderFleet(); renderAlarms();
+  }
+  topic("/fleet/task_board", "std_msgs/String").subscribe(onBoard);
+
+  function mergeBoardTask(bt) {
+    const id = FLEET_PREFIX + bt.task_id;
+    let t = tasks.find((x) => x.id === id);
+    if (!t) {
+      // Ours, still waiting for its id? The gateway names it; match on the route.
+      t = tasks.find((x) => x.pending && x.pickup === bt.pickup && x.dropoff === bt.dropoff);
+      if (t) { t.id = id; delete t.pending; }
+    }
+    const owner = bt.owner && bt.owner !== "gateway" ? bt.owner : null;
+    if (!t) {
+      if (["done", "cancelled"].includes(bt.state)) return; // history from before this page opened
+      t = { id, kind: "pickup", pickup: bt.pickup, dropoff: bt.dropoff, robot: owner, state: "BIDDING", at: Date.now() };
+      tasks.push(t);
+    }
+    t.fleet = true; t.loaded = !!bt.committed;
+    const set = (st) => { if (t.state !== st) { t.state = st; t.at = Date.now(); } };
+    // The robot's own task_status is the finer source once it has the task (QUEUED,
+    // NAV_TO_PICKUP, ...); the board only fills in what no robot reports: the auction
+    // itself, a new owner after a re-auction, and how it ended.
+    if (bt.state === "open" || bt.state === "bidding") {
+      if (!FINISHED.includes(t.state)) { set("BIDDING"); t.robot = null; }
+    } else if (bt.state === "claimed" && owner) {
+      if (t.state === "BIDDING" || t.robot !== owner) set("CLAIMED");
+      t.robot = owner;
+    } else if (bt.state === "done" || bt.state === "cancelled") {
+      if (!FINISHED.includes(t.state)) set(bt.state.toUpperCase());
+    }
+  }
+
+  // "Any robot" with the fleet up: the gateway announces it, the robots bid, and the
+  // winner's task_manager gets it as fleet-<id>. The row waits as "sent to the fleet"
+  // until the board names it.
+  function requestFleet(pickup, dropoff) {
+    publishString("/fleet/task_request", JSON.stringify({ pickup, dropoff }));
+    tasks.push({ id: `pending-${Math.random().toString(16).slice(2, 10)}`, kind: "pickup", pickup, dropoff,
+      robot: null, state: "BIDDING", fleet: true, pending: true, at: Date.now() });
+  }
+  function expirePending() {
+    let changed = false;
+    for (const t of tasks) {
+      if (!t.pending || t.state !== "BIDDING" || Date.now() - t.at < PENDING_MS) continue;
+      Object.assign(t, { state: "FAILED", at: Date.now(), reasonShort: "the fleet didn't take it",
+        reason: "The fleet gateway never announced this task: an unknown waypoint, or the gateway is down" });
+      changed = true;
+    }
+    if (changed) renderTasks();
+  }
+
+  // -- alarms --
+  const ALARM_KIND = { robot_silent: "Robot silent", owner_missing: "Owner missing", lease_expired: "Lease expired", task_stalled: "Task stalled" };
+  let lastAlarmSig = "";
+  function renderAlarms() {
+    const alarms = fleetUp() ? board.alarms || [] : [];
+    // A gateway that WAS publishing and stopped is itself the alarm: its own alarms can
+    // no longer arrive. Only while a session runs; between runs silence is expected.
+    const gwSilent = boardSeen && !fleetUp() && sessionActive();
+    const active = alarms.filter((a) => a.active).length;
+    const sig = JSON.stringify([alarms.map((a) => [a.id, a.active, a.acked]), gwSilent]);
+    if (sig === lastAlarmSig) return;
+    lastAlarmSig = sig;
+    const chip = $("#alarms");
+    chip.hidden = !alarms.length && !gwSilent;
+    chip.classList.toggle("on", !!active || gwSilent);
+    $("#alarms-label").textContent = gwSilent && !alarms.length ? "Fleet gateway silent"
+      : active ? `${active} alarm${active > 1 ? "s" : ""}` : `${alarms.length} to acknowledge`;
+    if (chip.hidden) $("#alarm-pop").hidden = true;
+    const t0 = board ? board.t : 0;
+    // Active first, newest first within each: the operator reads the top row.
+    const list = [...alarms].sort((a, b) => (b.active - a.active) || (b.t - a.t));
+    $("#alarm-list").innerHTML = (gwSilent ? `<li class="al on"><b>Fleet gateway silent</b><span>No task board for over ${BOARD_STALE_MS / 1000} s. Alarms can't reach this page until it's back.</span></li>` : "") +
+      list.map((a) => `<li class="al ${a.active ? "on" : ""}" data-alarm="${esc(a.id)}"><b>${esc(ALARM_KIND[a.kind] || a.kind)}</b>
+        <span>${esc(a.text || "")}</span><span class="age">${Math.round(Math.max(0, t0 - a.t))} s ago${a.active ? "" : " · cleared"}</span>
+        <button class="btn small" data-ack="${esc(a.id)}" title="Acknowledge. The alarm leaves once its condition has also cleared">Acknowledge</button></li>`).join("");
+  }
+  $("#alarms").addEventListener("click", () => { $("#alarm-pop").hidden = !$("#alarm-pop").hidden; });
+  $("#alarm-pop").addEventListener("click", (e) => {
+    const id = e.target.dataset.ack;
+    if (id !== undefined) publishString("/fleet/alarm_ack", JSON.stringify({ id: Number(id) }));
+  });
+  addEventListener("pointerdown", (e) => {
+    if (!$("#alarm-pop").hidden && !e.target.closest("#alarm-pop, #alarms")) $("#alarm-pop").hidden = true;
+  });
 
   // -- fleet list ---------------------------------------------------------------------------
 
@@ -438,6 +573,7 @@
     const st = statusOf(r), s = r.task;
     const waiting = r.queueDepth ? ` · ${r.queueDepth} waiting` : "";
     if (st.tag === "offline") return { cls: "off", title: "Offline", sub: st.detail };
+    if (st.tag === "silent") return { cls: "failed", title: "Silent", sub: st.detail };
     if (st.tag === "on a task") {
       const t = s.task ? { id: s.task_id, ...s.task } : tasks.find((x) => x.id === s.task_id) || { id: s.task_id };
       const cls = ["PICKING", "PLACING"].includes(s.state) ? "working" : "moving";
@@ -469,9 +605,12 @@
       speed: tw ? `${Math.hypot(tw.linear.x, tw.linear.y).toFixed(2)} m/s` : "—",
       turn: tw ? `${Math.round((tw.angular.z * 180) / Math.PI)}°/s` : "—",
       togo,
+      batt: battOf(r) == null ? "—" : `${battOf(r).toFixed(0)}%`,
     };
   }
-  const FACTS = [["pos", "Position"], ["heading", "Heading"], ["speed", "Speed"], ["turn", "Turn rate"], ["togo", "To go"]];
+  const FACTS = [["pos", "Position"], ["heading", "Heading"], ["speed", "Speed"], ["turn", "Turn rate"], ["togo", "To go"], ["batt", "Battery"]];
+  // Only the board knows it (fleet_tasks.py: a real BatteryState, or the sim model).
+  const battOf = (r) => { const fr = fleetOf(r); return fr && typeof fr.battery_pct === "number" ? fr.battery_pct : null; };
 
   function renderFleet() {
     const list = [...robots.values()];
@@ -485,7 +624,7 @@
       for (const dd of el.querySelectorAll("dd[data-f]")) if (dd.textContent !== f[dd.dataset.f]) dd.textContent = f[dd.dataset.f];
     }
     const rows = list.map((r) => ({ r, st: statusOf(r), isOpen: open.has(r.id), tile: tileOf(r) }));
-    const sig = JSON.stringify(rows.map((x) => [x.r.id, x.st, x.isOpen, x.r.id === selected, online(x.r), x.tile, x.r.queueDepth]));
+    const sig = JSON.stringify([fleetUp(), rows.map((x) => [x.r.id, x.st, x.isOpen, x.r.id === selected, online(x.r), x.tile, x.r.queueDepth, battOf(x.r) == null ? null : Math.round(battOf(x.r))])]);
     if (sig === lastFleetSig) return;
     lastFleetSig = sig;
     const onlineN = list.filter(online).length;
@@ -494,7 +633,7 @@
       const f = isOpen ? factsOf(r) : null, busy = st.tag === "on a task" || r.queueDepth > 0;
       return `
       <div class="robot ${isOpen ? "sel" : ""} ${r.id === selected ? "active" : ""} ${online(r) ? "" : "offline"}" data-id="${esc(r.id)}" style="--c:${r.color}">
-        <div class="l1" tabindex="0" role="button" aria-expanded="${isOpen}"><span class="sw"></span><span class="name">${esc(nameOf(r.id))}</span>${r.id === selected && open.size > 1 ? `<span class="ctl" title="Map clicks and waypoint sends go to this robot">controls</span>` : ""}<span class="tag pill ${tile.cls}">${esc(st.tag)}</span></div>
+        <div class="l1" tabindex="0" role="button" aria-expanded="${isOpen}"><span class="sw"></span><span class="name">${esc(nameOf(r.id))}</span>${r.id === selected && open.size > 1 ? `<span class="ctl" title="Map clicks and waypoint sends go to this robot">controls</span>` : ""}${battOf(r) == null ? "" : `<span class="batt ${battOf(r) < LOW_BATTERY_PCT ? "low" : ""}" title="Battery${battOf(r) < LOW_BATTERY_PCT ? ": below the reserve, so it won't bid for new tasks" : ""}">${battOf(r).toFixed(0)}%</span>`}<span class="tag pill ${tile.cls}">${esc(st.tag)}</span></div>
         <div class="l2">${st.tag === "on a task" ? tile.title + (tile.sub ? ` · ${tile.sub}` : "") : esc(st.detail) + (r.queueDepth ? ` · ${r.queueDepth} waiting` : "")}</div>
         ${isOpen ? `<div class="more">
           <div class="cam-slot" data-cam="${esc(r.id)}"></div>
@@ -749,7 +888,9 @@
 
   function renderTargets() {
     const keep = $("#nt-who").value;
-    $("#nt-who").innerHTML = `<option value="auto">Any free robot</option>` +
+    // With the fleet gateway up, "auto" for a pick & drop goes to the auction; a move
+    // still goes to the first free robot (the allocator only models pickup -> dropoff).
+    $("#nt-who").innerHTML = `<option value="auto">${fleetUp() ? "Any robot (fleet auction)" : "Any free robot"}</option>` +
       [...robots.values()].map((r) => `<option value="${esc(r.id)}">${esc(nameOf(r.id))}</option>`).join("");
     if ([...$("#nt-who").options].some((o) => o.value === keep)) $("#nt-who").value = keep;
   }
@@ -771,6 +912,11 @@
     const pickup = $("#nt-from").value, dropoff = $("#nt-to").value;
     if (!pickup || !dropoff) return;
     if (pickup === dropoff) return toast("Pick-up and drop-off can't be the same waypoint.");
+    if ($("#nt-who").value === "auto" && fleetUp()) {
+      requestFleet(pickup, dropoff);
+      renderTasks();
+      return toast("Task sent to the fleet");
+    }
     const who = resolveRobot($("#nt-who").value);
     if (!who) return toast("No robot is free. Pick one to queue the task on it.");
     queueTask({ pickup, dropoff }, who);
@@ -1155,7 +1301,7 @@
       if (p && (!r.pose || Math.hypot(p.x - r.pose.x, p.y - r.pose.y) > 0.01 || Math.abs(p.yaw - r.pose.yaw) > 0.02)) { r.pose = p; moved = true; }
     }
     if (moved) { dirty = true; if (!view.moved) fitView(); if (view3d) syncCloudRobots(); }
-    renderFleet(); renderEmpty(); maybeAutoDemo();
+    renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending();
   }, 250);
 
   // -- boot ----------------------------------------------------------------------------------------------------------------------
@@ -1166,5 +1312,5 @@
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, view, toPx, toWorld };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, view, toPx, toWorld, onBoard, get board() { return board; } };
 })();

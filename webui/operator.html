@@ -79,6 +79,20 @@
   header .spacer { flex: 1; }
   .btn.icon { width: 34px; padding: 6px 0; line-height: 1; font-size: 1rem; }
   #session-chip { display: inline-flex; align-items: center; gap: 8px; }
+  #alarms { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
+  #alarms .dot { background: var(--faint); }
+  #alarms.on { color: var(--stop); border-color: var(--stopb); font-weight: 600; }
+  #alarms.on .dot { background: var(--stop); }
+  #alarm-pop { position: fixed; top: 54px; right: 16px; z-index: 6; width: 340px; max-height: 60vh; overflow-y: auto;
+               background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 24px var(--shadow); }
+  #alarm-pop h3 { margin: 0; padding: 12px 16px 8px; font-size: .9rem; font-weight: 600; }
+  #alarm-list { list-style: none; margin: 0; padding: 0; }
+  #alarm-list .al { padding: 10px 16px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; font-size: .86rem; }
+  #alarm-list .al b { font-weight: 600; color: var(--muted); }
+  #alarm-list .al.on b { color: var(--stop); }
+  #alarm-list .al span { grid-column: 1; color: var(--ink); }
+  #alarm-list .al .age { color: var(--muted); font-size: .8rem; }
+  #alarm-list .al .btn { grid-column: 2; grid-row: 1 / 4; align-self: center; }
 
   aside { background: var(--surface); display: flex; flex-direction: column; min-height: 0; overflow: auto; }
   #left { border-right: 1px solid var(--line); }
@@ -115,6 +129,10 @@
   .robot .tag.pill { --tc: var(--faint); color: var(--tc); background: color-mix(in srgb, var(--tc) 14%, var(--surface));
                      border-radius: 10px; padding: 1px 8px; font-weight: 600; font-size: .74rem; }
   .pill.idle { --tc: var(--muted); } .pill.moving { --tc: var(--info); } .pill.working { --tc: #b88a00; }
+  .robot .batt { font-size: .76rem; color: var(--muted); }
+  .robot .batt.low { color: var(--stop); font-weight: 600; }
+  .robot .batt + .tag { margin-left: 8px; }
+  .robot .l1 .batt { margin-left: auto; }
   .pill.exploring { --tc: #8a5cf0; } .pill.failed { --tc: var(--stop); } .pill.off { --tc: var(--faint); }
   .more .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 10px; margin: 0; }
   .more .facts .wide { grid-column: span 2; }
@@ -157,7 +175,7 @@
   .tk { padding: 10px 16px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr auto; gap: 1px 10px; }
   .tk .t1 { font-weight: 500; } .tk .t2 { color: var(--muted); font-size: .84rem; }
   .tk .st { font-size: .8rem; text-align: right; color: var(--muted); }
-  .tk .st.active { color: var(--info); font-weight: 600; } .tk .st.done { color: var(--go); } .tk .st.failed { color: var(--stop); font-weight: 600; }
+  .tk .st.active { color: var(--info); font-weight: 600; } .tk .st.bid { color: var(--warnink); font-weight: 600; } .tk .st.done { color: var(--go); } .tk .st.failed { color: var(--stop); font-weight: 600; }
   .tk .who { font-size: .8rem; color: var(--muted); text-align: right; display: flex; align-items: center; gap: 5px; justify-content: flex-end; }
   .tk .who i { width: 7px; height: 7px; border-radius: 50%; background: var(--c); }
   .tk.finished { opacity: .6; }
@@ -273,6 +291,10 @@
   <span class="spacer"></span>
   <button class="btn icon" id="theme" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
   <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">No session</span></button>
+  <!-- The fleet gateway's latched alarms (/fleet/task_board): red while a condition
+       holds, quiet once it has cleared but nobody has acknowledged it. Hidden at none. -->
+  <button class="btn" id="alarms" hidden aria-haspopup="true" title="Fleet alarms"><span class="dot"></span><span id="alarms-label"></span></button>
+  <div id="alarm-pop" hidden role="dialog" aria-label="Fleet alarms"><h3>Fleet alarms</h3><ul id="alarm-list"></ul></div>
   <button class="btn stop" id="estop" title="Stop exploring and cancel every robot's navigation goal">Stop all</button>
 </header>
 

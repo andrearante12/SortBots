@@ -417,6 +417,72 @@ async function main() {
     await sleep(200);
     check(`${vp.label}: a rejected task is marked failed`, await page.eval(`window.__operator.tasks.find((t) => t.id === 'ext1').state === 'FAILED'`));
 
+    // -- fleet auction board ------------------------------------------------------------------------
+    // nodes/fleet_tasks.py --gateway's /fleet/task_board: liveness by the fleet's own
+    // rule, battery, who holds which task, latched alarms. Without one the page is
+    // exactly the pre-auction page; with one, "Any robot" goes to the auction.
+    await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+    await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+    await sleep(300);
+    const autoLabel = () => page.eval(`document.querySelector('#nt-who option[value="auto"]').textContent`);
+    check(`${vp.label}: with no fleet board, auto means any free robot`, (await autoLabel()) === 'Any free robot', await autoLabel());
+    check(`${vp.label}: with no fleet board there is no alarm chip`, !(await visible('#alarms')));
+    const fboard = (tasks, alarms = [], r0alive = true) => ({ data: JSON.stringify({ t: 100.0,
+      robots: [{ id: r0, alive: r0alive, last_heard_s: r0alive ? 0.2 : 9.0, battery_pct: 14.0, mode: 'idle', owned: [], carrying: [] },
+               { id: r1, alive: true, last_heard_s: 0.1, battery_pct: 81.5, mode: 'nav', owned: [], carrying: [] }],
+      tasks, alarms }) });
+    await emit('/fleet/task_board', fboard([], [
+      { id: 1, kind: 'robot_silent', robot: r0, task_id: null, t: 95.0, active: true, acked: false, text: `${r0} silent for 6 s` },
+      { id: 2, kind: 'lease_expired', robot: r0, task_id: 9, t: 60.0, active: false, acked: false, text: 'task 9: lease expired, re-auctioned' }], false));
+    await sleep(400);
+    const rowOf = (id) => page.eval(`(() => { const e = document.querySelector('#fleet .robot[data-id="${id}"]'); return e ? e.querySelector('.l1').textContent + ' | ' + e.querySelector('.l2').textContent : ''; })()`);
+    check(`${vp.label}: a robot the fleet calls silent reads silent`, /silent/.test(await rowOf(r0)) && /fleet radio/.test(await rowOf(r0)), await rowOf(r0));
+    check(`${vp.label}: robot rows show battery from the board`, /14%/.test(await rowOf(r0)) && /82%/.test(await rowOf(r1)), `${await rowOf(r0)} / ${await rowOf(r1)}`);
+    check(`${vp.label}: a battery under the reserve is flagged`, await page.eval(`!!document.querySelector('#fleet .robot[data-id="${r0}"] .batt.low') && !document.querySelector('#fleet .robot[data-id="${r1}"] .batt.low')`));
+    check(`${vp.label}: the alarm chip counts active alarms`, (await visible('#alarms')) && (await $text('#alarms-label')) === '1 alarm' && await page.eval(`document.getElementById('alarms').classList.contains('on')`), await $text('#alarms-label'));
+    await click('#alarms'); await sleep(150);
+    check(`${vp.label}: the alarm list puts the active one first`, (await page.eval(`[...document.querySelectorAll('#alarm-list .al')].map((e) => e.dataset.alarm).join(',')`)) === '1,2');
+    await page.eval(`window.__published.length = 0`);
+    await click('#alarm-list [data-ack="2"]');
+    const ack = JSON.parse(await page.eval(`JSON.stringify(window.__published)`)).find((x) => x.topic === '/fleet/alarm_ack');
+    check(`${vp.label}: acknowledging publishes the alarm id`, !!ack && JSON.parse(ack.msg.data).id === 2, JSON.stringify(ack));
+    await page.eval(`document.getElementById('tasks').dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))`); await sleep(100);
+    check(`${vp.label}: clicking elsewhere closes the alarm list`, !(await visible('#alarm-pop')));
+    await shot(`${vp.label}-fleet-alarms`);
+
+    check(`${vp.label}: with the fleet up, auto means the auction`, (await autoLabel()) === 'Any robot (fleet auction)', await autoLabel());
+    await page.eval(`document.getElementById('newtask').open = true; document.querySelector('#nt-kind [data-k="pick"]').click()`);
+    await page.eval(`document.getElementById('nt-who').value = 'auto'; document.getElementById('nt-from').value = 'A'; document.getElementById('nt-to').value = 'B'`);
+    await page.eval(`window.__published.length = 0; document.getElementById('task-form').requestSubmit()`);
+    const fpub = JSON.parse(await page.eval(`JSON.stringify(window.__published)`));
+    const req = fpub.find((x) => x.topic === '/fleet/task_request');
+    check(`${vp.label}: an auto pick & drop is requested from the fleet, not dispatched`,
+          !!req && JSON.parse(req.msg.data).pickup === 'A' && JSON.parse(req.msg.data).dropoff === 'B' && !fpub.some((x) => /dispatch_task$/.test(x.topic)), JSON.stringify(fpub));
+    check(`${vp.label}: the request waits as sent to the fleet`, /sent to the fleet/.test(await $text('#tasks')) && /bidding/.test(await $text('#tasks')), (await $text('#tasks')).slice(0, 160));
+    await emit('/fleet/task_board', fboard([{ task_id: 4242, pickup: 'A', dropoff: 'B', state: 'bidding', owner: null, committed: false, age_s: 0.5 }]));
+    await sleep(200);
+    check(`${vp.label}: the board names the pending row`, await page.eval(`window.__operator.tasks.some((t) => t.id === 'fleet-4242' && t.state === 'BIDDING' && !t.pending) && !window.__operator.tasks.some((t) => t.pending)`));
+    check(`${vp.label}: an unclaimed fleet task belongs to the fleet`, await page.eval(`[...document.querySelectorAll('#tasks .tk')].some((e) => /fleet-4242/.test(e.textContent) && e.querySelector('.who').textContent === 'Fleet')`));
+    await emit('/fleet/task_board', fboard([{ task_id: 4242, pickup: 'A', dropoff: 'B', state: 'claimed', owner: r1, committed: false, age_s: 2.0 }]));
+    await sleep(200);
+    check(`${vp.label}: a claim assigns it to the winner`, await page.eval(`(() => { const t = window.__operator.tasks.find((t) => t.id === 'fleet-4242'); return t.state === 'CLAIMED' && t.robot === ${JSON.stringify(r1)}; })()`));
+    await emit(`/${r1}/task_status`, { data: JSON.stringify({ task_id: 'fleet-4242', state: 'NAV_TO_DROPOFF', queue_depth: 0, queue: [],
+      task: { task_id: 'fleet-4242', kind: 'pickup', pickup: 'A', dropoff: 'B' } }) });
+    await emit('/fleet/task_board', fboard([{ task_id: 4242, pickup: 'A', dropoff: 'B', state: 'claimed', owner: r1, committed: true, age_s: 9.0 }]));
+    await sleep(200);
+    check(`${vp.label}: the winner's own status takes over, loaded once committed`, await page.eval(`window.__operator.tasks.find((t) => t.id === 'fleet-4242').state === 'NAV_TO_DROPOFF'`) && /fleet-4242 · loaded/.test(await $text('#tasks')), (await $text('#tasks')).slice(0, 200));
+    await page.eval(`window.__published.length = 0`);
+    await click('#tasks [data-cancel="fleet-4242"]');
+    const fpub2 = JSON.parse(await page.eval(`JSON.stringify(window.__published)`));
+    const fc = fpub2.find((x) => x.topic === '/fleet/task_cancel');
+    check(`${vp.label}: cancelling a fleet task withdraws it at the gateway`, !!fc && JSON.parse(fc.msg.data).task_id === 4242 && !fpub2.some((x) => /\/cancel_task$/.test(x.topic)), JSON.stringify(fpub2));
+    await emit('/fleet/task_board', fboard([{ task_id: 4242, pickup: 'A', dropoff: 'B', state: 'cancelled', owner: r1, committed: true, age_s: 10.0 }]));
+    await sleep(200);
+    check(`${vp.label}: the board's cancel finishes the row`, await page.eval(`window.__operator.tasks.find((t) => t.id === 'fleet-4242').state === 'CANCELLED'`));
+    await emit('/fleet/task_board', fboard([]));   // leave a quiet, healthy fleet for what follows
+    await sleep(200);
+    check(`${vp.label}: no alarms, no chip`, !(await visible('#alarms')));
+
     // -- renaming a waypoint ------------------------------------------------------------------------------
     await pickStop('B'); // a draft stop follows the rename
     await click('#wps [data-ren="B"]');
