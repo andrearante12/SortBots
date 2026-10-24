@@ -22,7 +22,7 @@ plus, once for the whole sim (see _WorldRuntime):
 and subscribing:
 
     /sim/world_cmd             std_msgs/String JSON {"cmd": "reset"|"start"|"pause"}
-    /sim/teleport              std_msgs/String JSON {"robot", "x", "y", "yaw", "ref": {x, y, yaw}}
+    /sim/teleport              std_msgs/String JSON {"robot", "x", "y", "yaw"} in the map frame
                                                      (operator view's Teleport tool; see _teleport)
     /<robot>/cmd_vel           geometry_msgs/Twist  (--drive cmd_vel; holonomic x/y/yaw)
     /<robot>/pick_cmd          std_msgs/String      ("attach"/"detach"; robot_0 only,
@@ -1279,19 +1279,20 @@ class _WorldRuntime:
     def _on_teleport(self, msg) -> None:
         try:
             t = self._json.loads(msg.data)
-            ref = t["ref"]
             self.teleports.append({"robot": str(t["robot"]), "x": float(t["x"]), "y": float(t["y"]),
-                                   "yaw": float(t["yaw"]), "ref": (float(ref["x"]), float(ref["y"]),
-                                                                   float(ref["yaw"]))})
+                                   "yaw": float(t["yaw"])})
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             emit(f"  bad /sim/teleport {msg.data!r}: {exc}")
 
     def _teleport(self, t: dict, robots: dict) -> None:
         """Put a robot somewhere else, instantly (operator view's Teleport tool, for
-        setting a scene up). The target arrives in the operator's MAP frame with the
-        robot's current map pose as `ref`; the map frame is RTAB-Map's, not Isaac's
-        world, so the offset between them is taken from this robot right now: where
-        the map thinks it is vs where it really is. No frame bookkeeping anywhere else.
+        setting a scene up). The target is in the fused `map` frame, which in the sim
+        IS this world frame: nodes/map_merge.py anchors each robot's map at its spawn,
+        and the robots spawn at those same poses (checked live 2026-10-24: both robots'
+        map pose and /sim/ground_truth agreed to the centimetre). So no offset is taken
+        from the robot's own map pose. A first version did that, and a robot not yet
+        localized (a secondary robot reads the PRIMARY's pose for its first seconds,
+        nodes/map_handoff.py) landed 8.6 m off target.
 
         Localization needs nothing: odometry is IsaacComputeOdometry on base_link's
         world pose (scripts/_ros2_graphs.py), so the jump shows up as one big odom
@@ -1311,12 +1312,7 @@ class _WorldRuntime:
         q = robot.get_joint_positions()
         sx, sy = self.spawn[t["robot"]][:2]
         wx, wy, wyaw = sx + float(q[0]), sy + float(q[1]), float(q[2])
-        rx, ry, ryaw = t["ref"]
-        th = wyaw - ryaw                                  # map -> world rotation
-        dx, dy = t["x"] - rx, t["y"] - ry
-        tx = wx + math.cos(th) * dx - math.sin(th) * dy
-        ty = wy + math.sin(th) * dx + math.cos(th) * dy
-        tyaw = t["yaw"] + th
+        tx, ty, tyaw = t["x"], t["y"], t["yaw"]
         # Continuous joint: move by the wrapped difference, never a full turn.
         q2 = wyaw + math.atan2(math.sin(tyaw - wyaw), math.cos(tyaw - wyaw))
         idx = np.array([0, 1, 2])

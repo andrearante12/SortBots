@@ -991,9 +991,9 @@
 
   // -- teleport (sim only) ----------------------------------------------------------------------
   // For setting a scene up: Isaac moves the robot instantly (scripts/spawn_warehouse.py,
-  // /sim/teleport). The target goes out in the MAP frame with the robot's current map
-  // pose; Isaac takes the map->world offset from that, so nothing here needs to know
-  // Isaac's frame. Odometry there is the base's true pose, so localization just follows.
+  // /sim/teleport). The target goes out in the map frame, which in the sim is Isaac's
+  // world frame (map_merge anchors each robot's map at its spawn). Odometry there is
+  // the base's true pose, so localization just follows.
   // The robot is stopped first: a goal or the explorer would otherwise drive it straight
   // back off the spot (and a fleet task it held fails and goes back to the auction).
   const TP_CLEAR_M = 0.25; // robot base radius-ish: no landing on a shelf
@@ -1014,7 +1014,7 @@
     if (!r || !r.pose) return;
     if (occupiedAt(x, y)) return toast("That spot is occupied on the map");
     stopRobot(id);
-    publishString("/sim/teleport", JSON.stringify({ robot: id, x, y, yaw, ref: { x: r.pose.x, y: r.pose.y, yaw: r.pose.yaw } }));
+    publishString("/sim/teleport", JSON.stringify({ robot: id, x, y, yaw }));
     toast(`${nameOf(id)} teleported to ${label}`);
   }
 

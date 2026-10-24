@@ -937,9 +937,8 @@ async function main() {
   const tpPub = JSON.parse(await page.eval(`JSON.stringify(window.__published)`));
   const tpMsg = tpPub.find((x) => x.topic === '/sim/teleport');
   const tpBody = tpMsg && JSON.parse(tpMsg.msg.data);
-  check('teleport: dropping a robot asks the sim to move it, in map coordinates with its current pose',
-        !!tpBody && tpBody.robot === r1 && Math.abs(tpBody.x - 7) < 0.2 && Math.abs(tpBody.y - 4) < 0.2 && Math.abs(tpBody.yaw - 3.1) < 0.05
-        && Math.abs(tpBody.ref.x - 4) < 0.05 && Math.abs(tpBody.ref.y + 2) < 0.05, JSON.stringify(tpBody));
+  check('teleport: dropping a robot asks the sim to move it there, in map coordinates, keeping its heading',
+        !!tpBody && tpBody.robot === r1 && Math.abs(tpBody.x - 7) < 0.2 && Math.abs(tpBody.y - 4) < 0.2 && Math.abs(tpBody.yaw - 3.1) < 0.05, JSON.stringify(tpBody));
   check('teleport: it never sends a nav goal or a task', !tpPub.some((x) => /dispatch_task/.test(x.topic)) && !(await page.eval(`window.__ops.some((o) => o.op === 'send_action_goal')`)));
   check('teleport: the robot is stopped first (goals cancelled, explorer told to stop)',
         tpPub.some((x) => x.topic === `/${r1}/explore_cmd` && x.msg.data === 'stop') && (await page.eval(`window.__services.some((s) => s.name === '/${r1}/navigate_to_pose/_action/cancel_goal')`)));
