@@ -61,7 +61,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from simtest import world as world_lib  # noqa: E402
 
 SCENARIO_DIR = REPO_ROOT / "configs" / "scenarios"
-# Overridable so scenarios_test.mjs can run against an empty dir instead of
+# Overridable so operator_test.mjs can run against an empty dir instead of
 # whatever a previous real console session left in the repo's own data/.
 SESSIONS_DIR = Path(os.environ["SORTBOTS_SESSIONS_DIR"]) if os.environ.get("SORTBOTS_SESSIONS_DIR") \
     else REPO_ROOT / "data" / "sessions"
@@ -214,7 +214,7 @@ def _map_path(flag: str):
             value = str(library_db_path(value))
         resolved = Path(os.path.expanduser(value)).resolve()
         # maps_lib.MAPS_DIR by reference, not a literal `REPO_ROOT/"maps"`: it
-        # honours SORTBOTS_MAPS_DIR, which is how scenarios_test.mjs points the
+        # honours SORTBOTS_MAPS_DIR, which is how operator_test.mjs points the
         # whole chain at a temp dir outside the repo (and outside $HOME).
         allowed = (Path.home().resolve(), (REPO_ROOT / "data").resolve(),
                    maps_lib.MAPS_DIR.resolve())

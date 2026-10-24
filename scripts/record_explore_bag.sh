@@ -2,17 +2,16 @@
 # Record a rosbag2 of an autonomous exploration run — map, TF, odom, explorer
 # decisions, task/costmap/plan state — for later review or replay.
 #
-# Deliberately NOT scripts/record_dashboard_bag.sh: that one targets a short
-# (~60s) fixture-building recording and includes full-rate camera/rgb +
-# camera/chase/rgb, which is fine at 60s but not at exploration-run length
-# (minutes to tens of minutes). Raw sensor_msgs/Image at ~60 Hz is roughly
+# Deliberately not a short (~60s) recording that includes full-rate camera/rgb +
+# camera/chase/rgb (the removed record_dashboard_bag.sh did that): fine at 60s
+# but not at exploration-run length (minutes to tens of minutes). Raw sensor_msgs/Image at ~60 Hz is roughly
 # 70-170 MB/s uncompressed depending on stream — a 10 minute exploration run
 # would be tens of GB. This script omits camera/rgb, camera/depth and
 # cloud_map entirely; scripts/record_explore_bag.sh's caller is expected to
 # grab periodic /snapshot JPEGs separately (cheap, decimated) if visual
 # reference is wanted — see the --frames-dir option.
 #
-# Unlike record_dashboard_bag.sh, this is NON-INTERACTIVE (no "topics
+# This is NON-INTERACTIVE (no "topics
 # missing, record anyway?" prompt) and does not block for a fixed duration —
 # it records until SIGINT/SIGTERM, so a caller can stop it exactly when the
 # explorer reports "exploration done" (see nodes/explorer.py's status topic).

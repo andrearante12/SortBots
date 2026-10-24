@@ -276,8 +276,7 @@ All offline, seconds:
 
 ```bash
 /usr/bin/python3 -m pytest tests/simtest_world_test.py tests/simtest_metrics_test.py tests/simtest_spec_test.py
-node webui/tests/world_overlay_test.mjs   # map overlay from fake /sim/* messages
-node webui/tests/scenarios_test.mjs       # includes the world picker and the tests tab
+node webui/tests/operator_test.mjs        # operator view: world overlay, tests tab, launch form
 scripts/simtest.py validate               # every committed test case resolves
 ```
 

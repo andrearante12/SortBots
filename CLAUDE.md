@@ -105,12 +105,7 @@ Node tuning is plain YAML loaded by the node itself, not ROS params. Nodes take
 Prefer offline. Seconds, no GPU, no display, no ROS:
 
 ```bash
-node webui/tests/scenarios_test.mjs   # scenarios tab (no fixture needed)
 node webui/tests/operator_test.mjs    # operator view, fake ROSLIB (no fixture needed)
-node webui/tests/splat_test.mjs       # 3D panel splat mode, fake worker (no fixture needed)
-node webui/tests/obstacle_overlay_test.mjs  # obstacle boxes on the sensors view (no fixture needed)
-node webui/tests/dashboard_test.mjs   # dashboard (needs webui/testdata/)
-node webui/tests/world_overlay_test.mjs  # map overlay of sim worlds (no fixture needed)
 python3 webui/session.py --list       # scenario validation
 python3 -m pytest tests/              # pure-python node logic (system python3 — see below)
 scripts/simtest.py validate           # scored test cases (configs/tests/) resolve

@@ -1,4 +1,4 @@
-// SortBots dashboard — Scenarios tab. Starts and stops the simulation itself.
+// SortBots operator view — session/launch panel. Starts and stops the simulation itself.
 //
 // Talks ONLY to webui/serve.py's control API over plain HTTP:
 //   GET  /api/launch/options   everything the launch form draws: platform,
@@ -13,8 +13,8 @@
 //
 // Deliberately no rosbridge: the whole point of this tab is to work when
 // nothing is running, and rosbridge is one of the things that may not be.
-// Also deliberately separate from app.js — nothing here touches ROS state, and
-// app.js's ~15 topic subscriptions have nothing to say about a sim that hasn't
+// Also deliberately separate from operator.js — nothing here touches ROS state, and
+// operator.js's topic subscriptions have nothing to say about a sim that hasn't
 // started yet.
 //
 // The control API only exists when serve.py runs with --control, which only
@@ -30,7 +30,7 @@
   ].filter(Boolean);
   const viewScenarios = document.getElementById("view-scenarios");
   const viewFleet = document.getElementById("view-fleet");
-  const viewTests = document.getElementById("view-tests"); // webui/tests_view.js
+  const viewTests = document.getElementById("view-tests"); // gone with the old dashboard; the guard below keeps it harmless
   // Live-only header chrome: the stage switcher and the SLAM badge are about
   // the robot, not about which sim to launch or the fleet radio monitor.
   const liveChrome = [
@@ -515,7 +515,7 @@
         "platform: real. This dashboard stays up throughout.";
       stopBtn.title = "Tear down the camera and the ROS 2 stack. The dashboard console stays up.";
     }
-    // sim: index.html's own wording already describes Isaac Sim.
+    // sim: operator.html's own wording already describes Isaac Sim.
   }
 
   async function startSession() {

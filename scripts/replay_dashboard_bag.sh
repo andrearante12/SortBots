@@ -3,11 +3,7 @@
 # web_video_server and webui/serve.py — with no Isaac Sim running.
 #
 # This is the "eyeball it in a real browser" path. For fast automated checks
-# use the fixture instead:  node webui/tests/dashboard_test.mjs
-#
-# It's also how you verify fixture fidelity: the messages the browser receives
-# here come through the real rosbridge serializer, which is the same
-# `extract_values` that scripts/bag_to_fixture.py uses to build the fixture.
+# use the offline test instead:  node webui/tests/operator_test.mjs
 #
 # Run from a shell with system ROS 2 Jazzy sourced and conda OFF the front of
 # PATH — rosbridge_websocket's `#!/usr/bin/env python3` shebang will otherwise

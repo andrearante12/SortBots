@@ -8,7 +8,7 @@ prints the plain-HTTP URL to open on the phone. If the `qrcode` package is
 importable it also renders a terminal QR to scan with the phone camera.
 
 Plain HTTP (not https/Tailscale Serve) on purpose: the dashboard is a 3-port
-app (page 8081 + rosbridge ws 9090 + web_video_server 8080) and webui/app.js
+app (page 8081 + rosbridge ws 9090 + web_video_server 8080) and webui/operator.js
 derives the rosbridge/video hosts from window.location.hostname, so an HTTPS
 origin would make those ws://9090 / http://8080 calls mixed-content and the
 browser would block them. An HTTP origin over the private tailnet avoids that.

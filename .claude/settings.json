@@ -36,8 +36,7 @@
       "Bash(node --check *)",
       "Bash(bash -n *)",
 
-      "Bash(node webui/tests/scenarios_test.mjs*)",
-      "Bash(node webui/tests/dashboard_test.mjs*)",
+      "Bash(node webui/tests/operator_test.mjs*)",
 
       "Bash(curl -s http://127.0.0.1:8081/api/*)",
       "Bash(curl -s http://localhost:8081/api/*)",
