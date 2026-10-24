@@ -354,7 +354,7 @@ appear.
 > Isaac alone is stable indefinitely; the full stack minus web_video_server is
 > stable; a steady RELIABLE subscriber (`depth_to_cloud`) is harmless; only
 > the churning snapshot subscriptions correlate with the death. Both consumers
-> (`webui/app.js`, `nodes/web_video_watchdog.sh`) already pass the parameter —
+> (`webui/operator.js`, `nodes/web_video_watchdog.sh`) already pass the parameter —
 > keep it on any new one, including ad-hoc `curl` checks.
 
 **Multi-robot:** `robot_ids:=robot_0,robot_1` brings up a full independent
@@ -1072,7 +1072,7 @@ http://andre-ubuntu.tail0d28f9.ts.net:8081/     (IP fallback http://100.74.199.7
 ```
 
 Open that on the phone. The page is served over plain HTTP on purpose:
-`webui/app.js` derives the rosbridge (`ws://…:9090`) and video (`http://…:8080`)
+`webui/operator.js` derives the rosbridge (`ws://…:9090`) and video (`http://…:8080`)
 hosts from `window.location.hostname`, so an HTTP origin lets them auto-wire to
 the same host. An HTTPS origin (e.g. Tailscale Serve) would make those
 mixed-content and the browser would block them — plain HTTP on the private
@@ -1096,10 +1096,10 @@ curl -s -o /dev/null -w '%{http_code}\n' http://<tailnet-ip>:8081/   # expect 20
 
 ## The operator view (the default page, `/`)
 
-`http://<host>:8081/` serves the operator view (`webui/operator.html`). The old per-robot
-dashboard (`index.html` + `app.js`) is **deprecated**: it stays reachable at `/?robot=ID` (each
-open robot card links it as "Engineering view") for the panels the operator view doesn't have
-yet (drive pad, head aim, SLAM internals, splats), but new work goes into the operator view.
+`http://<host>:8081/` serves the operator view (`webui/operator.html`), the only GUI. The old
+per-robot dashboard (`index.html` + `app.js`, with its drive pad, head aim, SLAM internals, arm
+pad, fleet-radio tab and splat viewer) was removed 2026-10-23; recover it from git history
+(`git show fa02632:webui/index.html`) if a panel needs porting.
 
 - **Header.** Map / 3D cloud picks what the stage shows. The mode tile only reports how the
   session was started (Mapping, or Premapped plus the map name): changing it restarts the stack
@@ -1169,86 +1169,21 @@ cards or alarms: those are the real fleet's. What-ifs act on the model only: **P
 **Switch off**, **Send A→B**, and the **Range** slider. The model steps only while a page has
 the overlay on. Details: `commsim/viz/README.md`.
 
-## Testing the dashboard without the sim (recorded data)
+## Testing the operator view without the sim
 
-Checking a dashboard change shouldn't need Isaac Sim, a GPU and a display. So
-record real ROS data **once**, and replay it from then on:
-
-```
-scripts/record_dashboard_bag.sh          # ← the ONLY step that needs the sim
-python3 scripts/bag_to_fixture.py <bag>  # offline
-node webui/tests/dashboard_test.mjs      # offline, no ROS at all, seconds
-scripts/replay_dashboard_bag.sh <bag>    # offline, real rosbridge + browser
-```
-
-### 1. Record (needs the demo running)
-
-With `scripts/run_demo.sh` up and ROS 2 sourced:
+Checking a UI change shouldn't need Isaac Sim, a GPU and a display:
 
 ```bash
-scripts/record_dashboard_bag.sh --duration 60
+node webui/tests/operator_test.mjs                   # add --screenshot DIR for PNGs
 ```
 
-**Drive the robot while it records, and dispatch a task.** A bag of a
-stationary robot has no trail, no planned path, no task states and probably no
-loop closure, so the fixture can't exercise those panels. The script warns
-about any dashboard topic that isn't currently being published before it starts
-— read that list, it's the difference between a useful bag and a useless one.
-
-Bags land in `data/bags/` (gitignored, they're hundreds of MB).
-
-### 2. Build the fixture
-
-```bash
-python3 scripts/bag_to_fixture.py data/bags/dashboard_<timestamp>/
-```
-
-This trims the bag to a small committable snapshot in `webui/testdata/`:
-`fixture.json` plus a handful of JPEG camera frames. It prints a per-topic
-kept/dropped table and fails if the result exceeds 5 MB.
-
-Messages are serialised with rosbridge's *own* converter
-(`rosbridge_library.internal.message_conversion.extract_values`), so the fixture
-is byte-shaped exactly like what the browser receives live — including
-base64 for `uint8[]` fields but plain arrays for `OccupancyGrid.data`.
-
-### 3. Run the headless test
-
-```bash
-node webui/tests/dashboard_test.mjs                  # add --screenshot DIR for PNGs
-```
-
-No ROS, no sim, no display, no npm install. It serves the real page, swaps in a
-stubbed `roslib` and fake `web_video_server`, replays the fixture, and asserts
-across five viewports: layout fits without scrolling, PiP swap, map mode, the
-grid renders undistorted, click-to-nav round-trips to the right world
-coordinate, the trail and robot marker draw, keyboard driving and its form
-guard, and the polling gate. Exit code is non-zero on any failure.
-
-The Scenarios tab has its own test, which needs **no fixture** — it talks only
-to `serve.py`'s control API, so the real thing runs entirely offline:
-
-```bash
-node webui/tests/scenarios_test.mjs                  # add --screenshot DIR for PNGs
-```
-
-It runs `serve.py` twice (with and without `--control`, since "the console
-isn't running" is a state the tab has to explain rather than fail in) and
-asserts the view switch hides the live view and its header chrome, that a card
-renders per scenario with its override controls, that only `ready` scenarios
-are startable, that the camera pollers idle behind the hidden panel, and that
-nothing scrolls horizontally at three viewports. It never POSTs
+No ROS, no sim, no display, no npm install. It serves the real page against `serve.py` with a
+fake ROSLIB and drives the operator view in headless Chrome. It never POSTs
 `/api/session/start`, so it cannot launch a sim.
 
-### 4. Replay through the real stack (optional)
-
-To eyeball it in a real browser, with real rosbridge and real MJPEG:
+To eyeball a recorded bag in a real browser, with real rosbridge and real MJPEG:
 
 ```bash
-scripts/replay_dashboard_bag.sh data/bags/dashboard_<timestamp>/
+scripts/replay_dashboard_bag.sh <bag-dir>
 # then open http://localhost:8081/
 ```
-
-This is also how to double-check fixture fidelity: what the browser gets here
-went through the live rosbridge serializer, which is the same `extract_values`
-the fixture was built with.

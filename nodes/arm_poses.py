@@ -8,11 +8,9 @@ module-scope `import torch`, which is why no launch file could ever start it
 system python). Playing back recorded joint angles needs none of that, so the
 node became launchable the moment IK stopped being on the critical path.
 
-The recorded angles come from the dashboard's arm pad (`webui/arm.js`): jog the
-arm, hit `cap`, paste the emitted block into `configs/arm_poses.yaml`. The
-format `format_capture()` emits here and the format arm.js emits MUST stay
-identical — `webui/tests/arm_test.mjs` round-trips the browser's text through
-`load_pose_book()` to enforce exactly that.
+The recorded angles were captured with the old dashboard's arm pad (removed
+2026-10-23 with webui/arm.js): jog the arm, record the angles, paste a block
+in the `format_capture()` format into `configs/arm_poses.yaml`.
 
 Standalone check (no ROS, no GPU):
 
@@ -26,7 +24,7 @@ from pathlib import Path
 
 import yaml
 
-# The contract with spawn_warehouse.ARM_JOINT_NAMES and webui/arm.js. Order is
+# The contract with spawn_warehouse.ARM_JOINT_NAMES and the removed webui/arm.js. Order is
 # load-bearing: `_read_arm_cmd` looks joints up by name but the Isaac side
 # applies them positionally, and a reordered list would silently drive the
 # wrong DOFs.
@@ -240,11 +238,10 @@ def interpolate(q_from, q_to, move_sec: float, hz: float):
 
 
 def format_capture(q, name: str = "pose") -> str:
-    """One YAML list entry, as `webui/arm.js` emits it.
+    """One YAML list entry, as the removed `webui/arm.js` emitted it.
 
-    Kept byte-identical to the browser's output on purpose — arm_test.mjs
-    round-trips the captured text through load_pose_book(), so a divergence
-    here fails that test rather than surfacing as a confusing parse error
+    Kept in the format load_pose_book() parses, so a divergence fails
+    tests/arm_poses_test.py rather than surfacing as a confusing parse error
     hours later with a pasted config.
     """
     return f"    - {{name: {name}, q: [{', '.join(f'{float(v):.3f}' for v in q)}]}}"

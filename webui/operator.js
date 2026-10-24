@@ -1,6 +1,7 @@
 // SortBots operator view (webui/operator.html). Fleet-first: every robot, one map,
-// the task list and the waypoints, with one robot's live view a click away. The
-// per-robot engineering dashboard (app.js) is deprecated and stays at /?robot=ID.
+// the task list and the waypoints, with one robot's live view a click away. It is
+// the only GUI: the old per-robot dashboard (app.js) was removed 2026-10-23, and
+// comments below that cite "app.js" mean its lessons, kept for the rationale.
 //
 // Talks to two things, like the rest of the webui:
 //   - rosbridge (9090)   live topics: /map, /tf, per-robot plan / explore_status /

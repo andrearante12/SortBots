@@ -155,9 +155,6 @@ and two message types on one topic break both.
     for moving, amber for static, labelled with range. The card's facts include
     "Obstacles: 2, 1 moving · nearest 1.9 m".
   - **Tests.** `webui/tests/operator_test.mjs` covers all three.
-- **Engineering dashboard** (`index.html`, deprecated). Camera → **head + depth**
-  draws the same boxes over the head RGB, with an **obstacles** toggle. Tested
-  by `webui/tests/obstacle_overlay_test.mjs`.
 - **RViz.** Add a MarkerArray display on `/<id>/obstacles_viz`, with
   `<id>/base_link` or `map` as the fixed frame.
 - **CLI.** Prints each frame's JSON:
@@ -181,14 +178,12 @@ A "person crosses the field of view" case can assert on `/<id>/obstacle_tracks` 
 
 `tests/obstacle_detector_test.py` covers the same cases offline with
 ray-cast synthetic depth (`test_end_to_end_person_crossing_rendered_frames`),
-and `webui/tests/operator_test.mjs` and `obstacle_overlay_test.mjs` cover the
-drawing.
+and `webui/tests/operator_test.mjs` covers the drawing.
 
 ## Verification status
 
 - **Offline.** `tests/obstacle_detector_test.py` (18 tests), the obstacle checks
-  in `webui/tests/operator_test.mjs` (11 per viewport), and
-  `webui/tests/obstacle_overlay_test.mjs` (15 checks).
+  in `webui/tests/operator_test.mjs` (11 per viewport).
 - **Live in sim.** Live sim runs (2026-10-22) covered sim 32FC1 depth, TF from
   `robot_0/camera_optical`, the floor estimate (≈0 m), odom tracking, and the
   false-positive table above.

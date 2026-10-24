@@ -221,11 +221,9 @@ fail deep inside sqlite.
 Prefer this. It is seconds instead of minutes, and needs no GPU or display.
 
 ```bash
-node webui/tests/scenarios_test.mjs    # scenarios tab; needs no fixture
-node webui/tests/dashboard_test.mjs    # live dashboard; needs webui/testdata/
+node webui/tests/operator_test.mjs     # operator view; needs no fixture
 python3 webui/session.py --list        # scenario validation, offline
 /usr/bin/python3 -m pytest tests/      # node + map-library + simtest logic (SYSTEM python3)
-node webui/tests/world_overlay_test.mjs # map overlay of /sim/world + ground truth
 scripts/simtest.py validate             # every test case resolves
 ```
 

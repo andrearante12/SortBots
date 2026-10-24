@@ -63,8 +63,8 @@ New UI is a view, panel or popover inside it, built on its CSS tokens, its
 light/dark theme and `webui/tests/operator_test.mjs`. Never a new standalone HTML
 page, a second HTTP server, or another port. A backend feature exposes `/api/...`
 routes on serve.py or ROS topics over rosbridge, and the operator view renders
-it. `webui/index.html` is the deprecated engineering view: fix it, don't grow it.
-A tool that shipped its own page gets folded into the operator view, not kept
+it. The old per-robot dashboard (`index.html` + `app.js`) was deleted 2026-10-23;
+don't bring a second page back. A tool that shipped its own page gets folded into the operator view, not kept
 beside it: commsim's live demo became the Comms overlay (2026-10-23).
 
 ## Invariants that cost the most time when violated
@@ -117,12 +117,7 @@ beside it: commsim's live demo became the Comms overlay (2026-10-23).
 Prefer offline. Seconds, no GPU, no display, no ROS:
 
 ```bash
-node webui/tests/scenarios_test.mjs   # scenarios tab (no fixture needed)
 node webui/tests/operator_test.mjs    # operator view, fake ROSLIB (no fixture needed)
-node webui/tests/splat_test.mjs       # 3D panel splat mode, fake worker (no fixture needed)
-node webui/tests/obstacle_overlay_test.mjs  # obstacle boxes on the sensors view (no fixture needed)
-node webui/tests/dashboard_test.mjs   # dashboard (needs webui/testdata/)
-node webui/tests/world_overlay_test.mjs  # map overlay of sim worlds (no fixture needed)
 python3 webui/session.py --list       # scenario validation
 python3 -m pytest tests/              # pure-python node logic (system python3 — see below)
 scripts/simtest.py validate           # scored test cases (configs/tests/) resolve

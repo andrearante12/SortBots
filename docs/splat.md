@@ -76,7 +76,6 @@ poses scored 21–29 dB PSNR.
 | `splat/train.py` | gsplat, SH degree 0, RGB L1 + SSIM + inverse-depth loss, snapshots while training |
 | `splat/convert.py` | standard 3DGS `.ply` ↔ the viewer's 32-byte `.splat` |
 | `splat/worker.py` | HTTP job server; a single FIFO queue, because the GPU can only fit one job |
-| `webui/splat_view.js` | WebGL2 renderer, adapted from antimatter15/splat (MIT) |
 | `configs/splat.yaml` | worker URL, iterations, gaussian cap, depth range |
 | `~/.cache/sortbots/splats/<map>/<job>/` | `model.splat`, `model.ply`, `job.log` (outside the repo: splats are 40–300 MB) |
 
@@ -109,7 +108,6 @@ poses scored 21–29 dB PSNR.
 
 ```bash
 /usr/bin/python3 -m pytest tests/splat_*_test.py   # dataset, convert, worker (+ real serve.py as the robot)
-node webui/tests/splat_test.mjs                     # splat mode in headless Chrome against a fake worker
 ```
 
 ## Later: live mode

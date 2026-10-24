@@ -3,8 +3,8 @@
 
 Pure stdlib except PyYAML (already a dependency of `nodes/task_manager.py`).
 Not a ROS node — the dashboard talks to ROS 2 directly over rosbridge's
-WebSocket (see index.html); this process only serves index.html/app.js and
-translates configs/*.yaml to JSON so the browser doesn't need a YAML parser.
+WebSocket (see operator.js); this process only serves the static operator
+page and translates configs/*.yaml to JSON so the browser doesn't need a YAML parser.
 
 Run (system ROS 2 Jazzy sourced or not — no rclpy dependency here):
 
@@ -161,7 +161,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def end_headers(self):
         # SimpleHTTPRequestHandler sends Last-Modified but no Cache-Control, so
         # browsers apply heuristic freshness (~10% of file age) and happily
-        # serve a days-old cached app.js on a "fresh" tab — every stale-page
+        # serve a days-old cached operator.js on a "fresh" tab — every stale-page
         # bug in this dashboard's history started that way. no-cache still
         # allows conditional requests (304s), it just forces revalidation.
         self.send_header("Cache-Control", "no-cache")
@@ -210,11 +210,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_test_report()
         elif route == "/api/tests/run":
             self._with_tests(self._serve_test_run)
-        elif route == "/" and "robot" not in parse_qs(urlsplit(self.path).query):
-            # Fleet overview is the landing page (promoted to default 2026-10-13,
-            # issue #6). The per-robot engineering dashboard stays at /?robot=ID,
-            # where operator.js links it, so a robot query param falls through to
-            # index.html below. index.html is also still reachable by its own path.
+        elif route == "/":
+            # The operator view is the only GUI (the per-robot dashboard,
+            # index.html + app.js, was removed 2026-10-23).
             self.path = "/operator.html"
             super().do_GET()
         else:
