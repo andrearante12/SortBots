@@ -234,3 +234,8 @@ need to talk to each other over the LAN.
   supports Jetson Orin on **JetPack 7.2 + ROS 2 Jazzy** — a reflash from
   JetPack 6, after which Jazzy also runs natively (no container). Confirm the
   Orin Nano 8 GB is on its supported list first; see tasks/slam_offload.md.
+- **Fleet mesh:** each robot carries an OpenWrt router, and
+  `scripts/jetson.sh bridge start <bundle>` puts this robot's `/fleet/*` topics
+  (only those) onto the mesh. The DDS discovery range stays LOCALHOST. Runbook:
+  `commsim/hw/README.md`, steps 1–7. Rebuild the image first: it now contains
+  the pinned zenoh-bridge-ros2dds.

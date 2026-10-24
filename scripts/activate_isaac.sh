@@ -44,6 +44,17 @@ export KIT_RENDERER=rtx
 export OMNI_KIT_ACCEPT_EULA=YES
 export PRIVACY_CONSENT=Y
 
+# Distro libs Isaac links against but newer Ubuntu no longer ships (25.10 has
+# only libxml2.so.16; Isaac's URDF/MJCF importers and asset converter need
+# libxml2.so.2 and its ICU 70). Kept OUTSIDE the system, next to the venv, and
+# only names the system lacks, so nothing else on the machine is shadowed.
+# Without it the URDF importer plugin cannot load, xlerobot.usd is never
+# generated, and the asset converter's import traceback trips run_demo.sh's
+# start check (2026-10-09).
+if [[ -d "$ISAACSIM_HOME/compat-libs" ]]; then
+    export LD_LIBRARY_PATH="$ISAACSIM_HOME/compat-libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
 # Phase 3+: Isaac Sim's bundled ROS 2 bridge (isaacsim.ros2.bridge v4.12.4)
 # fails to load with "ROS2 Bridge startup failed" unless ROS_DISTRO,
 # RMW_IMPLEMENTATION, and LD_LIBRARY_PATH point at the bundled distro libs.

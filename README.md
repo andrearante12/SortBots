@@ -44,6 +44,7 @@ Full-quality version: [`docs/media/fleet_explore_timelapse.mp4`](docs/media/flee
 - [`docs/quickstart.md`](docs/quickstart.md) — fresh device to a live fleet in one pass; **start here** (install + first run)
 - [`docs/running.md`](docs/running.md) — running everything: the demo, console mode and scenarios, autonomous exploration, map lifecycle, remote access, dashboard tests
 - [`docs/perception_exploration.md`](docs/perception_exploration.md) — perception, exploration, fleet mesh radio, and map/recon fusion architecture
+- [`commsim/`](commsim/README.md) — fleet communication simulation: Wi-Fi mesh, Zenoh and task-allocation protocol tested to failure (results in [`commsim/docs/sim_log.md`](commsim/docs/sim_log.md))
 
 
 ## Run commands

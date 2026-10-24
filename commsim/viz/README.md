@@ -1,0 +1,190 @@
+# commsim/viz — the fleet mesh, visibly
+
+Two pages, one renderer:
+
+- **Live demo** (`demo.html`, served by `demo.py`): the real simulation model
+  running in real time. Drag robots around the floor, post a task and watch
+  the auction, make a robot see an obstacle, pull a link, switch a robot off,
+  send a message from one robot to another and watch it route — through the
+  gateway when the two cannot hear each other.
+- **Replay** (`index.html`): one recorded emulation run (the real 802.11s +
+  batman-adv + ROS 2 stack in the VM), every frame the radios sent, hop by
+  hop, with a guided tour of the moments that matter.
+
+![three-node line replay](../docs/figures/viz_diamond.png)
+
+## Live demo
+
+```bash
+/usr/bin/python3 -m commsim.viz.demo          # Windows: py -3 -m commsim.viz.demo
+# open http://127.0.0.1:8765/
+```
+
+Standard library only; nothing to install beyond the repo and Python 3.
+Options: `--n 4` robots, `--variant V3` (2.4 GHz mesh; `V4` = dual band),
+`--layout warehouse|open_floor`, `--range-m 22` (open-air radio range to
+start with; the slider changes it live).
+
+What is real: the radio range model, carrier-sense contention, batman-style
+routing with link quality, every message's size and timing, the task
+auction, leases, committed ownership and silence detection are
+`commsim/des/sim.py` and `core/protocol.py` — the code the sweeps and the
+robots use. The demo only changes who decides *when*: tasks and obstacles
+arrive when you click, robots stand where you put them (a robot that wins a
+task still drives to it), the clock is paced to the wall.
+
+Things to try, in order:
+
+1. **Route through the AP.** Drag robot 1 to the west end of an aisle and
+   robot 2 to the east end with the gateway between them. The link between
+   them fades out, the green arrows show both routing via the gateway, and
+   *send A → B* animates the message 1 → gateway → 2 (the feed reports
+   "2 hops"). Raise the range slider and the direct link comes back.
+2. **＋ task.** The gateway announces (yellow TASK), robots bid (orange BID,
+   the bid is seconds of driving), the winner claims (green CLAIM) and
+   drives to the pickup, then the dropoff; lease beacons (green) tick while
+   it owns the task. Post two tasks and see the backlog in the bids.
+3. **Obstacle.** Pick a robot: it shares the obstacle with the whole fleet
+   (pink OBST, reliable, every robot gets it).
+4. **Pull link** between a relay and the gateway: frames queued for it die
+   (red X), batman notices (~2–3 s, the measured reroute) and the arrows
+   move. **Kill robot**: the others declare it silent after 6 s and its task
+   is re-auctioned after the lease (10 s) + margin.
+
+Hidden by default (checkboxes): OGMs (routing beacons, 4/s per node),
+keepalives, ACKs — they are most of the airtime and none of the story.
+
+## Replay
+
+| What you see | Where it comes from |
+|---|---|
+| Robots and the gateway on the floor, links shaded by SNR | `mesh_state.json` (positions, SNR matrix) + `des/layout.py` geometry |
+| A dot per frame travelling its hop, coloured by kind; broadcasts as rings | `hwsim0.pcap` — every over-the-air frame |
+| Red X where a hop was lost; red ring at a sender whose packet never left | receiver captures `rx_<i>.pcap` (ground truth), hwsim0 ACKs as fallback; stub send logs |
+| Green arrows: batman next hops (every robot → gateway, or from a selected node) | `poll_<i>.txt` — `batctl meshif bat0 o` sampled every 0.5 s |
+| Dashed red link with an X: a blocked peer link | `links.jsonl` — every `plink_action` the run injected |
+| "N silent" under a node; per-peer table when selected | derived from the stubs' receive logs with the fleet's `status_timeout_s` |
+| Timeline ticks: red/green link block/unblock, amber/blue silent/back, grey marks | the same events |
+
+## Run it
+
+Everything on the host uses the system Python (`/usr/bin/python3`). The
+emulation itself runs in the VM ([`../vm/README.md`](../vm/README.md)).
+
+```bash
+# 1. record a run in the VM — m1.py now captures everything the replay needs
+#    (full-snaplen hwsim0, per-receiver captures, route poller, link log)
+cat > commsim/results/myrun.sh <<'EOF'
+cd /home/ubuntu/SortBots
+python3 -m commsim.emu.m1 --n 4 --links 0-1,0-2,1-3,2-3 --duration 60 --transport udp \
+    --orig-ms 250 --block-at 20 --unblock-at 40 --alloc --task-every 8 --out /run/commsim/diamond
+mkdir -p commsim/results/diamond && cp -r /run/commsim/diamond/. commsim/results/diamond/ && rm -rf /run/commsim/diamond
+EOF
+multipass exec commsim -- sudo bash /home/ubuntu/SortBots/commsim/results/myrun.sh
+
+# 2. build the trace (prints a sanity report: frames by kind, delivery, ACK match)
+/usr/bin/python3 -m commsim.viz.build_trace commsim/results/diamond --pos "0:0,0 1:5,3 2:5,-3 3:10,0"
+
+# 3. open the page
+python3 -m http.server 8000 --bind 127.0.0.1   # at the repo root
+# http://127.0.0.1:8000/commsim/viz/index.html?trace=/commsim/results/diamond/trace.json
+```
+
+Or open `index.html` straight from disk and drop `trace.json` (or
+`trace.json.gz`) onto it — `file://` pages cannot fetch, which is why both
+paths exist.
+
+`build_trace` options: `--window T0 T1` (seconds into the capture),
+`--kinds status,icmp` (air kinds to keep), `--gz`, `--max-inflight-ms`
+(ACK-pairing fallback cutoff), `--pos "i:x,y …"` (positions for `--links`
+runs, which have no floor).
+
+Page: space plays/pauses, ←/→ step 1 s (shift: 10 s), ⏮/⏭ jump between
+link and silence events, click a node for its view of the fleet, the
+checkboxes hide kinds (OGMs, management, ACK-only TCP are hidden by default
+— they are most of the frames and none of the story). The **tour bar** at
+the bottom lists the moments worth seeing (first delivery, link pulled, the
+route that answered it, the hop that was lost, silence declared and lifted)
+with a one-line caption each; while playing, the caption appears as the
+replay passes the moment.
+
+## The trace format (`commsim-viz/1`)
+
+One JSON document — the page needs the header before it can draw, it scrubs
+rather than streams, and one URL / one dropped file keeps both load paths
+identical. ~12–15 MB for n = 10 over 120 s (gzip: ~2 MB).
+
+```
+{"format": "commsim-viz/1",
+ "header": {name, n, transport, hz, orig_ms, duration_s, t0_ns, built_at, source_dir,
+            layout {name, width, height, racks, shelves, aisles_y, cross_x, gateway_pos[, origin]},
+            nodes [{id, ns, ip, mac, bat0_mac, pos, gateway}], snr [[dB]],
+            knobs {status_timeout_s, status_hz, orig_interval_ms, zenoh_lease_ms, batadv_ttl, ...},
+            counts {air_by_kind, app_tx, app_rx, unacked, outcomes, delivery}, limits [...]},
+ "events": [ ... sorted by t ... ]}
+```
+
+`t` is integer microseconds since `header.t0_ns` (the first hwsim0 record;
+pcap timestamps and the stubs' `time.time_ns()` share CLOCK_REALTIME in the
+VM, so nothing needs aligning). Event kinds:
+
+| `k` | fields | meaning |
+|---|---|---|
+| `air` | `ta ra kind size rate mseq [mttl ttl hop dest src dst seq] ack dur via [ok]` | one frame on the radio. `ra: -1` = broadcast. `ack` true/false/null(broadcast); `dur` µs = receiver time − TX (`via: "rx"`) or ACK − TX (`via: "ack"`), modelled when lost; `ok` on the last hop of a Status: `ok` / `lost` / `lost_after` |
+| `app_tx` | `src seq` | the stub sent a Status |
+| `app_rx` | `src dst seq lat_us` | a stub received one |
+| `drop` | `src dst seq why` | a Status the stub sent that never went on air toward `dst` (`unroutable`) |
+| `route` | `node dst nh tq` | a next-hop change seen by the poller (`nh: -1` = route gone); the first sample is emitted in full |
+| `linkstat` | `a b plink signal tx retries failed` | per-peer station-dump deltas |
+| `link` | `a b action` | `block` / `unblock` injected by the run |
+| `robot_silent` / `robot_back` | `obs peer [gap_us]` | derived: `obs` heard nothing from `peer` for `status_timeout_s` / heard it again |
+| `mark` | `text` | run phases (`captures_started`, `stubs_started`, …) |
+
+## What it cannot show (yet)
+
+- **Task traffic only with `--alloc`.** By default the emulation stubs send
+  Status alone and `robot_silent` is derived from receive gaps with the
+  same rule `core/protocol.py` applies. With `m1.py --alloc` (UDP only) the
+  stubs run the real allocator: the gateway announces a task every
+  `--task-every` seconds, robots bid with their drive time from where they
+  stand, the winner claims and "works" the task in time only (no motion in
+  the emulation), lease beacons renew it, and every allocator decision —
+  including silence — comes from the robots' own logs (`alloc_<i>.jsonl`).
+- **Retries are invisible.** wmediumd retries inside itself; hwsim0 shows one
+  TX per frame. `dur` of a delivered hop includes that queueing.
+- **Hop delivery is exact only with receiver captures** (`rx_<i>.pcap`, every
+  run since 2026-10-20). Older runs fall back to pairing hwsim0's ACK records,
+  which name only the transmitter: one lost copy of a Status mis-pairs the
+  ACKs that follow until the queue drains (`via: "ack"`, best effort).
+- **`rate`** is the rate the kernel requested at handoff, not what wmediumd
+  used; `0` = unknown (ACK records carry none).
+- **Zenoh runs:** TCP payloads are opaque, so hops carry IPs only and
+  delivery/silence come from the stub logs alone.
+- Positions are static: the emulation does not move nodes.
+- **The first ~8 s are a start-up transient**, not a finding about the
+  design: no unicast flows on the mesh until ARP resolves, so every Status
+  the stubs send in that window shows as `unroutable` (red rings at the
+  senders). `m1.py`'s 20 s warmup hides it from the measurements; a trace
+  judged over its whole length reports delivery accordingly (A/B-checked:
+  identical with the replay captures off). Open question for the hardware
+  runbook — a robot joining the mesh may be mute for that long.
+
+## Tests
+
+```bash
+/usr/bin/python3 -m pytest commsim/tests/viz_test.py         # decoders (incl. a real captured frame), trace builder, tour, fixture
+node --experimental-websocket commsim/viz/tests/viz_test.mjs  # the replay page, headless Chrome (see the file header)
+node --experimental-websocket commsim/viz/tests/demo_test.mjs # the live demo: routes through the AP, a message 1→2, an auction, a pull, a kill
+/usr/bin/python3 -m commsim.viz.testdata.make_fixture         # regenerate testdata/trace_small.json after format changes
+```
+
+## Layout
+
+| File | |
+|---|---|
+| `pcap.py` | pure-Python decoders: pcap, radiotap, 802.11(+mesh control), LLC/SNAP, batman-adv IV, Ethernet/IPv4/UDP/TCP/ICMP, the Status CDR header |
+| `build_trace.py` | run directory → trace: hop join, ACK fallback, outcomes, silence, route/linkstat deltas |
+| `index.html`, `demo.html`, `viz.js` | the replay and live pages, one renderer; `window.__viz` is the test hook |
+| `demo.py` | the live demo server: the DES stepped in wall time, Server-Sent Events out, JSON commands in; stdlib only |
+| `testdata/make_fixture.py` | byte builders mirroring the decoders + a synthetic 3-node run; writes `trace_small.json` |
+| `tests/viz_test.mjs` | headless page test |

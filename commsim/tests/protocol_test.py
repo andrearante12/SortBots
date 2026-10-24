@@ -1,0 +1,485 @@
+"""Auction + lease correctness over the in-memory fleet (no radio model)."""
+from commsim.core.loopback import LoopbackNet
+from commsim.core.protocol import Allocator, Params, CLAIMED, OPEN, DONE, deliver
+
+GW = 0
+
+
+def fleet(positions, **pkw):
+    net = LoopbackNet(Params(**pkw))
+    net.add(GW, gateway=True)
+    for rid, pos in positions.items():
+        net.add(rid, pos)
+    return net
+
+
+def assert_single_owner_throughout(net, task_id, seconds):
+    end = net.t + seconds
+    while net.t < end:
+        net.step()
+        assert len(net.self_owners(task_id)) <= 1, (net.t, net.self_owners(task_id))
+
+
+def test_lowest_cost_wins():
+    net = fleet({1: (10, 0), 2: (2, 0), 3: (6, 0)})
+    net.run(1.0)
+    net.announce(GW, 7, (0, 0), (20, 20))
+    net.run(3.0)
+    assert net.self_owners(7) == [2]
+    # every robot (and the gateway) agrees on the owner
+    assert {r.alloc.tasks[7].owner for r in net.robots.values()} == {2}
+
+
+def test_tie_goes_to_lowest_robot_id():
+    net = fleet({3: (4, 0), 1: (-4, 0), 2: (0, 4)})
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (9, 9))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+
+
+def test_gateway_never_bids():
+    net = fleet({1: (100, 0)}, bid_radius_m=1000)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    assert GW not in net.robots[1].alloc.tasks[1].bids
+
+
+def test_no_bidder_in_radius_rebids_with_wider_radius():
+    net = fleet({1: (40, 0), 2: (50, 0)}, bid_radius_m=10, rebid_radius_growth=2.0)
+    net.run(1.0)
+    net.announce(GW, 3, (0, 0), (1, 1))
+    net.run(10.0)
+    assert net.events("no_winner")
+    assert net.self_owners(3) == [1]
+
+
+def test_lease_renewed_by_status_never_expires():
+    net = fleet({1: (1, 0), 2: (5, 0)})
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(60.0)
+    assert net.self_owners(1) == [1]
+    assert not net.events("lease_expired")
+    assert not net.events("robot_silent")
+
+
+def test_dead_owner_reclaimed_only_after_lease_plus_margin():
+    p = dict(task_lease_s=10.0, reclaim_margin_s=2.0)
+    net = fleet({1: (1, 0), 2: (5, 0), 3: (8, 0)}, **p)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    died = net.t
+    net.robots[1].alive = False
+    net.run(30.0)
+    expired = [e for e in net.events("lease_expired") if e["task_id"] == 1]
+    # Peers time the lease from the last Status they heard, up to one status
+    # period (+ delivery delay) before the owner actually died.
+    assert expired and min(e["t"] for e in expired) - died >= 12.0 - 1 / 3.0 - 0.05
+    assert net.self_owners(1) == [2]
+    assert {e["peer"] for e in net.events("robot_silent")} == {1}
+
+
+def test_isolated_owner_stops_before_anyone_reclaims():
+    net = fleet({1: (1, 0), 2: (5, 0), 3: (8, 0)})
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    net.isolate(1)
+    assert_single_owner_throughout(net, 1, 30.0)
+    stop = [e for e in net.events("stop_task") if e["robot_id"] == 1]
+    exp = net.events("lease_expired")
+    assert stop and exp and stop[0]["t"] < min(e["t"] for e in exp)
+    assert net.self_owners(1) == [2]
+    assert [e for e in net.events("hold_safe") if e["robot_id"] == 1]
+
+
+def test_isolated_robot_stops_bidding():
+    a = Allocator(1, Params(status_timeout_s=3.0), cost_fn=lambda pk, dp: (1.0, 1.0))
+    a.on_status(2, [], now=0.0)
+    a.on_announce(0, 4, (0, 0), (1, 1), now=0.0)
+    a.tick(1.1)  # bid from robot 1 only... but suppose the window found no winner
+    a.tasks[4].state, a.tasks[4].rebid_at = OPEN, 5.0
+    a.drain()
+    a.tick(5.0)  # 5 s without hearing anyone: isolated, rebid round opens
+    out, ev = a.drain()
+    assert a.isolated and any(e["event"] == "isolated" for e in ev)
+    assert not [m for m in out if m["type"] == "Bid"]
+
+
+def test_partition_heal_converges_by_tie_break():
+    # Owner in group A keeps hearing A, so it does NOT stop; group B reclaims
+    # after lease + margin. Spec tolerates this; heal must resolve it.
+    net = fleet({1: (1, 0), 2: (5, 0), 3: (2, 0), 4: (9, 0)})
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.partition({GW, 1, 2}, {3, 4})
+    net.run(20.0)
+    assert sorted(net.self_owners(1)) == [1, 3]  # duplicate during partition (see docs)
+    net.heal()
+    net.run(2.0)
+    owners = net.self_owners(1)
+    assert len(owners) == 1
+    assert {r.alloc.tasks[1].owner for r in net.robots.values()} == set(owners)
+    assert net.events("task_yielded")
+
+
+def test_quorum_minority_side_does_not_reclaim():
+    # Same split as above, with the majority quorum: {GW, 1, 2} is 3 of 5, so
+    # only that side may reclaim, and the owner is on it.
+    net = fleet({1: (1, 0), 2: (5, 0), 3: (2, 0), 4: (9, 0)}, quorum_nodes=5)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.partition({GW, 1, 2}, {3, 4})
+    assert_single_owner_throughout(net, 1, 20.0)
+    assert net.self_owners(1) == [1]
+    assert net.events("reclaim_blocked") and not net.events("lease_expired")
+    net.heal()
+    assert_single_owner_throughout(net, 1, 5.0)
+
+
+def test_quorum_minority_owner_stops_before_majority_reclaims():
+    net = fleet({1: (1, 0), 2: (5, 0), 3: (2, 0), 4: (9, 0)}, quorum_nodes=5)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.partition({1, 4}, {GW, 2, 3})
+    assert_single_owner_throughout(net, 1, 20.0)
+    assert [e for e in net.events("stop_task") if e.get("reason") == "lease_lost"]
+    assert net.self_owners(1) in ([2], [3])  # the majority side took it over
+    net.heal()
+    assert_single_owner_throughout(net, 1, 5.0)
+    assert len(net.self_owners(1)) == 1
+
+
+def test_quorum_heal_does_not_reclaim_task_committed_during_split():
+    net = fleet({1: (1, 0), 2: (5, 0), 3: (2, 0), 4: (9, 0)}, quorum_nodes=5)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.partition({GW, 1, 2}, {3, 4})
+    net.run(5.0)
+    net.robots[1].alloc.commit(1, net.robots[1].now(net.t))  # {3, 4} never hear it
+    net.run(20.0)
+    net.heal()
+    assert_single_owner_throughout(net, 1, 10.0)
+    assert not [e for e in net.events("lease_expired") if e.get("task_id") == 1]
+    assert {r.alloc.tasks[1].owner for r in net.robots.values()} == {1}
+
+
+def test_quorum_demo_fleet_survives_one_lost_node():
+    # 2 robots + gateway: either robot plus the gateway, or both robots, is a
+    # majority, so one dead node never stops the fleet.
+    net = fleet({1: (1, 0), 2: (5, 0)}, quorum_nodes=3)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.robots[1].alive = False
+    net.run(20.0)
+    assert net.self_owners(1) == [2]
+    net.robots[GW].alive = False  # robot 2 is now alone: 1 of 3
+    net.run(10.0)
+    assert not net.robots[2].alloc.has_quorum(net.robots[2].now(net.t))
+
+
+def test_no_quorum_no_claim():
+    net = fleet({1: (1, 0), 2: (5, 0)}, quorum_nodes=7)  # fleet list says 7, only 3 up
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(5.0)
+    assert net.self_owners(1) == []
+
+
+def test_clock_offset_and_rate_skew_do_not_expire_leases():
+    net = LoopbackNet(Params())
+    net.add(GW, gateway=True)
+    net.add(1, (1, 0), clock_offset_s=1e6, clock_rate=1.0005)
+    net.add(2, (5, 0), clock_offset_s=-3600.0, clock_rate=0.9995)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(120.0)
+    assert net.self_owners(1) == [1]
+    assert not net.events("lease_expired") and not net.events("robot_silent")
+
+
+def _outage(status_timeout_s):
+    net = fleet({1: (1, 0), 2: (5, 0)}, status_timeout_s=status_timeout_s)
+    net.run(2.0)
+    net.blocked = {frozenset((1, 2))}  # stand-in for a 2 s reroute window
+    net.run(2.0)
+    net.heal()
+    net.run(3.0)
+    return net.events("robot_silent")
+
+
+def test_timer_misordering_causes_false_silent():
+    assert _outage(status_timeout_s=3.0) == []       # timeout > reroute: correct
+    assert _outage(status_timeout_s=1.0)             # negative control: fires
+
+
+def test_release_reauctions_to_another_robot():
+    net = fleet({1: (1, 0), 2: (5, 0)})
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    net.robots[1].alloc.p = Params(max_owned_tasks=0)
+    net.robots[1].alloc.release(1, net.t)
+    net._flush(1)
+    net.run(3.0)
+    assert net.self_owners(1) == [2]
+
+
+def test_complete_marks_done_everywhere():
+    net = fleet({1: (1, 0), 2: (5, 0)})
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    net.robots[1].alloc.complete(1, net.t)
+    net._flush(1)
+    net.run(1.0)
+    assert {r.alloc.tasks[1].state for r in net.robots.values()} == {DONE}
+
+
+def test_early_claim_does_not_beat_cheaper_bid_still_in_window():
+    p = Params()
+    a = Allocator(1, p, cost_fn=lambda pk, dp: (2.0, 1.0))
+    a.on_announce(0, 9, (0, 0), (1, 1), now=0.0)
+    a.drain()
+    a.on_claim(2, 9, cost=5.0, now=0.3)  # peer closed early, never saw our bid
+    a.tick(1.01)
+    out, _ = a.drain()
+    assert any(m["type"] == "Claim" for m in out)
+    assert a.tasks[9].owner == 1 and a.tasks[9].state == CLAIMED
+    b = Allocator(2, p)
+    b.on_claim(2, 9, 5.0, 0.0)  # b's view of its own claim
+    b.tasks[9].owner = 2
+    b.on_claim(1, 9, 2.0, 1.1)
+    assert b.tasks[9].owner == 1
+
+
+def _far_robot_run(beacon_hz):
+    """Robot 3 never receives robot 1's Status (neighbor-only status, robot 3
+    out of robot 1's cells) — only the lease beacon can renew 1's lease at 3."""
+    net = fleet({1: (1, 0), 2: (8, 0), 3: (40, 0)}, lease_beacon_hz=beacon_hz)
+    net.deliver_filter = lambda src, dst, m: not (m["type"] == "Status" and src == 1 and dst == 3)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(60.0)
+    return net
+
+
+def test_neighbor_only_status_without_beacon_expires_leases():
+    net = _far_robot_run(0.0)  # spec as originally written
+    assert [e for e in net.events("lease_expired") if e["robot_id"] == 3]
+
+
+def test_lease_beacon_renews_leases_beyond_neighbors():
+    net = _far_robot_run(1.0)
+    assert not net.events("lease_expired")
+    assert net.self_owners(1) == [1]
+
+
+def test_robot_never_owns_more_than_max_owned_tasks():
+    # Robot 1 is cheapest for BOTH tasks, announced together. It may claim one;
+    # the other must go to robot 2 instead of being held and never worked.
+    net = fleet({1: (0, 0), 2: (10, 0)})
+    net.run(1.0)
+    net.announce(GW, 1, (1, 0), (5, 5))
+    net.announce(GW, 2, (2, 0), (5, 5))
+    for _ in range(int(5 / net.tick_s)):
+        net.step()
+        assert all(len(r.alloc.owned()) <= 1 for r in net.robots.values())
+    owners = {tid: net.self_owners(tid) for tid in (1, 2)}
+    assert sorted(o[0] for o in owners.values() if o) == [1, 2], owners
+
+
+def test_winner_at_capacity_declines_and_releases():
+    # Safety net behind bid withdrawal: ownership can also arrive another way
+    # (tie-break on a peer's Claim/Status) after we bid. Then we must decline.
+    a = Allocator(1, Params(), cost_fn=lambda pk, dp: (1.0, 1.0))
+    a.on_announce(0, 2, (0, 0), (1, 1), now=0.0)   # we bid on task 2
+    a.on_status(3, [(1, 9.0)], now=0.2)            # learn task 1, owned by 3...
+    a.tasks[1].owner, a.tasks[1].owner_cost = 1, 0.5  # ...then it resolves to us
+    a.drain()
+    a.tick(1.01)                                   # task 2's window: we "win"
+    out, ev = a.drain()
+    assert not any(m["type"] == "Claim" and m["task_id"] == 2 for m in out)
+    assert any(m["type"] == "TaskEvent" and m["task_id"] == 2 and m["kind"] == 1 for m in out)
+    assert any(e["event"] == "declined" for e in ev)
+
+
+def test_claiming_withdraws_other_open_bids():
+    a = Allocator(1, Params(), cost_fn=lambda pk, dp: (1.0, 1.0))
+    a.on_announce(0, 1, (0, 0), (1, 1), now=0.0)
+    a.on_announce(0, 2, (0, 0), (1, 1), now=0.5)
+    a.drain()
+    a.tick(1.01)  # window for task 1 closes: we win, now at capacity
+    out, _ = a.drain()
+    assert any(m["type"] == "Claim" and m["task_id"] == 1 for m in out)
+    assert any(m["type"] == "TaskEvent" and m["task_id"] == 2 and m["kind"] == 1 for m in out)
+    assert 1 not in a.tasks[2].bids
+
+
+def test_fuller_battery_beats_slightly_closer_robot():
+    # Robot 2 is 2 m (4 s) closer but at the reserve: +30 s outweighs it.
+    net = fleet({1: (6, 0), 2: (4, 0)})
+    net.robots[1].battery_pct, net.robots[2].battery_pct = 100.0, 25.0
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 0))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+
+
+def test_much_closer_robot_still_wins_on_lower_battery():
+    # The penalty is capped at battery_penalty_s: 40 m (80 s) closer wins.
+    net = fleet({1: (45, 0), 2: (5, 0)}, bid_radius_m=100)
+    net.robots[1].battery_pct, net.robots[2].battery_pct = 100.0, 30.0
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 0))
+    net.run(3.0)
+    assert net.self_owners(1) == [2]
+
+
+def test_battery_gate_counts_the_dropoff_leg():
+    # 2 m to pickup, 98 m on to dropoff: 200 s of driving = 10 % at the default
+    # drain. 28 % can reach the pickup but would finish below the 20 % reserve.
+    net = fleet({1: (2, 0), 2: (10, 0)})
+    net.robots[1].battery_pct, net.robots[2].battery_pct = 28.0, 90.0
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (98, 0))
+    net.run(3.0)
+    assert net.self_owners(1) == [2]
+    assert [e for e in net.events("battery_gated") if e["robot_id"] == 1]
+
+
+def test_no_battery_model_bids_on_travel_time():
+    a = Allocator(1, Params(), cost_fn=lambda pk, dp: (7.0, 1.0))
+    assert a.bid_cost(7.0, 7.0) == 7.0
+
+
+# ---- several tasks per robot (max_owned_tasks > 1, team decision 2026-10-19)
+
+def test_loaded_robot_bids_with_its_backlog_so_the_idle_one_wins():
+    # Robot 1 owns a long task and stands next to the second pickup; robot 2
+    # is idle 12 m away. Measured from where robot 1 stands it would win and
+    # the task would wait behind its queue; with the backlog, robot 2 wins.
+    net = fleet({1: (0, 0), 2: (12, 0)}, max_owned_tasks=3, bid_radius_m=1000)
+    net.run(1.0)
+    net.announce(GW, 1, (1, 0), (100, 0))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.announce(GW, 2, (2, 0), (3, 0))
+    net.run(3.0)
+    assert net.self_owners(2) == [2]
+
+
+def test_robot_owns_up_to_the_cap_and_the_rest_goes_elsewhere():
+    net = fleet({1: (0, 0), 2: (50, 0)}, max_owned_tasks=3, bid_radius_m=1000)
+    net.run(1.0)
+    for tid in (1, 2, 3, 4):
+        net.announce(GW, tid, (1, 0), (2, 0))
+    for _ in range(int(8 / net.tick_s)):
+        net.step()
+        assert all(len(r.alloc.owned()) <= 3 for r in net.robots.values())
+    owners = sorted(net.self_owners(t)[0] for t in (1, 2, 3, 4))
+    assert owners == [1, 1, 1, 2], owners
+
+
+def test_backlog_counts_toward_the_battery_gate():
+    # 30 % with a 20 % reserve at 0.05 %/s = 200 s of driving = 100 m. The
+    # first task (60 m) fits. The second (50 m from where the robot stands)
+    # would fit on its own but not after the first, which ends 60 m away:
+    # the robot must not promise a task it cannot finish.
+    net = fleet({1: (0, 0)}, max_owned_tasks=3, bid_radius_m=1000,
+                battery_drain_pct_per_s=0.05, battery_reserve_pct=20.0)
+    net.robots[1].battery_pct = 30.0
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (60, 0))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.announce(GW, 2, (0, 0), (50, 0))
+    net.run(3.0)
+    assert net.self_owners(2) == []
+    assert net.events("battery_gated")
+
+
+# ---- committed ownership: the item is on the robot (protocol.py docstring)
+
+def test_committed_owner_keeps_working_while_isolated_and_is_not_reclaimed():
+    net = fleet({1: (1, 0), 2: (5, 0)})
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    net.robots[1].alloc.commit(1, net.robots[1].now(net.t))
+    net.run(1.0)
+    net.isolate(1)
+    net.run(30.0)  # well past lease + margin on every side
+    assert net.self_owners(1) == [1]
+    assert not [e for e in net.events("stop_task")]
+    assert not net.events("lease_expired")
+    # the others know the owner is gone but do not send anyone to an empty shelf
+    assert [e["robot_id"] for e in net.events("owner_missing")] == [GW, 2] or \
+        sorted(e["robot_id"] for e in net.events("owner_missing")) == [GW, 2]
+    assert len(net.events("owner_missing")) == 2  # reported once per peer
+    assert all(r.alloc.tasks[1].owner == 1 for r in net.robots.values())
+    net.heal()
+    net.run(2.0)
+    net.robots[1].alloc.complete(1, net.robots[1].now(net.t))
+    net.run(1.0)
+    assert {r.alloc.tasks[1].state for r in net.robots.values()} == {DONE}
+
+
+def test_committed_owner_beats_a_cheaper_claim():
+    net = fleet({1: (1, 0), 2: (5, 0)})
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    net.robots[1].alloc.commit(1, net.robots[1].now(net.t))
+    net.run(1.0)
+    # A peer that believes it owns the task more cheaply (what a partition
+    # heal looks like) must lose, and we must not yield.
+    deliver(net.robots[1].alloc, 2, {"type": "Claim", "task_id": 1, "cost": 0.01},
+            net.robots[1].now(net.t))
+    net.run(1.0)
+    assert net.self_owners(1) == [1]
+    assert not net.events("task_yielded")
+    assert net.robots[2].alloc.tasks[1].owner == 1
+
+
+def test_cancel_still_stops_a_committed_owner():
+    net = fleet({1: (1, 0), 2: (5, 0)})
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    net.robots[1].alloc.commit(1, net.robots[1].now(net.t))
+    net.run(1.0)
+    net.robots[GW].alloc.cancel(1, net.robots[GW].now(net.t))
+    net.run(1.0)
+    stops = net.events("stop_task")
+    assert [(e["robot_id"], e["reason"], e["committed"]) for e in stops] == [(1, "cancelled", True)]
+
+
+def test_finished_tasks_are_forgotten_after_retention():
+    net = fleet({1: (1, 0)}, finished_retention_s=5.0)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.announce(GW, 2, (0, 0), (1, 1))
+    net.run(3.0)
+    net.robots[1].alloc.complete(1, net.robots[1].now(net.t))
+    net.robots[GW].alloc.cancel(2, net.robots[GW].now(net.t))
+    net.run(1.0)
+    assert all(set(r.alloc.tasks) == {1, 2} for r in net.robots.values())
+    net.run(10.0)
+    assert all(not r.alloc.tasks for r in net.robots.values())

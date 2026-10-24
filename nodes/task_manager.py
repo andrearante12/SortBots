@@ -31,7 +31,8 @@ Talks to two things:
     (see _on_explore_status / _on_dispatch). Nav2 itself would silently let
     a new goal preempt the old one either way — this gate exists so the
     explorer's own replan timer doesn't immediately fight back with another
-    frontier goal.
+    frontier goal. Once the queue drains it sends "start" again, but only if
+    a task was what stopped it (nodes/explorer_handoff.py has the why).
 
 No custom .msg/.srv package: the repo has no ament package scaffolding yet
 (everything runs as loose scripts — see docs/quickstart.md), so task dispatch and
@@ -64,7 +65,6 @@ import os
 import time
 import uuid
 from collections import deque
-from pathlib import Path
 
 import rclpy
 from action_msgs.msg import GoalStatus
@@ -72,19 +72,14 @@ from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
 from std_msgs.msg import String
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+from explorer_handoff import ExplorerHandoff
+from waypoints import Waypoint, load_waypoints, nav_waypoints_file
 
-# Single source of named destinations, shared with the dashboard: the WORKING
-# waypoint set the operator edits live on the map, keyed by platform
-# ({"sim": [{name,x,y,yaw}, ...], "real": [...]}). Honour the same env override
-# webui/maps_lib.py uses so tests and alternate layouts stay in lockstep.
-NAV_WAYPOINTS_FILE = (
-    Path(os.environ["SORTBOTS_NAV_WAYPOINTS"])
-    if os.environ.get("SORTBOTS_NAV_WAYPOINTS")
-    else REPO_ROOT / "data" / "nav_waypoints.json"
-)
+# Named destinations: the working waypoint set the operator edits live on the
+# map (data/nav_waypoints.json) — nodes/waypoints.py, shared with fleet_tasks.
 
 # Nav-only tasks (no arm): on reaching the pickup, and again at the dropoff,
 # pause this long to stand in for loading/unloading, then drive on. Steady
@@ -102,37 +97,6 @@ NAV_STARTUP_GRACE_SEC = 90.0
 NAV_RETRY_SEC = 3.0
 
 
-class Waypoint:
-    def __init__(self, spec: dict):
-        self.name = spec["name"]
-        self.x = float(spec["x"])
-        self.y = float(spec["y"])
-        self.yaw = float(spec.get("yaw", 0.0))
-
-
-def load_waypoints(platform: str, path: Path = NAV_WAYPOINTS_FILE) -> dict[str, Waypoint]:
-    """Named destinations for `platform` from the working set, keyed by name.
-
-    A missing/empty/malformed file yields no waypoints (tasks then fail
-    validation until the operator places some) rather than crashing the node.
-    Re-read on every dispatch, so a pin placed on the map resolves without a
-    restart — the stations file this replaced was load-once.
-    """
-    try:
-        raw = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return {}
-    points = raw.get(platform, []) if isinstance(raw, dict) else []
-    out: dict[str, Waypoint] = {}
-    for spec in points:
-        try:
-            wp = Waypoint(spec)
-        except (KeyError, TypeError, ValueError):
-            continue   # skip a malformed entry, keep the rest
-        out[wp.name] = wp
-    return out
-
-
 class Task:
     """One queued job, its waypoints resolved to poses AT DISPATCH.
 
@@ -148,17 +112,23 @@ class Task:
                   own task the operator can see and cancel.
     """
 
-    def __init__(self, kind: str, stops: list[Waypoint], task_id: str | None = None):
+    def __init__(self, kind: str, stops: list[Waypoint], task_id: str | None = None,
+                 carrying: bool = False):
         self.task_id = task_id or uuid.uuid4().hex[:8]
         self.kind = kind
         self.stops = stops
+        # The load is already on board (nodes/fleet_tasks.py re-dispatches a
+        # fleet task whose dropoff leg failed): skip the pickup leg and its
+        # dwell, drive straight to the dropoff.
+        self.carrying = carrying and kind == "pickup"
         self.first_try: float | None = None   # monotonic; see NAV_STARTUP_GRACE_SEC
 
     def summary(self) -> dict:
         if self.kind == "goto":
             return {"task_id": self.task_id, "kind": "goto", "goto": self.stops[0].name}
         return {"task_id": self.task_id, "kind": "pickup",
-                "pickup": self.stops[0].name, "dropoff": self.stops[1].name}
+                "pickup": self.stops[0].name, "dropoff": self.stops[1].name,
+                **({"carrying": True} if self.carrying else {})}
 
 
 class TaskManager(Node):
@@ -169,7 +139,7 @@ class TaskManager(Node):
         self.waypoints = load_waypoints(platform)
         self.get_logger().info(
             f"loaded {len(self.waypoints)} waypoints for platform {platform!r} "
-            f"from {NAV_WAYPOINTS_FILE}"
+            f"from {nav_waypoints_file()}"
         )
 
         self.queue: deque[Task] = deque()
@@ -177,12 +147,19 @@ class TaskManager(Node):
         self.current_task: Task | None = None
         self._dwell_deadline: float | None = None
         self._hold_until = 0.0   # monotonic; set while Nav2 is still rejecting goals
-        self._explorer_active = False
+        self.explorer = ExplorerHandoff()
 
         self.nav_client = ActionClient(
             self, NavigateToPose, f"/{robot_id}/navigate_to_pose"
         )
-        self.status_pub = self.create_publisher(String, f"/{robot_id}/task_status", 10)
+        # Latched: nodes/fleet_tasks.py reads the last status on start-up to
+        # learn what this node is still doing after a restart of its own (a
+        # fleet task with the load on board is adopted, anything else of the
+        # fleet's is cancelled so it gets re-auctioned).
+        self.status_pub = self.create_publisher(
+            String, f"/{robot_id}/task_status",
+            QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
+                       durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
         self.explore_cmd_pub = self.create_publisher(String, f"/{robot_id}/explore_cmd", 10)
 
         self.create_subscription(
@@ -229,17 +206,16 @@ class TaskManager(Node):
             # rejected task sits at "waiting" forever.
             self._publish_status(rejected={"task_id": task_id, "reason": reason})
             return
-        task = Task(kind, [self.waypoints[n] for n in names], task_id=task_id)
+        task = Task(kind, [self.waypoints[n] for n in names], task_id=task_id,
+                    carrying=bool(payload.get("carrying", False)))
         self.queue.append(task)
         self.get_logger().info(
             f"queued {kind} task {task.task_id}: {' -> '.join(names)} "
             f"(queue depth {len(self.queue)})"
         )
         self._publish_status()
-        if self._explorer_active:
-            stop_msg = String()
-            stop_msg.data = "stop"
-            self.explore_cmd_pub.publish(stop_msg)
+        if self.explorer.on_task_queued():
+            self._explore_cmd("stop")
             self.get_logger().info(
                 "dispatch received while explorer was active — sent stop so it "
                 "releases the nav goal server for this task"
@@ -264,7 +240,12 @@ class TaskManager(Node):
             status = json.loads(msg.data)
         except json.JSONDecodeError:
             return
-        self._explorer_active = status.get("state") == "exploring"
+        self.explorer.on_status(status.get("state"))
+
+    def _explore_cmd(self, cmd: str) -> None:
+        msg = String()
+        msg.data = cmd
+        self.explore_cmd_pub.publish(msg)
 
     # -- FSM ------------------------------------------------------------
 
@@ -273,13 +254,20 @@ class TaskManager(Node):
         # after the robot is visible, and a task popped before then used to fail
         # outright in _start_nav's wait — which made the first demo phase fail
         # on a fresh session. Holding the queue lets it start the moment Nav2 does.
-        if (self.state == "IDLE" and self.queue and not self._explorer_active
+        if (self.state == "IDLE" and self.queue and self.explorer.may_start_task()
                 and self.nav_client.server_is_ready() and time.monotonic() >= self._hold_until):
             self.current_task = self.queue.popleft()
             if self.current_task.first_try is None:
                 self.current_task.first_try = time.monotonic()
-            first = "NAV_TO_GOAL" if self.current_task.kind == "goto" else "NAV_TO_PICKUP"
-            self._start_nav(self.current_task.stops[0], next_state=first)
+            if self.current_task.kind == "goto":
+                self._start_nav(self.current_task.stops[0], next_state="NAV_TO_GOAL")
+            elif self.current_task.carrying:
+                self._start_nav(self.current_task.stops[1], next_state="NAV_TO_DROPOFF")
+            else:
+                self._start_nav(self.current_task.stops[0], next_state="NAV_TO_PICKUP")
+        elif self.state == "IDLE" and self.explorer.on_idle(not self.queue):
+            self._explore_cmd("start")
+            self.get_logger().info("task queue empty — resumed the exploration a task interrupted")
         elif self._dwell_deadline is not None and time.monotonic() >= self._dwell_deadline:
             self._dwell_deadline = None
             if self.state == "PICKING":
