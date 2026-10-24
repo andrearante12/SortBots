@@ -55,6 +55,9 @@ ExecStart=/bin/bash $REPO_ROOT/scripts/run_console.sh --port $PORT
 ExecStop=/bin/bash $REPO_ROOT/scripts/run_console.sh stop
 Restart=on-failure
 RestartSec=10
+# ExecStop kills serve.py (run_console.sh stop), so the main shell exits 137/143:
+# that is a clean stop, not a failure (it read "failed" in status, 2026-10-24).
+SuccessExitStatus=130 137 143
 TimeoutStopSec=60
 
 [Install]
