@@ -187,9 +187,10 @@ scripts/sim_ctl.sh console stop; scripts/sim_ctl.sh console start
 scripts/simtest.py run crossing_yield
 ```
 
-(`run_demo.sh`, `run_console.sh` and `session.py` must pass the domain through
-instead of hard-coding 0 for this to reach Isaac and the bringup — see the
-`dds-localhost-wip` branch for the related discovery-range work.)
+`run_demo.sh`, `run_console.sh` and `session.py` pass the caller's domain
+through (default 0) rather than hard-coding it, so Isaac, the bringup, the
+console and the probe all land on the same one. Restart the console after
+changing it: rosbridge keeps the domain it started on.
 
 ### What a run does
 

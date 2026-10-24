@@ -358,7 +358,7 @@ echo "[run_demo] launching RTAB-Map + Nav2 + web dashboard + task manager..."
 WEBUI=true; [[ "$KEEP_CONSOLE" == "true" ]] && WEBUI=false
 setsid "$ROS_BASH" -c "source '$ROS_SETUP'; \
   export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
-  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
+  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
        robot_id:=$ROBOT_ID robot_ids:=$ROBOT_IDS scene:=$SCENE \
        use_sim_time:=true rviz:=false \
@@ -377,7 +377,7 @@ python3 "$REPO_ROOT/scripts/webui_url.py" --port "$DASHBOARD_PORT" 2>/dev/null |
 
 # ---- 3. WASD teleop (its own terminal window) ----
 TELEOP_CMD="source '$ROS_SETUP'; \
-  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
+  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}; \
   python3 '$REPO_ROOT/scripts/wasd_teleop.py' --robot-id $ROBOT_ID"
 if [[ $TELEOP -eq 1 ]]; then
   if command -v gnome-terminal >/dev/null 2>&1; then
