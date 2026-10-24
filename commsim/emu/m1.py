@@ -148,7 +148,7 @@ def main(argv=None) -> int:
     ap.add_argument("--unblock-at", type=float, default=None,
                     help="seconds into the stub run: reopen the link --block-at blocked")
     ap.add_argument("--poll-s", type=float, default=0.5,
-                    help="route/station poller period for the replay trace (0 = off)")
+                    help="route/station poller period, written to poll_<i>.txt (0 = off)")
     ap.add_argument("--alloc", action="store_true",
                     help="stubs also run the task allocator (core/protocol.py) over UDP; the gateway "
                          "announces a task every --task-every s")
@@ -199,7 +199,7 @@ def main(argv=None) -> int:
                            start_new_session=True)
     # hwsim0 sees every frame any hwsim radio transmits (radiotap: rate, length)
     # -> channel busy time computed with the DES's own 802.11 timing.
-    # Full snaplen: the replay (commsim/viz) joins hops by the (robot, seq)
+    # Full snaplen: joining hops afterwards needs the (robot, seq)
     # inside each Status, and the old -s 64 cut a batman unicast header after
     # 2 bytes. Cost is file size only: ~25 MB at n=10, ~50 MB at n=15, on a
     # 994 MB tmpfs — the driver script copies and deletes each run.

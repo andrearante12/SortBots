@@ -19,8 +19,8 @@ peer, topic ids 2-6. The gateway (--robot-id 0) announces a task every
 straight-line drive time from --pos; a winner "works" the task in time only
 (picks up 2 s after the claim, completes after its bid, capped) — there is no
 motion in the emulation. Every allocator event, send and receive is logged to
---alloc-log as JSON lines, which commsim/viz/build_trace.py turns into the
-replay's task markers and silence events.
+--alloc-log as JSON lines: the run's own record of every auction decision and
+silence event.
 
     python3 status_stub.py --robot-id 1 --hz 3 --duration 120 --out /run/commsim/r1.csv
 """
@@ -107,7 +107,7 @@ class Stub(Node):
     def send_msg(self, cls, m) -> int:
         """One UDP unicast per peer of a commsim_msgs message with the prototype
         header. Returns the FleetHeader seq used (one counter for every type:
-        the replay joins hops by (topic, robot, seq))."""
+        a capture's hops join by (topic, robot, seq))."""
         m.header.version, m.header.robot_id, m.header.seq = 1, self.a.robot_id, self.seq
         ns = time.time_ns()
         m.header.stamp.sec, m.header.stamp.nanosec = ns // 10**9, ns % 10**9

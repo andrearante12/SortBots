@@ -1070,3 +1070,23 @@ derivation. The replay's guided tour now captions tasks as well as link
 events.
 
 ![live demo: robots 1 and 2 routing through the gateway](figures/viz_demo.png)
+
+### Step 31 — the live model moves onto the operator's map (2026-10-23)
+
+The demo page and the replay are gone: the operator view is the one GUI
+(CLAUDE.md, "One GUI"). `viz/demo.py` is now only the engine behind the
+operator view's **Comms** overlay, served by `webui/serve.py`
+(`/api/commsim/events`, `/api/commsim/cmd`), and it is fed from the live
+fleet instead of a mouse. The real robots' poses place the model's robots.
+The explored `/map` becomes its racks: every 4-connected blob of occupied
+0.5 m cells is one obstacle, covered by row-run rectangles, and a link
+crossing it costs one rack, however many rectangles. A blob's bounding box
+would not work: the outer wall is one blob and its box is the whole floor
+(`des/layout.py` `from_occupancy`). The operator's gateway pin is the AP.
+The overlay never posts tasks to the model, because the real auction runs on
+the robots (`nodes/fleet_tasks.py`), so the model's robots never drive. Its
+predictions are drawn dashed on the map and never reach the robot cards or
+alarms. The packet replay (`build_trace.py`, `pcap.py`, `index.html`) and its
+tests were deleted; the figures above are kept as the record of steps 29–30.
+Tests: `commsim/tests/overlay_test.py`, and the `comms:` checks in
+`webui/tests/operator_test.mjs`.

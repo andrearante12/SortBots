@@ -48,6 +48,7 @@ This is **not a colcon workspace** — there is no `src/`, no `package.xml`, no
 | `configs/` | tuning YAML, `scenarios/` presets |
 | `maps/` | saved map library — named, committed snapshots of explored maps |
 | `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `docs/splat.md`) |
+| `commsim/` | fleet comms simulation (mesh, Zenoh, task auction), system python3 only; `core/protocol.py` is the allocator `nodes/fleet_tasks.py` runs, `viz/demo.py` the model behind the operator's Comms overlay (`commsim/README.md`) |
 | `docs/running.md` | the full runbook |
 
 No custom `.msg`/`.srv`: inter-node protocol is `std_msgs/String` carrying JSON.
@@ -62,8 +63,8 @@ light/dark theme and `webui/tests/operator_test.mjs`. Never a new standalone HTM
 page, a second HTTP server, or another port. A backend feature exposes `/api/...`
 routes on serve.py or ROS topics over rosbridge, and the operator view renders
 it. `webui/index.html` is the deprecated engineering view: fix it, don't grow it.
-Tools that shipped their own page (e.g. `commsim/viz/`) get folded into the
-operator view, not kept beside it.
+A tool that shipped its own page gets folded into the operator view, not kept
+beside it: commsim's live demo became the Comms overlay (2026-10-23).
 
 ## Invariants that cost the most time when violated
 

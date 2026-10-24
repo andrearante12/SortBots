@@ -79,7 +79,7 @@ launch files. The only link is `core/protocol.py`, which
 | `measurements/` | Emulation measurements the model is checked against |
 | `scripts/` | `fix_sweep.sh` reproduces the final comparison; `check_isolation.sh` proves traffic stays on the fleet subnet |
 | `vm/` | Creating and provisioning the emulation VM |
-| `viz/` | **Packet-transfer replay:** every frame of an emulation run animated hop by hop over the floor, with routes, link blocks and each robot's view of who is silent (`viz/README.md`) |
+| `viz/` | **Live model on the operator's map:** the engine behind the operator view's Comms overlay — predicted links, mesh routes and every message hop for where the real robots stand (`viz/README.md`) |
 | `tests/` | Offline tests: protocol, config generation, hardware bundles, model sanity |
 | `docs/` | `brief.md` (the question), `plan.md` (the approach), `sim_log.md` (results, then the full run log), `figures/` |
 
@@ -132,21 +132,19 @@ sudo python3 -m commsim.emu.mesh down
 
 `multipass exec` joins its arguments into one remote shell string, so put
 multi-step VM commands in a script under the gitignored `commsim/results/`
-(mounted in the VM) and run that. Every `m1` run also records what the
-replay needs (per-receiver captures, route poller, link log); `--unblock-at`
+(mounted in the VM) and run that. Every `m1` run also records per-receiver
+captures, a route poller and a link log; `--unblock-at`
 reopens the link `--block-at` pulled; `--alloc --task-every 8` makes the
 stubs run the real task allocator over UDP so auctions happen on the real
 stack.
 
-### Live demo and replay (host, no VM)
+### Live model on the map (host, no VM)
 
-```bash
-/usr/bin/python3 -m commsim.viz.demo                                # the model live: drag robots, post tasks, pull links
-# open http://127.0.0.1:8765/
-/usr/bin/python3 -m commsim.viz.build_trace commsim/results/<run>   # -> <run>/trace.json + a sanity report
-python3 -m http.server 8000 --bind 127.0.0.1                        # then open
-# http://127.0.0.1:8000/commsim/viz/index.html?trace=/commsim/results/<run>/trace.json
-```
+The DES runs live behind the operator view's **Comms** overlay: open the
+dashboard (`webui/serve.py` / `scripts/run_console.sh`), then turn on Comms
+next to Map / 3D cloud. The real robots' poses and the explored map's obstacles
+go in; predicted links, routes and message hops come out. See
+[`viz/README.md`](viz/README.md).
 
 ### Real routers (laptop)
 
