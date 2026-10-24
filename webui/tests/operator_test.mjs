@@ -1006,6 +1006,8 @@ async function main() {
   check('landscape: the map fills the rest', (await box('#map')).w > 700 && (await box('#map')).h > 300, JSON.stringify(await box('#map')));
   check('landscape: Stop all and the session chip are on screen, nothing scrolls sideways',
         (await inView('#estop')) && (await inView('#session-chip')) && await page.eval(`innerWidth <= 845 && document.documentElement.scrollWidth <= 845`));
+  const aspect = () => page.eval(`(() => { const c = document.getElementById('map'), r = c.getBoundingClientRect(); return [c.width / c.height, r.width / r.height]; })()`);
+  check('landscape: the map is not stretched (pixel and screen aspect agree)', Math.abs((await aspect())[0] - (await aspect())[1]) < 0.02, JSON.stringify(await aspect()));
   await shot('phone-landscape');
   await click('#mnav [data-pane="robots"]'); await sleep(200);
   check('landscape: Robots from the rail', (await visible('#left')) && (await box('#left')).w > 700);
@@ -1039,6 +1041,12 @@ async function main() {
   check('side bars: widths survive a reload', Math.abs((await widths())[0] - 200) < 2 && Math.abs((await widths())[1] - r1w) < 4, JSON.stringify(await widths()));
   await page.eval(`document.getElementById('rz-left').dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); document.getElementById('rz-right').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
   await sleep(100);
+  // The stage changing size with NO window resize event (an iPhone rotation fires it
+  // before the layout settles): the map must still follow, or CSS stretches it.
+  await page.eval(`document.body.style.setProperty('--left-w', '420px')`); await sleep(300);
+  check('side bars: the map re-fits when its pane changes size without a window resize',
+        await page.eval(`(() => { const c = document.getElementById('map'), r = c.getBoundingClientRect(); return Math.abs(c.width / (window.devicePixelRatio || 1) - r.width) < 2 && Math.abs(c.height / (window.devicePixelRatio || 1) - r.height) < 2; })()`));
+  await page.eval(`document.body.style.removeProperty('--left-w')`); await sleep(200);
   check('side bars: double-click resets both', Math.abs((await widths())[0] - l0) < 2 && Math.abs((await widths())[1] - r0w) < 2, JSON.stringify(await widths()));
   await page.eval(`localStorage.clear()`);
 

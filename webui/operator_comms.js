@@ -432,6 +432,8 @@
     canvas.addEventListener("pointerdown", onPick);
     addEventListener("keydown", (e) => { if (e.key === "Escape" && pick) endPick(); });
     addEventListener("resize", resize);
+    // See operator.js: the window event comes too early on an iPhone rotation.
+    new ResizeObserver(() => resize()).observe(canvas.parentElement);
   }
 
   // -- public -----------------------------------------------------------------------

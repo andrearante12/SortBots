@@ -1656,6 +1656,10 @@
     if (t && !(t === "tp" && platform !== "sim")) setTool(t);
   });
   addEventListener("resize", resize);
+  // The window resize event isn't enough: on iPhone it fires on rotation BEFORE the new
+  // layout settles, so the map kept its portrait pixel size and CSS stretched it across
+  // the landscape stage (robots drawn as ellipses, 2026-10-24). Watch the stage itself.
+  new ResizeObserver(() => resize()).observe(canvas.parentElement);
 
   // -- 2D map / 3D cloud --------------------------------------------------------------------------------------------
   // The 3D view is look-only: the tools (waypoints, sends) work on the 2D map, so they
