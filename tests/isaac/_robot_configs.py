@@ -6,15 +6,19 @@ conftest directory on sys.path during test-module collection).
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GENERATED = REPO_ROOT / "assets" / "generated"
 CONFIGS = REPO_ROOT / "configs" / "physics_overrides"
 
-CARTER_URDF = Path(
-    "/home/andre/isaacsim/venv/lib/python3.11/site-packages/isaacsim/exts"
-    "/isaacsim.asset.importer.urdf/data/urdf/robots/carter/urdf/carter.urdf"
+# Derived from ISAACSIM_HOME (scripts/activate_isaac.sh's default ~/isaacsim)
+# rather than one developer's absolute venv path.
+CARTER_URDF = (
+    Path(os.environ.get("ISAACSIM_HOME", Path.home() / "isaacsim"))
+    / "venv/lib/python3.11/site-packages/isaacsim/exts"
+    / "isaacsim.asset.importer.urdf/data/urdf/robots/carter/urdf/carter.urdf"
 )
 XLEROBOT_URDF = (
     REPO_ROOT

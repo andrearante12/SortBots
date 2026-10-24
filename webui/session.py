@@ -766,6 +766,14 @@ _ROS_ENV_KEYS = (
 )
 
 
+def _domain() -> int:
+    """The caller's ROS_DOMAIN_ID (default 0), validated before it reaches a shell."""
+    try:
+        return max(0, min(232, int(os.environ.get("ROS_DOMAIN_ID", "0"))))
+    except ValueError:
+        return 0
+
+
 def clean_env() -> dict:
     """A ROS-free environment for spawning run_demo.sh.
 
@@ -818,7 +826,7 @@ def save_map_blocking(name: str, *, robot_id: str = "robot_0",
     cmd = (
         f"source {shlex.quote(ROS_SETUP)}; "
         f"export PATH={shlex.quote(SYSTEM_PATH)}:\"$PATH\"; "
-        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; "
+        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID={_domain()}; "
         f"exec {shlex.quote(str(MAPS_SH))} save {shlex.quote(name)} "
         f"--robot-id {shlex.quote(robot_id)}{extra}"
     )
@@ -854,7 +862,7 @@ def _ros_service_call(service: str, srv_type: str, request: str, *,
     cmd = (
         f"source {shlex.quote(ROS_SETUP)}; "
         f"export PATH={shlex.quote(SYSTEM_PATH)}:\"$PATH\"; "
-        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; "
+        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID={_domain()}; "
         f"exec ros2 service call {shlex.quote(service)} {shlex.quote(srv_type)} "
         f"{shlex.quote(request)}"
     )
@@ -883,7 +891,7 @@ def _publish_recon_reset(rid: str) -> None:
     cmd = (
         f"source {shlex.quote(ROS_SETUP)}; "
         f"export PATH={shlex.quote(SYSTEM_PATH)}:\"$PATH\"; "
-        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; "
+        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID={_domain()}; "
         f"exec ros2 topic pub --once -w 1 /{rid}/recon_reset std_msgs/msg/String "
         f"{shlex.quote('{data: clear}')}"
     )
@@ -1372,7 +1380,7 @@ class SessionManager:
         cmd = (
             f"source {shlex.quote(ROS_SETUP)}; "
             f"export PATH={shlex.quote(SYSTEM_PATH)}:\"$PATH\"; "
-            f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; "
+            f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID={_domain()}; "
             f"exec {shlex.quote(str(RECORD_BAG))} --output {shlex.quote(session['bag_dir'])}"
         )
         env = clean_env()

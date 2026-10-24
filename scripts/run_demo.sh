@@ -258,6 +258,15 @@ ids = [r['id'] for r in roster['robots']][:$ROBOTS]
 print(','.join(ids))
 ")
 fi
+# An empty list here doesn't fail anywhere useful: Isaac still starts, then
+# `ros2 launch` dies on "malformed launch argument 'robot_ids:='" into the
+# bringup log while the session reports running with no ROS stack at all.
+# Seen once on 2026-10-06 (not reproducible after); fail loudly instead.
+if [[ -z "$ROBOT_IDS" ]]; then
+  echo "ERROR: could not derive --robot-ids from configs/robots.yaml (robots=$ROBOTS);"
+  echo "       python3 is $(command -v python3). Pass --robot-ids explicitly to bypass."
+  exit 1
+fi
 
 # Working DB + copy-on-use for maps/ library entries — shared with
 # scripts/run_robot.sh, see scripts/_map_db.sh for the rationale.
@@ -358,7 +367,7 @@ echo "[run_demo] launching RTAB-Map + Nav2 + web dashboard + task manager..."
 WEBUI=true; [[ "$KEEP_CONSOLE" == "true" ]] && WEBUI=false
 setsid "$ROS_BASH" -c "source '$ROS_SETUP'; \
   export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
-  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
+  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
        robot_id:=$ROBOT_ID robot_ids:=$ROBOT_IDS scene:=$SCENE \
        use_sim_time:=true rviz:=false \
@@ -367,7 +376,17 @@ setsid "$ROS_BASH" -c "source '$ROS_SETUP'; \
        delete_db_on_start:=$DELETE_DB_ON_START shared_map:=$SHARED_MAP \
        explore:=true explore_autostart:=$EXPLORE" \
   >"$BRINGUP_LOG" 2>&1 &
+BRINGUP_PID=$!  # setsid execs, as for SIM_PID; ros_bash.sh stays up as long as the launch does
 sleep 12
+# The sleep alone used to be the whole check, so a bringup that died in its
+# first seconds (bad launch argument, missing package) still printed "up" and
+# the dashboard sat at `running` with nothing behind it (2026-10-06).
+if ! kill -0 "$BRINGUP_PID" 2>/dev/null; then
+  echo "ERROR: the ROS 2 bringup exited during startup. Tail of $BRINGUP_LOG:"
+  tail -n 15 "$BRINGUP_LOG" | sed 's/^/    /'
+  stop_pipeline
+  exit 1
+fi
 echo "[run_demo] ROS 2 stack up (see $BRINGUP_LOG)."
 
 # Echo the dashboard URL to this console too (the launch prints it into the
@@ -377,7 +396,7 @@ python3 "$REPO_ROOT/scripts/webui_url.py" --port "$DASHBOARD_PORT" 2>/dev/null |
 
 # ---- 3. WASD teleop (its own terminal window) ----
 TELEOP_CMD="source '$ROS_SETUP'; \
-  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
+  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}; \
   python3 '$REPO_ROOT/scripts/wasd_teleop.py' --robot-id $ROBOT_ID"
 if [[ $TELEOP -eq 1 ]]; then
   if command -v gnome-terminal >/dev/null 2>&1; then
