@@ -950,6 +950,45 @@ async function main() {
         !(await visible('#tools [data-t="tp"]')) && await page.eval(`document.querySelector('#tools [data-t="select"]').classList.contains('active')`));
   await page.eval(`window.__platform = null; window.__operator.loadWaypoints()`); await sleep(200);
 
+  // -- manual drive (pad on the camera tile) ----------------------------------------------------------
+  console.log('\n--- manual drive ---');
+  await page.eval(`window.__operator.select(${JSON.stringify(r1)})`); await sleep(400);
+  check('drive: an open robot card has a drive pad on its camera', await page.eval(`!!document.querySelector('#fleet .robot[data-id="${r1}"] .cam .drive [data-drive="fwd"]')`));
+  const twists = () => page.eval(`window.__published.filter((x) => x.topic === '/${r1}/cmd_vel').map((x) => [x.msg.linear.x, x.msg.linear.y, x.msg.angular.z])`);
+  const padBtn = (cmd) => page.eval(`(() => { const r = document.querySelector('#fleet .robot[data-id="${r1}"] .cam .drive [data-drive="${cmd}"]').getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+  await page.eval(`window.__published.length = 0`);
+  const [fx, fy] = await padBtn('fwd');
+  await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: fx, y: fy, button: 'left', clickCount: 1 });
+  await sleep(350);
+  const held = await twists();
+  check('drive: holding forward publishes 0.5 m/s, repeatedly', held.length >= 3 && held.every((t) => t[0] === 0.5 && t[1] === 0 && t[2] === 0), JSON.stringify(held));
+  check('drive: the held button lights up', await page.eval(`document.querySelector('#fleet .robot[data-id="${r1}"] .drive [data-drive="fwd"]').classList.contains('held')`));
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: fx, y: fy, button: 'left', clickCount: 1 });
+  await sleep(250);
+  const afterUp = await twists(), n = afterUp.length;
+  check('drive: letting go stops it at once', JSON.stringify(afterUp[n - 1]) === '[0,0,0]', JSON.stringify(afterUp.slice(-2)));
+  await sleep(300);
+  check('drive: and nothing more is sent once stopped', (await twists()).length === n);
+  check('drive: the pad never opens or closes the card', await page.eval(`window.__operator.open.has(${JSON.stringify(r1)})`));
+  await page.eval(`window.__published.length = 0`);
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w' })); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'a' }))`);
+  await sleep(150);
+  check('drive: W+A drives the robot in control diagonally', (await twists()).some((t) => t[0] === 0.5 && t[1] === 0.5), JSON.stringify(await twists()));
+  await page.eval(`window.dispatchEvent(new Event('blur'))`); await sleep(100);
+  check('drive: losing focus mid-drive stops the robot', JSON.stringify((await twists()).slice(-1)[0]) === '[0,0,0]');
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'w' })); window.dispatchEvent(new KeyboardEvent('keyup', { key: 'a' }))`);
+  // Taking the wheel from an exploring robot stops the explorer first.
+  await emit(`/${r1}/explore_status`, { data: JSON.stringify({ state: 'exploring' }) }); await sleep(300);
+  await page.eval(`window.__published.length = 0`);
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'e' }))`); await sleep(150);
+  const pubs = JSON.parse(await page.eval(`JSON.stringify(window.__published)`));
+  check('drive: taking the wheel stops the explorer, then turns', pubs.some((x) => x.topic === `/${r1}/explore_cmd` && x.msg.data === 'stop') && (await twists()).some((t) => t[2] < 0));
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'e' }))`);
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', bubbles: true }))`);
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'w' }))`);
+  await shot('drive-pad');
+  await page.eval(`window.__operator.select(null)`);
+
   // -- phones ---------------------------------------------------------------------------------------
   console.log('\n--- phone ---');
   await page.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });

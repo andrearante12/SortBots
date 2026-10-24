@@ -883,12 +883,103 @@
     const el = document.createElement("div");
     el.className = "cam";
     el.innerHTML = `<div class="pic"></div><canvas class="obst"></canvas><span class="msg">Connecting to camera…</span>
-      <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button></div>`;
+      <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button></div>
+      <div class="drive" role="group" aria-label="Drive by hand" title="Drive by hand: hold an arrow. Keys W/A/S/D move, Q/E rotate, Space stops (they drive the robot in control)">
+        <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
+        <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
+        <button type="button" data-drive="rot-left" aria-label="Rotate left">&#8634;</button><button type="button" data-drive="back" aria-label="Back">&#9660;</button><button type="button" data-drive="rot-right" aria-label="Rotate right">&#8635;</button>
+      </div>`;
     c = { el, pic: el.querySelector(".pic"), overlay: el.querySelector("canvas.obst"), msg: el.querySelector(".msg"), mode: camDefault, timer: null, token: 0 };
     cams.set(id, c);
     syncCamButtons(c);
+    wireDrivePad(id, el.querySelector(".drive"));
     return c;
   }
+
+  // -- manual drive (the camera tile's pad) ------------------------------------------------------
+  // Ported from the deleted per-robot dashboard (app.js): Twist on /<id>/cmd_vel while a
+  // direction is held, republished at DRIVE_HZ so one dropped rosbridge message can't
+  // leave the robot creeping, and a zero Twist the moment nothing is held. The base is
+  // holonomic (spawn_warehouse.py), so strafe is real; held directions add up (fwd +
+  // strafe = diagonal). 0.5 m/s is the base joints' URDF velocity limit, the sim's ceiling.
+  // Taking the wheel stops the explorer and cancels the robot's goals first: Nav2 or the
+  // explorer would otherwise fight the operator for cmd_vel (a running task fails, and a
+  // fleet task goes back to the auction).
+  const DRIVE_LINEAR_MPS = 0.5, DRIVE_ANGULAR_RADPS = 1.2, DRIVE_HZ = 10;
+  const DRIVE_VECTORS = {
+    fwd: [DRIVE_LINEAR_MPS, 0, 0], back: [-DRIVE_LINEAR_MPS, 0, 0], left: [0, DRIVE_LINEAR_MPS, 0], right: [0, -DRIVE_LINEAR_MPS, 0],
+    "rot-left": [0, 0, DRIVE_ANGULAR_RADPS], "rot-right": [0, 0, -DRIVE_ANGULAR_RADPS],
+  };
+  const DRIVE_KEYS = { w: "fwd", s: "back", a: "left", d: "right", q: "rot-left", e: "rot-right" };
+  const drives = new Map(); // id -> {held: Set, timer}
+  const driveOf = (id) => drives.get(id) || drives.set(id, { held: new Set(), timer: null }).get(id);
+
+  function drivePublish(id) {
+    const d = driveOf(id);
+    let x = 0, y = 0, z = 0;
+    for (const cmd of d.held) { const v = DRIVE_VECTORS[cmd]; x += v[0]; y += v[1]; z += v[2]; }
+    publish(`/${id}/cmd_vel`, "geometry_msgs/Twist", { linear: { x, y, z: 0 }, angular: { x: 0, y: 0, z } });
+    const c = cams.get(id);
+    if (c) for (const b of c.el.querySelectorAll("[data-drive]")) b.classList.toggle("held", d.held.has(b.dataset.drive));
+  }
+  function driveStart(id, cmd) {
+    const d = driveOf(id);
+    if (cmd === "stop") return driveRelease(id);
+    if (!DRIVE_VECTORS[cmd] || d.held.has(cmd)) return;
+    if (!d.held.size) {
+      const r = robots.get(id), st = r ? statusOf(r).tag : "idle";
+      if (["on a task", "navigating", "exploring"].includes(st)) {
+        stopRobot(id);
+        toast(`${nameOf(id)}: manual control (its goal is cancelled)`);
+      }
+    }
+    d.held.add(cmd);
+    drivePublish(id);
+    if (!d.timer) d.timer = setInterval(() => drivePublish(id), 1000 / DRIVE_HZ);
+  }
+  function driveStop(id, cmd) {
+    const d = driveOf(id);
+    if (!d.held.delete(cmd)) return;
+    drivePublish(id); // stop now, not on the next tick
+    if (!d.held.size && d.timer) { clearInterval(d.timer); d.timer = null; }
+  }
+  function driveRelease(id) {
+    const d = driveOf(id);
+    d.held.clear();
+    if (d.timer) { clearInterval(d.timer); d.timer = null; }
+    drivePublish(id);
+  }
+  function wireDrivePad(id, pad) {
+    for (const b of pad.querySelectorAll("[data-drive]")) {
+      const cmd = b.dataset.drive;
+      b.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); b.setPointerCapture(e.pointerId); driveStart(id, cmd); });
+      const up = (e) => { if (cmd !== "stop") driveStop(id, cmd); };
+      b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up); b.addEventListener("lostpointercapture", up);
+      b.addEventListener("click", (e) => e.stopPropagation()); // not a card click
+    }
+    // Faint until used: hover for a mouse; touch has none, so a touch lights it a while.
+    let fade = null;
+    pad.addEventListener("pointerdown", () => { pad.classList.add("on"); clearTimeout(fade); });
+    pad.addEventListener("pointerup", () => { clearTimeout(fade); fade = setTimeout(() => pad.classList.remove("on"), 3000); });
+  }
+  // Keys drive the robot in control (the open card clicked into last), from anywhere on
+  // the page except a form field; losing focus mid-drive releases everything, since the
+  // keyup would never arrive.
+  addEventListener("keydown", (e) => {
+    if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.target.closest && e.target.closest("input, select, textarea")) return;
+    if (!selected || !open.has(selected)) return;
+    if (e.code === "Space") { e.preventDefault(); return driveRelease(selected); }
+    const cmd = DRIVE_KEYS[e.key.toLowerCase()];
+    if (cmd) { e.preventDefault(); driveStart(selected, cmd); }
+  });
+  addEventListener("keyup", (e) => {
+    const cmd = DRIVE_KEYS[e.key.toLowerCase()];
+    if (cmd) for (const id of drives.keys()) driveStop(id, cmd);
+  });
+  const releaseAllDrives = () => { for (const [id, d] of drives) if (d.held.size) driveRelease(id); };
+  addEventListener("blur", releaseAllDrives);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAllDrives(); });
   function syncCamButtons(c) {
     for (const b of c.el.querySelectorAll("[data-cam-mode]")) b.classList.toggle("on", b.dataset.camMode === c.mode);
   }

@@ -84,6 +84,13 @@
   h1 { margin: 0; font-size: 1rem; font-weight: 600; letter-spacing: -.01em; width: 228px; }
   #mode-strip { display: flex; align-items: center; gap: 10px; min-width: 0; }
   #mode-strip > * { flex: none; }
+  /* The header must never wrap a button: at 1366 px "Stop all" broke onto two lines once
+     the full-screen button joined it. Buttons hold their width; the map-control strip
+     scrolls; below 1480 px the mapped-area figure and the column-wide title go first. */
+  header > .btn, header > #test-chip { flex: none; white-space: nowrap; }
+  #mode-strip { overflow-x: auto; scrollbar-width: none; }
+  #mode-strip::-webkit-scrollbar { display: none; }
+  @media (max-width: 1480px) { h1 { width: auto; } #coverage { display: none !important; } }
   /* Symbol plus word: the shapes alone (arrow, diamond, triangle) didn't say what they do. */
   #tools button { display: inline-flex; align-items: center; gap: 6px; }
   #tools button .ic { font-size: .9em; }
@@ -144,6 +151,17 @@
   .more .cam .msg { position: absolute; inset: 0; display: grid; place-items: center; color: #8b95a0; font-size: .8rem; pointer-events: none; }
   .more .cam .msg:empty { display: none; }
   /* Over the picture, so fixed dark-glass colours rather than theme tokens. */
+  /* Drive pad over the camera (operator.js wireDrivePad): faint until hovered or touched,
+     so the picture stays readable; held buttons light up. */
+  .cam .drive { position: absolute; left: 6px; bottom: 6px; display: grid; grid-template-columns: repeat(3, 26px); gap: 3px;
+                opacity: .75; transition: opacity .15s; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .cam:hover .drive, .cam .drive.on { opacity: 1; }
+  .cam .drive button { width: 26px; height: 24px; padding: 0; border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65);
+                       color: #e6ebf0; font-size: .72rem; line-height: 1; touch-action: none; }
+  .cam .drive button:hover { background: rgba(10,12,16,.85); }
+  .cam .drive button.held { background: rgba(255,255,255,.9); color: #15191e; }
+  .cam .drive [data-drive="stop"] { color: #ff8a80; }
+  @media (pointer: coarse) { .cam .drive { grid-template-columns: repeat(3, 36px); } .cam .drive button { width: 36px; height: 32px; font-size: .9rem; } }
   .camsel { position: absolute; top: 6px; right: 6px; display: flex; background: rgba(10,12,16,.6); border-radius: 6px; padding: 2px; }
   .camsel button { background: none; border: none; color: #c3cad2; font-size: .72rem; padding: 2px 8px; border-radius: 4px; }
   .camsel button.on { background: rgba(255,255,255,.9); color: #15191e; font-weight: 600; }
