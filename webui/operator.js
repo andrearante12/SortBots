@@ -1706,7 +1706,8 @@
   // Below 760 px (operator.html's media query) one pane shows at a time. The map keeps
   // running hidden (visibility, not display) so its canvas keeps its size, and a resize
   // re-fits it when it comes back.
-  const narrow = () => matchMedia("(max-width: 760px)").matches;
+  // Same query as operator.html's phone block: narrow, or a phone held sideways.
+  const narrow = () => matchMedia("(max-width: 760px), (max-height: 520px) and (orientation: landscape)").matches;
   function setPane(p) {
     document.body.dataset.pane = p;
     for (const b of document.querySelectorAll("#mnav button")) b.classList.toggle("active", b.dataset.pane === p);
@@ -1715,6 +1716,29 @@
   }
   $("#mnav").addEventListener("click", (e) => { const b = e.target.closest("button[data-pane]"); if (b) setPane(b.dataset.pane); });
   try { setPane(localStorage.getItem("sortbots.pane") || "map"); } catch (e) { setPane("map"); }
+  // Full screen where the browser allows it (Android, iPad, desktop; NOT iPhone Safari,
+  // where Add to Home Screen does the job: see the manifest in operator.html). On a
+  // touch device it also asks for landscape, how an operator holds a phone to drive.
+  const fsOn = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+  if (document.fullscreenEnabled || document.webkitFullscreenEnabled) {
+    const btn = $("#fullscreen");
+    btn.hidden = false;
+    btn.addEventListener("click", async () => {
+      try {
+        if (fsOn()) await (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+        else {
+          const el = document.documentElement;
+          await (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+          if (matchMedia("(pointer: coarse)").matches && screen.orientation && screen.orientation.lock) {
+            screen.orientation.lock("landscape").catch(() => { /* not allowed here: the user rotates */ });
+          }
+        }
+      } catch (e) { toast("Full screen isn't available here"); }
+    });
+    const sync = () => { btn.title = btn.ariaLabel = fsOn() ? "Exit full screen" : "Full screen"; btn.classList.toggle("on", fsOn()); dispatchEvent(new Event("resize")); };
+    document.addEventListener("fullscreenchange", sync); document.addEventListener("webkitfullscreenchange", sync);
+  }
+
   function renderPaneBadges() {
     const list = [...robots.values()], up = list.filter(online).length;
     const t = $("#mn-robots"); if (t) t.textContent = list.length ? `${up}/${list.length}` : "";

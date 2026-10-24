@@ -993,6 +993,25 @@ async function main() {
   check('phone: the session panel fits the screen', await page.eval(`(() => { const r = document.querySelector('#session .card').getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth + 1; })()`));
   await shot('phone-session');
   await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`);
+  // Sideways: how an operator holds a phone to drive.
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 844, height: 390, deviceScaleFactor: 3, mobile: true, screenOrientation: { type: 'landscapePrimary', angle: 90 } });
+  await page.eval(`localStorage.clear()`); await load();
+  await emit('/map', walled);
+  await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+  await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+  await sleep(500);
+  const box = (sel) => page.eval(`(() => { const r = document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect(); return { l: r.left, t: r.top, w: r.width, h: r.height }; })()`);
+  check('landscape: one header row, so the map keeps the height', (await box('header')).h < 56, JSON.stringify(await box('header')));
+  check('landscape: the pane switcher is a rail on the left', (await visible('#mnav')) && (await box('#mnav')).l < 2 && (await box('#mnav')).h > 250, JSON.stringify(await box('#mnav')));
+  check('landscape: the map fills the rest', (await box('#map')).w > 700 && (await box('#map')).h > 300, JSON.stringify(await box('#map')));
+  check('landscape: Stop all and the session chip are on screen, nothing scrolls sideways',
+        (await inView('#estop')) && (await inView('#session-chip')) && await page.eval(`innerWidth <= 845 && document.documentElement.scrollWidth <= 845`));
+  await shot('phone-landscape');
+  await click('#mnav [data-pane="robots"]'); await sleep(200);
+  check('landscape: Robots from the rail', (await visible('#left')) && (await box('#left')).w > 700);
+  check('landscape: installable full screen (manifest, home-screen meta)',
+        await page.eval(`!!document.querySelector('link[rel="manifest"]') && document.querySelector('meta[name="apple-mobile-web-app-capable"]').content === 'yes'`)
+        && (await (await fetch(`http://127.0.0.1:${PORT}/manifest.webmanifest`)).json()).display === 'fullscreen');
   await page.send('Emulation.setTouchEmulationEnabled', { enabled: false });
   await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
   await page.eval(`localStorage.clear()`); await load();

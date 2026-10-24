@@ -3,6 +3,14 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<!-- Installable: iPhone Safari has no Fullscreen API for pages, so "Share > Add to Home
+     Screen" is how an operator gets the view with no browser chrome; these make that
+     launch standalone. Android/desktop also get the full-screen button (#fullscreen). -->
+<link rel="manifest" href="manifest.webmanifest" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="SortBots" />
 <title>SortBots</title>
 <script>
   // Apply a pinned theme before first paint so there is no flash. Nothing pinned = follow the system.
@@ -384,7 +392,7 @@
      bottom bar to switch. The header wraps: session, alarms and Stop all stay on the first
      row, always one tap away; the map controls scroll sideways on the second. */
   #mnav { display: none; }
-  @media (max-width: 760px) {
+  @media (max-width: 760px), (max-height: 520px) and (orientation: landscape) {
     /* minmax(0, 1fr), not 1fr: a bare 1fr column grows to its widest child's min-content,
        and the scrolling tool row made the whole page 495 px wide on a 390 px phone,
        pushing Stop all off screen (caught by the phone test, 2026-10-24). */
@@ -418,6 +426,25 @@
     /* Touch targets: 40 px is the floor for a thumb. */
     .tk .x { font-size: 1.4rem; padding: 0 8px; }
     #tools button, .seg button { padding: 8px 12px; }
+    /* Launched from the home screen the page runs under the status bar / notch. */
+    header { padding-top: max(8px, env(safe-area-inset-top)); }
+  }
+  /* Phone held sideways: every pixel of height counts. One header row (the map controls
+     scroll in the middle, session and Stop all stay pinned right), and the pane switcher
+     becomes a rail on the left instead of a bar along the bottom. */
+  @media (max-height: 520px) and (orientation: landscape) {
+    body { grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+    header { flex-wrap: nowrap; padding: max(4px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) 4px max(8px, env(safe-area-inset-left)); gap: 6px; }
+    h1, header .spacer { display: none; }
+    #mode-strip { order: 0; flex: 1 1 auto; min-width: 0; padding-bottom: 0; }
+    header .btn { padding: 5px 10px; }
+    #tools button, .seg button { padding: 5px 10px; }
+    #left, #stage, #right { grid-row: 2; grid-column: 2; }
+    #mnav { grid-row: 2; grid-column: 1; flex-direction: column; justify-content: flex-start; width: calc(64px + env(safe-area-inset-left));
+            border-top: none; border-right: 1px solid var(--line); padding: 6px 4px max(6px, env(safe-area-inset-bottom)) max(4px, env(safe-area-inset-left)); }
+    #mnav button { flex: 0 0 auto; padding: 8px 2px; }
+    #alarm-pop { top: 50px; bottom: auto; left: auto; right: 8px; width: 340px; max-height: calc(100dvh - 60px); }
+    #comms-feed { bottom: 8px; right: auto; max-width: 60%; }
   }
   .boot-label { font-size: .82rem; color: var(--muted); }
   #empty .boot { width: 280px; margin-top: 6px; }
@@ -459,6 +486,7 @@
 <div id="test-chip" hidden title="A scored test is driving the sim"><span class="tp-dot"></span><span class="k">Test</span>
     <button type="button" class="name" id="tc-name" title="Open the Tests tab"></button><span id="tc-time" class="muted"></span>
     <button type="button" class="btn small stop" id="tc-cancel">Stop test</button></div>
+  <button class="btn icon" id="fullscreen" hidden aria-label="Full screen" title="Full screen">&#x26F6;</button>
   <button class="btn icon" id="theme" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
   <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">No session</span></button>
   <!-- The fleet gateway's latched alarms (/fleet/task_board): red while a condition
