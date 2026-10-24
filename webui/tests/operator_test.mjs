@@ -884,6 +884,15 @@ async function main() {
   await tap(await atWorld(-3, 2)); await tap(await atWorld(0.5, 8));
   await waitFor(async () => (await vz()).blocked.includes('0-1'), { what: 'a pulled link', tries: 30 });
   check('comms: pulling a link blocks it in the model', (await vz()).blocked.includes('0-1'));
+  // Why a link is down: robot 0 and 1 are 8 m apart (inside 22 m) with the free-standing
+  // wall between them, so the model drops that link and the overlay says it's the wall.
+  await waitFor(async () => (await vz()).hurt.some((h) => h.a === 1 && h.b === 2), { what: 'the wall-blocked link', tries: 30 });
+  const wallLink = (await vz()).hurt.find((h) => h.a === 1 && h.b === 2);
+  check('comms: a link the wall kills is reported as down because of one rack', wallLink.down && wallLink.racks === 1 && wallLink.db === 15, JSON.stringify(wallLink));
+  await click('#cm-show-obst'); await sleep(150);
+  check('comms: show obstacles shades what the model counts', (await vz()).showObstacles && (await vz()).obstacles.racks >= 2, JSON.stringify((await vz()).obstacles));
+  await shot('comms-obstacles');
+  await click('#cm-show-obst');
   await click('#cm-show-range'); await sleep(150);
   check('comms: show range turns on the range circles, sized by the model', (await vz()).showRange && (await vz()).range.robot > 5, JSON.stringify((await vz()).range));
   await shot('comms-range');

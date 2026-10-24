@@ -53,7 +53,11 @@
   let header = null, T = 0, liveT = 0, lastWall = 0, playing = true, speed = 1;
   let air = [];                // [{t, end, ta, ra, kind, ack}] in time order
   let routes = new Map(), blocked = new Set(), silent = new Map(), dead = new Set();
-  let feed = [], showChatter = false, showRange = false, pick = null;
+  let feed = [], showChatter = false, showRange = false, showObstacles = false, pick = null;
+  // The obstacles as the model sees them (commsim/des/layout.py from_occupancy): rack
+  // rectangles with the blob each belongs to, and light shelving. Model coordinates.
+  let obst = { rects: [], groups: [], shelves: [] };
+  let hurt = []; // last frame's obstacle-hurt links, for the test hook
   let origin = null;           // [x, y] world metres of the model's (0, 0); null until a map is posted
   let layoutAt = -Infinity, layoutMapStamp = null, racks = 0;
   const sentPos = new Map();   // node id -> [x, y] model, last posted
@@ -93,6 +97,7 @@
       case "init":
         header = e.header; speed = e.speed || 1; playing = !e.paused;
         T = liveT = 0; air = []; routes = new Map(); blocked = new Set(); silent = new Map();
+        obst = { rects: header.layout.racks || [], groups: header.layout.groups || [], shelves: header.layout.shelves || [] };
         for (const [node, dst, nh, tq] of header.routes || []) {
           if (!routes.has(node)) routes.set(node, new Map());
           routes.get(node).set(dst, { nh, tq });
@@ -109,7 +114,9 @@
       case "now": liveT = e.t; return;
       case "pos": { const nd = header && header.nodes[e.id]; if (nd) nd.pos = e.pos; return; }
       case "snr": if (header) { header.snr = e.snr; if (e.range_m) header.range_m = e.range_m; } return;
-      case "layout": racks = e.racks; if (header) { header.layout.width = e.width; header.layout.height = e.height; } renderBar(); return;
+      case "layout": racks = e.racks; if (header) { header.layout.width = e.width; header.layout.height = e.height; }
+        if (e.rects) obst = { rects: e.rects, groups: e.groups || [], shelves: e.shelves || [] };
+        renderBar(); return;
       case "route": { let m = routes.get(e.node); if (!m) routes.set(e.node, (m = new Map())); if (e.nh < 0) m.delete(e.dst); else m.set(e.dst, { nh: e.nh, tq: e.tq }); return; }
       case "link": { const key = `${Math.min(e.a, e.b)}-${Math.max(e.a, e.b)}`; if (e.action === "block") blocked.add(key); else blocked.delete(key);
         pushFeed("sys", `Link ${nameOf(e.a)}–${nameOf(e.b)} ${e.action === "block" ? "pulled" : "restored"}`); return; }
@@ -223,8 +230,9 @@
     const target = Math.max(0, liveT - LAG_US);
     T = playing ? Math.min(target, T + dt) : Math.min(T, target);
     if (air.length > 3000 && T - air[0].t > KEEP_US) air.splice(0, air.findIndex((a) => T - a.t <= KEEP_US));
+    if (showObstacles) drawObstacles();
     if (showRange) drawRange();
-    drawLinks(); drawRoutes(); drawBlocked(); drawPackets(); drawNodes();
+    drawLinks(); drawHurt(); drawRoutes(); drawBlocked(); drawPackets(); drawNodes();
   }
 
   // Open-air range per radio (the model's, so the slider moves it): how far a link
@@ -246,6 +254,82 @@
       ctx.fillText(`${Math.round(i === 0 ? rng.gateway : rng.robot)} m`, a[0], a[1] - r - 4);
       ctx.globalAlpha = 1;
     }
+  }
+
+  // Liang-Barsky, as commsim/des/layout.py _seg_hits_rect: where segment a-b runs through
+  // rect r's interior, as [t0, t1] along it, or null. The same test the model's link
+  // budget uses, so what is drawn is what it counted.
+  function segRect(a, b, r) {
+    const [x0, y0, x1, y1] = r, dx = b[0] - a[0], dy = b[1] - a[1];
+    let t0 = 0, t1 = 1;
+    for (const [p, q] of [[-dx, a[0] - x0], [dx, x1 - a[0]], [-dy, a[1] - y0], [dy, y1 - a[1]]]) {
+      if (p === 0) { if (q < 0) return null; continue; }
+      const t = q / p;
+      if (p < 0) t0 = Math.max(t0, t); else t1 = Math.min(t1, t);
+      if (t0 > t1) return null;
+    }
+    return t1 - t0 > 1e-9 ? [t0, t1] : null;
+  }
+  const worldPx = (x, y) => opts.toPx(x + origin[0], y + origin[1]);
+
+  // What the model counts as in the way (show obstacles): racks red, light shelving grey.
+  function drawObstacles() {
+    const stop = css("--stop"), muted = css("--muted");
+    const fill = (r, color, a) => {
+      const [ax, ay] = worldPx(r[0], r[3]), [bx, by] = worldPx(r[2], r[1]);
+      ctx.globalAlpha = a; ctx.fillStyle = color; ctx.fillRect(ax, ay, bx - ax, by - ay);
+    };
+    for (const r of obst.shelves) fill(r, muted, 0.22);
+    for (const r of obst.rects) fill(r, stop, 0.2);
+    ctx.globalAlpha = 1;
+  }
+
+  // Why a link is down: a pair inside each other's open-air range whose link the model
+  // still drops is down because of what is in the way. Draw that line red and dashed,
+  // an X on every rack it crosses (one per rack, as the model counts), and the bill:
+  // "2 racks · -30 dB". Links that hold but lose something get amber X marks only.
+  function drawHurt() {
+    const rng = header.range_m, k = header.knobs || {}, min = k.snr_link_min_db ?? 4;
+    if (!rng || !obst.rects.length && !obst.shelves.length) { hurt = []; return; }
+    const stop = css("--stop"), amber = "#d98a00", out = [];
+    ctx.font = '600 10px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
+    for (let i = 0; i < header.n; i++) for (let j = i + 1; j < header.n; j++) {
+      if (dead.has(i) || dead.has(j)) continue;
+      const A = header.nodes[i].pos, B = header.nodes[j].pos, gw = i === 0 || j === 0;
+      const d = Math.hypot(B[0] - A[0], B[1] - A[1]);
+      if (d > (gw ? rng.gateway : rng.robot)) continue; // out of range anyway: the circles say so
+      const seen = new Set(), marks = [];
+      obst.rects.forEach((r, n) => {
+        const g = obst.groups.length ? obst.groups[n] : n, hit = seen.has(g) ? null : segRect(A, B, r);
+        if (hit) { seen.add(g); marks.push((hit[0] + hit[1]) / 2); }
+      });
+      const shelves = obst.shelves.filter((r) => segRect(A, B, r)).length;
+      if (!seen.size && !shelves) continue;
+      const db = seen.size * (k.rack_db ?? 15) * (gw ? k.gateway_rack_factor ?? 0.5 : 1) + shelves * (k.shelf_db ?? 3);
+      const snr = Math.max(header.snr[i][j], header.snr[j][i]), down = snr < min;
+      out.push({ a: i, b: j, racks: seen.size, shelves, db: Math.round(db), down });
+      const a = px(i), b = px(j); if (!a || !b) continue;
+      const at = (t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+      if (down) {
+        ctx.strokeStyle = stop; ctx.globalAlpha = 0.7; ctx.lineWidth = 1.5; ctx.setLineDash([6, 5]);
+        ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = 1;
+      }
+      ctx.strokeStyle = down ? stop : amber; ctx.lineWidth = 2;
+      for (const t of marks) {
+        const [x, y] = at(t);
+        ctx.beginPath(); ctx.moveTo(x - 5, y - 5); ctx.lineTo(x + 5, y + 5); ctx.moveTo(x + 5, y - 5); ctx.lineTo(x - 5, y + 5); ctx.stroke();
+      }
+      if (down) {
+        const parts = [];
+        if (seen.size) parts.push(`${seen.size} rack${seen.size > 1 ? "s" : ""}`);
+        if (shelves) parts.push(`${shelves} small obstacle${shelves > 1 ? "s" : ""}`);
+        const [mx, my] = at(0.5), label = `${parts.join(" + ")} · −${Math.round(db)} dB`;
+        const w = ctx.measureText(label).width + 10;
+        ctx.fillStyle = css("--surface"); ctx.globalAlpha = 0.9; ctx.fillRect(mx - w / 2, my - 18, w, 15); ctx.globalAlpha = 1;
+        ctx.fillStyle = stop; ctx.fillText(label, mx, my - 7);
+      }
+    }
+    hurt = out;
   }
 
   function drawLinks() {
@@ -419,6 +503,11 @@
     $("#cm-kill").addEventListener("click", () => startPick("node", 1));
     $("#cm-send").addEventListener("click", () => startPick("send", 2));
     $("#cm-chatter").addEventListener("change", (e) => { showChatter = e.target.checked; });
+    $("#cm-show-obst").addEventListener("change", (e) => {
+      showObstacles = e.target.checked;
+      try { localStorage.setItem("sortbots.commsObst", showObstacles ? "on" : "off"); } catch (err) { /* this tab only */ }
+    });
+    try { if (localStorage.getItem("sortbots.commsObst") === "on") { showObstacles = true; $("#cm-show-obst").checked = true; } } catch (err) { /* off */ }
     $("#cm-show-range").addEventListener("change", (e) => {
       showRange = e.target.checked;
       try { localStorage.setItem("sortbots.commsRange", showRange ? "on" : "off"); } catch (err) { /* this tab only */ }
@@ -464,7 +553,8 @@
       nodes: header ? header.nodes.map((n) => n.pos) : [], snr: header ? header.snr : [],
       routes: Object.fromEntries([...routes].map(([k, m]) => [k, Object.fromEntries(m)])),
       blocked: [...blocked], dead: [...dead], silent: Object.fromEntries([...silent].map(([k, s]) => [k, [...s]])),
-      airCount: air.length, showRange, range: header ? header.range_m : null, feed: feed.slice(-12).map((f) => f.text), pick: pick ? pick.op : null,
+      airCount: air.length, showRange, range: header ? header.range_m : null,
+      showObstacles, obstacles: { racks: obst.rects.length, shelves: obst.shelves.length }, hurt, feed: feed.slice(-12).map((f) => f.text), pick: pick ? pick.op : null,
     }),
   };
 })();
