@@ -319,6 +319,18 @@
       else if (gwSilent.has(i)) { ctx.fillStyle = stop; ctx.fillText("model: cut off", a[0], a[1] - 27); }
       if (pick && pick.got.includes(i)) { ctx.strokeStyle = css("--info"); ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(a[0], a[1], 25, 0, Math.PI * 2); ctx.stroke(); }
     }
+    // With a pin, operator.js draws the gateway. Without one the model still has a
+    // gateway (the map centre), and every route arrow ends there, so draw it as a
+    // ghost: arrows into empty floor read as a bug (2026-10-24, live).
+    const g0 = px(0);
+    if (g0 && !opts.getGateway()) {
+      ctx.globalAlpha = 0.6; ctx.setLineDash([3, 3]); ctx.strokeStyle = muted; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(g0[0], g0[1] - 10); ctx.lineTo(g0[0] + 9, g0[1] + 7); ctx.lineTo(g0[0] - 9, g0[1] + 7); ctx.closePath(); ctx.stroke();
+      ctx.setLineDash([]); ctx.fillStyle = muted;
+      ctx.fillText("Gateway (map centre)", g0[0], g0[1] + 21);
+      ctx.fillText("drop a pin with ▲", g0[0], g0[1] + 33);
+      ctx.globalAlpha = 1;
+    }
     if (pick && pick.got.includes(0)) { const g = px(0); if (g) { ctx.strokeStyle = css("--info"); ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(g[0], g[1], 18, 0, Math.PI * 2); ctx.stroke(); } }
   }
 
