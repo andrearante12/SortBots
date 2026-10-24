@@ -76,6 +76,9 @@
   h1 { margin: 0; font-size: 1rem; font-weight: 600; letter-spacing: -.01em; width: 228px; }
   #mode-strip { display: flex; align-items: center; gap: 10px; min-width: 0; }
   #mode-strip > * { flex: none; }
+  /* Symbol plus word: the shapes alone (arrow, diamond, triangle) didn't say what they do. */
+  #tools button { display: inline-flex; align-items: center; gap: 6px; }
+  #tools button .ic { font-size: .9em; }
   /* The tile gives way first when the bar gets crowded (a test chip, a narrow window). */
   #mode-strip #mode-tile { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   header .spacer { flex: 1; }
@@ -390,9 +393,9 @@
     </div>
     <!-- Map tools live up here, not over the map: the map gets the whole stage. -->
     <div class="seg" id="tools" role="toolbar" aria-label="Map tools">
-      <button data-t="select" class="active" title="Select (V). Drag a robot to send it somewhere (drop on a pin to use it); click a robot for its camera; drag the map to pan">&#8598;</button>
-      <button data-t="wp" title="Add waypoint (F). Click to place, drag to set its heading">&#9670;</button>
-      <button data-t="gw" title="Place the fleet gateway (R): where the comms overlay puts the access point">&#9650;</button>
+      <button data-t="select" class="active" title="Select (V). Drag a robot to send it somewhere (drop on a pin to use it); click a robot for its camera; drag the map to pan"><span class="ic">&#8598;</span>Select</button>
+      <button data-t="wp" title="Add waypoint (F). Click to place, drag to set its heading"><span class="ic">&#9670;</span>Waypoint</button>
+      <button data-t="gw" title="Place the fleet gateway (R): where the comms overlay puts the access point"><span class="ic">&#9650;</span>Gateway</button>
     </div>
     <!-- Comms overlay (operator_comms.js): the commsim model of the fleet radio, fed
          the real robots' poses, the map's obstacles and the gateway pin. Predicted, so it
