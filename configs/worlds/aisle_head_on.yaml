@@ -1,0 +1,27 @@
+# A world layout (simtest/world.py has the full schema). See aisle_crossing.yaml
+# for how these coordinates were chosen.
+
+name: aisle_head_on
+title: Aisle — walker coming head-on
+description: >
+  A walker comes down robot_0's aisle toward the robot (x = -7.6, y 15.5 ->
+  9.5) and back. The aisle is ~4 m between racks, so there is room to pass —
+  but only if the robot sees the walker early enough to move over, or stops
+  and waits. The harder case: closing speed is the sum of both speeds.
+
+scenes: [nvidia]
+autostart: true
+
+actors:
+  - id: walker_0
+    label: walker
+    shape: cylinder
+    radius: 0.25
+    height: 1.75
+    color: [0.95, 0.45, 0.10]
+    path:
+      waypoints: [[-7.6, 15.5], [-7.6, 9.5]]
+      speed_mps: 0.8
+      mode: pingpong
+      start_at_s: 0.0
+      dwell_s: 2.0

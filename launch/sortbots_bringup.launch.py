@@ -204,6 +204,19 @@ def _make_per_robot_actions(
                 output="screen",
             ))
 
+        # Obstacles in front of the robot, from geometry rather than frame
+        # differencing: clusters in base_link plus a `moving` flag from odom
+        # tracks (docs/obstacle_detection.md). Every platform — it reads raw
+        # camera/depth, so it doesn't depend on the depth filter below, and the
+        # sensors view draws its boxes over the head camera.
+        actions.append(ExecuteProcess(
+            cmd=[
+                "python3",
+                os.path.join(REPO_ROOT, "nodes", "obstacle_detector.py"),
+                "--robot-id", rid,
+            ],
+            output="screen",
+        ))
         # Live obstacles from raw depth, at camera rate, in base_link: what is
         # in front of the robot NOW, independent of odometry and SLAM (and of
         # where SLAM runs). Real robot only for now — sim's Nav2 reads the

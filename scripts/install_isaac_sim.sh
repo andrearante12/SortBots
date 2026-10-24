@@ -99,7 +99,12 @@ if ! command -v vulkaninfo >/dev/null 2>&1; then
     echo "ERROR: vulkaninfo not found. Install: sudo apt install vulkan-tools libvulkan1" >&2
     exit 1
 fi
-if ! vulkaninfo --summary 2>/dev/null | grep -qi nvidia; then
+# Capture first, then grep: piping straight into `grep -q` under pipefail
+# false-fails when NVIDIA is listed early — grep exits on the match, vulkaninfo
+# dies of SIGPIPE (141), and pipefail reports the GPU as missing (2026-10-06,
+# Intel+NVIDIA hybrid laptop).
+VULKAN_SUMMARY="$(vulkaninfo --summary 2>/dev/null || true)"
+if ! grep -qi nvidia <<<"$VULKAN_SUMMARY"; then
     echo "ERROR: vulkaninfo does not list an NVIDIA ICD." >&2
     echo "       On hybrid-graphics laptops, retry with:" >&2
     echo "       __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia vulkaninfo --summary" >&2

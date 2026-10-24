@@ -123,8 +123,19 @@ function spawnTracked(cmd, argv, opts = {}) {
   children.push(p);
   return p;
 }
+// Every temp dir a run makes (Chrome profile, sessions, seeded maps) is removed on
+// exit: they were never cleaned, and a day of runs filled the disk (2026-10-22).
+const tempDirs = [];
+const tmpDir = (prefix) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix)); tempDirs.push(d); return d; };
 function cleanup() {
   for (const p of children) { try { p.kill('SIGKILL'); } catch {} }
+  // SIGKILL is asynchronous: Chrome writes into its profile while it dies, so wait
+  // (up to 2 s, synchronously: this runs in an 'exit' handler) before deleting.
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  for (const p of children) {
+    for (let i = 0; i < 40 && p.pid; i++) { try { process.kill(p.pid, 0); } catch { break; } Atomics.wait(nap, 0, 0, 50); }
+  }
+  for (const d of tempDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
 }
 process.on('exit', cleanup);
 process.on('SIGINT', () => { cleanup(); process.exit(130); });
@@ -395,7 +406,7 @@ async function main() {
                 { what: `webui/serve.py on :${HTTP_PORT}` });
 
   // 2. headless chrome. swiftshader so the three.js panel actually renders.
-  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'sortbots-chrome-'));
+  const profile = tmpDir('sortbots-chrome-');
   const chromeBin = ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']
     .find((b) => { try { return spawn(b, ['--version']).pid; } catch { return false; } })
     || 'google-chrome';

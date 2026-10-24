@@ -55,6 +55,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # importing it here keeps this module runnable in the same bare environment.
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import maps_lib  # noqa: E402
+# World layouts (configs/worlds/) — pure python + PyYAML like maps_lib, so the
+# allowlist below can check a `world:` name against what actually parses.
+sys.path.insert(0, str(REPO_ROOT))
+from simtest import world as world_lib  # noqa: E402
 
 SCENARIO_DIR = REPO_ROOT / "configs" / "scenarios"
 # Overridable so scenarios_test.mjs can run against an empty dir instead of
@@ -67,6 +71,10 @@ RUN_ROBOT = REPO_ROOT / "scripts" / "run_robot.sh"
 RECORD_BAG = REPO_ROOT / "scripts" / "record_explore_bag.sh"
 MAPS_SH = REPO_ROOT / "scripts" / "maps.sh"
 ROS_SETUP = "/opt/ros/jazzy/setup.bash"
+# Stands in for `bash` wherever ROS gets sourced: plain bash with ROS on the
+# host, the same bash inside the jazzy distrobox without it (Ubuntu 26.04).
+# It relays SIGINT into the box, which _stop_bag's killpg depends on.
+ROS_BASH = str(REPO_ROOT / "scripts" / "ros_bash.sh")
 
 # Same prepend run_demo.sh and sortbots_webui.launch.py use: conda's init hook
 # puts its bin dirs at the front of PATH even after `conda deactivate`, and
@@ -219,6 +227,39 @@ def _map_path(flag: str):
     return build
 
 
+def _world_name(flag: str):
+    """A configs/worlds/ layout, by name only. None/"" omits the flag.
+
+    Loaded (not just name-matched) here, so a scenario naming a world that
+    doesn't parse lists as `invalid` with the reason instead of failing after
+    Isaac's startup. NAME_RX has no `/` or `.`, so it can't traverse.
+    """
+    def build(value):
+        if value in (None, "", "none"):
+            return []
+        try:
+            world_lib.load(value)
+        except world_lib.WorldError as e:
+            raise ScenarioError(f"{flag}: {e}") from None
+        return [flag, value]
+    return build
+
+
+def _check_world_scene(run: dict) -> None:
+    """A world is laid out for specific scenes; the NVIDIA warehouse's aisles
+    don't exist in the primitive scene."""
+    name = run.get("world")
+    if name in (None, "", "none"):
+        return
+    try:
+        scenes = world_lib.load(name)["scenes"]
+    except world_lib.WorldError as e:
+        raise ScenarioError(f"world: {e}") from None
+    if run.get("scene", "nvidia") not in scenes:
+        raise ScenarioError(
+            f"world {name!r} is laid out for scene(s) {scenes}, not {run.get('scene')!r}")
+
+
 def _robot_ids(flag: str):
     """Comma-separated robot ids, e.g. `robot_0,robot_1`. Empty/None omits
     the flag entirely — run_demo.sh then derives it from --robots against
@@ -262,6 +303,7 @@ RUN_FLAGS = {
     "resume": _switch("--resume", when=True),
     "explore": _switch("--explore", when=True),
     "map": _map_path("--map"),
+    "world": _world_name("--world"),
 }
 
 RUN_DEFAULTS = {
@@ -279,6 +321,7 @@ RUN_DEFAULTS = {
     "resume": False,
     "explore": False,
     "map": None,
+    "world": None,
 }
 
 
@@ -391,6 +434,7 @@ def _validate(path: Path, raw: dict) -> dict:
     merged = {**PLATFORM_DEFAULTS[platform], **run}
     build_argv(merged, platform)  # type/range check now, not at launch time
     _check_session_keys(merged)
+    _check_world_scene(merged)
     if merged["localize"] and merged["resume"]:
         raise ScenarioError("run: localize and resume are mutually exclusive")
 
@@ -480,6 +524,7 @@ def apply_overrides(scenario: dict, overrides: dict | None) -> dict:
         else:
             run[key] = value
     build_argv(run, scenario["platform"])  # re-validate the merged result
+    _check_world_scene(run)
     if run["localize"] and run["resume"]:
         raise ScenarioError("localize and resume are mutually exclusive")
     return run
@@ -503,14 +548,14 @@ def apply_overrides(scenario: dict, overrides: dict | None) -> dict:
 
 CONFIG_SIM_KEYS = {"scene", "robots", "map", "mode", "explore", "waypoints",
                    "headless", "chase_cam", "chase_cam_robots", "teleop", "bag", "demo",
-                   "render_every", "lite_render"}
+                   "render_every", "lite_render", "world"}
 CONFIG_REAL_KEYS = {"map", "mode", "waypoints", "bag", "demo"}
 CONFIG_KEYS = {"sim": CONFIG_SIM_KEYS, "real": CONFIG_REAL_KEYS}
 CONFIG_DEFAULTS = {
     "scene": "nvidia", "robots": 1, "map": "new", "mode": "extend",
     "explore": True, "waypoints": "map", "headless": True, "chase_cam": False,
     "chase_cam_robots": 1, "teleop": False, "bag": False, "demo": False,
-    "render_every": 1, "lite_render": False,
+    "render_every": 1, "lite_render": False, "world": "none",
 }
 MODES = ("extend", "readonly")
 
@@ -577,6 +622,8 @@ def config_to_run(config: dict, platform: str = "sim") -> dict:
         run["lite_render"] = _as_bool(cfg["lite_render"])
         if run["chase_cam"]:
             run["chase_cam_robots"] = int(cfg["chase_cam_robots"])
+        run["world"] = None if cfg["world"] in (None, "", "none") else str(cfg["world"])
+        _check_world_scene(run)
     run["waypoints"] = cfg["waypoints"]
     if _as_bool(cfg["demo"]):
         run["demo"] = True  # absent otherwise, like every preset that doesn't use it
@@ -615,6 +662,7 @@ def run_to_config(run: dict, platform: str = "sim", bag: bool = False) -> dict:
             cfg[key] = bool(run.get(key, RUN_DEFAULTS[key]))
         cfg["render_every"] = int(run.get("render_every") or 1)
         cfg["chase_cam_robots"] = int(run.get("chase_cam_robots") or 1)
+        cfg["world"] = run.get("world") or "none"
     return {"config": cfg}
 
 
@@ -638,6 +686,8 @@ def describe_config(cfg: dict, platform: str = "sim") -> str:
             bits.append(f"render every {int(full['render_every'])}")
         if _as_bool(full["lite_render"]):
             bits.append("lite render")
+        if full.get("world") not in (None, "", "none"):
+            bits.append(f"world: {full['world']}")
     # Waypoints are an Advanced setting: only mention a non-default choice
     # (the default is the map's own set for a saved map, else keep current).
     default_wp = "keep" if full["map"] in ("new", "working") else "map"
@@ -774,7 +824,7 @@ def save_map_blocking(name: str, *, robot_id: str = "robot_0",
     )
     try:
         proc = subprocess.run(
-            ["bash", "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
+            [ROS_BASH, "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired as e:
@@ -810,7 +860,7 @@ def _ros_service_call(service: str, srv_type: str, request: str, *,
     )
     try:
         proc = subprocess.run(
-            ["bash", "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
+            [ROS_BASH, "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired as e:
@@ -838,7 +888,7 @@ def _publish_recon_reset(rid: str) -> None:
         f"{shlex.quote('{data: clear}')}"
     )
     try:
-        proc = subprocess.run(["bash", "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
+        proc = subprocess.run([ROS_BASH, "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
                               capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired as e:
         raise maps_lib.MapError("recon_reset timed out (is recon_cloud_relay up?)") from e
@@ -1330,7 +1380,7 @@ class SessionManager:
         log_fh = open(Path(session["dir"]) / "bag.log", "wb")
         try:
             self._bag_proc = subprocess.Popen(
-                ["bash", "-c", cmd], cwd=str(REPO_ROOT), env=env,
+                [ROS_BASH, "-c", cmd], cwd=str(REPO_ROOT), env=env,
                 stdout=log_fh, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, start_new_session=True,
             )

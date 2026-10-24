@@ -40,6 +40,9 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROS_SETUP="/opt/ros/jazzy/setup.bash"
+# `bash`, or the same bash inside the jazzy distrobox on hosts without ROS 2
+# (Ubuntu 26.04) — see the header of scripts/ros_bash.sh.
+ROS_BASH="$SCRIPT_DIR/ros_bash.sh"
 CONSOLE_LOG="/tmp/sortbots_console.log"
 PORT=8081
 
@@ -96,8 +99,8 @@ if [[ -n "${AMENT_PREFIX_PATH:-}" ]]; then
   exit 1
 fi
 
-if ! [[ -f "$ROS_SETUP" ]]; then
-  echo "ERROR: $ROS_SETUP not found — is ROS 2 Jazzy installed?"
+if ! "$ROS_BASH" -c "test -f '$ROS_SETUP'" 2>/dev/null; then
+  echo "ERROR: $ROS_SETUP not found on the host or in the jazzy distrobox — is ROS 2 Jazzy installed?"
   exit 1
 fi
 
@@ -114,7 +117,7 @@ fi
 # launch/sortbots_webui.launch.py: rosbridge_websocket's `#!/usr/bin/env
 # python3` must resolve to the system 3.12, not conda's.
 echo "[run_console] starting rosbridge + web_video_server..."
-setsid bash -c "source '$ROS_SETUP'; \
+setsid "$ROS_BASH" -c "source '$ROS_SETUP'; \
   export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
   export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_webui.launch.py' \
