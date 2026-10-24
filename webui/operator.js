@@ -1316,7 +1316,7 @@
   function setComms(v) {
     if (!window.sortbotsComms) return;
     window.sortbotsComms.set(v);
-    $("#comms-toggle").setAttribute("aria-pressed", String(v));
+    $("#comms-toggle").setAttribute("aria-checked", String(v));
     dirty = true;
   }
   if (window.sortbotsComms) {

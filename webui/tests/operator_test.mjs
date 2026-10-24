@@ -639,7 +639,7 @@ async function main() {
   await page.eval(`localStorage.setItem('sortbots.comms', 'on')`); await load();
   await emit('/map', walled);
   await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
-  check('comms: the toggle survives a reload', (await page.eval(`document.getElementById('comms-toggle').getAttribute('aria-pressed')`)) === 'true' && (await vz()).on);
+  check('comms: the toggle survives a reload', (await page.eval(`document.getElementById('comms-toggle').getAttribute('aria-checked')`)) === 'true' && (await vz()).on);
   await click('#view [data-v="3d"]'); await sleep(200);
   check('comms: the 3D view turns the overlay off', !(await vz()).on && !(await visible('#comms-toggle')));
   await click('#view [data-v="2d"]'); await sleep(200);

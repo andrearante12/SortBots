@@ -162,7 +162,17 @@
   #coverage b { font-weight: 600; font-size: 1rem; }
   #hint { position: absolute; bottom: 20px; right: 16px; font-size: .82rem; color: var(--muted); }
   #comms { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-  #comms-toggle[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--on-ink); }
+  /* An on/off switch, not a button: it layers the model over the map, it doesn't
+     change view, so it must not read as a third tab next to Map / 3D cloud. */
+  #comms-toggle { display: inline-flex; align-items: center; gap: 8px; margin-left: 6px; padding: 4px 6px;
+                  background: none; border: none; color: var(--muted); font-weight: 500; }
+  #comms-toggle .sw { position: relative; width: 30px; height: 18px; border-radius: 99px; background: var(--segbg);
+                      border: 1px solid var(--border); transition: background .15s; flex: none; }
+  #comms-toggle .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%;
+                             background: var(--surface); box-shadow: 0 1px 2px var(--shadow); transition: transform .15s; }
+  #comms-toggle[aria-checked="true"] { color: var(--ink); }
+  #comms-toggle[aria-checked="true"] .sw { background: var(--info); border-color: var(--info); }
+  #comms-toggle[aria-checked="true"] .sw::after { transform: translateX(12px); }
   #comms-bar { top: 14px; left: 64px; right: 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; padding: 6px 10px; font-size: .84rem; }
   #comms-bar .model { font-weight: 600; font-size: .76rem; padding: 2px 8px; border-radius: 99px; border: 1px dashed var(--muted); color: var(--muted); }
   #comms-bar .cm-range { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
@@ -302,7 +312,7 @@
     <!-- Comms overlay (operator_comms.js): the commsim model of the fleet radio, fed
          the real robots' poses, the map's obstacles and the gateway pin. Predicted, so it
          only ever draws on the map; the robot cards and alarms stay the real fleet's. -->
-    <button class="btn" id="comms-toggle" aria-pressed="false" title="Overlay the comms model: predicted radio links, mesh routes and every message hop, for where the robots are now">Comms</button>
+    <button id="comms-toggle" type="button" role="switch" aria-checked="false" title="Overlay the comms model on the map: predicted radio links, mesh routes and every message hop, for where the robots are now"><span class="sw"></span>Comms overlay</button>
     <span id="mode-tile" hidden title="How this session was started. Change it from Session"><span class="k">Mode</span><b id="mode-label"></b><span id="map-name"></span></span>
   </div>
   <span class="spacer"></span>
