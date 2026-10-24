@@ -49,6 +49,7 @@
   let view3d = false; // main stage: 2D occupancy map, or the 3D point cloud
   let waypoints = []; // [{name, x, y, yaw}], the server's copy — also the task endpoints
   let gateway = null; // {x, y}: the fleet gateway pin (comms overlay), server's copy
+  let platform = null; // "sim" | "real", from serve.py; the Teleport tool is sim-only
   let tasks = []; // [{id, kind: "goto"|"pickup", goto, pickup, dropoff, robot, state, at, reason}]
   let session = null; // last /api/session body, null until the first answer
   let controlAvailable = true; // false once /api/session answers 503
@@ -463,9 +464,11 @@
     const r = drag && robots.get(drag.id);
     if (!r || !r.pose) return;
     const [a, b] = toPx(r.pose.x, r.pose.y), [ex, ey] = toPx(drag.wx, drag.wy);
-    const yaw = drag.wp ? -(drag.wp.yaw || 0) : Math.atan2(ey - b, ex - a); // canvas y points down
+    // A teleport keeps the robot's heading (or a pin's); a send faces the way it travels.
+    const tp = drag.tp, yaw = drag.wp ? -(drag.wp.yaw || 0) : tp ? -r.pose.yaw : Math.atan2(ey - b, ex - a); // canvas y points down
     ctx.strokeStyle = r.color; ctx.fillStyle = r.color; ctx.lineWidth = 2.5;
-    ctx.setLineDash([7, 5]); ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(ex, ey); ctx.stroke(); ctx.setLineDash([]);
+    // No path line for a teleport: it doesn't travel, it appears.
+    if (!tp) { ctx.setLineDash([7, 5]); ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(ex, ey); ctx.stroke(); ctx.setLineDash([]); }
     ctx.globalAlpha = 0.25; ctx.beginPath(); ctx.arc(ex, ey, 14, 0, 7); ctx.fill(); ctx.globalAlpha = 1;
     ctx.beginPath(); ctx.arc(ex, ey, 14, 0, 7); ctx.stroke();
     ctx.beginPath();
@@ -473,7 +476,9 @@
     ctx.lineTo(ex + Math.cos(yaw + 2.5) * 7, ey + Math.sin(yaw + 2.5) * 7);
     ctx.lineTo(ex + Math.cos(yaw - 2.5) * 7, ey + Math.sin(yaw - 2.5) * 7);
     ctx.fill();
-    const label = drag.wp ? `Send ${nameOf(r.id)} to ${drag.wp.name}` : `Send ${nameOf(r.id)} here`;
+    const verb = tp ? "Teleport" : "Send";
+    const label = drag.blocked ? "Occupied: can't teleport here" : drag.wp ? `${verb} ${nameOf(r.id)} to ${drag.wp.name}` : `${verb} ${nameOf(r.id)} here`;
+    if (drag.blocked) ctx.fillStyle = palette.stop || "#d63b2f";
     ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
     const tw = ctx.measureText(label).width + 12;
     ctx.fillRect(ex - tw / 2, ey - 38, tw, 18);
@@ -984,6 +989,35 @@
     lastFleetSig = ""; renderFleet();
   }
 
+  // -- teleport (sim only) ----------------------------------------------------------------------
+  // For setting a scene up: Isaac moves the robot instantly (scripts/spawn_warehouse.py,
+  // /sim/teleport). The target goes out in the MAP frame with the robot's current map
+  // pose; Isaac takes the map->world offset from that, so nothing here needs to know
+  // Isaac's frame. Odometry there is the base's true pose, so localization just follows.
+  // The robot is stopped first: a goal or the explorer would otherwise drive it straight
+  // back off the spot (and a fleet task it held fails and goes back to the auction).
+  const TP_CLEAR_M = 0.25; // robot base radius-ish: no landing on a shelf
+  function occupiedAt(x, y) {
+    if (!lastMap || !lastMap.info) return false;
+    const { width: w, height: h, resolution: res, origin } = lastMap.info;
+    const c0 = Math.floor((x - origin.position.x) / res), r0 = Math.floor((y - origin.position.y) / res);
+    const k = Math.ceil(TP_CLEAR_M / res);
+    for (let dr = -k; dr <= k; dr++) for (let dc = -k; dc <= k; dc++) {
+      if ((dr * dr + dc * dc) * res * res > TP_CLEAR_M * TP_CLEAR_M) continue;
+      const r = r0 + dr, c = c0 + dc;
+      if (r >= 0 && r < h && c >= 0 && c < w && lastMap.data[r * w + c] >= 65) return true;
+    }
+    return false;
+  }
+  function teleport(id, x, y, yaw, label) {
+    const r = robots.get(id);
+    if (!r || !r.pose) return;
+    if (occupiedAt(x, y)) return toast("That spot is occupied on the map");
+    stopRobot(id);
+    publishString("/sim/teleport", JSON.stringify({ robot: id, x, y, yaw, ref: { x: r.pose.x, y: r.pose.y, yaw: r.pose.yaw } }));
+    toast(`${nameOf(id)} teleported to ${label}`);
+  }
+
   function toggleExplore(id) {
     const r = robots.get(id);
     const exploring = r && r.explore && r.explore.state === "exploring" && performance.now() - r.exploreAt < EXPLORE_TTL_MS;
@@ -1016,6 +1050,11 @@
     try {
       const body = await (await fetch("/api/nav_waypoints")).json();
       waypoints = body.waypoints || [];
+      if (body.platform && body.platform !== platform) {
+        platform = body.platform;
+        $('#tools [data-t="tp"]').hidden = platform !== "sim";
+        if (platform !== "sim" && tool === "tp") setTool("select");
+      }
       renderWaypoints(); dirty = true;
     } catch (e) { console.error("failed to load waypoints", e); }
   }
@@ -1411,12 +1450,13 @@
     if (Math.hypot(px - press.px, py - press.py) > 6) press.moved = true;
     if (press.moved && press.robot) {
       const [wx, wy] = toWorld(px, py), wp = waypointAt(px, py);
-      drag = { id: press.robot, wx: wp ? wp.x : wx, wy: wp ? wp.y : wy, wp: wp || null };
+      drag = { id: press.robot, wx: wp ? wp.x : wx, wy: wp ? wp.y : wy, wp: wp || null, tp: tool === "tp" };
+      if (drag.tp) drag.blocked = occupiedAt(drag.wx, drag.wy);
       canvas.style.cursor = "grabbing";
       dirty = true;
       return;
     }
-    if (press.moved && tool === "select") { // drag pans
+    if (press.moved && (tool === "select" || tool === "tp")) { // drag pans
       view.moved = true;
       view.cx = press.cx - (px - press.px) / view.scale;
       view.cy = press.cy + (py - press.py) / view.scale;
@@ -1433,11 +1473,13 @@
       // Dropped back on the robot: changed its mind.
       if (robotAt(px, py) && robotAt(px, py).id === d.id) return;
       const r0 = robots.get(d.id);
+      if (d.tp) return teleport(d.id, d.wx, d.wy, d.wp ? d.wp.yaw || 0 : r0.pose.yaw, d.wp ? d.wp.name : `(${d.wx.toFixed(1)}, ${d.wy.toFixed(1)})`);
       // A pin keeps its own heading; anywhere else, arrive facing the way it travelled.
       const yaw = d.wp ? d.wp.yaw || 0 : Math.atan2(d.wy - r0.pose.y, d.wx - r0.pose.x);
       return sendNav(d.id, d.wx, d.wy, yaw, d.wp ? d.wp.name : `(${d.wx.toFixed(1)}, ${d.wy.toFixed(1)})`);
     }
-    if (tool === "select") {
+    if (tool === "tp" && !p.moved && !robotAt(px, py)) return toast("Drag a robot to where it should be");
+    if (tool === "select" || tool === "tp") {
       if (p.moved) return;
       const hit = robotAt(px, py);
       // Closed -> open it; open -> give it control; already in control -> close it.
@@ -1581,8 +1623,8 @@
       return;
     }
     if (e.target.closest && e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
-    const t = { v: "select", f: "wp", r: "gw" }[e.key.toLowerCase()];
-    if (t) setTool(t);
+    const t = { v: "select", f: "wp", r: "gw", t: "tp" }[e.key.toLowerCase()];
+    if (t && !(t === "tp" && platform !== "sim")) setTool(t);
   });
   addEventListener("resize", resize);
 
@@ -1703,5 +1745,5 @@
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; } };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; } };
 })();

@@ -59,7 +59,7 @@ window.fetch = (url, opts) => {
   const json = (b) => Promise.resolve(new Response(JSON.stringify(b), { status: 200, headers: { 'Content-Type': 'application/json' } }));
   if (u.startsWith('/api/nav_waypoints')) {
     if (opts && opts.method === 'POST') window.__navWps = JSON.parse(opts.body).waypoints;
-    return json({ waypoints: window.__navWps });
+    return json({ platform: window.__platform || 'sim', waypoints: window.__navWps });
   }
   if (u.startsWith('/api/session') && !u.startsWith('/api/session/') && window.__fakeSession) return json(window.__fakeSession);
   // Stop all's dialog: record, never stop anything real.
@@ -880,6 +880,10 @@ async function main() {
   await tap(await atWorld(-3, 2)); await tap(await atWorld(0.5, 8));
   await waitFor(async () => (await vz()).blocked.includes('0-1'), { what: 'a pulled link', tries: 30 });
   check('comms: pulling a link blocks it in the model', (await vz()).blocked.includes('0-1'));
+  await click('#cm-show-range'); await sleep(150);
+  check('comms: show range turns on the range circles, sized by the model', (await vz()).showRange && (await vz()).range.robot > 5, JSON.stringify((await vz()).range));
+  await shot('comms-range');
+  await click('#cm-show-range');
   await page.eval(`window.__viz.cmd({ op: 'link', a: 0, b: 1, action: 'unblock' })`);
   await waitFor(async () => !(await vz()).blocked.includes('0-1'), { what: 'a restored link', tries: 30 });
   await emit('/tf', tf('map', `${r1}/base_link`, 6, -2, 3.1));
@@ -908,6 +912,44 @@ async function main() {
   await click('#comms-toggle'); await sleep(300);
   check('comms: toggling off closes the model stream', !(await vz()).on && !(await vz()).connected && !(await visible('#comms')));
   await page.eval(`localStorage.clear()`);
+
+  // -- teleport (sim only) ------------------------------------------------------------------------
+  console.log('\n--- teleport ---');
+  await page.eval(`localStorage.clear()`); await load();
+  await emit('/map', walled);
+  await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
+  await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+  await sleep(600);
+  check('teleport: the default tool is called Drive', /Drive/.test(await $text('#tools [data-t="select"]')), await $text('#tools [data-t="select"]'));
+  check('teleport: the tool shows on the sim', await visible('#tools [data-t="tp"]'));
+  const dragWorld = async (x0, y0, x1, y1) => {
+    const at = (x, y) => page.eval(`(() => { const r = document.getElementById('map').getBoundingClientRect(); const [a, b] = window.__operator.toPx(${x}, ${y}); return [r.left + a, r.top + b]; })()`);
+    const [ax, ay] = await at(x0, y0), [bx, by] = await at(x1, y1);
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: ax, y: ay, button: 'left', clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: (ax + bx) / 2, y: (ay + by) / 2, button: 'left' });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: bx, y: by, button: 'left' });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: bx, y: by, button: 'left', clickCount: 1 });
+  };
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 't' }))`);
+  check('teleport: T picks the tool', await page.eval(`document.querySelector('#tools [data-t="tp"]').classList.contains('active')`));
+  await page.eval(`window.__published.length = 0; window.__services.length = 0; window.__ops.length = 0`);
+  await dragWorld(4, -2, 7, 4);
+  const tpPub = JSON.parse(await page.eval(`JSON.stringify(window.__published)`));
+  const tpMsg = tpPub.find((x) => x.topic === '/sim/teleport');
+  const tpBody = tpMsg && JSON.parse(tpMsg.msg.data);
+  check('teleport: dropping a robot asks the sim to move it, in map coordinates with its current pose',
+        !!tpBody && tpBody.robot === r1 && Math.abs(tpBody.x - 7) < 0.2 && Math.abs(tpBody.y - 4) < 0.2 && Math.abs(tpBody.yaw - 3.1) < 0.05
+        && Math.abs(tpBody.ref.x - 4) < 0.05 && Math.abs(tpBody.ref.y + 2) < 0.05, JSON.stringify(tpBody));
+  check('teleport: it never sends a nav goal or a task', !tpPub.some((x) => /dispatch_task/.test(x.topic)) && !(await page.eval(`window.__ops.some((o) => o.op === 'send_action_goal')`)));
+  check('teleport: the robot is stopped first (goals cancelled, explorer told to stop)',
+        tpPub.some((x) => x.topic === `/${r1}/explore_cmd` && x.msg.data === 'stop') && (await page.eval(`window.__services.some((s) => s.name === '/${r1}/navigate_to_pose/_action/cancel_goal')`)));
+  await page.eval(`window.__published.length = 0`);
+  await dragWorld(-3, 2, 1.0, 0);   // onto the free-standing wall
+  check('teleport: an occupied spot is refused', !JSON.parse(await page.eval(`JSON.stringify(window.__published)`)).some((x) => x.topic === '/sim/teleport') && /occupied/i.test(await $text('#toast')), await $text('#toast'));
+  await page.eval(`window.__platform = 'real'; window.__operator.loadWaypoints()`); await sleep(300);
+  check('teleport: not offered on the real robot, and the tool falls back to Drive',
+        !(await visible('#tools [data-t="tp"]')) && await page.eval(`document.querySelector('#tools [data-t="select"]').classList.contains('active')`));
+  await page.eval(`window.__platform = null; window.__operator.loadWaypoints()`); await sleep(200);
 
   // -- resizable side bars ------------------------------------------------------------------------
   console.log('\n--- side bars ---');

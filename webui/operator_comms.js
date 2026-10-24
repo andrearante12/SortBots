@@ -53,7 +53,7 @@
   let header = null, T = 0, liveT = 0, lastWall = 0, playing = true, speed = 1;
   let air = [];                // [{t, end, ta, ra, kind, ack}] in time order
   let routes = new Map(), blocked = new Set(), silent = new Map(), dead = new Set();
-  let feed = [], showChatter = false, pick = null;
+  let feed = [], showChatter = false, showRange = false, pick = null;
   let origin = null;           // [x, y] world metres of the model's (0, 0); null until a map is posted
   let layoutAt = -Infinity, layoutMapStamp = null, racks = 0;
   const sentPos = new Map();   // node id -> [x, y] model, last posted
@@ -223,7 +223,29 @@
     const target = Math.max(0, liveT - LAG_US);
     T = playing ? Math.min(target, T + dt) : Math.min(T, target);
     if (air.length > 3000 && T - air[0].t > KEEP_US) air.splice(0, air.findIndex((a) => T - a.t <= KEEP_US));
+    if (showRange) drawRange();
     drawLinks(); drawRoutes(); drawBlocked(); drawPackets(); drawNodes();
+  }
+
+  // Open-air range per radio (the model's, so the slider moves it): how far a link
+  // reaches with nothing in the way. The gateway's is longer (mounted high). Obstacles
+  // shorten real links, which the link lines show; the circles are the upper bound.
+  function drawRange() {
+    const rng = header.range_m; if (!rng) return;
+    const info = css("--info"), s = opts.scale();
+    ctx.font = '500 10px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
+    for (let i = 0; i < header.n; i++) {
+      if (dead.has(i)) continue;
+      const a = px(i); if (!a) continue;
+      const r = (i === 0 ? rng.gateway : rng.robot) * s;
+      ctx.fillStyle = info; ctx.globalAlpha = 0.05;
+      ctx.beginPath(); ctx.arc(a[0], a[1], r, 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 0.45; ctx.strokeStyle = info; ctx.lineWidth = 1; ctx.setLineDash([5, 5]);
+      ctx.beginPath(); ctx.arc(a[0], a[1], r, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+      ctx.globalAlpha = 0.8; ctx.fillStyle = info;
+      ctx.fillText(`${Math.round(i === 0 ? rng.gateway : rng.robot)} m`, a[0], a[1] - r - 4);
+      ctx.globalAlpha = 1;
+    }
   }
 
   function drawLinks() {
@@ -397,6 +419,11 @@
     $("#cm-kill").addEventListener("click", () => startPick("node", 1));
     $("#cm-send").addEventListener("click", () => startPick("send", 2));
     $("#cm-chatter").addEventListener("change", (e) => { showChatter = e.target.checked; });
+    $("#cm-show-range").addEventListener("change", (e) => {
+      showRange = e.target.checked;
+      try { localStorage.setItem("sortbots.commsRange", showRange ? "on" : "off"); } catch (err) { /* this tab only */ }
+    });
+    try { if (localStorage.getItem("sortbots.commsRange") === "on") { showRange = true; $("#cm-show-range").checked = true; } } catch (err) { /* off */ }
     let rangeTimer = null;
     $("#cm-range").addEventListener("input", (e) => {
       const v = Number(e.target.value); $("#cm-range-v").textContent = `${v} m`;
@@ -435,7 +462,7 @@
       nodes: header ? header.nodes.map((n) => n.pos) : [], snr: header ? header.snr : [],
       routes: Object.fromEntries([...routes].map(([k, m]) => [k, Object.fromEntries(m)])),
       blocked: [...blocked], dead: [...dead], silent: Object.fromEntries([...silent].map(([k, s]) => [k, [...s]])),
-      airCount: air.length, feed: feed.slice(-12).map((f) => f.text), pick: pick ? pick.op : null,
+      airCount: air.length, showRange, range: header ? header.range_m : null, feed: feed.slice(-12).map((f) => f.text), pick: pick ? pick.op : null,
     }),
   };
 })();

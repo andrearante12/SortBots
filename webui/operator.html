@@ -401,7 +401,8 @@
     </div>
     <!-- Map tools live up here, not over the map: the map gets the whole stage. -->
     <div class="seg" id="tools" role="toolbar" aria-label="Map tools">
-      <button data-t="select" class="active" title="Select (V). Drag a robot to send it somewhere (drop on a pin to use it); click a robot for its camera; drag the map to pan"><span class="ic">&#8598;</span>Select</button>
+      <button data-t="select" class="active" title="Drive (V). Drag a robot to send it driving there (drop on a pin to use it); click a robot for its camera; drag the map to pan"><span class="ic">&#8598;</span>Drive</button>
+      <button data-t="tp" hidden title="Teleport (T), sim only. Drag a robot and drop it to move it there instantly (drop on a pin to take its heading). For setting a scene up; localization follows"><span class="ic">&#10070;</span>Teleport</button>
       <button data-t="wp" title="Add waypoint (F). Click to place, drag to set its heading"><span class="ic">&#9670;</span>Waypoint</button>
       <button data-t="gw" title="Place the fleet gateway (R): where the comms overlay puts the access point"><span class="ic">&#9650;</span>Gateway</button>
     </div>
@@ -449,6 +450,7 @@
       <button class="btn small" id="cm-kill" type="button">Switch off</button>
       <button class="btn small" id="cm-send" type="button">Send A&rarr;B</button>
     </span>
+    <label class="lf-check" title="Each radio's open-air range as a circle. Obstacles on the map cut real links shorter than this"><input type="checkbox" id="cm-show-range"> show range</label>
     <label class="lf-check" title="Mesh routing beacons, transport ACKs and keepalives: most of the airtime, little of the story"><input type="checkbox" id="cm-chatter"> routing chatter</label>
   </div>
   <ul class="float" id="comms-feed" hidden aria-live="polite"></ul>
