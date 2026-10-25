@@ -40,3 +40,36 @@ robots:
       nvidia: [1.23, 13.69, 0.05]
       # Primitive scene: east side, clear of shelf_1/shelf_3.
       primitive: [3.0, 1.0, 0.05]
+  # robot_2..robot_5 (2026-10-24): for fleets past two, chiefly comms tests
+  # (multi-hop needs a relay between two robots out of each other's range).
+  # nvidia poses are free cells on an explored grid of the warehouse, at least
+  # 6.5 m from every other spawn or behind a rack from it, so no robot starts
+  # inside another's 5 m Grid/RangeMax view and paints it into /map at t=0
+  # (robot_3/robot_5 are 4.7 m apart, the x~0 rack between). A run uses the first
+  # --robots N entries, so the order here is the order robots are added.
+  - id: robot_2
+    spawn:
+      # Open apron south of the racks, ~7.7 m south of robot_0.
+      nvidia: [-9.0, 4.0, 0.05]
+      # Primitive scene: north-west corner, clear of shelf_2 and pallet_0.
+      primitive: [-4.5, 2.8, 0.05]
+  - id: robot_3
+    spawn:
+      # North end of robot_1's aisle (between the x~0 and x~3.8 racks),
+      # ~8.4 m up the aisle from it.
+      nvidia: [2.0, 22.0, 0.05]
+      # Primitive scene: south-east corner, south of shelf_3 / pallet_1.
+      primitive: [4.8, -3.0, 0.05]
+  - id: robot_4
+    spawn:
+      # South-west apron, ~6.5 m west of robot_2 (it faces +X, so robot_2
+      # sits ~22° off its camera axis, past the 5 m Grid/RangeMax).
+      nvidia: [-15.0, 1.5, 0.05]
+      # Primitive scene: middle of the north wall, east of shelf_2.
+      primitive: [0.0, 3.2, 0.05]
+  - id: robot_5
+    spawn:
+      # North aisle between the x~-5 and x~0 racks.
+      nvidia: [-2.5, 23.5, 0.05]
+      # Primitive scene: middle of the south wall, between box_1 and box_2.
+      primitive: [-0.5, -3.3, 0.05]
