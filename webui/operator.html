@@ -675,6 +675,7 @@
             <span class="lf-k" title="Render the cameras on every Nth 60 Hz physics step (1-4; 1 = every step). 2 matches the D435's 30 Hz, so the head cams lose no frames, while /clock, odom and TF drop to 30 Hz sim-time. ~2x real-time factor on a GPU-bound machine, little on a CPU-bound one (scripts/bench_sim.sh).">Render every</span>
             <input type="number" id="lf-render_every" min="1" max="4" step="1" value="1"> <span class="lf-unit" id="lf-render_every-unit">frames</span>
             <label class="lf-check" data-field="lite_render" title="Turn off reflections, translucency, indirect light and AO in the RTX renderer. Depth is unchanged and direct light/shadows stay; ~+55% real-time factor when the GPU is the bottleneck (scripts/bench_sim.sh)."><input type="checkbox" id="lf-lite_render"> lite render</label>
+            <label class="lf-check" data-field="half_res_cams" title="Render every robot camera at 424x240 instead of 848x480: a quarter of the pixels to render, read back and publish per camera. For larger fleets, where Isaac's image throughput is the limit; SLAM gets fewer features per frame (scripts/spawn_warehouse.py --half-res-cams)."><input type="checkbox" id="lf-half_res_cams"> half-res cameras</label>
           </div>
           <div class="lf-row">
             <button type="button" id="lf-save-preset" title="Save these settings as a new Quick start preset (configs/scenarios/NAME.yaml)">Save as preset&hellip;</button>

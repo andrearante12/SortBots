@@ -32,13 +32,14 @@ run:
   chase_cam: false       # each chase cam is another render product
   render_every: 2
   lite_render: true
+  half_res_cams: false   # true for 5+ robots: see spawn_warehouse.py --half-res-cams
   explore: false         # robots wait for goals; tick it to watch them explore
   resume: false          # fresh map: Nav2 plans through unknown space (allow_unknown)
   localize: false
   teleop: false
   map: null
 
-overrides: [robots, world, headless, chase_cam, explore, render_every, lite_render]
+overrides: [robots, world, headless, chase_cam, explore, render_every, lite_render, half_res_cams]
 
 capture:
   bag: false

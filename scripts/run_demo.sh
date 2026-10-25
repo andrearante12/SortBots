@@ -20,7 +20,7 @@
 #                       [--scene nvidia]
 #                       [--no-headless] [--teleop] [--localize | --resume]
 #                       [--no-chase-cam | --chase-cam-robots N]
-#                       [--render-every N] [--lite-render]
+#                       [--render-every N] [--lite-render] [--half-res-cams]
 #                       [--map PATH] [--explore] [--world NAME] [--keep-console]
 #   scripts/run_demo.sh stop [--keep-console]   # tear the pipeline down
 #
@@ -202,10 +202,11 @@ ROBOT_ID=robot_0; ROBOTS=2; ROBOT_IDS=""; SCENE=nvidia; HEADLESS="--headless"; T
 # drops all of them; --chase-cam-robots N keeps them on the first N robots
 # only (dashboard only shows robot_id's feed, so fleet runs usually want 1).
 CHASE_CAM_ARGS=""
-# Render-cost knobs, passed straight to spawn_warehouse.py. Both default off:
-# on a GPU-bound machine they're worth ~2x real-time factor together, on a
-# CPU-bound one much less — measure with scripts/bench_sim.sh before relying
-# on either (numbers in its header).
+# Render-cost knobs, passed straight to spawn_warehouse.py. All default off.
+# --render-every/--lite-render: on a GPU-bound machine they're worth ~2x
+# real-time factor together, on a CPU-bound one much less — measure with
+# scripts/bench_sim.sh before relying on either (numbers in its header).
+# --half-res-cams is for large fleets: see spawn_warehouse.py --help.
 RENDER_ARGS=""
 LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false; WORLD_ARGS=""
 while [[ $# -gt 0 ]]; do
@@ -220,6 +221,7 @@ while [[ $# -gt 0 ]]; do
     --chase-cam-robots) CHASE_CAM_ARGS="--chase-cam-robots $2"; shift 2;;
     --render-every) RENDER_ARGS+=" --render-every $2"; shift 2;;
     --lite-render)  RENDER_ARGS+=" --lite-render"; shift;;
+    --half-res-cams) RENDER_ARGS+=" --half-res-cams"; shift;;
     --teleop)    TELEOP=1; shift;;
     --no-teleop) TELEOP=0; shift;;  # accepted for back-compat (already the default)
     --localize) LOCALIZE=true; shift;;
