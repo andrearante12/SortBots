@@ -16,6 +16,10 @@
 # launch/sortbots_bringup.launch.py robot_ids:=... .
 
 default: robot_0
+# How many robots (the first N below) a run brings up when it doesn't say:
+# scripts/run_demo.sh's --robots default, kept in sync by hand. The idle
+# dashboard lists these rather than every entry (webui/serve.py).
+default_robots: 2
 robots:
   - id: robot_0
     spawn:

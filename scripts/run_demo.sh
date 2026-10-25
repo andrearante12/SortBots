@@ -194,7 +194,8 @@ fi
 
 # ---- args ----
 # Teleop defaults OFF — the dashboard drive pad replaces the WASD window.
-# ROBOTS defaults to 2 — SortBots is a fleet project, so the bare demo comes up
+# ROBOTS defaults to 2 (configs/robots.yaml default_robots, kept in sync by
+# hand) — SortBots is a fleet project, so the bare demo comes up
 # as a collaborative fleet (fused /map, mesh radio). --robots 1 for single-robot.
 ROBOT_ID=robot_0; ROBOTS=2; ROBOT_IDS=""; SCENE=nvidia; HEADLESS="--headless"; TELEOP=0
 # Cosmetic 3rd-person cam = a second render product per robot. --no-chase-cam
