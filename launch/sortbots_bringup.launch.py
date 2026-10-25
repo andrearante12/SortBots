@@ -75,6 +75,7 @@ from launch.actions import (
     GroupAction,
     IncludeLaunchDescription,
     OpaqueFunction,
+    TimerAction,
 )
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -123,6 +124,7 @@ def _make_per_robot_actions(
     platform_cfg,
     slam_role_cfg,
     shared_map_cfg,
+    robot_stagger_cfg,
 ):
     primary_robot_id = robot_id_cfg.perform(context)
     raw = robot_ids_cfg.perform(context).strip()
@@ -150,9 +152,11 @@ def _make_per_robot_actions(
     shared = as_bool(shared_map_cfg) and len(robot_ids) > 1
     localize_only = as_bool(localization)
     primary_spawn = _spawn_pose(scene, primary_robot_id)
+    stagger_s = float(robot_stagger_cfg.perform(context))
 
     actions = []
-    for rid in robot_ids:
+    for idx, rid in enumerate(robot_ids):
+        first = len(actions)
         # Anchors this robot's SLAM into the shared world frame: RTAB-Map
         # publishes its OWN map at <rid>/map (sortbots_rtabmap_robot.launch.py
         # sets map_frame_id), starting from wherever its odom happened to
@@ -402,6 +406,19 @@ def _make_per_robot_actions(
             ]
         actions.append(GroupAction(condition=IfCondition(explore), actions=explorers))
 
+        # Each robot's stack starts robot_stagger_s after the previous one's.
+        # All at once, six robots meant ~140 processes importing, discovering
+        # each other over DDS and walking Nav2's lifecycle together: load
+        # average 178 on 32 threads (2026-10-24), and Nav2 lifecycle managers
+        # timed out on bt_navigator/controller_server and aborted: 1 robot's
+        # Nav2 in one run, 2 in the next. Staggered by 8 s: 0, then 1. It
+        # softens the spike but doesn't make six full stacks fit a 32-thread
+        # laptop. Four come up either way (configs/tests/fleet_scale_smoke.yaml).
+        if idx and stagger_s > 0:
+            mine = actions[first:]
+            del actions[first:]
+            actions.append(TimerAction(period=idx * stagger_s, actions=mine))
+
     # Fleet gateway: takes /fleet/task_request, announces, keeps
     # /fleet/task_board. Once per bringup, like the operator's laptop it stands
     # in for. Sim only: a real robot's bringup is one of several on the mesh,
@@ -464,8 +481,18 @@ def generate_launch_description():
     platform = LaunchConfiguration("platform")
     slam_role = LaunchConfiguration("slam_role")
     shared_map = LaunchConfiguration("shared_map")
+    robot_stagger_s = LaunchConfiguration("robot_stagger_s")
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "robot_stagger_s",
+            default_value="8.0",
+            description=(
+                "Seconds between one robot's stack starting and the next's (wall "
+                "clock). Staggering keeps a large fleet's startup from timing out "
+                "Nav2's lifecycle managers; 0 starts every robot at once."
+            ),
+        ),
         DeclareLaunchArgument(
             "shared_map",
             default_value="false",
@@ -640,6 +667,7 @@ def generate_launch_description():
                 explore, explore_autostart, robot_id, robot_ids, scene, platform,
                 slam_role,
                 shared_map,
+                robot_stagger_s,
             ],
         ),
     ])
