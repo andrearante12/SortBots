@@ -18,10 +18,13 @@ This trips first, stops the whole pipeline with `run_demo.sh stop
 --keep-console`, and writes the reason to REPORT. webui/session.py shows that
 reason as the session's error.
 
-Trips, each sustained for `--sustain` consecutive samples so one spike
-(a map checkpoint) doesn't end a run:
-  - fence anon memory above `--fence-frac` of the scope's MemoryHigh
-    (anon, not memory.current: page cache is reclaimable and would trip on I/O)
+Trips, each held for `--sustain` samples (a strike count that decays rather
+than resets, so a reading wobbling on the line still trips) so one spike, such
+as a map checkpoint, doesn't end a run:
+  - fence anon memory plus what it swapped out, above `--fence-frac` of the
+    scope's MemoryHigh (anon, not memory.current: page cache is reclaimable
+    and would trip on I/O; plus swap, because throttled at MemoryHigh anon
+    stalls under the line while the rest goes to swap)
   - system MemAvailable below `--min-avail-gb` (default max(3 GB, 10 % of
     RAM)): the fence only bounds the sim, and the rest of the machine can
     still eat what's left. systemd-oomd watches user@<uid>.service at 50 %
@@ -77,11 +80,18 @@ def fence_budget(fence: dict) -> int | None:
     return fence.get("high") or fence.get("max")
 
 
+def fence_demand(fence: dict) -> int:
+    """Anon memory plus what the fence has pushed to swap. Over MemoryHigh the
+    kernel reclaims anon into swap, so anon alone stalls just under the line
+    while the run's real demand keeps growing (live trip test, 2026-10-25)."""
+    return fence.get("anon", 0) + fence.get("swap", 0)
+
+
 def verdict(s: dict, args) -> str | None:
     fence = s["cgroups"].get("fence") or {}
     budget = fence_budget(fence)
-    if budget and fence.get("anon", 0) > args.fence_frac * budget:
-        return (f"sim memory {fence['anon'] / GB:.1f} GB is over "
+    if budget and fence_demand(fence) > args.fence_frac * budget:
+        return (f"sim memory {fence_demand(fence) / GB:.1f} GB is over "
                 f"{args.fence_frac:.0%} of its {budget / GB:.0f} GB budget (MemoryHigh)")
     avail_gb = s["mem_avail_kb"] / 1048576
     if avail_gb < args.min_avail_gb:
@@ -110,6 +120,7 @@ def stop_pipeline(reason: str, s: dict) -> None:
         "reason": reason,
         "sim_t": s["sim_t"],
         "fence_anon_gb": round(fence.get("anon", 0) / GB, 2),
+        "fence_swap_gb": round(fence.get("swap", 0) / GB, 2),
         "mem_avail_gb": round(s["mem_avail_kb"] / 1048576, 2),
         "swap_used_gb": round(s["swap_used_kb"] / 1048576, 2),
         "psi": s["psi"],
@@ -150,6 +161,7 @@ def main() -> int:
         print(json.dumps({
             "verdict": v or "ok",
             "fence_anon_gb": round(fence.get("anon", 0) / GB, 2) if fence else None,
+            "fence_swap_gb": round(fence.get("swap", 0) / GB, 2) if fence else None,
             "fence_budget_gb": round(fence_budget(fence) / GB, 1) if fence_budget(fence) else None,
             "mem_avail_gb": round(s["mem_avail_kb"] / 1048576, 2),
             "min_avail_gb": args.min_avail_gb,
@@ -174,17 +186,21 @@ def main() -> int:
             log("pipeline gone; guard exiting")
             return 0
         v = verdict(s, args) if alive else None
-        strikes = strikes + 1 if v else 0
+        # Decay, don't reset: throttled at MemoryHigh, the reading oscillates
+        # around the line, and a reset on every dip put a live trip ~5 min late.
+        strikes = strikes + 1 if v else max(0, strikes - 1)
         if strikes >= args.sustain:
             stop_pipeline(v, s)
             return 3
         fence = s["cgroups"].get("fence") or {}
         budget = fence_budget(fence)
-        near = bool(budget and fence.get("anon", 0) > 0.85 * budget)
-        if near and not warned["budget"]:
-            log(f"warning: sim memory {fence['anon'] / GB:.1f} GB of a {budget / GB:.0f} GB "
+        frac = fence_demand(fence) / budget if budget else 0.0
+        if frac > 0.85 and not warned["budget"]:
+            log(f"warning: sim memory {fence_demand(fence) / GB:.1f} GB of a {budget / GB:.0f} GB "
                 f"budget; largest: {_largest(s)}")
-        warned["budget"] = near
+            warned["budget"] = True
+        elif frac < 0.75:  # re-arm only well below, or it re-warns on every wobble
+            warned["budget"] = False
         hot = bool(gpu_total and s["gpu_mib"] and s["gpu_mib"] > 0.97 * gpu_total)
         if hot and not warned["gpu"]:
             log(f"warning: GPU memory {s['gpu_mib']}/{gpu_total} MiB; "

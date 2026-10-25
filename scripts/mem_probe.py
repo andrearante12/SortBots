@@ -123,6 +123,7 @@ def cgroup_stats(cg: Path) -> dict:
     out: dict = {}
     try:
         out["current"] = int((cg / "memory.current").read_text())
+        out["swap"] = int((cg / "memory.swap.current").read_text())
         for line in (cg / "memory.stat").read_text().splitlines():
             k, v = line.split()
             if k in ("anon", "file", "shmem"):

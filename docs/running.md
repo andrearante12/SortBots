@@ -510,9 +510,10 @@ head cameras at 424x240. With four idle robots that took the sim from 0.40x to
 (MemoryHigh = RAM − 14 GB, MemoryMax = RAM − 10 GB). Hitting the fence throttles
 the whole sim, then OOM-kills one process in it, usually Isaac. So `run_demo.sh`
 also starts `scripts/mem_guard.py` inside the fence. The guard stops the run
-cleanly (`run_demo.sh stop --keep-console`) when any of these is true for 15 s:
+cleanly (`run_demo.sh stop --keep-console`) when any of these holds for about
+15 s:
 
-- the fence's anonymous memory passes 97 % of MemoryHigh
+- the fence's anonymous memory plus what it swapped out passes 97 % of MemoryHigh
 - the machine's MemAvailable drops under max(3 GB, 10 % of RAM)
 - memory pressure stalls everything (PSI full > 30 %)
 

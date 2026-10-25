@@ -67,6 +67,15 @@ def test_guard_trips_on_the_fence_budget_not_page_cache():
     assert mem_guard.verdict(s, _args()) is None
 
 
+def test_guard_counts_what_the_fence_swapped_out():
+    # Throttled at MemoryHigh, anon stalls under the line and the rest swaps.
+    s = _sample(anon_gb=14.0)
+    assert mem_guard.verdict(s, _args()) is None
+    s["cgroups"]["fence"]["swap"] = int(2.0 * GB)
+    v = mem_guard.verdict(s, _args())
+    assert v and "16.0 GB" in v
+
+
 def test_guard_trips_on_machine_memory_even_without_a_fence():
     v = mem_guard.verdict(_sample(avail_gb=2.0, fence=False), _args())
     assert v and "MemAvailable" in v
