@@ -297,6 +297,15 @@ def summarize(d: Path, steady_after_s: float) -> str:
     # Only samples with Isaac up: teardown samples (everything 0, sim time
     # frozen at its last value) would drag every fitted slope down.
     rows = [r for r in _load(d) if any(k.endswith("/isaac") for k in r["groups_kb"])]
+    # Teardown kills the ROS side a few seconds before Isaac, so the last
+    # Isaac-up samples have every rtabmap at 0. Cut from the first sample
+    # where the total falls by a fifth: nothing in a live run frees that much
+    # at once.
+    totals = [sum(r["groups_kb"].values()) for r in rows]
+    for i in range(1, len(rows)):
+        if totals[i] < 0.8 * totals[i - 1]:
+            rows = rows[:i]
+            break
     if not rows:
         return f"{d}: no pipeline samples\n"
     timed = [r for r in rows if r["sim_t"] is not None]
