@@ -1,0 +1,44 @@
+# Scenario definition for the dashboard's Scenarios tab — see the header of
+# configs/scenarios/explore_fresh.yaml for the schema and the rationale behind
+# the `run:` allowlist.
+
+name: fleet_scale
+
+title: Fleet scale — 4 robots, waiting for goals
+description: >
+  More robots than the two-robot fleet: the first `robots` entries of
+  configs/robots.yaml (default 4, up to 6), each with its full stack
+  (RTAB-Map, Nav2, explorer idle), on a fresh fused map. The robots wait for
+  goals, so a comms or traffic test decides who drives where. Built for the
+  multi-robot comms tests (issue #18) and as the scale smoke test
+  (configs/tests/fleet_scale_smoke.yaml).
+  Memory is the limit, not the GPU. Each robot costs ~1.2 GB fixed plus its
+  RTAB-Map, which grows only while the robot moves through new space
+  (~3.7 MB per sim-second with the malloc cap in
+  launch/sortbots_rtabmap_robot.launch.py). Isaac is ~6.6 GB flat for any
+  fleet size, and each head camera adds only ~0.2 GB of GPU memory.
+  scripts/mem_guard.py stops the run cleanly if the fence budget runs out.
+  Render settings default to the GPU-bound laptop's best (render_every 2,
+  lite_render): 4 head cameras at every-frame rendering run the sim far below
+  real time.
+
+status: ready
+
+run:
+  scene: nvidia
+  robots: 4              # first N of configs/robots.yaml
+  robot_id: robot_0
+  headless: true
+  chase_cam: false       # each chase cam is another render product
+  render_every: 2
+  lite_render: true
+  explore: false         # robots wait for goals; tick it to watch them explore
+  resume: false          # fresh map: Nav2 plans through unknown space (allow_unknown)
+  localize: false
+  teleop: false
+  map: null
+
+overrides: [robots, world, headless, chase_cam, explore, render_every, lite_render]
+
+capture:
+  bag: false
