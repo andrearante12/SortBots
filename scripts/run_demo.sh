@@ -122,7 +122,7 @@ PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz
                    map_merge.py static_transform_publisher \
                    fleet_radio.py fleet_tasks.py dynamic_obstacle_filter.py recon_cloud_merge.py \
                    depth_colorizer.py feature_overlay.py obstacle_detector.py \
-                   map_handoff.py sortbots_bringup.launch.py \
+                   map_handoff.py sortbots_bringup.launch.py mem_guard.py \
                    "spawn_warehouse.py")
 # Note scripts/save_map.sh --watch is deliberately absent from that list. Its
 # checkpoint loop has to OUTLIVE teardown: rtabmap gets pkill -9'd only 2 s
@@ -318,6 +318,16 @@ setsid bash -c "source '$REPO_ROOT/scripts/activate_isaac.sh' >/dev/null 2>&1; \
        --robots $ROBOTS --scene $SCENE --drive cmd_vel $CHASE_CAM_ARGS $RENDER_ARGS $WORLD_ARGS" \
   >"$SIM_LOG" 2>&1 &
 SIM_PID=$!  # setsid execs (not a group leader here), then bash execs python
+
+# Memory guard: stops the whole run cleanly, with the reason on the dashboard,
+# before it hits the fence above. At MemoryMax the kernel OOM-kills one process
+# in the scope (Isaac or the biggest RTAB-Map) and the run limps on.
+# Started here, inside the fence, so it reads its own scope's budget;
+# setsid so it outlives this script, and it exits once the pipeline is gone.
+# SORTBOTS_NO_MEM_GUARD=1 skips it.
+if [[ "${SORTBOTS_NO_MEM_GUARD:-}" != "1" ]]; then
+  setsid /usr/bin/python3 "$REPO_ROOT/scripts/mem_guard.py" >/dev/null 2>&1 &
+fi
 
 echo "[run_demo] waiting for the warehouse to load"
 echo "           (first run streams assets from NVIDIA — can take a few minutes)..."

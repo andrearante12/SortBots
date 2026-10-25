@@ -964,6 +964,21 @@ def load_map_blocking(name: str, robot_id: str = "robot_0") -> dict:
 _PIPELINE_PATTERNS = ("spawn_warehouse.py", "sortbots_bringup.launch.py")
 
 
+MEM_GUARD_REPORT = Path("/tmp/sortbots_mem_guard.json")
+
+
+def mem_guard_reason(since: float) -> str | None:
+    """Why scripts/mem_guard.py stopped the run, if it did and since `since`."""
+    try:
+        report = json.loads(MEM_GUARD_REPORT.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(report, dict) or report.get("stopped_at", 0) < since:
+        return None
+    top = ", ".join(f"{k} {mb} MB" for k, mb in (report.get("top") or [])[:3])
+    return f"stopped by the memory guard: {report.get('reason')}" + (f" (largest: {top})" if top else "")
+
+
 def pipeline_alive() -> bool:
     """Is a sim pipeline up right now?
 
@@ -1055,6 +1070,7 @@ class SessionManager:
             if session["state"] == "running" and not self._pipeline_alive_cached():
                 self._session["state"] = "exited"
                 self._session["error"] = self._session.get("error") or \
+                    mem_guard_reason(session["started_at"]) or \
                     "pipeline is no longer running (stopped outside the dashboard?)"
                 self._persist()
                 session = dict(self._session)
