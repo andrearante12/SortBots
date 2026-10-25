@@ -440,6 +440,10 @@ def _make_per_robot_actions(
             "python3",
             os.path.join(REPO_ROOT, "nodes", "map_merge.py"),
             "--robot-ids", ",".join(robot_ids),
+            # Every spawn stays inside /map even before its robot maps
+            # anything — see spawn_margin_m in configs/map_merge.yaml.
+            "--keep-in", ";".join(
+                f"{x},{y}" for x, y, _ in (_spawn_pose(scene, rid) for rid in robot_ids)),
             # Required, not cosmetic: this node rebroadcasts a TF edge onto
             # /tf (see its own _tick()), so its clock must agree with the
             # rest of the sim-time-stamped tree — see nodes/map_merge.py's
