@@ -1,6 +1,7 @@
 # A test case (simtest/spec.py has the schema; docs/testing.md the how-to).
 
 name: cluttered_route
+suite: regression
 title: Two-leg route through clutter and two walkers
 description: >
   robot_0 leaves its aisle for the far west of the open floor, then cuts back

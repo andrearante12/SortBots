@@ -135,6 +135,7 @@ metrics:
     id: clearance_props
     params: {actors: [], props: true}
   - metric: run_stats                # no `pass:` = reported, not judged
+suite: regression                    # smoke | regression | long — see Scheduled runs
 repeats: 3
 pass_rate: 1.0                       # fraction of repeats per variant that must pass
 variants:                            # the same question under other conditions
@@ -227,6 +228,45 @@ passed runs / runs ≥ `pass_rate` (a run that never got scored counts against
 it — "couldn't tell" is not a pass); the **test** when every variant does. A
 criterion with no data FAILS: a detection metric that never had the actor in
 view didn't test what it says.
+
+## Scheduled runs
+
+Hosted CI (`.github/workflows/ci.yml`) only validates these files; it can't run
+a sim. Running them on a schedule is `.github/workflows/sim.yml`, on the GPU
+workstation as a self-hosted runner.
+
+Every test case sits in one **tier** (`suite:`; default `regression`):
+
+| tier | what | when |
+|---|---|---|
+| `smoke` | `pipeline_smoke` — the harness itself: clock, ground truth, one short goal | nightly, and first |
+| `regression` | avoidance and navigation cases | nightly |
+| `long` | fleet and exploration runs | Sundays |
+
+```bash
+scripts/simtest.py suite smoke regression          # run the tiers in that order
+scripts/simtest.py suite long --list               # just the names
+```
+
+`suite` runs every test in the tiers and exits with the worst code (130, then
+3 infrastructure, 2 invalid, 1 a failed verdict). A failed verdict does not stop
+the tier; an infrastructure failure does, because the sim not starting would
+fail every later test the same way. A tier that selects no tests exits 2 rather
+than passing, so a mistyped `suite:` can't make a nightly quietly green.
+
+The workflow runs on `workflow_dispatch` (pick the tiers), on a cron, and on a
+same-repo PR carrying the `needs-sim` label. It yields instead of tearing down
+someone's manual session (`pgrep -f spawn_warehouse.py`), always runs
+`sim_ctl.sh stop` afterwards, writes each `report.md` to the job summary, and
+uploads `data/simtests/` as an artifact — download it and `simtest.py rescore`
+a run locally if a metric looks wrong.
+
+**One-time runner setup** (on the workstation, as a dedicated user that can run
+the sim): GitHub → Settings → Actions → Runners → New self-hosted runner, add the
+label `gpu-sim`, install it as a service, and make sure the service environment
+does not have `/opt/ros` sourced (`AMENT_PREFIX_PATH` unset) and has git-lfs.
+Read the security note at the top of `sim.yml` first: never attach this runner
+to workflows that run fork PRs.
 
 ## Metrics
 

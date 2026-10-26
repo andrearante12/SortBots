@@ -7,6 +7,7 @@
 # tighten them once a few runs show where the stack actually sits.
 
 name: crossing_yield
+suite: regression
 title: Walker crosses the aisle mouth — see it, yield, arrive
 description: >
   robot_0 drives from its spawn pose down its aisle and out onto the open

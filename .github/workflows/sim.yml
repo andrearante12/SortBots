@@ -1,0 +1,109 @@
+name: sim
+
+# Closed-loop scored tests on a real Isaac Sim, on the GPU workstation.
+# Hosted CI (ci.yml) can never run these. See docs/testing.md "Scheduled runs".
+#
+# SECURITY — read before registering a runner. A self-hosted runner executes
+# whatever the workflow tells it to, as the runner's user, on a machine with
+# the team's maps and credentials. So this workflow:
+#   - never triggers on `pull_request` from a fork (guarded below);
+#   - runs PR code only for a same-repo branch that a maintainer labelled
+#     `needs-sim` (labelling is a write-access action);
+#   - should live on a PRIVATE repo, or a public one with "Require approval for
+#     all outside collaborators" set. GitHub's own advice is never to attach a
+#     self-hosted runner to a public repo's fork-PR workflows.
+
+on:
+  schedule:
+    - cron: "43 7 * * *"      # nightly 07:43 UTC: smoke + regression
+    - cron: "13 9 * * 0"      # Sundays 09:13 UTC: long
+  workflow_dispatch:
+    inputs:
+      suites:
+        description: "Tiers to run, space separated (smoke regression long)"
+        default: "smoke regression"
+        required: true
+  pull_request:
+    types: [labeled, synchronize]
+
+permissions:
+  contents: read
+
+# One GPU, one sim. A second run queues instead of fighting the first for the
+# render pipeline (and a queued run replaces an older queued one). Never cancel
+# a run in flight: that would kill Isaac mid-test and leave a half-written result.
+concurrency:
+  group: sim-gpu
+  cancel-in-progress: false
+
+jobs:
+  sim:
+    # PRs: same-repo head only, and only with the label.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       contains(github.event.pull_request.labels.*.name, 'needs-sim'))
+    runs-on: [self-hosted, gpu-sim]
+    timeout-minutes: 240
+    env:
+      SUITES: >-
+        ${{ github.event_name == 'workflow_dispatch' && inputs.suites
+            || github.event_name == 'pull_request' && 'smoke regression'
+            || github.event.schedule == '13 9 * * 0' && 'long'
+            || 'smoke regression' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true          # the saved maps the regression tier localizes on
+
+      - name: Preflight — the machine is free and the shell is clean
+        id: pre
+        run: |
+          # Never source ROS into the shell that launches Isaac (CLAUDE.md).
+          if [ -n "${AMENT_PREFIX_PATH:-}" ]; then
+            echo "::error::AMENT_PREFIX_PATH is set in the runner's environment; the sim refuses to start. Fix the runner service's env."
+            exit 1
+          fi
+          # Someone's manual session is using the GPU: yield, don't tear it down.
+          if pgrep -f spawn_warehouse.py >/dev/null; then
+            echo "::warning::a sim is already running on this machine; skipping this run instead of stopping it."
+            echo "### sim skipped: a session was already running" >> "$GITHUB_STEP_SUMMARY"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - name: Run suites
+        id: run
+        if: steps.pre.outputs.run == 'true'
+        run: |
+          # conda's python3 leads PATH on the workstation and has no PyYAML-with-ROS
+          # story; the system interpreter is the one every other entry point uses.
+          export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+          echo "suites: $SUITES"
+          # shellcheck disable=SC2086  # SUITES is a space-separated list on purpose
+          /usr/bin/python3 scripts/simtest.py suite $SUITES
+
+      - name: Always stop the sim
+        # run_demo.sh exiting 0 only means it launched; a cancelled or timed-out
+        # job can leave Isaac and the bringup alive and hold the GPU for the
+        # next run. Idempotent: exit 4 (no session) is fine.
+        if: always() && steps.pre.outputs.run == 'true'
+        run: scripts/sim_ctl.sh stop || true
+
+      - name: Reports to the job summary
+        if: always() && steps.pre.outputs.run == 'true'
+        run: |
+          for r in data/simtests/*/report.md; do
+            [ -f "$r" ] || continue
+            { echo; echo "<details><summary>$(basename "$(dirname "$r")")</summary>"; echo; cat "$r"; echo; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Keep the results (events, scores, logs) for rescoring
+        if: always() && steps.pre.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: simtests-${{ github.run_id }}
+          path: data/simtests/
+          retention-days: 30
+          if-no-files-found: ignore

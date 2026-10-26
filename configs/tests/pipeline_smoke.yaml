@@ -6,6 +6,7 @@
 # trusting a long test's verdict.
 
 name: pipeline_smoke
+suite: smoke
 title: Harness smoke — one short goal, ground truth flowing
 description: >
   robot_0 drives 1.6 m down its aisle in the aisle_crossing world. Pass =

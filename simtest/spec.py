@@ -20,6 +20,7 @@
     metrics:                            # simtest/metrics — name, params, pass criteria
       - metric: clearance
         pass: {contacts: {eq: 0}}
+    suite: regression                   # smoke | regression | long — which scheduled tier runs it
     repeats: 3
     pass_rate: 1.0                      # fraction of repeats (per variant) that must pass
     variants:                           # optional: the same test under other settings
@@ -62,7 +63,13 @@ MAX_SIM_S = 3600.0
 MAX_REPEATS = 50
 MAX_VARIANTS = 20
 TOP_KEYS = {"name", "title", "description", "scenario", "overrides", "warmup_s", "goals",
-            "tasks", "stop", "metrics", "repeats", "pass_rate", "variants", "record"}
+            "tasks", "stop", "metrics", "repeats", "pass_rate", "variants", "record", "suite"}
+# Which scheduled tier runs a test (`simtest.py suite NAME`; docs/testing.md):
+# smoke = minutes, run before anything else is worth trusting; regression = the
+# avoidance/navigation cases, nightly; long = fleet and exploration runs, weekly.
+# One tier per test, not a tag set — a test that runs in two tiers runs twice.
+SUITES = ("smoke", "regression", "long")
+DEFAULT_SUITE = "regression"
 # What a variant may change. Not `scenario` or `metrics`: a variant is the
 # same question asked under different conditions, and changing the scoring
 # would make the variants' rows in one report incomparable.
@@ -304,6 +311,9 @@ def validate(raw, *, stem: str | None = None) -> dict:
     if isinstance(reps, bool) or not isinstance(reps, int) or not 1 <= reps <= MAX_REPEATS:
         raise SpecError(f"repeats: integer 1..{MAX_REPEATS}")
     pass_rate = _num(raw.get("pass_rate", 1.0), "pass_rate", 0.0, 1.0)
+    suite = raw.get("suite", DEFAULT_SUITE)
+    if suite not in SUITES:
+        raise SpecError(f"suite: one of {list(SUITES)}")
     record = raw.get("record") or []
     from .events import STREAMS
     if not isinstance(record, list) or set(record) - set(STREAMS):
@@ -337,7 +347,7 @@ def validate(raw, *, stem: str | None = None) -> dict:
     return {"name": name, "title": str(raw.get("title") or name),
             "description": str(raw.get("description") or "").strip(),
             "repeats": reps, "pass_rate": pass_rate, "record": list(record),
-            "variants": variants}
+            "suite": suite, "variants": variants}
 
 
 def context(resolved: dict) -> metrics_lib.Context:
@@ -393,7 +403,7 @@ def list_tests() -> list[dict]:
             base = t["variants"][0][1]
             out.append({
                 "name": t["name"], "title": t["title"], "description": t["description"],
-                "status": "ready", "scenario": base["scenario"],
+                "status": "ready", "suite": t["suite"], "scenario": base["scenario"],
                 "world": base["run"].get("world"), "robots": base["robots"],
                 "variants": [label for label, _ in t["variants"]],
                 "repeats": t["repeats"], "runs": len(t["variants"]) * t["repeats"],
@@ -407,3 +417,24 @@ def list_tests() -> list[dict]:
             out.append({"name": p.stem, "title": p.stem, "description": "",
                         "status": "invalid", "error": str(e)})
     return out
+
+
+def select_suites(suites: list[str]) -> list[str]:
+    """Names of the tests in the given tiers, in the order the tiers are asked.
+
+    Reads each file's raw `suite:` rather than fully loading it: a test whose
+    saved map is missing is still IN its tier, and must fail when it runs (or at
+    `validate`) instead of silently dropping out of a scheduled suite. A bad
+    `suite:` value is an error here for the same reason.
+    """
+    unknown = [x for x in suites if x not in SUITES]
+    if unknown:
+        raise SpecError(f"unknown suite(s) {unknown}; have {list(SUITES)}")
+    by_suite: dict[str, list[str]] = {x: [] for x in SUITES}
+    for p in sorted(TESTS_DIR.glob("*.yaml")):
+        raw = yaml.safe_load(p.read_text())
+        suite = raw.get("suite", DEFAULT_SUITE) if isinstance(raw, dict) else DEFAULT_SUITE
+        if suite not in SUITES:
+            raise SpecError(f"{p.stem}: suite: one of {list(SUITES)}")
+        by_suite[suite].append(p.stem)
+    return [n for x in suites for n in by_suite[x]]

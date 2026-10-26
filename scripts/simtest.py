@@ -7,6 +7,8 @@
     scripts/simtest.py metrics                    # the metric catalog (simtest/metrics)
     scripts/simtest.py run NAME [--set k=v ...] [--repeats N] [--variant LABEL]
                                 [--dry-run] [--force] [--keep]
+    scripts/simtest.py suite SUITE [SUITE ...]    # run every test in a tier: smoke | regression | long
+                                [--list] [--repeats N] [--force]
     scripts/simtest.py rescore DIR [--current-spec]   # re-score recorded events
     scripts/simtest.py report DIR [DIR ...]       # re-render / compare result dirs
 
@@ -30,7 +32,9 @@ YAML for the metric list and thresholds instead.
 
 Exit codes: 0 every variant passed, 1 a verdict failed, 2 invalid test /
 bad arguments, 3 infrastructure (the sim or probe never produced a score
-for any run), 130 interrupted.
+for any run), 130 interrupted. `suite` returns the worst code of its tests
+(3, then 2, then 1) and stops at the first infrastructure failure: if the sim
+won't start, the rest of the tier would only repeat that.
 
 Run from a CLEAN shell like everything else that launches the sim — the
 probe sources ROS in its own subshell (scripts/ros_bash.sh when present).
@@ -100,7 +104,7 @@ def cmd_list(_a) -> int:
         if r["status"] != "ready":
             log(f"! {r['name']:<22} INVALID  {r['error']}")
             continue
-        log(f"• {r['name']:<22} {r['runs']:>2} run(s)  {r['scenario']}"
+        log(f"• {r['name']:<22} {r['suite']:<10} {r['runs']:>2} run(s)  {r['scenario']}"
             f"{'/' + r['world'] if r.get('world') else ''}  {r['title']}")
     return 0
 
@@ -403,6 +407,54 @@ def cmd_run(a) -> int:
     return 0 if vd["_all"] else 1
 
 
+def suite_exit_code(codes: list[int]) -> int:
+    """One exit code for a tier from its tests' codes.
+
+    Ranked by what the operator must do next, not numerically: interrupted
+    wins (the run was cancelled, nothing else matters), then infrastructure
+    (3: fix the machine), then invalid (2: fix the test), then a failed
+    verdict (1: a real regression), else 0.
+    """
+    for code in (130, 3, 2, 1):
+        if code in codes:
+            return code
+    return 0
+
+
+def cmd_suite(a) -> int:
+    try:
+        names = spec.select_suites(a.suites)
+    except spec.SpecError as e:
+        log(f"INVALID: {e}")
+        return 2
+    if not names:
+        log(f"[simtest] no tests in suite(s) {a.suites}")
+        return 2   # a scheduled tier that selects nothing is a broken config, not a pass
+    if a.list:
+        for n in names:
+            log(n)
+        return 0
+    log(f"[simtest] suite {'+'.join(a.suites)}: {len(names)} test(s): {' '.join(names)}")
+    codes: dict[str, int] = {}
+    for n in names:
+        # One run's namespace per test; the suite's flags are the only ones it takes.
+        ns = argparse.Namespace(name=n, set=[], repeats=a.repeats, variant=None,
+                                dry_run=a.dry_run, force=a.force, keep=False, out=None)
+        codes[n] = cmd_run(ns)
+        log(f"[simtest] suite: {n} -> exit {codes[n]}")
+        if codes[n] in (3, 130):
+            log("[simtest] suite: stopping — " + ("interrupted" if codes[n] == 130 else
+                "infrastructure failure, the remaining tests would only repeat it"))
+            break
+    skipped = [n for n in names if n not in codes]
+    log("\n[simtest] suite summary")
+    for n in names:
+        log(f"  {n:<24} {'exit ' + str(codes[n]) if n in codes else 'not run'}")
+    if skipped:
+        return suite_exit_code(list(codes.values()) + [3])
+    return suite_exit_code(list(codes.values()))
+
+
 # ---------------------------------------------------------------- after the fact
 
 def cmd_rescore(a) -> int:
@@ -515,6 +567,15 @@ def main(argv=None) -> int:
                    help="leave the sim up after the LAST run, to look around")
     r.add_argument("--out", help="results dir (default data/simtests/<UTC>_<name>)")
     r.set_defaults(fn=cmd_run)
+    su = sub.add_parser("suite", help="run every test in one or more tiers, in order")
+    su.add_argument("suites", nargs="+", choices=spec.SUITES, metavar="SUITE",
+                    help="; ".join(spec.SUITES))
+    su.add_argument("--list", action="store_true", help="print the selected test names and exit")
+    su.add_argument("--repeats", type=int, help="override every selected test's repeats")
+    su.add_argument("--dry-run", action="store_true")
+    su.add_argument("--force", action="store_true",
+                    help="stop an already-running sim instead of refusing")
+    su.set_defaults(fn=cmd_suite)
     rs = sub.add_parser("rescore")
     rs.add_argument("dir")
     rs.add_argument("--current-spec", action="store_true",

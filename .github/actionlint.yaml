@@ -1,0 +1,3 @@
+self-hosted-runner:
+  labels:
+    - gpu-sim     # the GPU workstation runner for .github/workflows/sim.yml
