@@ -52,7 +52,7 @@ window.ROSLIB = {
 window.__navWps = [];
 window.__testPosts = []; window.__testResults = []; window.__sessionPosts = [];
 window.__testRun = { running: false, name: null, exit: null, elapsed_s: null, log: '', offset: 0 };
-window.__fakeSession = null;
+window.__fakeSession = null; window.__fakeRobots = null;
 const realFetch = window.fetch.bind(window);
 window.fetch = (url, opts) => {
   const u = String(url);
@@ -62,6 +62,7 @@ window.fetch = (url, opts) => {
     return json({ platform: window.__platform || 'sim', waypoints: window.__navWps });
   }
   if (u.startsWith('/api/session') && !u.startsWith('/api/session/') && window.__fakeSession) return json(window.__fakeSession);
+  if (u.startsWith('/api/robots') && window.__fakeRobots) return json({ default: window.__fakeRobots[0], robots: window.__fakeRobots });
   // Stop all's dialog: record, never stop anything real.
   if ((u.startsWith('/api/session/stop') || u.startsWith('/api/session/finish')) && opts && opts.method === 'POST') {
     window.__sessionPosts.push({ url: u, body: JSON.parse(opts.body || '{}') });
@@ -777,6 +778,19 @@ async function main() {
     await sleep(400);
     check(`${vp.label}: the bar is gone once the robots are up`, await page.eval(`document.getElementById('sp-boot').hidden`));
     check(`${vp.label}: once running, a short status replaces the bar`, /^Running · /.test(await page.eval(`document.getElementById('sp-status').textContent`)) && await page.eval(`!document.getElementById('sp-status').hidden`));
+
+    // -- a smaller run after a bigger one drops the robots it left out -----------------------------------------
+    const fleetRows = () => page.eval(`[...document.querySelectorAll('#fleet .robot')].map((e) => e.dataset.id).join(',')`);
+    await page.eval(`window.__fakeRobots = ${JSON.stringify([r0, r1, 'robot_2', 'robot_3'])}; window.__fakeSession = { ...window.__fakeSession, session_id: 's-four' }`);
+    await sleep(3400);
+    check(`${vp.label}: a four-robot run lists four robots`, (await fleetRows()).split(',').length === 4, await fleetRows());
+    await page.eval(`window.__fakeRobots = ${JSON.stringify([r0, r1])}; window.__fakeSession = { ...window.__fakeSession, session_id: 's-two' }`);
+    await sleep(3400);
+    await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+    await sleep(400);
+    check(`${vp.label}: the next two-robot run drops the other two`, (await fleetRows()) === `${r0},${r1}` && (await $text('#n-robots')) === '2 of 2 online', `${await fleetRows()} / ${await $text('#n-robots')}`);
+    check(`${vp.label}: ...so the boot bar isn't left waiting on them`, await page.eval(`document.getElementById('sp-boot').hidden`), await $text('#sp-boot .boot-label'));
+    await page.eval(`window.__fakeRobots = null`);
 
     // -- Stop all ends the sim: save or discard the map ----------------------------------------------------
     await page.eval(`window.__fakeSession = { ...window.__fakeSession, read_only: false, map_name: 'warehouse' }`);
