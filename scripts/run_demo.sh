@@ -20,7 +20,7 @@
 #                       [--scene nvidia]
 #                       [--no-headless] [--teleop] [--localize | --resume]
 #                       [--no-chase-cam | --chase-cam-robots N]
-#                       [--render-every N] [--lite-render]
+#                       [--render-every N] [--lite-render] [--half-res-cams]
 #                       [--map PATH] [--explore] [--world NAME] [--keep-console]
 #   scripts/run_demo.sh stop [--keep-console]   # tear the pipeline down
 #
@@ -122,7 +122,7 @@ PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz
                    map_merge.py static_transform_publisher \
                    fleet_radio.py fleet_tasks.py dynamic_obstacle_filter.py recon_cloud_merge.py \
                    depth_colorizer.py feature_overlay.py obstacle_detector.py \
-                   map_handoff.py sortbots_bringup.launch.py \
+                   map_handoff.py sortbots_bringup.launch.py mem_guard.py \
                    "spawn_warehouse.py")
 # Note scripts/save_map.sh --watch is deliberately absent from that list. Its
 # checkpoint loop has to OUTLIVE teardown: rtabmap gets pkill -9'd only 2 s
@@ -194,17 +194,19 @@ fi
 
 # ---- args ----
 # Teleop defaults OFF — the dashboard drive pad replaces the WASD window.
-# ROBOTS defaults to 2 — SortBots is a fleet project, so the bare demo comes up
+# ROBOTS defaults to 2 (configs/robots.yaml default_robots, kept in sync by
+# hand) — SortBots is a fleet project, so the bare demo comes up
 # as a collaborative fleet (fused /map, mesh radio). --robots 1 for single-robot.
 ROBOT_ID=robot_0; ROBOTS=2; ROBOT_IDS=""; SCENE=nvidia; HEADLESS="--headless"; TELEOP=0
 # Cosmetic 3rd-person cam = a second render product per robot. --no-chase-cam
 # drops all of them; --chase-cam-robots N keeps them on the first N robots
 # only (dashboard only shows robot_id's feed, so fleet runs usually want 1).
 CHASE_CAM_ARGS=""
-# Render-cost knobs, passed straight to spawn_warehouse.py. Both default off:
-# on a GPU-bound machine they're worth ~2x real-time factor together, on a
-# CPU-bound one much less — measure with scripts/bench_sim.sh before relying
-# on either (numbers in its header).
+# Render-cost knobs, passed straight to spawn_warehouse.py. All default off.
+# --render-every/--lite-render: on a GPU-bound machine they're worth ~2x
+# real-time factor together, on a CPU-bound one much less — measure with
+# scripts/bench_sim.sh before relying on either (numbers in its header).
+# --half-res-cams is for large fleets: see spawn_warehouse.py --help.
 RENDER_ARGS=""
 LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false; WORLD_ARGS=""
 while [[ $# -gt 0 ]]; do
@@ -219,6 +221,7 @@ while [[ $# -gt 0 ]]; do
     --chase-cam-robots) CHASE_CAM_ARGS="--chase-cam-robots $2"; shift 2;;
     --render-every) RENDER_ARGS+=" --render-every $2"; shift 2;;
     --lite-render)  RENDER_ARGS+=" --lite-render"; shift;;
+    --half-res-cams) RENDER_ARGS+=" --half-res-cams"; shift;;
     --teleop)    TELEOP=1; shift;;
     --no-teleop) TELEOP=0; shift;;  # accepted for back-compat (already the default)
     --localize) LOCALIZE=true; shift;;
@@ -318,6 +321,16 @@ setsid bash -c "source '$REPO_ROOT/scripts/activate_isaac.sh' >/dev/null 2>&1; \
        --robots $ROBOTS --scene $SCENE --drive cmd_vel $CHASE_CAM_ARGS $RENDER_ARGS $WORLD_ARGS" \
   >"$SIM_LOG" 2>&1 &
 SIM_PID=$!  # setsid execs (not a group leader here), then bash execs python
+
+# Memory guard: stops the whole run cleanly, with the reason on the dashboard,
+# before it hits the fence above. At MemoryMax the kernel OOM-kills one process
+# in the scope (Isaac or the biggest RTAB-Map) and the run limps on.
+# Started here, inside the fence, so it reads its own scope's budget;
+# setsid so it outlives this script, and it exits once the pipeline is gone.
+# SORTBOTS_NO_MEM_GUARD=1 skips it.
+if [[ "${SORTBOTS_NO_MEM_GUARD:-}" != "1" ]]; then
+  setsid /usr/bin/python3 "$REPO_ROOT/scripts/mem_guard.py" >/dev/null 2>&1 &
+fi
 
 echo "[run_demo] waiting for the warehouse to load"
 echo "           (first run streams assets from NVIDIA — can take a few minutes)..."

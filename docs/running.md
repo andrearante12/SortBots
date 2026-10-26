@@ -473,6 +473,63 @@ whatever `task_manager` is currently navigating — it's a manual override, same
 spirit as the drive-pad note above. Use the **Dispatch task** form for the
 queued pickup→dropoff workflow instead.
 
+## Fleet size: memory, CPU and the memory guard
+
+`configs/robots.yaml` places six robots. A run brings up the first `--robots N`,
+and the idle dashboard lists `default_robots` (2). `fleet_scale` is the scenario
+for more than two: robots wait for goals, render settings are tuned for the
+laptop, and `robots` is overridable. `configs/tests/fleet_scale_smoke.yaml` checks
+that four full stacks come up and drive.
+
+What a robot costs, measured 2026-10-24 with `scripts/mem_probe.py` on the RTX
+4070 laptop (30 GB RAM, 32 threads):
+
+| | RAM | grows? |
+|---|---|---|
+| Isaac + console, any fleet size | ~6.8 GB | no |
+| per robot: Nav2 (10 processes) + Python nodes (13) | ~1.2–1.5 GB | no |
+| per robot: RTAB-Map | ~0.3 GB at start | ~3.5 MB per sim-second while it maps new space; flat when idle or localizing |
+| per robot: head camera | ~0.2 GB GPU | no |
+
+RTAB-Map's growth used to be about 8 MB per sim-second, and that's what ran two
+exploring robots out of memory. Most of it was glibc malloc arenas, not map
+data. `launch/sortbots_rtabmap_robot.launch.py` now starts it with
+`MALLOC_ARENA_MAX=2`, and two exploring robots at sim t=300 s use 9.3 GB of the
+fence instead of 14.3 GB.
+
+The limit past four robots is CPU, not memory. Six full stacks fit in about 12 GB,
+but startup drove the load average past 150 on 32 threads. Nav2 lifecycle managers
+timed out, Isaac fell to ~0.25x, each camera delivered ~1 image/s wall-clock, and
+most robots' RTAB-Map never got a synchronized RGB/depth pair. The bringup
+staggers each robot's stack by `robot_stagger_s` (8 s), which softens the spike but
+doesn't remove it. `half_res_cams` (launch form, or a scenario key) renders the
+head cameras at 424x240. With four idle robots that took the sim from 0.40x to
+0.46x and the GPU from 48 % to 28 %.
+
+**Memory guard.** `run_demo.sh` fences the pipeline in a systemd scope
+(MemoryHigh = RAM − 14 GB, MemoryMax = RAM − 10 GB). Hitting the fence throttles
+the whole sim, then OOM-kills one process in it, usually Isaac. So `run_demo.sh`
+also starts `scripts/mem_guard.py` inside the fence. The guard stops the run
+cleanly (`run_demo.sh stop --keep-console`) when any of these holds for about
+15 s:
+
+- the fence's anonymous memory plus what it swapped out passes 97 % of MemoryHigh
+- the machine's MemAvailable drops under max(3 GB, 10 % of RAM)
+- memory pressure stalls everything (PSI full > 30 %)
+
+It writes the reason to `/tmp/sortbots_mem_guard.json`, and the dashboard shows it
+as the session's error. `scripts/mem_guard.py --check` takes one reading. Use
+`SORTBOTS_NO_MEM_GUARD=1` to run without the guard and
+`SORTBOTS_SIM_MEM_HIGH`/`_MAX` to resize the fence.
+
+To see where a run's memory goes:
+
+```bash
+scripts/mem_probe.py record --out data/memprobe/NAME &   # exits with the pipeline
+scripts/sim_ctl.sh start fleet_scale robots=4 ...
+scripts/mem_probe.py summarize data/memprobe/NAME       # per robot/role, MB per sim-minute
+```
+
 ## Autonomous exploration
 
 Module overview (frontiers, mesh intent/status, Nav2 handoff):

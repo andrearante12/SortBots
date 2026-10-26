@@ -1,0 +1,50 @@
+# A test case (simtest/spec.py has the schema; docs/testing.md the how-to).
+#
+# Four full robot stacks up at once, each driving one short leg. The check to
+# run after touching anything per-robot (the roster, the bringup, a launch
+# file), and before trusting a multi-robot comms test: if one robot's SLAM or
+# Nav2 never came up, its goal fails here, by name.
+
+name: fleet_scale_smoke
+title: Fleet smoke — four robots, one short goal each
+description: >
+  robot_0..robot_3 from their configs/robots.yaml spawns, each sent ~1.5 m
+  into known-free floor (an aisle or the open apron). Pass = every goal
+  reached and ground truth flowing. The legs don't cross, so no avoidance is
+  asked of anyone.
+
+scenario: fleet_scale
+overrides:
+  robots: 4
+
+warmup_s: 2
+
+goals:
+  - robot: robot_0
+    pose: [-7.15, 10.0, -1.5708]   # south down its aisle (pipeline_smoke's leg)
+    timeout_s: 90
+  - robot: robot_1
+    pose: [1.23, 12.2, -1.5708]    # south down its aisle
+    timeout_s: 90
+  - robot: robot_2
+    pose: [-7.5, 4.0, 0.0]         # east across the open apron
+    timeout_s: 90
+  - robot: robot_3
+    pose: [2.0, 20.5, -1.5708]     # south, toward robot_1's end of the aisle
+    timeout_s: 90
+
+stop:
+  sim_s: 150
+  until: [goals_done]
+  settle_s: 1
+
+metrics:
+  - metric: goals
+    pass:
+      success_rate: {gte: 1.0}
+  - metric: run_stats
+    pass:
+      gt_hz: {gte: 5}
+
+repeats: 1
+pass_rate: 1.0
