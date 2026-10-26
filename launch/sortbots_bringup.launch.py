@@ -441,8 +441,11 @@ def _make_per_robot_actions(
             os.path.join(REPO_ROOT, "nodes", "map_merge.py"),
             "--robot-ids", ",".join(robot_ids),
             # Every spawn stays inside /map even before its robot maps
-            # anything — see spawn_margin_m in configs/map_merge.yaml.
-            "--keep-in", ";".join(
+            # anything — see spawn_margin_m in configs/map_merge.yaml. One
+            # `--keep-in=` token: as a separate argument, a negative first x
+            # ("-7.15,...") parses as an option and map_merge exits at
+            # startup, leaving every costmap without a map (2026-10-25).
+            "--keep-in=" + ";".join(
                 f"{x},{y}" for x, y, _ in (_spawn_pose(scene, rid) for rid in robot_ids)),
             # Required, not cosmetic: this node rebroadcasts a TF edge onto
             # /tf (see its own _tick()), so its clock must agree with the
