@@ -327,6 +327,46 @@ explorer) per robot, with the per-robot grids fused into one `/map`. The
 `explore_fresh` / `explore_resume` / `library_*` scenarios are the
 single-robot variants. See "Multi-robot" below.
 
+
+### Keeping the console up (so the site is always there)
+
+The console alone costs no GPU (about 2% of a core, 180 MB): only a running sim holds the GPU.
+To keep it up across logouts and reboots on this machine, so anyone on the tailnet can open the
+operator view and start and stop sims from the Session panel without a terminal:
+
+```bash
+scripts/console_service.sh install     # systemd USER service; no sudo
+scripts/console_service.sh status
+scripts/console_service.sh uninstall
+```
+
+It runs as you, from this checkout, and changes nothing outside `~/.config/systemd/user/`. Other
+machines and the Jetson are untouched unless someone runs it there. It serves whatever branch is
+checked out here (`systemctl --user restart sortbots-console` after switching). Stopping the
+service also stops a running sim, which lives in its own systemd scope. To run at boot without
+anyone logged in, it needs linger: `install` tries `loginctl enable-linger`; if polkit refuses
+(remote or non-interactive shells), run that once yourself.
+
+**Hosting `main` (prod).** `install` serves the shared checkout, so a teammate's `git checkout`
+changes the site. `scripts/console_service.sh deploy` instead keeps a worktree of `main` at
+`~/SortBots-prod` (`SORTBOTS_PROD_DIR`), points the service at it, and installs a 5-minute timer
+that fast-forwards it. It restarts the console only when `main` moved and no sim is running
+(a restart stops a live sim), so a merge goes live within minutes of the sim ending. Run it once,
+from a checkout that has this script on `main`.
+
+**Public URL.** The site is published with Tailscale Funnel, which needs no login and works off any
+network. Funnel only exposes 443, 8443 and 10000, so the page's rosbridge and video connections
+use `wss://HOST:8443` and `https://HOST:10000` when served over https (`operator.js`):
+
+```bash
+tailscale funnel --bg --https=443 8081     # operator view
+tailscale funnel --bg --https=8443 9090    # rosbridge
+tailscale funnel --bg --https=10000 8080   # web_video_server
+tailscale funnel reset                     # off
+```
+
+There is no authentication, and rosbridge can publish to any topic. Treat the URL as a secret.
+
 ### Unified ROS-2 bringup on its own
 
 If Isaac Sim is already running (e.g. you launched `scripts/spawn_warehouse.py`

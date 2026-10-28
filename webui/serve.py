@@ -32,7 +32,10 @@ SECURITY: this server binds 0.0.0.0 and is reachable from any tailnet device,
 so --control is a remote process launcher. Containment lives in
 webui/session.py — scenario names resolve by allowlist, every argv element
 comes from a fixed typed table, and Popen is always called with a list.
-Tailscale ACLs are the actual perimeter; there is no authentication here.
+There is no authentication here. Since 2026-10-28 the console is also published
+to the public internet via Tailscale Funnel (443 -> this, 8443 -> rosbridge,
+10000 -> web_video_server; docs/running.md), so the perimeter is the obscurity of
+the URL, not Tailscale ACLs. Turn it off with `tailscale funnel reset`.
 """
 from __future__ import annotations
 
@@ -83,6 +86,28 @@ COMMSIM_OPS = {"move", "obstacle", "link", "node", "send", "range", "layout", "g
                "speed", "pause", "reset"}
 _HUB = None
 _HUB_LOCK = threading.Lock()
+
+
+def _git(*args: str) -> str:
+    import subprocess
+    try:
+        return subprocess.run(["git", "-C", str(WEBUI_DIR.parent), *args], capture_output=True,
+                              text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _git_state() -> dict:
+    return {"branch": _git("rev-parse", "--abbrev-ref", "HEAD") or None,
+            "commit": _git("rev-parse", "--short", "HEAD") or None,
+            # Tracked files only: untracked local maps/ etc. aren't "changes to the code".
+            "dirty": bool(_git("status", "--porcelain", "--untracked-files=no"))}
+
+
+# What this process was started from. The page's HTML/JS are read from disk on every
+# request, but this file, session.py and the comms model were imported at startup, so
+# a branch switch since then is only half live until the console restarts.
+_STARTED = _git_state()
 
 
 def _commsim_hub():
@@ -192,6 +217,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_splat_config()
         elif route == "/api/comms_gateway":
             self._serve_json(_load_comms_gateway())
+        elif route == "/api/version":
+            now = _git_state()
+            self._serve_json({**now, "started": _STARTED,
+                              "restart_needed": now["commit"] != _STARTED["commit"]})
         elif route == "/api/commsim/events":
             self._serve_commsim_events()
         elif route == "/api/session":

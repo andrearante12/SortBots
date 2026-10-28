@@ -21,8 +21,12 @@
   "use strict";
 
   const HOST = window.location.hostname || "localhost";
-  const ROSBRIDGE_PORT = 9090;
-  const VIDEO_PORT = 8080;
+  // Over https (Tailscale Funnel, 2026-10-28) the browser forbids ws:// and http://
+  // sub-requests (mixed content), and Funnel only exposes 443/8443/10000, so the
+  // funnel maps 8443 -> rosbridge 9090 and 10000 -> web_video_server 8080.
+  const SECURE = window.location.protocol === "https:";
+  const ROSBRIDGE_URL = SECURE ? `wss://${HOST}:8443` : `ws://${HOST}:9090`;
+  const VIDEO_BASE = SECURE ? `https://${HOST}:10000` : `http://${HOST}:8080`;
   // A robot whose base_link transform hasn't updated for this long is "not responding".
   const ONLINE_TTL_MS = 5000;
   // explore_status / task_status are heartbeats; silence means the node is gone.
@@ -62,11 +66,11 @@
 
   // -- rosbridge --------------------------------------------------------------
 
-  const ros = new ROSLIB.Ros({ url: `ws://${HOST}:${ROSBRIDGE_PORT}` });
+  const ros = new ROSLIB.Ros({ url: ROSBRIDGE_URL });
   ros.on("connection", () => { $("#link-down").hidden = true; });
   ros.on("close", () => {
     $("#link-down").hidden = false;
-    setTimeout(() => ros.connect(`ws://${HOST}:${ROSBRIDGE_PORT}`), 2000);
+    setTimeout(() => ros.connect(ROSBRIDGE_URL), 2000);
   });
   ros.on("error", (e) => { $("#link-down").hidden = false; console.error("rosbridge error", e); });
 
@@ -1028,7 +1032,7 @@
         c.msg.textContent = `No ${label} feed`;
         c.timer = setTimeout(tick, 3000);
       };
-      probe.src = `http://${HOST}:${VIDEO_PORT}/snapshot?topic=/${id}/${CAM_TOPIC[c.mode]}&qos_profile=sensor_data&_=${Date.now()}`;
+      probe.src = `${VIDEO_BASE}/snapshot?topic=/${id}/${CAM_TOPIC[c.mode]}&qos_profile=sensor_data&_=${Date.now()}`;
     };
     c.pic.style.backgroundImage = ""; c.msg.textContent = `Connecting to ${label}…`;
     tick();
@@ -1132,6 +1136,28 @@
     const r = robots.get(id);
     const exploring = r && r.explore && r.explore.state === "exploring" && performance.now() - r.exploreAt < EXPLORE_TTL_MS;
     publishString(`/${id}/explore_cmd`, exploring ? "stop" : "start");
+  }
+
+  // -- which branch is served (serve.py /api/version) --------------------------------------------
+  // The site is whatever is checked out on the host (scripts/console_service.sh keeps it up),
+  // so a teammate switching branches there changes what everyone sees. Show it. Amber when
+  // the console's server code predates the checkout: page files are live, Python isn't.
+  async function loadVersion() {
+    let v;
+    try { const r = await fetch("/api/version"); if (!r.ok) return; v = await r.json(); } catch (e) { return; }
+    const el = $("#build");
+    if (!v.branch) { el.hidden = true; return; }
+    el.hidden = false;
+    // Last path part only (andre/sim-view -> sim-view): the header has no room for more,
+    // and the tooltip carries the full name.
+    el.textContent = `\u2387 ${v.branch.split("/").pop()}${v.dirty ? " *" : ""}`;
+    el.classList.toggle("stale", !!v.restart_needed);
+    const lines = [`Branch ${v.branch} @ ${v.commit}${v.dirty ? ", with uncommitted changes" : ""}`];
+    if (v.restart_needed) {
+      lines.push(`The console was started on ${v.started.branch} @ ${v.started.commit}: the page is current, the server code isn't.`,
+                 "Restart it to catch up: systemctl --user restart sortbots-console");
+    } else lines.push("This is what the site is running.");
+    el.title = lines.join("\n");
   }
 
   // -- gateway pin (comms overlay) -------------------------------------------------------------------
@@ -1828,7 +1854,7 @@
       probe.onload = () => { if (token !== simView.token) return; pic.style.backgroundImage = `url(${probe.src})`; msg.textContent = ""; simView.timer = setTimeout(tick, 250); };
       // The first frames take a moment: the render product is created on the first beat.
       probe.onerror = () => { if (token !== simView.token) return; if (!pic.style.backgroundImage) msg.textContent = "Starting the sim camera…"; simView.timer = setTimeout(tick, 1500); };
-      probe.src = `http://${HOST}:${VIDEO_PORT}/snapshot?topic=/sim/view/rgb&qos_profile=sensor_data&_=${Date.now()}`;
+      probe.src = `${VIDEO_BASE}/snapshot?topic=/sim/view/rgb&qos_profile=sensor_data&_=${Date.now()}`;
     };
     tick();
   }
@@ -2052,14 +2078,15 @@
 
   // -- boot ----------------------------------------------------------------------------------------------------------------------
   applyTheme(); resize(); setTool("select"); renderTasks(); renderWaypoints();
-  refreshRoster(); loadWaypoints(); loadGateway(); pollSession();
+  refreshRoster(); loadWaypoints(); loadGateway(); pollSession(); loadVersion();
   // "sim" waits for loadWaypoints to learn the platform (it's sim-only), see there.
   try { const v = localStorage.getItem("sortbots.mapView"); if (v === "3d") setView("3d"); } catch (e) { /* default: 2D */ }
   setInterval(loadWaypoints, 10000); // another operator may have added pins
   setInterval(loadGateway, 10000);
+  setInterval(loadVersion, 30000); // someone may switch branches on the host
   try { if (localStorage.getItem("sortbots.comms") === "on") $("#comms-toggle").click(); } catch (e) { /* default: off */ }
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane, setView, get stageView() { return stageView; }, simCam };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane, setView, get stageView() { return stageView; }, simCam, loadVersion };
 })();

@@ -62,6 +62,7 @@ window.fetch = (url, opts) => {
     return json({ platform: window.__platform || 'sim', waypoints: window.__navWps });
   }
   if (u.startsWith('/api/session') && !u.startsWith('/api/session/') && window.__fakeSession) return json(window.__fakeSession);
+  if (u.startsWith('/api/version') && window.__fakeVersion) return json(window.__fakeVersion);
   if (u.startsWith('/api/robots') && window.__fakeRobots) return json({ default: window.__fakeRobots[0], robots: window.__fakeRobots });
   // Stop all's dialog: record, never stop anything real.
   if ((u.startsWith('/api/session/stop') || u.startsWith('/api/session/finish')) && opts && opts.method === 'POST') {
@@ -405,7 +406,14 @@ async function main() {
     await click('#tp-list .tp-test[data-name="crossing_yield"] .tp-row .t');
     await sleep(100);
     const more = await $text('#tp-list .tp-test[data-name="crossing_yield"] .tp-more');
-    check(`${vp.label}: clicking a row shows what it checks`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Passes when/.test(more) && /recall ≥ 0.3/.test(more), more.slice(0, 160));
+    // crossing_yield localizes on the fleet_warehouse_test library map, which is local
+    // to the machines that recorded it (not in git, docs/testing.md). Without it the
+    // row must say why it can't run, not what it checks; both are the page working.
+    if (fs.existsSync(path.join(REPO_ROOT, 'maps', 'fleet_warehouse_test', 'map.json'))) {
+      check(`${vp.label}: clicking a row shows what it checks`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Passes when/.test(more) && /recall ≥ 0.3/.test(more), more.slice(0, 160));
+    } else {
+      check(`${vp.label}: clicking a row whose map is missing says why it can't run`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Can't run here/.test(more) && /fleet_warehouse_test/.test(more), more.slice(0, 160));
+    }
     await click('#tp-list .tp-test[data-name="pipeline_smoke"] .tp-row .t');
     await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"]'); c.querySelector('[data-repeats]').value = '2'; c.querySelector('[data-run]').click(); })()`);
     await sleep(400);
@@ -1075,6 +1083,18 @@ async function main() {
   await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'w' }))`);
   await shot('drive-pad');
   await page.eval(`window.__operator.select(null)`);
+
+  // -- which branch the site is serving -------------------------------------------------------------
+  console.log('\n--- branch chip ---');
+  const { execSync } = await import('node:child_process');
+  const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: REPO_ROOT }).toString().trim();
+  await waitFor(async () => /\S/.test(await $text('#build')), { what: 'the branch chip', tries: 20 });
+  check('branch: the header says which branch the site serves', (await visible('#build')) && (await $text('#build')).includes(branch.split('/').pop()) && (await page.eval(`document.getElementById('build').title`)).includes(branch), `${await $text('#build')} vs ${branch}`);
+  await page.eval(`window.__fakeVersion = { branch: 'main', commit: 'bbbbbbb', dirty: false, started: { branch: 'old', commit: 'aaaaaaa', dirty: false }, restart_needed: true }; window.__operator.loadVersion()`);
+  await sleep(200);
+  check('branch: amber, with the restart command, when the server code is older than the checkout',
+        await page.eval(`document.getElementById('build').classList.contains('stale') && /systemctl --user restart sortbots-console/.test(document.getElementById('build').title)`));
+  await page.eval(`window.__fakeVersion = null; window.__operator.loadVersion()`); await sleep(200);
 
   // -- phones ---------------------------------------------------------------------------------------
   console.log('\n--- phone ---');
