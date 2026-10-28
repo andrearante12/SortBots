@@ -129,6 +129,13 @@ case "${1:-}" in
     # ff-only: a prod checkout with local commits is a mistake to surface, not paper over.
     git -C "$PROD_DIR" merge -q --ff-only origin/main || { echo "[deploy] $PROD_DIR can't fast-forward to origin/main"; exit 1; }
     after="$(git -C "$PROD_DIR" rev-parse HEAD)"
+    # A fresh worktree has no submodules; without third_party/XLeRobot Isaac dies at
+    # "URDF not found" (2026-10-28). --reference reuses the shared checkout's clone.
+    if [[ -d "$REPO_ROOT/.git/modules/third_party/XLeRobot" ]]; then
+      git -C "$PROD_DIR" submodule update -q --init --reference "$REPO_ROOT/.git/modules/third_party/XLeRobot" || echo "[deploy] submodule update failed"
+    else
+      git -C "$PROD_DIR" submodule update -q --init || echo "[deploy] submodule update failed"
+    fi
     if [[ ! -x "$PROD_DIR/scripts/console_service.sh" ]]; then
       echo "[deploy] main has no console_service.sh yet: merge the console-service PR first"; exit 1
     fi
