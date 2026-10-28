@@ -377,6 +377,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--half-res-cams",
+        action="store_true",
+        help=(
+            "Render every robot camera at 424x240 instead of the D435's "
+            "848x480: a quarter of the pixels to render, read back and "
+            "publish per camera. For larger fleets. Four idle robots on the "
+            "RTX 4070 laptop (render_every 2, lite_render): 0.40x -> 0.46x "
+            "real time, GPU 48%% -> 28%% (2026-10-24). It does not make six "
+            "full robots fit that machine: there the CPU is the limit, and "
+            "each camera got ~1 image/s wall-clock either way. Intrinsics "
+            "follow from the prim's focal length and aperture, so camera_info "
+            "stays consistent; SLAM gets fewer features per frame."
+        ),
+    )
+    p.add_argument(
         "--world",
         default=None,
         metavar="NAME",
@@ -1565,6 +1580,8 @@ def main() -> int:
     emit(f"  lite_render={args.lite_render}")
 
     d435, mpu = _load_sensor_configs()
+    if args.half_res_cams:
+        d435 = dict(d435, width=d435["width"] // 2, height=d435["height"] // 2)
     emit(f"  d435: {d435['width']}x{d435['height']}@{d435['fps']}Hz")
     emit(f"  mpu6050: {mpu['publish_rate_hz']}Hz publish, mount={mpu['mount_offset_m']}")
 

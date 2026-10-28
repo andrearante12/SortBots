@@ -478,6 +478,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             # — same derivation as run_demo.sh: explicit robot_ids, else the
             # first --robots N of the roster, in roster order.
             live = _session_robot_ids(ids)
+            # With no session, the fleet a run brings up when it doesn't say
+            # (run_demo.sh --robots default), not every robot the roster can
+            # place: the roster grew past the usual fleet for scale and comms
+            # tests (2026-10-24), and an idle page listing six robots, four of
+            # them never started, reads as four dead robots.
+            if not live and PLATFORM != "real":
+                live = ids[:int(raw.get("default_robots") or len(ids))]
             data = {
                 "default": raw["default"],
                 "robots": live or ids,

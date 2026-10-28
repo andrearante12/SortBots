@@ -131,7 +131,7 @@ fi
 echo "[run_console] starting rosbridge + web_video_server..."
 setsid "$ROS_BASH" -c "source '$ROS_SETUP'; \
   export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
-  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
+  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_webui.launch.py' \
        serve:=false dashboard_port:=$PORT" \
   >"$CONSOLE_LOG" 2>&1 &

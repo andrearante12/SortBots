@@ -28,6 +28,7 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchD
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
+    EnvironmentVariable,
     LaunchConfiguration,
     PathJoinSubstitution,
     PythonExpression,
@@ -179,9 +180,28 @@ def generate_launch_description():
     # 170-220 ms when RTAB-Map shared an unpinned CPU budget with them.
     # Real robot mapping on itself only — sim has a whole desktop to spare,
     # and a workstation running slam_role:=workstation has nothing to yield to.
+    #
+    # And every RTAB-Map runs with glibc capped at a few malloc arenas. It
+    # runs ~950 threads, and by default glibc gives each thread that contends
+    # on the heap its own arena (up to 8 per core, 256 here), each holding its
+    # own freed-but-unreturned memory. Measured 2026-10-24 with scripts/
+    # mem_probe.py, two robots exploring to sim t=300 s (explore_fleet): 3.4
+    # and 4.2 GB RSS by default, 1.25 and 1.3 GB with MALLOC_ARENA_MAX=2, from
+    # the same ~293 map nodes. The pipeline's peak fell from 14.3 to 9.3 GB of
+    # its 16 GB fence. Median time per update was 270/307 ms against 289/322,
+    # so no slower. Most of what looked like a 7 MB-per-node map was the
+    # allocator, and it's what ran two exploring robots out of memory in ~30
+    # min (configs/scenarios/fleet_demo.yaml).
+    # SORTBOTS_RTABMAP_MALLOC_ARENAS overrides it; 0 means the glibc default.
     slam_prefix = PythonExpression([
+        "' '.join(p for p in (",
+        "'env MALLOC_ARENA_MAX=' + '", EnvironmentVariable("SORTBOTS_RTABMAP_MALLOC_ARENAS",
+                                                           default_value="2"),
+        "' if '", EnvironmentVariable("SORTBOTS_RTABMAP_MALLOC_ARENAS", default_value="2"),
+        "' not in ('', '0') else '', ",
         "'nice -n 10' if '", camera_odometry, "'.lower() in ('true', '1') and '",
-        slam_role, "' == 'all' else ''",
+        slam_role, "' == 'all' else '',",
+        ") if p)",
     ])
 
     # RTAB-Map takes --delete_db_on_start as a flag inside `args`, so it can't

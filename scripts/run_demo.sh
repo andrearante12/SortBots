@@ -20,7 +20,7 @@
 #                       [--scene nvidia]
 #                       [--no-headless] [--teleop] [--localize | --resume]
 #                       [--no-chase-cam | --chase-cam-robots N]
-#                       [--render-every N] [--lite-render]
+#                       [--render-every N] [--lite-render] [--half-res-cams]
 #                       [--map PATH] [--explore] [--world NAME] [--keep-console]
 #   scripts/run_demo.sh stop [--keep-console]   # tear the pipeline down
 #
@@ -122,7 +122,7 @@ PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz
                    map_merge.py static_transform_publisher \
                    fleet_radio.py fleet_tasks.py dynamic_obstacle_filter.py recon_cloud_merge.py \
                    depth_colorizer.py feature_overlay.py obstacle_detector.py \
-                   map_handoff.py sortbots_bringup.launch.py \
+                   map_handoff.py sortbots_bringup.launch.py mem_guard.py \
                    "spawn_warehouse.py")
 # Note scripts/save_map.sh --watch is deliberately absent from that list. Its
 # checkpoint loop has to OUTLIVE teardown: rtabmap gets pkill -9'd only 2 s
@@ -194,17 +194,19 @@ fi
 
 # ---- args ----
 # Teleop defaults OFF — the dashboard drive pad replaces the WASD window.
-# ROBOTS defaults to 2 — SortBots is a fleet project, so the bare demo comes up
+# ROBOTS defaults to 2 (configs/robots.yaml default_robots, kept in sync by
+# hand) — SortBots is a fleet project, so the bare demo comes up
 # as a collaborative fleet (fused /map, mesh radio). --robots 1 for single-robot.
 ROBOT_ID=robot_0; ROBOTS=2; ROBOT_IDS=""; SCENE=nvidia; HEADLESS="--headless"; TELEOP=0
 # Cosmetic 3rd-person cam = a second render product per robot. --no-chase-cam
 # drops all of them; --chase-cam-robots N keeps them on the first N robots
 # only (dashboard only shows robot_id's feed, so fleet runs usually want 1).
 CHASE_CAM_ARGS=""
-# Render-cost knobs, passed straight to spawn_warehouse.py. Both default off:
-# on a GPU-bound machine they're worth ~2x real-time factor together, on a
-# CPU-bound one much less — measure with scripts/bench_sim.sh before relying
-# on either (numbers in its header).
+# Render-cost knobs, passed straight to spawn_warehouse.py. All default off.
+# --render-every/--lite-render: on a GPU-bound machine they're worth ~2x
+# real-time factor together, on a CPU-bound one much less — measure with
+# scripts/bench_sim.sh before relying on either (numbers in its header).
+# --half-res-cams is for large fleets: see spawn_warehouse.py --help.
 RENDER_ARGS=""
 LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false; WORLD_ARGS=""
 while [[ $# -gt 0 ]]; do
@@ -219,6 +221,7 @@ while [[ $# -gt 0 ]]; do
     --chase-cam-robots) CHASE_CAM_ARGS="--chase-cam-robots $2"; shift 2;;
     --render-every) RENDER_ARGS+=" --render-every $2"; shift 2;;
     --lite-render)  RENDER_ARGS+=" --lite-render"; shift;;
+    --half-res-cams) RENDER_ARGS+=" --half-res-cams"; shift;;
     --teleop)    TELEOP=1; shift;;
     --no-teleop) TELEOP=0; shift;;  # accepted for back-compat (already the default)
     --localize) LOCALIZE=true; shift;;
@@ -257,6 +260,15 @@ with open('$REPO_ROOT/configs/robots.yaml') as f:
 ids = [r['id'] for r in roster['robots']][:$ROBOTS]
 print(','.join(ids))
 ")
+fi
+# An empty list here doesn't fail anywhere useful: Isaac still starts, then
+# `ros2 launch` dies on "malformed launch argument 'robot_ids:='" into the
+# bringup log while the session reports running with no ROS stack at all.
+# Seen once on 2026-10-06 (not reproducible after); fail loudly instead.
+if [[ -z "$ROBOT_IDS" ]]; then
+  echo "ERROR: could not derive --robot-ids from configs/robots.yaml (robots=$ROBOTS);"
+  echo "       python3 is $(command -v python3). Pass --robot-ids explicitly to bypass."
+  exit 1
 fi
 
 # Working DB + copy-on-use for maps/ library entries — shared with
@@ -310,6 +322,16 @@ setsid bash -c "source '$REPO_ROOT/scripts/activate_isaac.sh' >/dev/null 2>&1; \
   >"$SIM_LOG" 2>&1 &
 SIM_PID=$!  # setsid execs (not a group leader here), then bash execs python
 
+# Memory guard: stops the whole run cleanly, with the reason on the dashboard,
+# before it hits the fence above. At MemoryMax the kernel OOM-kills one process
+# in the scope (Isaac or the biggest RTAB-Map) and the run limps on.
+# Started here, inside the fence, so it reads its own scope's budget;
+# setsid so it outlives this script, and it exits once the pipeline is gone.
+# SORTBOTS_NO_MEM_GUARD=1 skips it.
+if [[ "${SORTBOTS_NO_MEM_GUARD:-}" != "1" ]]; then
+  setsid /usr/bin/python3 "$REPO_ROOT/scripts/mem_guard.py" >/dev/null 2>&1 &
+fi
+
 echo "[run_demo] waiting for the warehouse to load"
 echo "           (first run streams assets from NVIDIA — can take a few minutes)..."
 READY=0
@@ -358,7 +380,7 @@ echo "[run_demo] launching RTAB-Map + Nav2 + web dashboard + task manager..."
 WEBUI=true; [[ "$KEEP_CONSOLE" == "true" ]] && WEBUI=false
 setsid "$ROS_BASH" -c "source '$ROS_SETUP'; \
   export PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin':\"\$PATH\"; \
-  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
+  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
        robot_id:=$ROBOT_ID robot_ids:=$ROBOT_IDS scene:=$SCENE \
        use_sim_time:=true rviz:=false \
@@ -367,7 +389,17 @@ setsid "$ROS_BASH" -c "source '$ROS_SETUP'; \
        delete_db_on_start:=$DELETE_DB_ON_START shared_map:=$SHARED_MAP \
        explore:=true explore_autostart:=$EXPLORE" \
   >"$BRINGUP_LOG" 2>&1 &
+BRINGUP_PID=$!  # setsid execs, as for SIM_PID; ros_bash.sh stays up as long as the launch does
 sleep 12
+# The sleep alone used to be the whole check, so a bringup that died in its
+# first seconds (bad launch argument, missing package) still printed "up" and
+# the dashboard sat at `running` with nothing behind it (2026-10-06).
+if ! kill -0 "$BRINGUP_PID" 2>/dev/null; then
+  echo "ERROR: the ROS 2 bringup exited during startup. Tail of $BRINGUP_LOG:"
+  tail -n 15 "$BRINGUP_LOG" | sed 's/^/    /'
+  stop_pipeline
+  exit 1
+fi
 echo "[run_demo] ROS 2 stack up (see $BRINGUP_LOG)."
 
 # Echo the dashboard URL to this console too (the launch prints it into the
@@ -377,7 +409,7 @@ python3 "$REPO_ROOT/scripts/webui_url.py" --port "$DASHBOARD_PORT" 2>/dev/null |
 
 # ---- 3. WASD teleop (its own terminal window) ----
 TELEOP_CMD="source '$ROS_SETUP'; \
-  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; \
+  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}; \
   python3 '$REPO_ROOT/scripts/wasd_teleop.py' --robot-id $ROBOT_ID"
 if [[ $TELEOP -eq 1 ]]; then
   if command -v gnome-terminal >/dev/null 2>&1; then

@@ -111,7 +111,7 @@
   const SEGMENTS = { scene: $("lf-scene"), mode: $("lf-mode"), waypoints: $("lf-waypoints") };
   // Only the checkboxes this page carries: operator.html has its own copy of
   // this form, and a field it lacks must not take the whole form down.
-  const CHECKS = ["explore", "headless", "chase_cam", "teleop", "bag", "lite_render"]
+  const CHECKS = ["explore", "headless", "chase_cam", "teleop", "bag", "lite_render", "half_res_cams"]
     .filter((k) => $(`lf-${k}`));
   const CFG_KEY = "sortbots.launchConfig";
 
@@ -189,7 +189,8 @@
     for (const el of formEl.querySelectorAll("[data-field]")) {
       el.hidden = !fields.has(el.dataset.field);
     }
-    $("lf-advanced").hidden = !["headless", "chase_cam", "teleop", "bag", "waypoints", "render_every", "lite_render"]
+    $("lf-advanced").hidden = !["headless", "chase_cam", "teleop", "bag", "waypoints", "render_every", "lite_render",
+                                "half_res_cams"]
       .some((f) => fields.has(f));
   }
 

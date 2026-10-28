@@ -93,6 +93,36 @@ def test_prev_info_grows_the_output_but_never_shrinks_it():
     assert out_info.width >= 20 and out_info.height >= 20
 
 
+def test_keep_in_points_pad_the_grid_with_unknown_around_an_unmapped_spawn():
+    # A robot spawned off the edge of a saved map (2026-10-25: robot_1 at
+    # x=1.2 on a map ending at x=-2.4) must still be inside /map, or Nav2's
+    # global costmap rejects every plan from its start pose.
+    data = np.zeros((4, 4), dtype=np.int8)
+    info = GridInfo(resolution=1.0, origin_x=0.0, origin_y=0.0, width=4, height=4)
+
+    fused, out_info = fuse_grids(
+        [(data, info, IDENTITY)], resolution=1.0, keep_in=[(10.0, 2.0)], margin=3.0
+    )
+
+    assert (out_info.origin_x, out_info.origin_y) == (0.0, -1.0)
+    assert out_info.origin_x + out_info.width >= 13.0
+    assert out_info.origin_y + out_info.height >= 5.0
+    # The source's cells are unchanged; the padding is unknown, not free.
+    assert (fused[1:5, 0:4] == 0).all()
+    assert (fused[:, 4:] == -1).all()
+
+
+def test_keep_in_inside_the_map_changes_nothing():
+    data = np.zeros((10, 10), dtype=np.int8)
+    info = GridInfo(resolution=1.0, origin_x=0.0, origin_y=0.0, width=10, height=10)
+
+    _, out_info = fuse_grids(
+        [(data, info, IDENTITY)], resolution=1.0, keep_in=[(5.0, 5.0)], margin=3.0
+    )
+
+    assert (out_info.origin_x, out_info.origin_y, out_info.width, out_info.height) == (0.0, 0.0, 10, 10)
+
+
 def test_ninety_degree_yaw_rotates_the_source_into_the_output_frame():
     # A 1x3 strip along the source's local +x, with the far cell occupied.
     # Under a +90deg yaw, local +x maps to output +y — verify the occupied

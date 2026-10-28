@@ -109,13 +109,15 @@ def test_render_cost_knobs(lib):
     # Stock values must add no flag, so every pre-existing run's logged argv
     # stays byte-identical; set, they reach run_demo.sh and survive the
     # preset round trip. Sim-only: the robot has no renderer.
-    assert not {"--render-every", "--lite-render"} & set(_flags(sm.config_to_run({})))
-    run = sm.config_to_run({"render_every": 2, "lite_render": True})
+    assert not {"--render-every", "--lite-render", "--half-res-cams"} & set(
+        _flags(sm.config_to_run({})))
+    run = sm.config_to_run({"render_every": 2, "lite_render": True, "half_res_cams": True})
     flags = _flags(run)
     assert flags[flags.index("--render-every") + 1] == "2" and "--lite-render" in flags
+    assert "--half-res-cams" in flags
     cfg = sm.run_to_config(run)["config"]
-    assert (cfg["render_every"], cfg["lite_render"]) == (2, True)
-    assert "render every 2 · lite render" in sm.describe_config(cfg)
+    assert (cfg["render_every"], cfg["lite_render"], cfg["half_res_cams"]) == (2, True, True)
+    assert "render every 2 · lite render · half-res cameras" in sm.describe_config(cfg)
     with pytest.raises(sm.ScenarioError, match="platform 'real'"):
         sm.config_to_run({"lite_render": True}, "real")
 

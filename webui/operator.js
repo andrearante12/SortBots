@@ -504,13 +504,15 @@
       id, color: COLORS[robots.size % COLORS.length], pose: null, linkAt: -Infinity, plan: [],
       explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity, queueDepth: 0,
       nav: null, seenStamp: {}, odom: null, odomAt: -Infinity,
-      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [],
+      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [],
     };
     robots.set(id, r);
+    // Kept so removeRobot can drop them when a run leaves this robot out.
+    const sub = (...a) => { const t = topic(...a); r.subs.push(t); return t; };
 
     // Always subscribed, not just while a card is open: moving obstacles go on the
     // fleet map. A few KB at 5 Hz per robot.
-    topic(`/${id}/obstacle_tracks`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
+    sub(`/${id}/obstacle_tracks`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
       let p;
       try { p = JSON.parse(msg.data); } catch (e) { return; }
       onObstacles(r, p);
@@ -518,19 +520,19 @@
 
     // Only the twist is used (speed / turn rate on the card); the pose comes from /tf.
     // Throttled: the card shows it to two decimals, 4 Hz is plenty.
-    topic(`/${id}/odom`, "nav_msgs/Odometry", { throttle_rate: 250, queue_length: 1 }).subscribe((msg) => {
+    sub(`/${id}/odom`, "nav_msgs/Odometry", { throttle_rate: 250, queue_length: 1 }).subscribe((msg) => {
       r.odom = msg.twist.twist; r.odomAt = performance.now();
     });
 
-    topic(`/${id}/plan`, "nav_msgs/Path").subscribe((msg) => {
+    sub(`/${id}/plan`, "nav_msgs/Path").subscribe((msg) => {
       r.plan = (msg.poses || []).map((p) => [p.pose.position.x, p.pose.position.y]);
       dirty = true;
     });
-    topic(`/${id}/explore_status`, "std_msgs/String").subscribe((msg) => {
+    sub(`/${id}/explore_status`, "std_msgs/String").subscribe((msg) => {
       try { r.explore = JSON.parse(msg.data); } catch (e) { return; }
       r.exploreAt = performance.now();
     });
-    topic(`/${id}/task_status`, "std_msgs/String").subscribe((msg) => {
+    sub(`/${id}/task_status`, "std_msgs/String").subscribe((msg) => {
       let s;
       try { s = JSON.parse(msg.data); } catch (e) { return; }
       r.task = s; r.taskAt = performance.now(); r.queueDepth = s.queue_depth || 0;
@@ -539,7 +541,7 @@
     // Progress of a goal we sent: from each action's GoalStatusArray (roslib drops
     // rosbridge's action_result), same trick as app.js.
     for (const action of ["navigate_to_pose", "follow_waypoints"]) {
-      topic(`/${id}/${action}/_action/status`, "action_msgs/msg/GoalStatusArray").subscribe((msg) => {
+      sub(`/${id}/${action}/_action/status`, "action_msgs/msg/GoalStatusArray").subscribe((msg) => {
         const stamp = (g) => g.goal_info.stamp.sec + g.goal_info.stamp.nanosec * 1e-9;
         const newest = (msg.status_list || []).reduce((a, g) => (!a || stamp(g) > stamp(a) ? g : a), null);
         if (!newest) return;
@@ -553,6 +555,19 @@
         renderFleet();
       });
     }
+    renderFleet();
+  }
+
+  // A run with fewer robots than the last one: its extra robots are gone, not
+  // offline. Left listed, they read as dead robots and held the boot bar at
+  // "Waiting for the robots (2 of 4)" for the whole run (2026-10-25).
+  function removeRobot(id) {
+    const r = robots.get(id);
+    if (!r) return;
+    if (open.has(id)) closeRobot(id);
+    for (const t of r.subs) t.unsubscribe();
+    robots.delete(id);
+    dirty = true;
     renderFleet();
   }
 
@@ -1530,6 +1545,9 @@
   async function refreshRoster() {
     let ids = [];
     try { ids = (await (await fetch("/api/robots")).json()).robots || []; } catch (e) { console.error("failed to load robots", e); }
+    // Only an answer that names robots replaces the list: a console that is down
+    // keeps the last known fleet on screen.
+    if (ids.length) for (const id of [...robots.keys()]) if (!ids.includes(id)) removeRobot(id);
     if (!ids.length && !robots.size) ids = ["robot_0"];
     ids.forEach(addRobot);
   }
