@@ -8,6 +8,7 @@
 #     scripts/console_service.sh install     # write + enable + start the service
 #     scripts/console_service.sh status      # is it up? (systemd's view + the API)
 #     scripts/console_service.sh uninstall   # stop + disable + remove it
+#     scripts/console_service.sh deploy      # host origin/main from its own checkout, kept current
 #
 # The console itself costs no GPU (rosbridge, web_video_server, serve.py: ~2% of
 # a core, ~180 MB). Only a running sim holds the GPU, and the page's Stop all /
@@ -17,6 +18,14 @@
 # site reflects it after the next restart (systemctl --user restart
 # sortbots-console). Per machine and per user: other machines, and the Jetson
 # (scripts/jetson.sh console), are untouched unless someone runs this there.
+#
+# deploy: the PROD form. The service above serves whatever branch is checked out in
+# the shared working tree, so a teammate's `git checkout` changes the public site.
+# `deploy` instead keeps a dedicated worktree of main (~/SortBots-prod, override with
+# SORTBOTS_PROD_DIR), points the service at it, and installs a timer that fast-forwards
+# it every 5 min. It restarts the console only when main moved AND no sim is running
+# (a restart runs ExecStop, which takes a live sim down); otherwise it waits for the
+# next tick. Run it once after this lands on main; nothing else is needed.
 #
 # Linger: without it, user services only run while you're logged in. install
 # tries `loginctl enable-linger`; from a remote or non-interactive shell polkit
@@ -28,8 +37,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 UNIT=sortbots-console.service
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 PORT="${SORTBOTS_CONSOLE_PORT:-8081}"
+PROD_DIR="${SORTBOTS_PROD_DIR:-$HOME/SortBots-prod}"
+TIMER=sortbots-console-deploy
 
+# The checkout the unit runs from: $1, else this script's own repo.
 write_unit() {
+  local REPO_ROOT="${1:-$REPO_ROOT}"
   mkdir -p "$UNIT_DIR"
   # PATH is pinned to the system one: conda's python3 leading PATH breaks every
   # `#!/usr/bin/env python3` that needs rclpy (CLAUDE.md), and a user manager's
@@ -94,8 +107,9 @@ case "${1:-}" in
     exit 1
     ;;
   uninstall)
+    systemctl --user disable --now "$TIMER.timer" 2>/dev/null || true
     systemctl --user disable --now "$UNIT" 2>/dev/null || true
-    rm -f "$UNIT_DIR/$UNIT"
+    rm -f "$UNIT_DIR/$UNIT" "$UNIT_DIR/$TIMER.service" "$UNIT_DIR/$TIMER.timer"
     systemctl --user daemon-reload
     echo "[console_service] removed (linger, if you enabled it, is left as is: loginctl disable-linger $USER)"
     ;;
@@ -104,8 +118,54 @@ case "${1:-}" in
     echo "linger: $(loginctl show-user "$USER" -p Linger --value 2>/dev/null)"
     if curl -sf -o /dev/null "http://127.0.0.1:$PORT/api/session"; then echo "dashboard: up on :$PORT"; else echo "dashboard: not answering on :$PORT"; fi
     ;;
+  deploy)
+    auto=0; [[ "${2:-}" == "--auto" ]] && auto=1
+    if [[ ! -e "$PROD_DIR/.git" ]]; then
+      git -C "$REPO_ROOT" fetch -q origin main || { echo "[deploy] fetch failed"; exit 1; }
+      git -C "$REPO_ROOT" worktree add "$PROD_DIR" main || exit 1
+    fi
+    before="$(git -C "$PROD_DIR" rev-parse HEAD)"
+    git -C "$PROD_DIR" fetch -q origin main || { echo "[deploy] fetch failed; leaving prod as is"; exit 1; }
+    # ff-only: a prod checkout with local commits is a mistake to surface, not paper over.
+    git -C "$PROD_DIR" merge -q --ff-only origin/main || { echo "[deploy] $PROD_DIR can't fast-forward to origin/main"; exit 1; }
+    after="$(git -C "$PROD_DIR" rev-parse HEAD)"
+    if [[ ! -x "$PROD_DIR/scripts/console_service.sh" ]]; then
+      echo "[deploy] main has no console_service.sh yet: merge the console-service PR first"; exit 1
+    fi
+    # Unit already runs from prod and main didn't move: nothing to do (the timer's usual tick).
+    if grep -q "WorkingDirectory=$PROD_DIR\$" "$UNIT_DIR/$UNIT" 2>/dev/null && [[ "$before" == "$after" ]]; then
+      [[ $auto == 1 ]] || echo "[deploy] already serving main @ ${after:0:7}"
+      exit 0
+    fi
+    # Liveness is pgrep, never a pid (CLAUDE.md).
+    if pgrep -f spawn_warehouse.py >/dev/null; then
+      echo "[deploy] a sim is running; a restart would stop it. Deferring until it ends."; exit 5
+    fi
+    write_unit "$PROD_DIR"
+    cat >"$UNIT_DIR/$TIMER.service" <<EOF
+[Unit]
+Description=Fast-forward the hosted SortBots console to origin/main
+[Service]
+Type=oneshot
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/bin/bash $PROD_DIR/scripts/console_service.sh deploy --auto
+EOF
+    cat >"$UNIT_DIR/$TIMER.timer" <<EOF
+[Unit]
+Description=Every 5 min: host origin/main
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+[Install]
+WantedBy=timers.target
+EOF
+    systemctl --user daemon-reload
+    systemctl --user enable --now "$TIMER.timer"
+    systemctl --user restart "$UNIT" || { echo "[deploy] restart failed; see: journalctl --user -u $UNIT"; exit 1; }
+    echo "[deploy] serving main @ ${after:0:7} from $PROD_DIR"
+    ;;
   *)
-    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

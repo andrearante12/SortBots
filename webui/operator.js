@@ -21,8 +21,12 @@
   "use strict";
 
   const HOST = window.location.hostname || "localhost";
-  const ROSBRIDGE_PORT = 9090;
-  const VIDEO_PORT = 8080;
+  // Over https (Tailscale Funnel, 2026-10-28) the browser forbids ws:// and http://
+  // sub-requests (mixed content), and Funnel only exposes 443/8443/10000, so the
+  // funnel maps 8443 -> rosbridge 9090 and 10000 -> web_video_server 8080.
+  const SECURE = window.location.protocol === "https:";
+  const ROSBRIDGE_URL = SECURE ? `wss://${HOST}:8443` : `ws://${HOST}:9090`;
+  const VIDEO_BASE = SECURE ? `https://${HOST}:10000` : `http://${HOST}:8080`;
   // A robot whose base_link transform hasn't updated for this long is "not responding".
   const ONLINE_TTL_MS = 5000;
   // explore_status / task_status are heartbeats; silence means the node is gone.
@@ -62,11 +66,11 @@
 
   // -- rosbridge --------------------------------------------------------------
 
-  const ros = new ROSLIB.Ros({ url: `ws://${HOST}:${ROSBRIDGE_PORT}` });
+  const ros = new ROSLIB.Ros({ url: ROSBRIDGE_URL });
   ros.on("connection", () => { $("#link-down").hidden = true; });
   ros.on("close", () => {
     $("#link-down").hidden = false;
-    setTimeout(() => ros.connect(`ws://${HOST}:${ROSBRIDGE_PORT}`), 2000);
+    setTimeout(() => ros.connect(ROSBRIDGE_URL), 2000);
   });
   ros.on("error", (e) => { $("#link-down").hidden = false; console.error("rosbridge error", e); });
 
@@ -1013,7 +1017,7 @@
         c.msg.textContent = `No ${label} feed`;
         c.timer = setTimeout(tick, 3000);
       };
-      probe.src = `http://${HOST}:${VIDEO_PORT}/snapshot?topic=/${id}/${CAM_TOPIC[c.mode]}&qos_profile=sensor_data&_=${Date.now()}`;
+      probe.src = `${VIDEO_BASE}/snapshot?topic=/${id}/${CAM_TOPIC[c.mode]}&qos_profile=sensor_data&_=${Date.now()}`;
     };
     c.pic.style.backgroundImage = ""; c.msg.textContent = `Connecting to ${label}…`;
     tick();
@@ -1832,7 +1836,7 @@
       probe.onload = () => { if (token !== simView.token) return; pic.style.backgroundImage = `url(${probe.src})`; msg.textContent = ""; simView.timer = setTimeout(tick, 250); };
       // The first frames take a moment: the render product is created on the first beat.
       probe.onerror = () => { if (token !== simView.token) return; if (!pic.style.backgroundImage) msg.textContent = "Starting the sim camera…"; simView.timer = setTimeout(tick, 1500); };
-      probe.src = `http://${HOST}:${VIDEO_PORT}/snapshot?topic=/sim/view/rgb&qos_profile=sensor_data&_=${Date.now()}`;
+      probe.src = `${VIDEO_BASE}/snapshot?topic=/sim/view/rgb&qos_profile=sensor_data&_=${Date.now()}`;
     };
     tick();
   }

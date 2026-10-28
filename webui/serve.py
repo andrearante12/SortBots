@@ -32,7 +32,10 @@ SECURITY: this server binds 0.0.0.0 and is reachable from any tailnet device,
 so --control is a remote process launcher. Containment lives in
 webui/session.py — scenario names resolve by allowlist, every argv element
 comes from a fixed typed table, and Popen is always called with a list.
-Tailscale ACLs are the actual perimeter; there is no authentication here.
+There is no authentication here. Since 2026-10-28 the console is also published
+to the public internet via Tailscale Funnel (443 -> this, 8443 -> rosbridge,
+10000 -> web_video_server; docs/running.md), so the perimeter is the obscurity of
+the URL, not Tailscale ACLs. Turn it off with `tailscale funnel reset`.
 """
 from __future__ import annotations
 
