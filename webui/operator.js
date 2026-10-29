@@ -1010,7 +1010,7 @@
   // Toggle on a camera tile. /<id>/odom_features is subscribed ONLY while the toggle is on:
   // the node watches its subscriber count and holds the (large) odom_info subscription just
   // as long, so an untoggled tile costs the robot nothing. Sim publishes odom directly and
-  // never runs rgbd_odometry, so there the toggle just says so.
+  // never runs rgbd_odometry, so there the node substitutes ORB on camera/rgb (--sim).
   const FEATURE_TTL_MS = 1500;
   const FEATURE_COLOR = ["#9aa4ae", "#f5a524", "#3ddc84"]; // detected, matched, inlier
   function setCamFeatures(id, on) {
@@ -1044,7 +1044,7 @@
     if (!c.features) { c.featStat.textContent = ""; return; }
     const p = c.featData, fresh = p && performance.now() - c.featAt < FEATURE_TTL_MS;
     if (!fresh || !p.w || !p.h) {
-      c.featStat.textContent = platform === "real" ? "Waiting for SLAM features…" : "No SLAM features (sim has no visual odometry)";
+      c.featStat.textContent = platform === "real" ? "Waiting for SLAM features…" : "Waiting for features (sim: ORB stand-in)";
       return;
     }
     c.featStat.textContent = p.lost ? "SLAM lost" : `${p.inliers} inliers · ${p.matches} matched · ${p.features} features`;
