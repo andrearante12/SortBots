@@ -40,8 +40,9 @@ window.ROSLIB = {
   Ros: function () { this.on = () => {}; this.connect = () => {}; this.close = () => {};
                      this.callOnConnection = (op) => window.__ops.push(op); },
   Topic: function (o) { this.name = o.name;
-    this.subscribe = (cb) => { (window.__topics[o.name] = window.__topics[o.name] || []).push(cb); };
-    this.unsubscribe = () => {}; this.advertise = () => {};
+    let mine = null;
+    this.subscribe = (cb) => { mine = cb; (window.__topics[o.name] = window.__topics[o.name] || []).push(cb); };
+    this.unsubscribe = () => { if (mine && window.__topics[o.name]) window.__topics[o.name] = window.__topics[o.name].filter((x) => x !== mine); }; this.advertise = () => {};
     this.publish = (m) => window.__published.push({ topic: o.name, msg: m }); },
   Message: function (d) { Object.assign(this, d); },
   Service: function (o) { this.callService = (req) => window.__services.push({ name: o.name, req }); },
@@ -307,6 +308,16 @@ async function main() {
     await click(`#fleet .robot[data-id="${r0}"] [data-cam-mode="depth"]`);
     check(`${vp.label}: the camera tile switches to depth`, await page.eval(`window.__operator.cams.get(${JSON.stringify(r0)}).mode === 'depth' && document.querySelector('#fleet .robot[data-id="${r0}"] [data-cam-mode="depth"]').classList.contains('on')`));
     check(`${vp.label}: the other card keeps its own camera mode`, await page.eval(`window.__operator.cams.get(${JSON.stringify(r1)}).mode === ${JSON.stringify(r1Mode)}`));
+    // SLAM features: subscribed only while the tile's toggle is on, drawn on canvas.feat.
+    const featSubs = () => page.eval(`(window.__topics['/${r0}/odom_features'] || []).length`);
+    const featPx = () => page.eval(`(() => { const c = document.querySelector('#fleet .robot[data-id="${r0}"] canvas.feat'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++; return n; })()`);
+    check(`${vp.label}: no feature subscription until the toggle is on`, (await featSubs()) === 0);
+    await click(`#fleet .robot[data-id="${r0}"] [data-cam-features]`);
+    check(`${vp.label}: the Features toggle subscribes to odom_features`, (await featSubs()) === 1 && await page.eval(`document.querySelector('#fleet .robot[data-id="${r0}"] [data-cam-features]').classList.contains('on')`));
+    await emit(`/${r0}/odom_features`, { data: JSON.stringify({ w: 848, h: 480, lost: false, features: 3, matches: 2, inliers: 1, pts: [[100, 100, 12, 0], [200, 150, 12, 1], [400, 240, 12, 2]] }) });
+    check(`${vp.label}: tracked features are drawn on the camera tile`, (await featPx()) > 20);
+    await click(`#fleet .robot[data-id="${r0}"] [data-cam-features]`);
+    check(`${vp.label}: toggling off drops the subscription and clears the overlay`, (await featSubs()) === 0 && (await featPx()) === 0);
     check(`${vp.label}: a click inside a card leaves both open`, (await page.eval(`document.querySelectorAll('#fleet .robot.sel').length`)) === 2);
     await emit(`/${r0}/odom`, { twist: { twist: { linear: { x: 0.5, y: 0, z: 0 }, angular: { x: 0, y: 0, z: Math.PI / 4 } } } });
     await emit(`/${r0}/task_status`, { data: JSON.stringify({ task_id: 'tt1', state: 'NAV_TO_GOAL', queue_depth: 1, task: { task_id: 'tt1', kind: 'goto', goto: 'Dock' }, queue: [] }) });
