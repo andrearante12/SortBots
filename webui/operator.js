@@ -1049,15 +1049,14 @@
     }
     c.featStat.textContent = p.lost ? "SLAM lost" : `${p.inliers} inliers · ${p.matches} matched · ${p.features} features`;
     const k = Math.max(w / p.w, h / p.h), ox = (w - p.w * k) / 2, oy = (h - p.h * k) / 2;
-    g.lineWidth = 1.5;
     // Weakest first, so the inliers that drive the pose are never hidden under grey dots.
+    // Plain fixed-size points: the keypoint's own scale only turned dense areas into blobs.
+    const DOT = [2, 3, 3];
     for (const state of [0, 1, 2]) {
-      g.strokeStyle = FEATURE_COLOR[state]; g.fillStyle = FEATURE_COLOR[state];
-      for (const [x, y, size, st] of p.pts) {
-        if (st !== state) continue;
-        const px = ox + x * k, py = oy + y * k;
-        if (state === 0) { g.globalAlpha = 0.7; g.fillRect(px - 1, py - 1, 2, 2); g.globalAlpha = 1; continue; }
-        g.beginPath(); g.arc(px, py, Math.max(3, Math.min(10, size * k * 0.25)), 0, Math.PI * 2); g.stroke();
+      g.fillStyle = FEATURE_COLOR[state];
+      const d = DOT[state];
+      for (const [x, y, , st] of p.pts) {
+        if (st === state) g.fillRect(Math.round(ox + x * k - d / 2), Math.round(oy + y * k - d / 2), d, d);
       }
     }
   }
