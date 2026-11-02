@@ -43,22 +43,9 @@ The Comms overlay modeling Wi-Fi mesh range and link quality between robots and 
 | ![Comms overlay: both robots in range of the gateway](docs/media/demos/comms_in_range.gif) | ![Comms overlay: a 2-hop relay through the other robot](docs/media/demos/comms_relay_hop.gif) | ![Comms overlay: direct link vs. routed relay around obstacles](docs/media/demos/comms_direct_vs_relay.gif) |
 
 ### Simulation infrastructure
-- **Isaac Sim** Isaac Sim 5.1 supporting SLAM pipelines and integrating with Nvidia packages such as Nvblox
-- **ManiSkill (arm-manipulation sim):** XLeRobot's original sim env with extensive support for training manipulation tasks
-
-### Perception & mapping
-- **Intended sensor suite**
-  - Intel RealSense D435 RGB-Depth Camera
-  - MPU 6050 IMU
-  - Optical Tracking Odometry Sensor - PAA5160E1
-- **RGB-D SLAM:** RTAB-Map per robot; dynamic depth filter keeps movers out of the permanent grid
-- **Fleet fusion (not collab SLAM):** fused 2D `/map` + fused 3D `/fleet/recon_cloud` via spawn anchors
-- **Exploration:** frontier explorer on the fused map; mesh intent/status radio (no peer TF oracle)
-- **Dashboard:** live view, fleet radio monitor tab, scenarios console
-
+- **Isaac Sim** Isaac Sim 5.1 supporting SLAM pipelines and integrating with Nvidia packages such as RTAB-Map
 
 ## Docs
-
 - [`docs/quickstart.md`](docs/quickstart.md) — fresh device to a live fleet in one pass; **start here** (install + first run)
 - [`docs/running.md`](docs/running.md) — running everything: the demo, console mode and scenarios, autonomous exploration, map lifecycle, remote access, dashboard tests
 - [`docs/perception_exploration.md`](docs/perception_exploration.md) — perception, exploration, fleet mesh radio, and map/recon fusion architecture
@@ -70,7 +57,7 @@ The Comms overlay modeling Wi-Fi mesh range and link quality between robots and 
 Open a fresh shell at the repo root. Never activate both simulators in the same shell, and never source ROS 2 in either.
 
 
-### Isaac Sim (mobile / multi-robot / ROS 2 / VSLAM track)
+### Isaac Sim
 
 Two ways in. **Console mode** is the one to use day to day — you start the
 dashboard once and launch runs from the browser (including from your phone):
