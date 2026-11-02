@@ -16,13 +16,51 @@ mechanism for both efficiency and resilience. Robots divide work via decentraliz
 coordinate passage through shared spaces, and dynamically
 re-allocate tasks when one is blocked or delayed. Applications to autonomous delivery logistics in dynamic enviornemnts, such as warehouses, shelf restocking, or serving foods in restaurants.
 
-## Exploration Demo
+## Demos
 
-Fleet exploration mapping timelapse - understanding a fresh warehouse enviornment.
+### Fleet exploration mapping
+
+Two robots exploring a fresh warehouse environment and fusing their grids into one `/map`.
 
 ![Fleet exploration mapping timelapse](docs/media/fleet_explore_timelapse.gif)
 
 Full-quality version: [`docs/media/fleet_explore_timelapse.mp4`](docs/media/fleet_explore_timelapse.mp4).
+
+### SLAM with feature mapping
+
+RTAB-Map building the occupancy grid and 3D feature map live as a robot drives the warehouse.
+
+<video src="docs/media/demos/full_slam_feature_mapping.webm" controls width="720"></video>
+
+### Object detection & perception
+
+Per-robot camera feeds with live bounding-box detection (pedestrians, other robots, warehouse obstacles) and the depth estimate behind each box:
+
+<video src="docs/media/demos/detect_pedestrian.webm" controls width="360" poster="docs/media/demos/detection_bounding_boxes.png"></video> <video src="docs/media/demos/detect_robot.webm" controls width="360"></video>
+
+![Detection bounding boxes in the operator dashboard](docs/media/demos/detection_bounding_boxes.png)
+
+The same depth stream fused into a 3D point cloud of the mapped warehouse:
+
+![Fused 3D point cloud view](docs/media/demos/fused_point_cloud.png)
+
+### Operator dashboard
+
+Driving, teleport, waypoints and live camera/depth feeds for both robots from one browser tab:
+
+<video src="docs/media/demos/operator_dashboard.webm" controls width="720"></video>
+
+### Fleet mesh comms overlay
+
+The Comms overlay modeling Wi-Fi mesh range and link quality between robots and the gateway, including cases where a robot can't reach the gateway directly and has to route through another robot:
+
+![Comms overlay showing mesh range and routing](docs/media/demos/comms_mesh_overlay.png)
+
+### Sim startup
+
+Bringing up the two-robot fleet in Isaac Sim from a cold start:
+
+<video src="docs/media/demos/sim_startup.webm" controls width="720" poster="docs/media/demos/xlerobot_platform.png"></video>
 
 ### Simulation infrastructure
 - **Isaac Sim** Isaac Sim 5.1 supporting SLAM pipelines and integrating with Nvidia packages such as Nvblox
