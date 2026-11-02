@@ -26,41 +26,61 @@ Two robots exploring a fresh warehouse environment and fusing their grids into o
 
 Full-quality version: [`docs/media/fleet_explore_timelapse.mp4`](docs/media/fleet_explore_timelapse.mp4).
 
+### Drive system demo
+
+Driving the real XLeRobot base over its command-line interface.
+
+![Drive system demo on the real robot](docs/media/demos/drive_system_demo.gif)
+
+### Arm demo
+
+The 3D-printed arm prototype executing a manipulation sequence on the bench.
+
+![Arm demo on the bench prototype](docs/media/demos/arm_demo.gif)
+
+### Isaac Sim environment
+
+The NVIDIA warehouse environment used for sim-first verification, with forklifts and a pedestrian as scripted movers.
+
+![Isaac Sim warehouse environment](docs/media/demos/isaac_sim_environment.gif)
+
 ### SLAM with feature mapping
 
-RTAB-Map building the occupancy grid and 3D feature map live as a robot drives the warehouse.
+RTAB-Map's feature view: matched keypoints and inlier counts between consecutive frames as a robot drives the warehouse, with the fused 3D point cloud building up alongside it.
 
-<video src="docs/media/demos/full_slam_feature_mapping.webm" controls width="720"></video>
-
-### Object detection & perception
-
-Per-robot camera feeds with live bounding-box detection (pedestrians, other robots, warehouse obstacles) and the depth estimate behind each box:
-
-<video src="docs/media/demos/detect_pedestrian.webm" controls width="360" poster="docs/media/demos/detection_bounding_boxes.png"></video> <video src="docs/media/demos/detect_robot.webm" controls width="360"></video>
-
-![Detection bounding boxes in the operator dashboard](docs/media/demos/detection_bounding_boxes.png)
-
-The same depth stream fused into a 3D point cloud of the mapped warehouse:
+![RTAB-Map feature matching during SLAM](docs/media/demos/slam_feature_mapping.gif)
 
 ![Fused 3D point cloud view](docs/media/demos/fused_point_cloud.png)
+
+### Depth to 3D points
+
+Each depth pixel becomes a 3D point: the live RGB feed next to its colorized depth estimate.
+
+![Live RGB camera feed](docs/media/demos/rgb_live_feed.gif) ![Live colorized depth feed](docs/media/demos/depth_live_feed.gif)
+
+### Object detection validation
+
+Scripted test cases from the [simtest](simtest/) layer: detecting a crossing pedestrian, and one robot detecting another.
+
+![Detect-pedestrian test case](docs/media/demos/detect_pedestrian.gif)
+
+![Detect-other-robot test case](docs/media/demos/detect_robot.gif)
 
 ### Operator dashboard
 
 Driving, teleport, waypoints and live camera/depth feeds for both robots from one browser tab:
 
-<video src="docs/media/demos/operator_dashboard.webm" controls width="720"></video>
+![Operator dashboard sim view](docs/media/demos/operator_view_demo.gif)
 
 ### Fleet mesh comms overlay
 
-The Comms overlay modeling Wi-Fi mesh range and link quality between robots and the gateway, including cases where a robot can't reach the gateway directly and has to route through another robot:
+The Comms overlay modeling Wi-Fi mesh range and link quality between robots and the gateway: both robots in direct range of the gateway, a robot out of range relaying through the other, and the overlay comparing a direct line-of-sight link against the routed path when obstacles are in the way.
 
-![Comms overlay showing mesh range and routing](docs/media/demos/comms_mesh_overlay.png)
+![Comms overlay: both robots in range of the gateway](docs/media/demos/comms_in_range.gif)
 
-### Sim startup
+![Comms overlay: a 2-hop relay through the other robot](docs/media/demos/comms_relay_hop.gif)
 
-Bringing up the two-robot fleet in Isaac Sim from a cold start:
-
-<video src="docs/media/demos/sim_startup.webm" controls width="720" poster="docs/media/demos/xlerobot_platform.png"></video>
+![Comms overlay: direct link vs. routed relay around obstacles](docs/media/demos/comms_direct_vs_relay.gif)
 
 ### Simulation infrastructure
 - **Isaac Sim** Isaac Sim 5.1 supporting SLAM pipelines and integrating with Nvidia packages such as Nvblox
