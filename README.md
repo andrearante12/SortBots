@@ -16,47 +16,15 @@ mechanism for both efficiency and resilience. Robots divide work via decentraliz
 coordinate passage through shared spaces, and dynamically
 re-allocate tasks when one is blocked or delayed. Applications to autonomous delivery logistics in dynamic enviornemnts, such as warehouses, shelf restocking, or serving foods in restaurants.
 
-## Demos
+### Operator dashboard
 
-### Fleet exploration mapping
+Driving, teleport, waypoints and live camera/depth feeds for both robots from one browser tab:
 
-Two robots exploring a fresh warehouse environment and fusing their grids into one `/map`.
+![Operator dashboard sim view](docs/media/demos/operator_view_demo.gif)
 
-![Fleet exploration mapping timelapse](docs/media/fleet_explore_timelapse.gif)
-
-Full-quality version: [`docs/media/fleet_explore_timelapse.mp4`](docs/media/fleet_explore_timelapse.mp4).
-
-### Drive system demo
-
-Driving the real XLeRobot base over its command-line interface.
-
-![Drive system demo on the real robot](docs/media/demos/drive_system_demo.gif)
-
-### Arm demo
-
-The 3D-printed arm prototype executing a manipulation sequence on the bench.
-
-![Arm demo on the bench prototype](docs/media/demos/arm_demo.gif)
-
-### Isaac Sim environment
-
-The NVIDIA warehouse environment used for sim-first verification, with forklifts and a pedestrian as scripted movers.
-
-![Isaac Sim warehouse environment](docs/media/demos/isaac_sim_environment.gif)
-
-### SLAM with feature mapping
-
-RTAB-Map's feature view: matched keypoints and inlier counts between consecutive frames as a robot drives the warehouse, with the fused 3D point cloud building up alongside it.
+### SLAM Mapping and 3D Reconstruction (RTAB-Map) 
 
 ![RTAB-Map feature matching during SLAM](docs/media/demos/slam_feature_mapping.gif)
-
-![Fused 3D point cloud view](docs/media/demos/fused_point_cloud.png)
-
-### Depth to 3D points
-
-Each depth pixel becomes a 3D point: the live RGB feed next to its colorized depth estimate.
-
-![Live RGB camera feed](docs/media/demos/rgb_live_feed.gif) ![Live colorized depth feed](docs/media/demos/depth_live_feed.gif)
 
 ### Object detection validation
 
@@ -66,11 +34,6 @@ Scripted test cases from the [simtest](simtest/) layer: detecting a crossing ped
 
 ![Detect-other-robot test case](docs/media/demos/detect_robot.gif)
 
-### Operator dashboard
-
-Driving, teleport, waypoints and live camera/depth feeds for both robots from one browser tab:
-
-![Operator dashboard sim view](docs/media/demos/operator_view_demo.gif)
 
 ### Fleet mesh comms overlay
 
