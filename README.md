@@ -30,20 +30,17 @@ Driving, teleport, waypoints and live camera/depth feeds for both robots from on
 
 Scripted test cases from the [simtest](simtest/) layer: detecting a crossing pedestrian, and one robot detecting another.
 
-![Detect-pedestrian test case](docs/media/demos/detect_pedestrian.gif)
-
-![Detect-other-robot test case](docs/media/demos/detect_robot.gif)
-
+| Detect pedestrian | Detect other robot |
+|---|---|
+| ![Detect-pedestrian test case](docs/media/demos/detect_pedestrian.gif) | ![Detect-other-robot test case](docs/media/demos/detect_robot.gif) |
 
 ### Fleet mesh comms overlay
 
 The Comms overlay modeling Wi-Fi mesh range and link quality between robots and the gateway: both robots in direct range of the gateway, a robot out of range relaying through the other, and the overlay comparing a direct line-of-sight link against the routed path when obstacles are in the way.
 
-![Comms overlay: both robots in range of the gateway](docs/media/demos/comms_in_range.gif)
-
-![Comms overlay: a 2-hop relay through the other robot](docs/media/demos/comms_relay_hop.gif)
-
-![Comms overlay: direct link vs. routed relay around obstacles](docs/media/demos/comms_direct_vs_relay.gif)
+| Both robots in range | 2-hop relay | Direct vs. routed |
+|---|---|---|
+| ![Comms overlay: both robots in range of the gateway](docs/media/demos/comms_in_range.gif) | ![Comms overlay: a 2-hop relay through the other robot](docs/media/demos/comms_relay_hop.gif) | ![Comms overlay: direct link vs. routed relay around obstacles](docs/media/demos/comms_direct_vs_relay.gif) |
 
 ### Simulation infrastructure
 - **Isaac Sim** Isaac Sim 5.1 supporting SLAM pipelines and integrating with Nvidia packages such as Nvblox
