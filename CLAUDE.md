@@ -50,6 +50,7 @@ This is **not a colcon workspace** — there is no `src/`, no `package.xml`, no
 | `maps/` | saved map library — named, committed snapshots of explored maps |
 | `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `docs/splat.md`) |
 | `commsim/` | fleet comms simulation (mesh, Zenoh, task auction), system python3 only; `core/protocol.py` is the allocator `nodes/fleet_tasks.py` runs, `viz/demo.py` the model behind the operator's Comms overlay (`commsim/README.md`) |
+| `fleetsim/` | headless many-robot sim, system python3 only: each robot plans on its OWN map, shares map patches and runs the real `FleetTasks` auction over an ideal or radio network; scored by simtest's metrics (`fleetsim/README.md`) |
 | `docs/running.md` | the full runbook |
 
 No custom `.msg`/`.srv`: inter-node protocol is `std_msgs/String` carrying JSON.
@@ -121,6 +122,7 @@ node webui/tests/operator_test.mjs    # operator view, fake ROSLIB (no fixture n
 python3 webui/session.py --list       # scenario validation
 python3 -m pytest tests/              # pure-python node logic (system python3 — see below)
 scripts/simtest.py validate           # scored test cases (configs/tests/) resolve
+python3 -m fleetsim run delivery_smoke  # headless fleet sim, seconds (fleetsim/README.md)
 ```
 
 Scored live tests — a world of props and scripted movers

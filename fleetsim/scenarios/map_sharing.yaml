@@ -12,21 +12,19 @@ description: >
   map sharing on, its MapUpdate reaches the others and they replan before
   they set off (nav.replans_shared); off, each finds it on arrival.
 seed: 1
-duration_s: 900
+duration_s: 1200
 robots: 10
 config:
   map_share: {prior: truth, recipients: all}
 disturbances:
   - {at_s: 1, blockage: {rect: [21.5, 12.0, 22.5, 14.4]}}
-tasks:
+tasks:  # a minute apart: this asks about the map, not about queueing at one shelf
   - {at_s: 5, pickup: shelf_1_3, dropoff: dock_2}
-  - {at_s: 25, pickup: shelf_1_3, dropoff: dock_3}
-  - {at_s: 45, pickup: shelf_1_3, dropoff: dock_4}
-  - {at_s: 65, pickup: shelf_1_3, dropoff: dock_5}
-  - {at_s: 85, pickup: shelf_1_3, dropoff: dock_6}
-  - {at_s: 105, pickup: shelf_1_3, dropoff: dock_7}
-  - {at_s: 125, pickup: shelf_1_3, dropoff: dock_2}
-  - {at_s: 145, pickup: shelf_1_3, dropoff: dock_3}
+  - {at_s: 65, pickup: shelf_1_3, dropoff: dock_3}
+  - {at_s: 125, pickup: shelf_1_3, dropoff: dock_4}
+  - {at_s: 185, pickup: shelf_1_3, dropoff: dock_5}
+  - {at_s: 245, pickup: shelf_1_3, dropoff: dock_6}
+  - {at_s: 305, pickup: shelf_1_3, dropoff: dock_7}
 stop: {until: tasks_done, settle_s: 3}
 metrics:
   - metric: fleet_tasks
@@ -34,8 +32,10 @@ metrics:
   - metric: contacts
     pass: {contacts: {eq: 0}}
   - metric: map_divergence
-    # Every robot ends knowing every face of the pallet. With sharing off,
-    # only the robots that drove up to it do (~140 wrong cells, seed 1).
-    pass: {final_wrong_free: {eq: 0}}
+    # Every robot ends up with the fleet's newest view of the floor. With
+    # sharing off only the robots that drove up to the pallet know it
+    # (final_stale ~150 cells, seed 1). final_wrong_free stays ~10 either
+    # way: faces of the pallet no camera ever saw.
+    pass: {final_stale: {eq: 0}}
   - metric: nav
     pass: {gave_up: {eq: 0}}

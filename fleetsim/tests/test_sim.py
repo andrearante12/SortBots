@@ -104,23 +104,48 @@ def test_tasks_announced_during_a_split_are_never_worked_twice():
     assert v["fleet_tasks"]["done"] == v["fleet_tasks"]["announced"]
 
 
+def _split_around_the_pick(**kw):
+    """One task; cut its owner off 5 s before it reaches the shelf (inside
+    its 10 s lease), for 60 s."""
+    tasks = [{"at_s": 1, "pickup": "shelf_2_1", "dropoff": "dock_1"}]
+    base, _ = run(scenario(robots=5, duration_s=500, tasks=tasks))
+    owner, t_pick = next((e["rid"], e["t"]) for e in base.events
+                         if e["s"] == "task" and e["state"] == "NAV_TO_DROPOFF")
+    s, _ = run(scenario(robots=5, duration_s=500, tasks=tasks, **kw, disturbances=[
+        {"at_s": max(1.0, t_pick - 5.0), "duration_s": 60, "partition": [[owner], "rest"]}]))
+    return s, owner
+
+
 def test_pickup_inside_the_lease_window_still_sends_a_second_robot():
-    # KNOWN PROTOCOL GAP (found 2026-11-02; commsim's DES reports the same
-    # 0-2 duplicate episodes per partition run). robot_0 owns task 1 when
-    # the split starts, has no quorum, and must stop within task_lease_s —
-    # but it reaches the shelf 9.6 s in and commits, and a committed task
-    # never yields. The majority never hears the commit and reclaims at
-    # lease + margin, so robot_2 drives to a shelf the item has left. When
-    # the protocol closes the gap (e.g. no pick without a quorum), flip this.
-    scn = scenario(robots=5, duration_s=500, disturbances=PARTITION,
-                   tasks=[{"at_s": t, "pickup": p, "dropoff": d} for t, p, d in (
-                       (1, "shelf_1_0", "dock_0"), (2, "shelf_2_1", "dock_1"),
-                       (3, "shelf_3_2", "dock_2"))])
-    s, _ = run(scn)
+    # KNOWN PROTOCOL GAP 1 (found 2026-11-02; commsim's DES reports the same
+    # 0-2 duplicate episodes per partition run). An owner cut off from the
+    # majority must stop within task_lease_s — unless it picks the item up
+    # first: a committed task never yields. The majority never hears the
+    # commit and reclaims at lease + margin, so a second robot drives to a
+    # shelf the item has left. Flip when the protocol closes it (e.g. no
+    # pick without a quorum).
+    s, _owner = _split_around_the_pick()
     v = score(s, [{"metric": "fleet_tasks"}, {"metric": "nav"}])
-    assert v["fleet_tasks"]["duplicates"] == 1
-    assert v["nav"]["empty_shelf"] == 1
-    assert v["fleet_tasks"]["done"] == v["fleet_tasks"]["announced"]  # nothing is lost
+    assert v["fleet_tasks"]["duplicates"] >= 1
+    assert v["nav"]["empty_shelf"] >= 1
+    assert v["fleet_tasks"]["done"] == v["fleet_tasks"]["announced"]
+
+
+def test_a_completion_lost_in_a_split_is_never_repeated():
+    # KNOWN PROTOCOL GAP 2 (found 2026-11-02). The cut-off owner delivers
+    # while still split; its fleet-wide Complete is lost and nothing ever
+    # repeats it. After the heal the majority still holds the task open,
+    # and the robot that knows it is DONE ignores their claims for it
+    # (protocol.py _assert_owner returns early for DONE tasks), so robot
+    # after robot is sent to the empty shelf until each one's failed_backoff
+    # runs. The DES can't see this: its robots never find a shelf empty.
+    # Flip when e.g. a node that knows a task is DONE answers a claim or
+    # lease beacon for it with a Complete.
+    s, _owner = _split_around_the_pick()
+    v = score(s, [{"metric": "nav"}])
+    assert v["nav"]["empty_shelf"] > 1
+    gw_state = s.gw.alloc.tasks.get(1)
+    assert gw_state is None or gw_state.state != "done"
 
 
 def test_radio_network_runs_and_reports_load():

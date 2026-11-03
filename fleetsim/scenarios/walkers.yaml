@@ -1,0 +1,40 @@
+# Issue #18's case: something one robot can see and another can't. Walkers
+# pace along rack aisles and step out across the cross-aisles robots use;
+# the racks hide them from a robot driving up the cross-aisle until they are
+# in front of it. Compare with obstacle notices off:
+#   /usr/bin/python3 -m fleetsim run walkers --set obstacle_share.enabled=false
+name: walkers
+title: Walkers stepping out of rack aisles into robot traffic
+description: >
+  Twelve robots on a steady task stream; four walkers pace 7 m along aisles
+  1, 3, 5 and 7, across the mouth of a middle cross-aisle, at 1.2 m/s —
+  stopping short of the shelf spots, so a robot parked to pick isn't simply
+  walked into.
+  Walkers never yield (simtest/world.py), so contact is counted whoever
+  moved. Scored with simtest's own clearance metric against the walkers'
+  true footprints, the same metric Isaac's crossing_yield test uses.
+seed: 1
+duration_s: 600
+robots: 12
+config:
+  map_share: {prior: truth}
+task_arrival: {rate_hz: 0.08, pickups: "shelf_*", dropoffs: "dock_*", until_s: 480}
+actors:
+  - {id: walker_1, shape: cylinder, radius: 0.25, height: 1.75,
+     path: {waypoints: [[12.0, 13.2], [19.0, 13.2]], speed_mps: 1.2, mode: pingpong, dwell_s: 2}}
+  - {id: walker_3, shape: cylinder, radius: 0.25, height: 1.75,
+     path: {waypoints: [[26.0, 20.4], [33.0, 20.4]], speed_mps: 1.2, mode: pingpong, dwell_s: 2, start_at_s: 5}}
+  - {id: walker_5, shape: cylinder, radius: 0.25, height: 1.75,
+     path: {waypoints: [[12.0, 27.6], [19.0, 27.6]], speed_mps: 1.2, mode: pingpong, dwell_s: 2, start_at_s: 10}}
+  - {id: walker_7, shape: cylinder, radius: 0.25, height: 1.75,
+     path: {waypoints: [[26.0, 34.8], [33.0, 34.8]], speed_mps: 1.2, mode: pingpong, dwell_s: 2, start_at_s: 15}}
+metrics:
+  - metric: clearance
+  - metric: contacts
+    # First cut (seeds 1-4: 0-1 per run). Most contacts are walkers walking
+    # into a robot that stopped for them — walkers never yield — so the
+    # local layer is judged on `driven` only.
+    pass: {driven: {lte: 2}}
+  - metric: fleet_tasks
+  - metric: nav
+  - metric: comms

@@ -239,9 +239,9 @@ def synthetic_warehouse(cfg: dict, cell_m: float) -> tuple[np.ndarray, Grid, dic
         waypoints[f"dock_{k}"] = (round(x, 3), round(dock_y, 3))
 
     # Homes: a lattice on the apron between the docks and the first aisle.
-    # 1.6 m apart: two parked 0.64 m discs leave 0.96 m, enough for a robot
-    # (planned as a 0.84 m disc) to pass between them. At 1.2 m a parked
-    # fleet walled the docks off from the racks.
+    # 1.6 m apart: two parked 0.5 m discs leave 1.1 m, enough for a robot
+    # (planned as a 0.7 m disc at 0.2 m cells) to pass between them. At
+    # 1.2 m a parked fleet walled the docks off from the racks.
     homes = []
     hy = dock_y + 2.4
     while hy < staging_top - 0.6:

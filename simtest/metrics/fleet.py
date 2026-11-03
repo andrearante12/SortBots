@@ -106,17 +106,21 @@ class Contacts(Metric):
         "robot": "robot-robot contacts",
         "static": "robot-wall/rack contacts (the robot's map was wrong and it didn't see it)",
         "actor": "robot-mover contacts, whoever moved",
+        "driven": "contacts where the ROBOT moved into something: its local layer didn't "
+                  "stop it in time (the rest are movers walking into a robot)",
     }
 
     def __init__(self, ctx, **params):
         super().__init__(ctx, **params)
         self.n = {"robot": 0, "static": 0, "actor": 0}
+        self.driven = 0
 
     def on_event(self, ev):
         self.n[ev["kind"]] = self.n.get(ev["kind"], 0) + 1
+        self.driven += ev.get("by", "robot") == "robot"
 
     def result(self):
-        return {"contacts": sum(self.n.values()), **self.n}
+        return {"contacts": sum(self.n.values()), **self.n, "driven": self.driven}
 
 
 @register

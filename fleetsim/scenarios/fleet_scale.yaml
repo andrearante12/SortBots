@@ -1,0 +1,32 @@
+# The question this tool exists for: what happens at many more robots than
+# Isaac can run. Fifty robots on the radio model, with the comms design the
+# commsim DES recommends for scale: neighbour-only Status (3 Hz) plus zenoh-
+# session liveness for the quorum. Compare with the fleet-wide Status the
+# robots run today, which the DES found saturates past ~20 robots:
+#   /usr/bin/python3 -m fleetsim run fleet_scale --set status.recipients=all \
+#       --set status.hz=5 --set status.session_liveness=false
+name: fleet_scale
+title: Fifty robots, radio model, neighbour-only Status
+description: >
+  An 80 x 50 m synthetic warehouse, 50 robots starting blind (prior: none)
+  on the radio model with spatial contention, a task stream sized to keep
+  the fleet busy. Map patches go to robots within 20 m of the tile.
+seed: 1
+duration_s: 900
+robots: 50
+config:
+  world:
+    synthetic: {width_m: 80, height_m: 50, docks: 16}
+  network:
+    model: radio
+    radio: {contention: spatial}
+  status: {recipients: radius, radius_m: 12, hz: 3, session_liveness: true}
+task_arrival: {rate_hz: 0.2, pickups: "shelf_*", dropoffs: "dock_*", until_s: 780}
+metrics:
+  - metric: fleet_tasks
+    pass: {duplicates: {eq: 0}}
+  - metric: comms
+    pass: {load_max: {lt: 1.0}}
+  - metric: contacts
+  - metric: map_divergence
+  - metric: nav

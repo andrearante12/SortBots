@@ -203,19 +203,27 @@ class Sim:
         that would is refused and counted as a contact — the robot drove
         into something its local layer didn't stop it for."""
         cells = self._disc_cells(x, y, r.body_r)
-        hit = None
+        hit, where = None, None
         if len(cells) == 0 or self.static_flat[cells].any():
             hit = ("static", None)
         else:
             own = self.robot_owner_flat[cells]
             other = own[(own != 0) & (own != r.node)]
             if len(other):
-                hit = ("robot", f"robot_{int(other[0]) - 1}")
+                o = self.robots[int(other[0]) - 1]
+                hit, where = ("robot", o.rid), (o.x, o.y)
             elif self.actor_owner_flat[cells].any():
                 a = int(self.actor_owner_flat[cells][self.actor_owner_flat[cells] != 0][0]) - 1
-                hit = ("actor", self.actors[a]["id"])
+                p = self.actor_pose[self.actors[a]["id"]]
+                hit, where = ("actor", self.actors[a]["id"]), (p["x"], p["y"])
         if hit is not None:
-            self._contact(r, hit[0], hit[1])
+            # The robot drove into it only if it was ahead; something that
+            # came at its side or back while it crept forward came at it.
+            by = "robot"
+            if where is not None and (where[0] - r.x) * math.cos(r.yaw) \
+                    + (where[1] - r.y) * math.sin(r.yaw) <= 0.0:
+                by = hit[0]
+            self._contact(r, hit[0], hit[1], by=by)
             # What it bumped is now an obstacle to its local layer, so it
             # stops pushing and, after block_replan_s, plans around it.
             r.bumps.append((x, y, self.now))
@@ -227,12 +235,14 @@ class Sim:
         r.x, r.y = x, y
         return True
 
-    def _contact(self, r: Robot, kind: str, other) -> None:
+    def _contact(self, r: Robot, kind: str, other, by: str) -> None:
+        """`by` is who moved: "robot" (its local layer let it drive into
+        something) or "actor" (a mover walked into it)."""
         key = (r.rid, kind, other)
         self._contacts_now.add(key)
         if key not in self.contacts_active:
             self.counts["contacts"] += 1
-            self.record({"s": "contact", "rid": r.rid, "kind": kind, "other": other,
+            self.record({"s": "contact", "rid": r.rid, "kind": kind, "other": other, "by": by,
                          "x": round(r.x, 3), "y": round(r.y, 3)})
 
     def _move_actors(self) -> None:
@@ -248,7 +258,7 @@ class Sim:
             # contact whoever moved.
             hit = self.robot_owner_flat[cells]
             for node in np.unique(hit[hit != 0]).tolist():
-                self._contact(self.robots[node - 1], "actor", a["id"])
+                self._contact(self.robots[node - 1], "actor", a["id"], by="actor")
 
     # ---- scheduling ------------------------------------------------------------
 

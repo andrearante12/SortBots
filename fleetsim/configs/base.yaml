@@ -17,9 +17,9 @@ world:
   # each costmap. 0.2 m is the compromise (fleetsim/README.md, "Resolution"):
   #   * the 0.5 x 0.4 m footprint is ~3 x 2 cells, so inflation and clearance
   #     still mean something. A robot is planned as a disc of
-  #     footprint_radius_m + half a cell (0.42 m here), so a passage must be
-  #     ~0.84 m clear — and on a saved map, pooling can take up to one more
-  #     cell off each side. At 0.1 m that is 0.74 m + 0.1 m per side;
+  #     footprint_radius_m + half a cell (0.35 m here), so a passage must be
+  #     ~0.7 m clear — and on a saved map, pooling can take up to one more
+  #     cell off each side. At 0.1 m that is 0.6 m + 0.1 m per side;
   #   * memory and A* time grow as 1/cell^2: 0.1 m is 4x the cells of 0.2 m —
   #     ~1.5 MB per robot at 0.2 m on the default 60 x 40 m floor, ~6 MB at 0.1 m;
   #   * a saved 0.05 m map is max-pooled to this size, which thickens walls by
@@ -36,7 +36,12 @@ world:
 
 robots:
   count: 8
-  footprint_radius_m: 0.32    # corner reach of Nav2's 0.5 x 0.4 m footprint (configs/nav2_params.yaml)
+  # The body is a disc. 0.25 m = half the length of Nav2's 0.5 x 0.4 m
+  # footprint (configs/nav2_params.yaml): exact head-on, 0.07 m short of the
+  # corners. The circumscribed 0.32 m made two robots 0.64 m wide side by
+  # side (real: 0.4 m), and on a 0.2 m grid they could no longer pass each
+  # other in a 2.4 m aisle — head-on meetings deadlocked (2026-11-02).
+  footprint_radius_m: 0.25
   max_speed_mps: 0.5          # Nav2 max_velocity x
   accel_mps2: 0.5             # PLACEHOLDER
   yaw_rate_rps: 1.0           # PLACEHOLDER
@@ -58,6 +63,8 @@ nav:
   stop_distance_m: 0.9        # local layer looks this far along the path for obstacles
   clearance_margin_m: 0.1     # obstacle counts as in the way within body + its radius + this
   detection_ttl_s: 0.5        # a camera detection is trusted this long
+  predict_s: 0.5              # also avoid where a moving detection will be this far ahead
+                              # (obstacle_detector tracks carry velocity; docs/obstacle_detection.md v2)
   bump_ttl_s: 5.0             # a physical bump stays an obstacle this long
   block_replan_s: 2.0         # blocked this long -> replan around it (lower priority first)
   block_fail_s: 45.0          # blocked this long -> the leg fails (Nav2 abort after recoveries)

@@ -131,8 +131,8 @@ class Robot:
         self.dwell_until = None
         self.idle_since = 0.0
         # perception
-        self.dets: list[tuple] = []       # (kind, ident, x, y, t)
-        self._det_prev: dict = {}         # (kind, ident) -> (x, y, t)
+        self.dets: list[tuple] = []       # (kind, ident, x, y, t, vx, vy)
+        self._det_prev: dict = {}         # (kind, ident) -> (x, y, t), for velocity
         self.remote_obs: list[dict] = []  # obstacle notices from peers
         self.bumps: list[tuple] = []      # where it physically bumped into something
         self._last_share = -math.inf
@@ -384,10 +384,17 @@ class Robot:
         detections, peers from Status, peers' obstacle notices."""
         out = []
         ttl = float(self.nav["detection_ttl_s"])
-        for kind, ident, x, y, t in self.dets:
+        ahead = float(self.nav["predict_s"])
+        for kind, ident, x, y, t, vx, vy in self.dets:
             if now - t <= ttl:
                 r = self.body_r if kind == "robot" else self.sim.actor_radius(ident)
-                out.append((x, y, r, kind, ident))
+                # Where it is now, and where it will be predict_s from now:
+                # obstacle_detector's tracks carry a velocity, and a walker
+                # crossing at 1.2 m/s covers a body width between two scans.
+                dt = now - t
+                out.append((x + vx * dt, y + vy * dt, r, kind, ident))
+                if ahead > 0 and (vx or vy):
+                    out.append((x + vx * (dt + ahead), y + vy * (dt + ahead), r, kind, ident))
         bump_ttl = float(self.nav["bump_ttl_s"])
         self.bumps = [b for b in self.bumps if now - b[2] <= bump_ttl]
         for x, y, _t in self.bumps:
@@ -405,7 +412,10 @@ class Robot:
         for o in self.remote_obs:
             if now <= o["expires"]:
                 keep.append(o)
-                dt = now - o["t"]
+                # Extrapolate at most 1 s: a walker turns around, and a notice
+                # carried 3 s along a stale velocity put phantom obstacles
+                # where no one was (walkers scenario, 2026-11-02).
+                dt = min(now - o["t"], 1.0)
                 out.append((o["x"] + o["vx"] * dt, o["y"] + o["vy"] * dt, o["r"], "notice", o["id"]))
         self.remote_obs = keep
         return out
@@ -599,7 +609,15 @@ class Robot:
                                            sim.robot_owner_flat, sim.actor_owner_flat, self.node)
         changed = self.belief.observe(free, occ, now)
         self.on_belief_change(changed, "sensed")
-        self.dets = [(kind, ident, x, y, now) for kind, ident, x, y in dets]
+        out = []
+        for kind, ident, x, y in dets:
+            prev = self._det_prev.get((kind, ident))
+            vx = vy = 0.0
+            if prev is not None and 0 < now - prev[2] <= 1.0:
+                vx, vy = (x - prev[0]) / (now - prev[2]), (y - prev[1]) / (now - prev[2])
+            self._det_prev[(kind, ident)] = (x, y, now)
+            out.append((kind, ident, x, y, now, vx, vy))
+        self.dets = out
         if sim.cfg["obstacle_share"]["enabled"]:
             self._share_movers(now)
 
@@ -610,16 +628,11 @@ class Robot:
         cfg = self.sim.cfg["obstacle_share"]
         st_ttl = float(self.sim.cfg["status"]["ttl_s"])
         known = self.sim.seen_xy[self.k][now - self.sim.seen_t[self.k] <= st_ttl]
-        for kind, ident, x, y, t in self.dets:
-            prev = self._det_prev.get((kind, ident))
-            self._det_prev[(kind, ident)] = (x, y, t)
+        for kind, ident, x, y, t, vx, vy in self.dets:
             if len(known) and np.min(np.hypot(known[:, 0] - x, known[:, 1] - y)) < 0.6:
                 continue
             if now - self._last_share < float(cfg["min_interval_s"]):
                 continue
-            vx = vy = 0.0
-            if prev is not None and 0 < t - prev[2] <= 1.0:
-                vx, vy = (x - prev[0]) / (t - prev[2]), (y - prev[1]) / (t - prev[2])
             self._last_share = now
             r = self.sim.actor_radius(ident) if kind == "actor" else self.body_r
             self.sim.share_obstacle(self, {"x": x, "y": y, "vx": vx, "vy": vy, "r": r,
