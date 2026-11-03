@@ -160,7 +160,10 @@ These came out of building this, and each one is worth a decision.
   `PYTHONMALLOC=debug` found no heap corruption. Runs that don't fail are
   bit-identical, so the simulation itself is deterministic. The pytest
   suite without fleetsim never crashed (0/6 on `main`, 0/6 on this branch);
-  with it, 3/6.
+  with it, 6/20 — and two of those segfaults were inside commsim's own
+  protocol tests (`protocol.py` `has_quorum`, pure python), which run
+  before fleetsim's and only share a process with its imported modules.
+  So the fault isn't in fleetsim's code; fleetsim's presence makes it show.
   Two explanations fit, and this machine alone can't separate them:
   1. a CPython 3.14 interpreter bug. [cpython#155145](https://github.com/python/cpython/issues/155145)
      (open, unconfirmed) reports the same symptoms on 3.14.6 from a pure
