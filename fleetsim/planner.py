@@ -58,7 +58,9 @@ class Costmap:
         # 'float'" on `ng < gscore[j]` with every local a float — once in
         # five to ten full runs, at a different run each time, never under a
         # standalone stress test (2026-11-02). Integer arithmetic allocates
-        # no floats in the loop; see fleetsim/README.md "Known issues".
+        # no floats in the loop and the TypeError stopped, but segfaults
+        # elsewhere since suggest the fault (interpreter or CPU, unresolved)
+        # only moved; see fleetsim/README.md "Known issues".
         self.wint = array("l", bytes(array("l").itemsize * grid.size))
         self.version = 0
         self.rebuild()

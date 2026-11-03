@@ -100,7 +100,8 @@ uses one core).
 | `map_sharing` | A pallet blocks an aisle; does sharing save the others finding it? | **on:** 0 stale cells, mean delivery 98 s · **off:** 147 stale cells, 107 s |
 | `partition_heal` | 4 of 10 robots cut off for 60 s | all delivered, 0 duplicates |
 | `walkers` | #18: walkers stepping out of rack aisles | robot-driven contacts 0–1 per run; **notices made no measurable difference** (seeds 1–4) |
-| `fleet_scale` | 50 robots, radio, neighbour-only Status | see below |
+| `fleet_scale` | 50 robots, radio, neighbour-only Status | 108/140 done, 9× real time; **fails** its criteria (finding 4) |
+| `fleet_scale` + `--set status.recipients=all --set status.hz=5 --set status.session_liveness=false` | the same with today's fleet-wide Status | **0/140 done**: `/fleet/tasks` delivery 0.01 %, mean load 324 % |
 
 ## Findings so far
 
@@ -122,35 +123,66 @@ These came out of building this, and each one is worth a decision.
    a shelf empty. A possible fix: answer a Claim or LeaseBeacon for a task you
    know is DONE with a Complete.
 3. **Fleet-wide Status does not scale.** At 50 robots, all-to-all Status
-   at 5 Hz is 12,500 unicast copies a second, and the radio model puts the
-   channel at ~330 % load. That matches the DES's ~20-robot ceiling. Scale needs
+   at 5 Hz is 12,500 unicast copies a second. The radio model puts mean load
+   at 324 %, and the fleet delivers nothing (`fleet_scale` with fleet-wide
+   Status: 0/140). That matches the DES's ~20-robot ceiling. Scale needs
    neighbour-only Status, and then the quorum needs zenoh-session liveness
    (`status.session_liveness`), which **`nodes/fleet_tasks.py` doesn't do
    today**. With Status neighbour-only, a robot never hears a majority's
    Status and can't claim anything.
-4. **Parked robots wall off docks.** At 1.2 m spacing, an idle fleet on the
+4. **Even neighbour-only, 50 robots saturate where they bunch up.** With
+   Status at 3 Hz within 12 m, `fleet_scale` still peaks at ~300 % load on
+   the apron where idle robots park, and the lease beacons are still
+   fleet-wide (n² copies a second). Reliable `/fleet/tasks` delivery falls to
+   74 % (p95 4 s), and the protocol responds with 61 cancellations, 17
+   duplicate-work episodes and 8 empty-shelf visits. Next levers to try: lease
+   beacons to the gateway plus neighbours only, sparser parking, and the
+   DES's dual-band variant.
+5. **Parked robots wall off docks.** At 1.2 m spacing, an idle fleet on the
    apron blocked the route to the docks. Homes are now 1.6 m apart.
    Decentralised parking is itself a protocol question.
-5. **Dead-end aisles deadlock** when many robots share one pickup behind a
+6. **Dead-end aisles deadlock** when many robots share one pickup behind a
    blockage. There's no traffic coordination beyond "lower priority replans
    first". Intents and yielding (`fleet_radio.should_yield` exists and is
    unused here) are the next nav-protocol step.
 
 ## Known issues
 
-- **CPython 3.14.4 float fault.** With float costs, A* intermittently raised
-  `'<' not supported between instances of 'Costmap' and 'float'` on
-  `ng < gscore[j]`. Every local was a float at the moment it happened. It
-  showed up about once in 5–10 full runs, at the same simulation step,
-  depending on the process. It was not reproducible standalone, not
-  hash-seed dependent, unaffected by `gc.disable()`, and the debug allocator
-  (`PYTHONMALLOC=debug`) found no corruption. A* now runs on integer costs
-  (`Costmap.wint`): 15/15 runs identical, no crash. Other float-heavy Python
-  code could in principle be affected. CI runs 3.12. If you see odd
-  TypeErrors on this machine, suspect the interpreter first.
+- **Intermittent interpreter faults on the development machine — cause not
+  yet pinned down.** On the i9-14900HX laptop with CPython 3.14.4, long
+  fleetsim runs occasionally fail inside the interpreter loop. One kind is
+  a spurious `TypeError` (`'<' not supported between instances of 'Costmap'
+  and 'float'` on `ng < gscore[j]`, with every local a float at that
+  moment). The other is a segfault in `_PyEval_EvalFrameDefault`, seen in
+  the full pytest run and in a genexpr in `planner.py`. Neither reproduces
+  on demand. Both happen at the same simulation step only in some processes,
+  and both are independent of `PYTHONHASHSEED` and `gc.disable()`.
+  `PYTHONMALLOC=debug` found no heap corruption. Runs that don't fail are
+  bit-identical, so the simulation itself is deterministic. The pytest
+  suite without fleetsim never crashed (0/6 on `main`, 0/6 on this branch);
+  with it, 3/6.
+  Two explanations fit, and this machine alone can't separate them:
+  1. a CPython 3.14 interpreter bug. [cpython#155145](https://github.com/python/cpython/issues/155145)
+     (open, unconfirmed) reports the same symptoms on 3.14.6 from a pure
+     stdlib hot loop, while 3.12 is clean;
+  2. the CPU. 13th/14th-gen Intel Raptor Lake parts have a known
+     voltage-degradation instability that shows up as exactly this kind of
+     random crash under sustained single-core load. The #155145 reporter is
+     also on an i9, and a contributor on AMD couldn't reproduce it.
+  How to tell: run `python3 -m pytest fleetsim/tests` in a loop on another
+  machine, or under Python 3.12 (CI uses 3.12). A* uses integer costs
+  (`Costmap.wint`), which made the TypeError disappear in 15 runs. That may
+  only have moved the fault elsewhere, and the segfaults since suggest it
+  did.
 - **Walkers never yield** (simtest's rule), so most walker contacts are a
   walker walking into a robot that stopped for it. `contacts.driven` counts
   only the ones where the robot moved into something ahead of it.
+- **`map_divergence.final_stale` and `recipients: radius`.** Stale counts
+  every cell where a robot differs from the fleet's newest knowledge. With
+  region-limited sharing a robot isn't *meant* to know distant tiles, so
+  stale is large by design (`fleet_scale`: ~32 k cells per robot). Read it
+  as "how far from one shared map", and use it as a pass criterion only
+  with `recipients: all`.
 - **Notice extrapolation** is capped at 1 s. A full 3 s along a stale
   velocity planted phantom obstacles where a pacing walker never went.
 
