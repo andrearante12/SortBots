@@ -280,7 +280,15 @@ class Robot:
 
     # ---- navigation ---------------------------------------------------------
 
+    def _record_path(self) -> None:
+        if self.sim.cfg["record"]["paths"]:
+            self.sim.record({"s": "path", "rid": self.rid, "purpose": self.purpose,
+                             "pts": [[round(x, 2), round(y, 2)] for x, y in self.path]})
+
     def _clear_goal(self) -> None:
+        if self.path:
+            self.path = []
+            self._record_path()
         self.goal = self.purpose = None
         self.path, self.path_idx, self.seg = [], [], 0
         self.plan_failed_since = self.blocked_since = self.blocked_by = None
@@ -308,6 +316,9 @@ class Robot:
                 self.counters[key] += 1
             self.sim.record({"s": "nav", "rid": self.rid, "event": "replan", "cause": cause})
         if path is None:
+            if self.path:
+                self.path = []
+                self._record_path()
             self.path, self.path_idx = [], []
             if self.plan_failed_since is None:
                 self.plan_failed_since = now
@@ -321,6 +332,7 @@ class Robot:
         g = self.sim.grid
         self.path_idx = [i for i in (g.index(*p) for p in path) if i is not None]
         self.seg = 0
+        self._record_path()
         return True
 
     def _smooth(self, pts: list) -> list:

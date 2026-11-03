@@ -20,7 +20,7 @@ to verify, calibrate and demo.
 System python3 with numpy and PyYAML (`requirements-dev.txt`), from the repo
 root. Results land in `data/fleetsim/<UTC>_<name>/` (gitignored):
 `scenario.json` (exactly what ran), `events.jsonl.gz`, `summary.json`,
-`score.json`. Exit code 0 = every pass criterion held, 1 = one failed,
+`score.json`. To watch a run, see [Watching a run](#watching-a-run). Exit code 0 = every pass criterion held, 1 = one failed,
 2 = invalid scenario.
 
 ## Where it sits
@@ -86,6 +86,53 @@ or heard from peers, and every byte of that travels the network model.
 The body is a 0.25 m disc, half the length of the 0.5 × 0.4 m footprint.
 The circumscribed 0.32 m disc made robots unable to pass each other in a
 2.4 m aisle on a 0.2 m grid.
+
+## Watching a run
+
+The operator view replays any recorded run. Open the Session panel, go to the
+**Tests** tab, and find the run under **Fleet sim runs**. You can also go
+straight to one with `http://<console>/#replay=<run dir>`. The replay
+covers the stage until you close it. None of it is the live fleet.
+
+- **Floor:** the true floor. Waypoints are drawn as tape, the gateway as a
+  triangle, and a blockage as a red box while it is in place.
+- **Robots:** to scale, coloured by state (to pickup, carrying, idle, off). A
+  dashed red ring means the robot can't reach the gateway: over the radio
+  links if any were recorded, otherwise through a partition or a cut link.
+- **Paths:** every robot's planned path. The selected robot's path is drawn
+  dashed.
+- **Links:** one-hop radio links, darker for a stronger signal. Radio runs
+  only.
+- **Own map:** with a robot selected, its *own* map replaces the true floor.
+  Cells where it disagrees with the truth at that moment are red, so a
+  blockage it hasn't learned about shows up red. Only robots listed in
+  `record.belief_maps` are recorded.
+- **Timeline:** trouble is ticked along the top (contacts, blocks,
+  failures) and deliveries along the bottom. Disturbances are shaded bands.
+  Click a tick to jump to it.
+- **Info panel:** the task board, network loss and load, and the selected
+  robot's task, how much of the floor it knows, how far it is behind the
+  fleet's map, and its recent events.
+
+Keys: Space plays or pauses. ←/→ steps 1 s (with Shift, 10 s). `[`/`]` jumps
+to the previous or next event (only the selected robot's, if one is
+selected). Esc closes. Drag to pan, scroll to zoom, double-click to fit.
+
+**What is recorded for it.** These go in `record:` in `configs/base.yaml`,
+and no metric reads them. The run's floor, waypoints, homes and gateway are
+recorded once (`world`). Paths are recorded on every plan and replan. Radio
+links are recorded every `links_s`. `belief_map` snapshots are taken every
+`belief_map_s` for the robots in `belief_maps` (default `[robot_0]`; `all`
+records every robot).
+
+`fleetsim/replay.py` packs a run into one JSON document. Poses are stored as
+flat arrays, and every stream is a list of time-ordered rows, so the page
+finds the state at any moment by bisection. A 5-minute run of `fleet_scale`
+(50 robots, radio) packs in 0.2 s to 2.5 MB, or 420 kB once gzipped.
+
+Runs recorded before 2026-11-03 have no `world` event, so they are listed but
+can't be replayed. Re-running the same scenario and seed reproduces them
+exactly.
 
 ## Scenarios
 
@@ -203,5 +250,3 @@ These came out of building this, and each one is worth a decision.
 - **Calibration against Isaac.** `nav.hiccup_rate_hz` (random recovery
   pauses) is 0 until Isaac task timings give it a value. Run the same task
   list in both and compare the `fleet_tasks` metric.
-- Viewing a run in the operator view. Events are recorded in simtest's
-  format, so a replay can be built without changing the format.

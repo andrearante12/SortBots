@@ -46,6 +46,9 @@ from simtest import world as world_lib
 FLEETSIM_DIR = Path(__file__).resolve().parent
 BASE = FLEETSIM_DIR / "configs" / "base.yaml"
 SCENARIOS_DIR = Path(os.environ.get("FLEETSIM_SCENARIOS_DIR") or FLEETSIM_DIR / "scenarios")
+# Where `fleetsim run` writes and the replay view reads (gitignored). The
+# override is for tests: webui/tests/operator_test.mjs replays a run it makes.
+RESULTS_DIR = Path(os.environ.get("FLEETSIM_RESULTS_DIR") or FLEETSIM_DIR.parent / "data" / "fleetsim")
 NAME_RX = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 TOP_KEYS = {"name", "title", "description", "seed", "duration_s", "robots", "config", "tasks",
             "task_arrival", "disturbances", "stop", "metrics", "actors"}
@@ -181,6 +184,10 @@ def _validate(s: dict) -> None:
         if not isinstance(d, dict) or "at_s" not in d or len(DISTURBANCE_KINDS & set(d)) != 1:
             raise ScenarioError(f"disturbances[{i}]: need at_s and exactly one of "
                                 f"{sorted(DISTURBANCE_KINDS)}")
+    bm = cfg["record"]["belief_maps"]
+    names = {f"robot_{k}" for k in range(n)}
+    if bm != "all" and (not isinstance(bm, list) or set(bm) - names):
+        raise ScenarioError(f"config.record.belief_maps: `all` or a list of robot_0..robot_{n - 1}")
     until = s["stop"].get("until")
     if until not in (None, "tasks_done"):
         raise ScenarioError("stop.until: tasks_done (or omit to run for duration_s)")

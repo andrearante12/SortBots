@@ -143,3 +143,11 @@ record:
   net_s: 1.0
   board_s: 5.0
   fleet_log: false            # every FleetTasks log line as an event (verbose)
+  # For the operator view's fleet replay (Tests tab -> Fleet sim runs); none of
+  # these feed a metric. The floor itself (`world`) is always recorded, once.
+  paths: true                 # each robot's planned path, on every plan and replan
+  links_s: 2.0                # radio one-hop links + SNR this often (0 = off). An ideal
+                              # network has every link, so it never records them
+  belief_maps: [robot_0]      # robots whose OWN map is snapshotted: a list, or all. ~5 KB a
+                              # snapshot on the default floor; `all` at 50 robots is ~100 MB/h
+  belief_map_s: 10.0          # snapshot period (0 = off)

@@ -227,6 +227,46 @@
   #comms-feed:empty { display: none; }
   #comms-feed li { padding: 2px 0; } #comms-feed li:first-child { color: var(--ink); }
   #comms-feed li.error { color: var(--stop); }
+  /* Fleet replay (operator_replay.js): a recorded fleetsim run on its own floor. It
+     covers the stage, because nothing live belongs under it: different floor,
+     different robots. */
+  /* Above #empty (3): "no session running" is about the live fleet, not this. */
+  #replay { position: absolute; inset: 0; z-index: 4; background: var(--map-bg); }
+  #rp-map { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  #rp-bar { top: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 6px 10px; font-size: .84rem; }
+  #rp-bar .rp-title { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1 1 auto; }
+  #rp-name { font-weight: 600; white-space: nowrap; }
+  #rp-meta { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #rp-bar select { padding: 2px 6px; }
+  #rp-info-toggle[aria-pressed="true"] { background: var(--segbg); }
+  #rp-bar .x { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 1.3rem; line-height: 1; padding: 0 2px; cursor: pointer; }
+  .rp-v { font-size: .7rem; font-weight: 700; letter-spacing: .05em; padding: 1px 6px; border-radius: 4px; color: var(--on-ink); background: var(--muted); }
+  .rp-v.pass { background: var(--go); } .rp-v.fail { background: var(--stop); }
+  #rp-info { top: 64px; right: 12px; width: 280px; max-height: calc(100% - 150px); overflow: auto; padding: 8px 12px 10px; font-size: .8rem; }
+  #rp-info .rp-k { margin: 8px 0 3px; font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  #rp-info .rp-k:first-child { margin-top: 0; }
+  #rp-info .rp-row { display: flex; flex-wrap: wrap; gap: 2px 10px; }
+  #rp-info .rp-row b { font-weight: 600; } #rp-info .bad { color: var(--stop); }
+  .rp-mode { text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--ink); }
+  .rp-mode::before { content: ""; display: inline-block; width: 8px; height: 8px; margin: 0 4px 0 6px; border-radius: 50%; background: var(--c); }
+  .rp-feed { margin: 0; padding: 0; list-style: none; }
+  .rp-feed li { padding: 1px 0 1px 8px; border-left: 2px solid var(--c, var(--line)); margin: 2px 0; }
+  .rp-feed .tm { color: var(--muted); margin-right: 6px; }
+  #rp-time { left: 12px; right: 12px; bottom: 12px; display: grid; grid-template-columns: auto auto auto 1fr auto; align-items: center; gap: 8px; padding: 6px 10px; font-size: .84rem; }
+  #rp-clock { white-space: nowrap; min-width: 92px; text-align: right; }
+  #rp-time select { padding: 2px 4px; }
+  .rp-scrub { position: relative; display: grid; }
+  #rp-ticks { width: 100%; height: 14px; cursor: pointer; display: block; }
+  #rp-slider { width: 100%; margin: 0; }
+  #rp-legend { display: inline-flex; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: .78rem; }
+  #rp-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; background: var(--c); }
+  #rp-msg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); padding: 24px; text-align: center; pointer-events: none; }
+  #rp-msg.err { color: var(--stop); }
+  /* The Tests tab's list of recorded fleet runs. */
+  .fs-run { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 8px 4px; border-top: 1px solid var(--line); }
+  .fs-run:last-child { border-bottom: 1px solid var(--line); }
+  .fs-t { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; font-size: .86rem; }
+  .fs-t .muted { flex-basis: 100%; font-size: .8rem; }
   #coverage { font-size: .86rem; color: var(--muted); white-space: nowrap; }
   #coverage b { font-weight: 600; color: var(--ink); }
   #coverage[hidden] { display: none; }
@@ -443,6 +483,12 @@
     #mnav .badge { font-size: .7rem; color: var(--muted); font-weight: 500; }
     #alarm-pop { top: auto; bottom: 70px; left: 8px; right: 8px; width: auto; }
     #comms-bar { top: 8px; left: 8px; right: 8px; font-size: .8rem; gap: 6px 8px; }
+    #rp-bar { top: 8px; left: 8px; right: 8px; }
+    #rp-time { left: 8px; right: 8px; bottom: 8px; grid-template-columns: auto auto 1fr; }
+    #rp-time .rp-jump { display: none; }
+    #rp-time .rp-scrub { grid-column: 1 / -1; }
+    #rp-info { top: auto; bottom: 96px; left: 8px; right: 8px; width: auto; max-height: 40%; }
+    #rp-legend { display: none; }
     #comms-bar .cm-range input { width: 70px; }
     #comms-feed { left: 8px; right: 8px; bottom: 56px; max-width: none; }
     #hint { display: none; }
@@ -578,6 +624,35 @@
     <ul id="rc-checks"></ul>
     <p id="rc-err" hidden></p>
   </div>
+  <!-- Fleet replay (operator_replay.js): a recorded fleetsim run, opened from the
+       Tests tab. Covers the stage until closed; nothing in it is the live fleet. -->
+  <section id="replay" hidden aria-label="Fleet sim replay">
+    <canvas id="rp-map"></canvas>
+    <div id="rp-msg" hidden></div>
+    <div class="float" id="rp-bar" role="toolbar" aria-label="Replay">
+      <span class="rp-title"><b id="rp-name"></b><span class="rp-v" id="rp-verdict" hidden></span><span id="rp-meta"></span></span>
+      <select id="rp-sel" title="Follow one robot: its path, its task, its events and (if recorded) its own map"></select>
+      <label class="lf-check" title="Every robot's planned path; the selected one's dashed"><input type="checkbox" id="rp-paths" checked> Paths</label>
+      <label class="lf-check"><input type="checkbox" id="rp-links" checked> Links</label>
+      <label class="lf-check" title="Draw the selected robot's OWN map instead of the true floor (record.belief_maps). Red cells: where it is wrong"><input type="checkbox" id="rp-own" checked> Own map</label>
+      <span id="rp-legend"><span style="--c: var(--info)"><i></i>to pickup</span><span style="--c: var(--go)"><i></i>carrying</span><span style="--c: var(--muted)"><i></i>idle</span><span style="--c: var(--stop)"><i></i>off</span></span>
+      <button type="button" class="btn small" id="rp-info-toggle" aria-pressed="true" title="Task board, network, the selected robot and its events at this moment">Info</button>
+      <button type="button" class="btn small" id="rp-fit" title="Fit the floor (or double-click it)">Fit</button>
+      <button type="button" class="x" id="rp-x" title="Close the replay (Esc)" aria-label="Close the replay">&times;</button>
+    </div>
+    <div class="float" id="rp-info" aria-live="off"></div>
+    <div class="float" id="rp-time" role="group" aria-label="Timeline">
+      <button type="button" class="btn small" id="rp-play" aria-pressed="false" title="Play / pause (Space)">Play</button>
+      <select id="rp-speed" title="Playback speed, sim seconds per second"></select>
+      <span id="rp-clock">0:00</span>
+      <div class="rp-scrub">
+        <canvas id="rp-ticks" title=""></canvas>
+        <input type="range" id="rp-slider" min="0" max="1" step="0.1" value="0" aria-label="Sim time" title="Scrub (arrow keys: 1 s, Shift: 10 s)">
+      </div>
+      <span class="rp-jump"><button type="button" class="btn small" id="rp-prev" title="Previous event ([): contacts, blocks, failures; the selected robot's only, if one is">&lsaquo;</button>
+        <button type="button" class="btn small" id="rp-next" title="Next event (])">&rsaquo;</button></span>
+    </div>
+  </section>
   <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
   <div id="empty" hidden><b id="empty-title">No session running</b><span class="muted" id="empty-sub">Start a session to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><button class="btn primary" id="empty-go">Start a session</button></div>
   <div id="toast" role="status"></div>
@@ -720,6 +795,11 @@
         <h4 class="tp-h">Test cases <span class="muted" id="tp-count"></span></h4>
         <div id="tp-list"></div>
       </section>
+      <!-- Headless fleetsim runs (data/fleetsim/), replayed on the stage: operator_replay.js. -->
+      <section>
+        <h4 class="tp-h">Fleet sim runs <span class="muted" id="tp-fleet-count"></span></h4>
+        <div id="tp-fleet-list"></div>
+      </section>
     </div>
     <div id="session-pane">
         <div class="boot" id="sp-boot" hidden><div class="bar"><i></i></div><span class="boot-label"></span></div>
@@ -748,5 +828,6 @@
 <script src="operator.js"></script>
 <script src="scenarios.js"></script>
 <script src="operator_tests.js"></script>
+<script src="operator_replay.js"></script>
 </body>
 </html>

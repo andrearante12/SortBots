@@ -36,7 +36,7 @@ from simtest import metrics as metrics_lib  # noqa: E402
 from simtest import robots as robots_lib  # noqa: E402
 from simtest import world as world_lib  # noqa: E402
 
-RESULTS_DIR = REPO_ROOT / "data" / "fleetsim"
+RESULTS_DIR = config.RESULTS_DIR
 
 
 def _sets(items) -> list[tuple[str, object]]:

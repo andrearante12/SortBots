@@ -14,7 +14,7 @@
  * It NEVER starts a sim. Zero npm dependencies, same as the other tests: node's
  * WebSocket and fetch drive the Chrome DevTools Protocol directly.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -175,9 +175,17 @@ const tf = (parent, child, x, y, yaw = 0) => ({ transforms: [{
 
 async function main() {
   const sessionsDir = tmpDir('sortbots-sessions-');
+  // A real fleetsim run for the replay, recorded into a temp dir serve.py reads
+  // instead of data/fleetsim/. Small and short: six robots, 80 sim-s, the
+  // partition_heal split starting at 60 s so a cut is on the timeline.
+  const fleetDir = tmpDir('sortbots-fleetsim-');
+  const fs1 = spawnSync('/usr/bin/python3', ['-m', 'fleetsim', 'run', 'partition_heal', '--robots', '6', '--duration', '80',
+    '--set', 'record.belief_maps=[robot_0]', '--set', 'record.belief_map_s=5', '--out', path.join(fleetDir, 'fixture_run'), '--quiet'],
+    { cwd: REPO_ROOT, encoding: 'utf8', timeout: 180000 });
+  check('replay: the fleetsim fixture run was recorded', fs.existsSync(path.join(fleetDir, 'fixture_run', 'summary.json')), (fs1.stderr || '').slice(-300));
   spawnTracked('python3', [path.join(WEBUI_DIR, 'serve.py'), '--control', '--platform', 'sim',
                            '--port', String(PORT), '--host', '127.0.0.1'],
-               { cwd: REPO_ROOT, env: { ...process.env, SORTBOTS_SESSIONS_DIR: sessionsDir,
+               { cwd: REPO_ROOT, env: { ...process.env, SORTBOTS_SESSIONS_DIR: sessionsDir, FLEETSIM_RESULTS_DIR: fleetDir,
                  // The gateway pin is saved by the real serve.py: never into data/.
                  SORTBOTS_COMMS_GATEWAY: path.join(sessionsDir, 'comms_gateway.json') } });
   await waitFor(async () => (await fetch(`http://127.0.0.1:${PORT}/operator.html`)).ok, { what: 'serve.py' });
@@ -1220,6 +1228,68 @@ async function main() {
   check('3d: the chosen view survives a reload', await visible('#cloud'));
   await click('#view [data-v="2d"]'); await sleep(200);
   check('3d: back to 2D restores the map and tools', await visible('#map') && await visible('#tools') && !(await visible('#cloud')));
+
+  // -- fleet replay (operator_replay.js) --------------------------------------------------------
+  // The fixture run recorded at the top, through the real serve.py and fleetsim/replay.py.
+  console.log('\n--- fleet replay ---');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+  await page.eval(`localStorage.clear()`); await load();
+  const rp = async () => JSON.parse(await page.eval(`JSON.stringify((({ toPx, ...s }) => s)(window.sortbotsReplay.state()))`));
+  check('replay: closed until a run is opened', !(await visible('#replay')));
+  await page.eval(`window.sortbotsTests.openTests()`);
+  await waitFor(async () => (await page.eval(`!!document.querySelector('#tp-fleet-list [data-dir="fixture_run"] [data-replay]:not([disabled])')`)), { what: 'the fleet run list', tries: 40 });
+  check('replay: the Tests tab lists recorded fleet runs, replayable', /Partition heal/.test(await $text('#tp-fleet-list')) && /6 robots/.test(await $text('#tp-fleet-list')), await $text('#tp-fleet-list'));
+  await click('#tp-fleet-list [data-dir="fixture_run"] [data-replay]');
+  await waitFor(async () => (await rp()).loaded, { what: 'the replay to load', tries: 40 });
+  check('replay: Replay closes the panel and covers the stage', (await visible('#replay')) && (await page.eval(`document.getElementById('session').hidden`)));
+  check('replay: the bar names the run', (await $text('#rp-name')) === 'Partition heal' && /6 robots · ideal · seed 1/.test(await $text('#rp-meta')), await $text('#rp-meta'));
+  check('replay: the floor is drawn', await page.eval(`(() => { const c = document.getElementById('rp-map'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; const seen = new Set(); for (let i = 0; i < d.length; i += 4 * 97) seen.add(d[i] + ',' + d[i + 1] + ',' + d[i + 2]); return seen.size >= 3; })()`));
+  check('replay: a shareable link', /^#replay=fixture_run$/.test(await page.eval(`location.hash`)), await page.eval(`location.hash`));
+  await page.eval(`window.sortbotsReplay.seek(30)`); await sleep(150);
+  check('replay: before the split nobody is cut off', (await rp()).cut.length === 0, JSON.stringify((await rp()).cut));
+  await page.eval(`window.sortbotsReplay.seek(70)`); await sleep(150);
+  check('replay: during the partition robots 0-3 are cut off from the gateway', JSON.stringify((await rp()).cut) === '[0,1,2,3]', JSON.stringify((await rp()).cut));
+  check('replay: the info panel shows the board at that moment', /Task board/.test(await $text('#rp-info')) && /alive/.test(await $text('#rp-info')), await $text('#rp-info'));
+  // Pick robot 0 off the floor with a real click.
+  const [qx, qy] = await page.eval(`(() => { const r = document.getElementById('rp-map').getBoundingClientRect(), s = window.sortbotsReplay.state(); window.sortbotsReplay.select(0); const p = s.toPx(...window.sortbotsReplay.state().pose); window.sortbotsReplay.select(-1); return [r.left + p[0], r.top + p[1]]; })()`);
+  await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: qx, y: qy, button: 'left', clickCount: 1 });
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: qx, y: qy, button: 'left', clickCount: 1 });
+  await sleep(200);
+  check('replay: clicking a robot selects it', (await rp()).sel === 0 && (await page.eval(`document.getElementById('rp-sel').value`)) === '0');
+  await waitFor(async () => (await rp()).own, { what: 'robot 0\'s own map to decode', tries: 20 });
+  check('replay: a robot with a recorded map shows its own map', (await rp()).own && /own map/.test(await $text('#rp-info')), await $text('#rp-info'));
+  await click('#rp-own'); await sleep(150);
+  check('replay: Own map off goes back to the true floor', !(await rp()).own);
+  await page.eval(`window.sortbotsReplay.select(1)`); await sleep(150);
+  check('replay: a robot without one says how to record it', /record\.belief_maps/.test(await $text('#rp-info')), await $text('#rp-info'));
+  await page.eval(`window.sortbotsReplay.select(-1); window.sortbotsReplay.seek(10)`);
+  const t0 = (await rp()).T;
+  await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ']', text: ']' }); await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ']' }); await sleep(100);
+  check('replay: ] jumps to the next event', (await rp()).T > t0 + 1, `${t0} -> ${(await rp()).T}`);
+  await page.eval(`window.sortbotsReplay.seek(10)`);
+  await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', text: ' ' }); await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space' });
+  await sleep(600);
+  const playing = await rp();
+  check('replay: Space plays, at the chosen speed', playing.playing && playing.T > 11 && playing.T < 18, JSON.stringify({ T: playing.T, speed: playing.speed }));
+  check('replay: the clock follows', /^0:1\d \/ 1:20$/.test(await $text('#rp-clock')), await $text('#rp-clock'));
+  await page.eval(`window.sortbotsReplay.play(false)`);
+  await shot('replay');
+  await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape' }); await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape' }); await sleep(150);
+  check('replay: Esc closes it and drops the link', !(await visible('#replay')) && (await page.eval(`location.hash`)) === '');
+  await page.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/operator.html#replay=fixture_run` });
+  await waitFor(async () => (await page.eval(`!!window.sortbotsReplay && window.sortbotsReplay.state().loaded`)), { what: 'a replay from its link', tries: 40 });
+  check('replay: the link opens straight into the run', await visible('#replay'));
+  await page.eval(`window.sortbotsReplay.open('no_such_run')`); await sleep(400);
+  check('replay: a missing run says so', (await visible('#rp-msg')) && /no fleetsim run 'no_such_run'/.test(await $text('#rp-msg')), await $text('#rp-msg'));
+  await click('#rp-x');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await page.eval(`window.sortbotsReplay.open('fixture_run')`);
+  await waitFor(async () => (await rp()).loaded, { what: 'the replay on a phone', tries: 40 });
+  await sleep(200);
+  check('replay: on a phone nothing scrolls sideways and the info panel starts closed', await page.eval(`document.documentElement.scrollWidth <= innerWidth`) && !(await visible('#rp-info')));
+  await shot('replay-phone');
+  await click('#rp-x');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
 
   // -- light / dark: follows the system until the toggle pins a choice ------------------------
   console.log('\n--- theme ---');

@@ -37,6 +37,7 @@ import fleet_radio  # noqa: E402
 import fleet_tasks as ft  # noqa: E402
 from commsim.core.protocol import Params  # noqa: E402
 from simtest import world as world_lib  # noqa: E402
+from simtest.events import MapGrid  # noqa: E402
 from waypoints import Waypoint  # noqa: E402
 
 GW = 0
@@ -594,6 +595,33 @@ class Sim:
         self.record({"s": "belief", "free_cells": free_n, "surface_cells": int(surf.sum()),
                      "cell_m": self.grid.res, "robots": rows})
 
+    def _grid_json(self, data: np.ndarray) -> dict:
+        g = self.grid
+        return MapGrid(g.width, g.height, g.res, g.ox, g.oy, data).to_json()
+
+    def _world(self) -> None:
+        """The floor as the run starts, once: everything the replay draws
+        that no other stream carries. Blockages arrive later as `disturb`."""
+        self.record({"s": "world",
+                     "grid": self._grid_json(np.where(self.static, OCC, FREE).astype(np.int8)),
+                     "waypoints": {k: [round(w.x, 3), round(w.y, 3)] for k, w in self.waypoints.items()},
+                     "homes": {r.rid: [round(r.home[0], 3), round(r.home[1], 3)] for r in self.robots},
+                     "gateway": [round(float(v), 3) for v in self.gateway_xy],
+                     "body_r": float(self.cfg["robots"]["footprint_radius_m"]),
+                     "actors": {a["id"]: round(float(world_lib.half_extent(a)), 3) for a in self.actors}})
+
+    def _belief_maps(self) -> None:
+        sel = self.cfg["record"]["belief_maps"]
+        for r in self.robots:
+            if sel == "all" or r.rid in sel:
+                self.record({"s": "belief_map", "rid": r.rid, "grid": self._grid_json(r.belief.state)})
+
+    def _links(self) -> None:
+        # One-hop links only: routes are paths over these, and the viewer can
+        # walk them. Blocked and dead links are already out of the table.
+        tab = self.net.link_table()
+        self.record({"s": "links", "links": [[e["a"], e["b"], round(e["snr_db"])] for e in tab]})
+
     def _net_sample(self) -> None:
         self.record({"s": "net", "model": self.cfg["network"]["model"],
                      "kinds": self.net.take_stats(), **self.net.summary()})
@@ -628,8 +656,10 @@ class Sim:
                                   "cell_m": self.grid.res, "seed": self.seed,
                                   "grid": [self.grid.width, self.grid.height],
                                   "gateway": list(self.gateway_xy), "notes": self.notes}})
+        self._world()
         nxt = {"gt": 0.0, "belief": 0.0, "net": float(rec["net_s"]), "board": float(rec["board_s"]),
-               "session": 0.0}
+               "session": 0.0, "bmap": 0.0, "links": 0.0}
+        links_on = float(rec["links_s"]) > 0 and hasattr(self.net, "link_table")
         stop = self.scn.get("stop") or {}
         settle_until = None
         reason = "duration"
@@ -671,6 +701,12 @@ class Sim:
             if t >= nxt["net"]:
                 nxt["net"] += float(rec["net_s"])
                 self._net_sample()
+            if rec["belief_map_s"] and t >= nxt["bmap"]:
+                nxt["bmap"] += float(rec["belief_map_s"])
+                self._belief_maps()
+            if links_on and t >= nxt["links"]:
+                nxt["links"] += float(rec["links_s"])
+                self._links()
             if t >= nxt["board"]:
                 nxt["board"] += float(rec["board_s"])
                 self._board_sample()
@@ -682,6 +718,8 @@ class Sim:
         self._gt()
         if rec["belief_s"]:
             self._belief_sample()
+        if rec["belief_map_s"]:
+            self._belief_maps()
         self._net_sample()
         self._board_sample()
         wall = time.monotonic() - wall0

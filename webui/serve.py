@@ -14,6 +14,10 @@ Then open http://localhost:8081/. Requires rosbridge_websocket (port 9090)
 and web_video_server (port 8080) running separately — see
 launch/sortbots_webui.launch.py, which brings up all three together.
 
+FLEET REPLAY (fleetsim/replay.py): /api/fleetsim/runs lists data/fleetsim/ and
+/api/fleetsim/run?dir=NAME returns one run packed for the operator view's
+replay. Read-only, so no --control.
+
 TESTS (configs/tests/, scripts/simtest.py): /api/tests, /api/worlds and
 /api/tests/results are readable without --control (the Tests view should show
 what exists and what last happened even with the console down); running and
@@ -40,6 +44,7 @@ the URL, not Tailscale ACLs. Turn it off with `tailscale funnel reset`.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import math
 import os
@@ -63,6 +68,9 @@ from simtest import report as simtest_report
 from simtest import spec as simtest_spec
 from simtest import world as simtest_world
 from simtest_runner import SimtestRunner
+# The fleet replay (Tests tab -> Fleet sim runs): fleetsim's recorded runs,
+# read-only. fleetsim/replay.py is stdlib + simtest; nothing here runs a sim.
+from fleetsim import replay as fleetsim_replay
 
 WEBUI_DIR = Path(__file__).resolve().parent
 DEMO_TASKS_CONFIG = WEBUI_DIR.parent / "configs" / "demo_tasks.yaml"
@@ -239,6 +247,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_test_report()
         elif route == "/api/tests/run":
             self._with_tests(self._serve_test_run)
+        elif route == "/api/fleetsim/runs":
+            self._serve_json({"runs": fleetsim_replay.list_runs()})
+        elif route == "/api/fleetsim/run":
+            self._serve_fleetsim_run()
         elif route == "/":
             # The operator view is the only GUI (the per-robot dashboard,
             # index.html + app.js, was removed 2026-10-23).
@@ -738,6 +750,25 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except OSError as exc:
             self._serve_error(500, f"failed to launch: {exc}")
 
+    # -- fleet replay (fleetsim/replay.py) --------------------------------------
+
+    def _serve_fleetsim_run(self):
+        """One recorded fleetsim run, packed whole for the page to scrub.
+        Readable without --control, like /api/tests/results: it only reads
+        data/fleetsim/, by directory NAME (fleetsim_replay.DIR_RX)."""
+        name = parse_qs(urlsplit(self.path).query).get("dir", [""])[0]
+        try:
+            packed = fleetsim_replay.pack(name)
+        except fleetsim_replay.ReplayError as exc:
+            self._serve_error(400 if not fleetsim_replay.DIR_RX.match(name) else 409, str(exc))
+            return
+        except FileNotFoundError as exc:
+            self._serve_error(404, str(exc))
+            return
+        # Megabytes of JSON for a big fleet, over Tailscale Funnel to a phone:
+        # gzip takes a 50-robot run from ~4 MB to under 1 MB.
+        self._serve_json(packed, gzip_ok=True)
+
     # -- plumbing ----------------------------------------------------------
 
     def _with_tests(self, fn):
@@ -780,10 +811,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return None
         return body
 
-    def _serve_json(self, obj, code: int = 200) -> None:
-        body = json.dumps(obj).encode("utf-8")
+    def _serve_json(self, obj, code: int = 200, gzip_ok: bool = False) -> None:
+        body = json.dumps(obj, separators=(",", ":") if gzip_ok else None).encode("utf-8")
+        zipped = gzip_ok and len(body) > 4096 and "gzip" in (self.headers.get("Accept-Encoding") or "")
+        if zipped:
+            body = gzip.compress(body, 5)
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        if zipped:
+            self.send_header("Content-Encoding", "gzip")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

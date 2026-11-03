@@ -50,7 +50,7 @@ This is **not a colcon workspace** — there is no `src/`, no `package.xml`, no
 | `maps/` | saved map library — named, committed snapshots of explored maps |
 | `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `docs/splat.md`) |
 | `commsim/` | fleet comms simulation (mesh, Zenoh, task auction), system python3 only; `core/protocol.py` is the allocator `nodes/fleet_tasks.py` runs, `viz/demo.py` the model behind the operator's Comms overlay (`commsim/README.md`) |
-| `fleetsim/` | headless many-robot sim, system python3 only: each robot plans on its OWN map, shares map patches and runs the real `FleetTasks` auction over an ideal or radio network; scored by simtest's metrics (`fleetsim/README.md`) |
+| `fleetsim/` | headless many-robot sim, system python3 only: each robot plans on its OWN map, shares map patches and runs the real `FleetTasks` auction over an ideal or radio network; scored by simtest's metrics; replayed in the operator view's Tests tab (`fleetsim/replay.py`, `webui/operator_replay.js`) (`fleetsim/README.md`) |
 | `docs/running.md` | the full runbook |
 
 No custom `.msg`/`.srv`: inter-node protocol is `std_msgs/String` carrying JSON.

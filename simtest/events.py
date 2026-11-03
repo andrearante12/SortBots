@@ -54,6 +54,16 @@ STREAMS = {
     "board": "fleetsim: the gateway's task board, counted: {tasks: {state: n}, alarms, "
              "robots_alive}",
     "disturb": "fleetsim: an injected failure starting (on: true) or ending",
+    # fleetsim, for the operator view's replay (fleetsim/replay.py); no metric reads them.
+    "world": "fleetsim, once after start: {grid: MapGrid JSON (0 free / 100 occupied), "
+             "waypoints: {name: [x, y]}, homes: {rid: [x, y]}, gateway: [x, y], body_r, "
+             "actors: {id: radius}}",
+    "path": "fleetsim: a robot's planned path, on every plan; pts [] when it has none: "
+            "{rid, purpose: task|home, pts: [[x, y], ...]}",
+    "links": "fleetsim, radio network only: usable one-hop links: {links: [[node_a, node_b, "
+             "snr_db], ...]}; node 0 is the gateway, robot_N is node N+1",
+    "belief_map": "fleetsim: one robot's own map (record.belief_maps): {rid, grid: MapGrid "
+                  "JSON, -1 unknown / 0 free / 100 occupied}",
 }
 
 # Recorded on every run whether or not a metric asks, so a NEW metric can be
