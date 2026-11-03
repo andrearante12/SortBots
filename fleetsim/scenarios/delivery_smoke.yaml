@@ -1,0 +1,36 @@
+# The baseline: does a small fleet finish its deliveries with nothing in the
+# way? Ideal network, every robot starting with the true map (prior: truth).
+# Runs in a few seconds; if this fails, nothing else is worth reading.
+name: delivery_smoke
+title: Eight robots, a dozen deliveries, ideal network
+description: >
+  Twelve fixed pickup -> dropoff tasks across the default 60 x 40 m synthetic
+  warehouse, auctioned by the real fleet_tasks allocator to eight robots that
+  each plan on their own map. Pass = every task delivered, nobody touches
+  anything, no task worked twice at once.
+seed: 1
+duration_s: 900
+robots: 8
+config:
+  map_share: {prior: truth}
+tasks:
+  - {at_s: 2, pickup: shelf_1_0, dropoff: dock_0}
+  - {at_s: 4, pickup: shelf_2_3, dropoff: dock_3}
+  - {at_s: 6, pickup: shelf_3_5, dropoff: dock_6}
+  - {at_s: 8, pickup: shelf_4_7, dropoff: dock_9}
+  - {at_s: 10, pickup: shelf_5_1, dropoff: dock_1}
+  - {at_s: 12, pickup: shelf_6_4, dropoff: dock_4}
+  - {at_s: 14, pickup: shelf_7_6, dropoff: dock_7}
+  - {at_s: 16, pickup: shelf_8_2, dropoff: dock_10}
+  - {at_s: 30, pickup: shelf_2_6, dropoff: dock_2}
+  - {at_s: 32, pickup: shelf_4_2, dropoff: dock_5}
+  - {at_s: 34, pickup: shelf_6_0, dropoff: dock_8}
+  - {at_s: 36, pickup: shelf_8_5, dropoff: dock_11}
+stop: {until: tasks_done, settle_s: 3}
+metrics:
+  - metric: fleet_tasks
+    pass: {done_frac: {gte: 1.0}, duplicates: {eq: 0}}
+  - metric: contacts
+    pass: {contacts: {eq: 0}}
+  - metric: nav
+  - metric: comms

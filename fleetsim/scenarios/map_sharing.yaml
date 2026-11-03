@@ -1,0 +1,41 @@
+# Does sharing map patches save robots from finding a blockage themselves?
+# Run it twice and compare:
+#   /usr/bin/python3 -m fleetsim run map_sharing
+#   /usr/bin/python3 -m fleetsim run map_sharing --set map_share.enabled=false
+name: map_sharing
+title: A blocked aisle only the first robot sees
+description: >
+  Every robot starts with the true map (prior: truth). At t=1 a pallet blocks
+  aisle 1 at x 21.5-22.5 (the first aisle between racks), and nobody's map
+  knows. Every task picks up at shelf_1_3, just past the pallet from the
+  shortest route, so the first robot through finds it with its camera. With
+  map sharing on, its MapUpdate reaches the others and they replan before
+  they set off (nav.replans_shared); off, each finds it on arrival.
+seed: 1
+duration_s: 900
+robots: 10
+config:
+  map_share: {prior: truth, recipients: all}
+disturbances:
+  - {at_s: 1, blockage: {rect: [21.5, 12.0, 22.5, 14.4]}}
+tasks:
+  - {at_s: 5, pickup: shelf_1_3, dropoff: dock_2}
+  - {at_s: 25, pickup: shelf_1_3, dropoff: dock_3}
+  - {at_s: 45, pickup: shelf_1_3, dropoff: dock_4}
+  - {at_s: 65, pickup: shelf_1_3, dropoff: dock_5}
+  - {at_s: 85, pickup: shelf_1_3, dropoff: dock_6}
+  - {at_s: 105, pickup: shelf_1_3, dropoff: dock_7}
+  - {at_s: 125, pickup: shelf_1_3, dropoff: dock_2}
+  - {at_s: 145, pickup: shelf_1_3, dropoff: dock_3}
+stop: {until: tasks_done, settle_s: 3}
+metrics:
+  - metric: fleet_tasks
+    pass: {done_frac: {gte: 1.0}}
+  - metric: contacts
+    pass: {contacts: {eq: 0}}
+  - metric: map_divergence
+    # Every robot ends knowing every face of the pallet. With sharing off,
+    # only the robots that drove up to it do (~140 wrong cells, seed 1).
+    pass: {final_wrong_free: {eq: 0}}
+  - metric: nav
+    pass: {gave_up: {eq: 0}}

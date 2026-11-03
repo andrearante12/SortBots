@@ -117,9 +117,11 @@ class Robot:
         self.plan_failed_since = None
         self.blocked_since = None
         self.blocked_by = None
+        self.block_replan_at = None
         self.next_replan_ok = 0.0
         self.next_periodic = 0.0
         self.replan_due = None
+        self._retry_n = 0
         self.pause_until = 0.0
         self.overlay: list[tuple[float, np.ndarray]] = []
         # task FSM (task_manager stand-in)
@@ -230,16 +232,25 @@ class Robot:
     def _fsm(self, now: float) -> None:
         if self.state in ("PICKING", "PLACING") and now >= self.dwell_until:
             if self.state == "PICKING":
+                # One physical item per task: a second robot sent to the same
+                # shelf (a reclaim during a split) finds it gone, and the
+                # pick fails as task_manager's would.
+                if not self.sim.take_item(self.task["task_id"], self.rid):
+                    self.sim.record({"s": "nav", "rid": self.rid, "event": "empty_shelf",
+                                     "task_id": self.task["task_id"]})
+                    self._end_task("FAILED")
+                    return
                 self._set_state("NAV_TO_DROPOFF")
                 self.set_goal(self.sim.waypoint_xy(self.task["dropoff"]), "task")
             else:
+                self.sim.place_item(self.task["task_id"])
                 self._end_task("DONE")
             return
         if self.state == "IDLE" and self.queue:
             self.task = self.queue.popleft()
             if self.purpose == "home":
                 self._clear_goal()
-            if self.task.get("carrying"):
+            if self.task.get("carrying") and self.sim.item_at(self.task["task_id"]) == self.rid:
                 self._set_state("NAV_TO_DROPOFF")
                 self.set_goal(self.sim.waypoint_xy(self.task["dropoff"]), "task")
             else:
@@ -273,6 +284,7 @@ class Robot:
         self.goal = self.purpose = None
         self.path, self.path_idx, self.seg = [], [], 0
         self.plan_failed_since = self.blocked_since = self.blocked_by = None
+        self.block_replan_at = None
         self.replan_due = None
         self.v = 0.0
 
@@ -304,6 +316,7 @@ class Robot:
                                  "cause": cause})
             return False
         self.plan_failed_since = None
+        self._retry_n = 0
         self.path = [(self.x, self.y)] + self._smooth(path)[1:]
         g = self.sim.grid
         self.path_idx = [i for i in (g.index(*p) for p in path) if i is not None]
@@ -418,10 +431,33 @@ class Robot:
             if (ox - self.x) * hx + (oy - self.y) * hy < -0.05:
                 continue  # behind: driving on only gains distance
             need = self.body_r + r + margin
-            for a, b in zip(segs[:-1], segs[1:]):
-                if seg_dist((ox, oy), a, b) < need:
-                    return (ox, oy, r, kind, ident)
+            here = math.hypot(ox - self.x, oy - self.y)
+            closest = min(seg_dist((ox, oy), a, b) for a, b in zip(segs[:-1], segs[1:]))
+            # In the way only if the path ahead comes within `need` AND closer
+            # than the robot already is: a peer that stopped right beside or
+            # in front of us must not pin us when the new path leads away.
+            if closest < need and closest < here - 0.02:
+                return (ox, oy, r, kind, ident)
         return None
+
+    def _cluster(self, blk, now: float, link_m: float = 1.8, limit: int = 8) -> list:
+        """The blocking obstacle plus every obstacle within link_m of one
+        already taken (transitively), nearest first, at most `limit`."""
+        obs = [(o[0], o[1], o[2]) for o in self.obstacles(now)
+               if math.hypot(o[0] - self.x, o[1] - self.y) < 6.0]
+        taken = [(blk[0], blk[1], blk[2])]
+        grew = True
+        while grew and len(taken) < limit:
+            grew = False
+            for o in obs:
+                if o in taken:
+                    continue
+                if any(math.hypot(o[0] - t[0], o[1] - t[1]) <= link_m for t in taken):
+                    taken.append(o)
+                    grew = True
+                    if len(taken) >= limit:
+                        break
+        return taken
 
     def _add_overlay(self, ox: float, oy: float, r: float, now: float) -> None:
         g = self.sim.grid
@@ -460,7 +496,13 @@ class Robot:
                 self.sim.record({"s": "nav", "rid": self.rid, "event": "gave_up", "cause": "no_path"})
                 self._nav_done(False)
             elif now >= self.next_replan_ok:
+                # A failed search floods the whole reachable floor; back off
+                # 0.5, 1, 2, 4 s between retries instead of paying that
+                # every min_replan_s.
                 self._replan("retry")
+                if not self.path:
+                    self._retry_n += 1
+                    self.next_replan_ok = now + min(4.0, float(nav["min_replan_s"]) * 2 ** self._retry_n)
             return
         if self.replan_due is not None and now >= self.next_replan_ok:
             self._replan(self.replan_due)
@@ -504,14 +546,21 @@ class Robot:
             # interval, so two robots don't swerve into each other in step.
             first = blk[3] != "robot" or blk[4] < self.k
             due = float(nav["block_replan_s"]) * (1 if first else 2)
-            if waited >= due and now >= self.next_replan_ok:
-                self._add_overlay(blk[0], blk[1], blk[2], now)
+            if self.block_replan_at is None:
+                self.block_replan_at = now + due
+            if now >= self.block_replan_at and now >= self.next_replan_ok:
+                self.block_replan_at = now + due  # still blocked after this: wait again
+                # Mark the blocker and whatever is chained to it: a row of
+                # parked peers has to be planned around as a row, or the new
+                # path just runs into the next one.
+                for ox, oy, r in self._cluster(blk, now):
+                    self._add_overlay(ox, oy, r, now)
                 self._replan("blocked")
             return
         if self.blocked_since is not None:
             self.sim.record({"s": "nav", "rid": self.rid, "event": "unblocked",
                              "after_s": round(now - self.blocked_since, 2)})
-            self.blocked_since = self.blocked_by = None
+            self.blocked_since = self.blocked_by = self.block_replan_at = None
         # Heading: turn toward the current segment; drive only when roughly
         # facing it (rotate in place at a sharp corner, as a diff drive does).
         a, b = (self.x, self.y), self.path[self.seg + 1]
@@ -590,7 +639,7 @@ class Robot:
             # A robot standing still sees the same static world: scan it at
             # idle_hz (still enough to notice a peer or mover coming).
             pose = (round(self.x, 3), round(self.y, 3), round(self.yaw, 3))
-            still = pose == self._scan_pose
+            still = pose == self._scan_pose and self.goal is None
             sc = self.sim.cfg["sensing"]
             self.next_sense = now + 1.0 / float(sc["idle_hz"] if still else sc["hz"])
             self._scan_pose = pose

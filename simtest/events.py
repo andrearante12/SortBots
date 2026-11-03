@@ -41,6 +41,19 @@ STREAMS = {
            "{grid: MapGrid}",
     "dyn": "/<rid>/dynamic_obstacles in the map frame, <=5 Hz, 0.1 m voxels: "
            "{rid, pts: [[x, y], ...]}",
+    # fleetsim only (fleetsim/README.md): the headless fleet sim records these
+    # alongside start/end/gt/dispatch/task, which keep the schema above.
+    "announce": "fleetsim: a task the gateway announced: {task_id, pickup, dropoff}",
+    "contact": "fleetsim: a body contact: {rid, kind: robot|static|actor, other, x, y}",
+    "nav": "fleetsim: local-layer / planner event: {rid, event: replan|blocked|unblocked|"
+           "gave_up|plan_failed|recovery, cause?, by?, after_s?}",
+    "net": "fleetsim, 1 Hz: {model, kinds: {kind: {sent, delivered, lost, bytes, p50_ms, "
+           "p95_ms}}, load_max, load_mean, reach_frac, hops_max}",
+    "belief": "fleetsim: each robot's map vs the truth: {free_cells, cell_m, robots: {rid: "
+              "{known_free, wrong_free, wrong_occ, known}}}",
+    "board": "fleetsim: the gateway's task board, counted: {tasks: {state: n}, alarms, "
+             "robots_alive}",
+    "disturb": "fleetsim: an injected failure starting (on: true) or ending",
 }
 
 # Recorded on every run whether or not a metric asks, so a NEW metric can be

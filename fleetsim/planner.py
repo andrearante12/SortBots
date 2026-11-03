@@ -32,9 +32,8 @@ from .grid import Grid
 
 UNKNOWN, FREE, OCC = -1, 0, 100
 INF = float("inf")
-SQRT2 = math.sqrt(2.0)
-NEIGHBOURS = ((1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
-              (1, 1, SQRT2), (1, -1, SQRT2), (-1, 1, SQRT2), (-1, -1, SQRT2))
+NEIGHBOURS_INT = ((1, 0, 1000), (-1, 0, 1000), (0, 1, 1000), (0, -1, 1000),
+                  (1, 1, 1414), (1, -1, 1414), (-1, 1, 1414), (-1, -1, 1414))
 
 
 class Costmap:
@@ -53,6 +52,14 @@ class Costmap:
         # Flat mirror of the step multiplier for A*: array('f') indexes from
         # python at list speed with a quarter of a list's memory.
         self.mult = array("f", bytes(4 * grid.size))
+        # The same multiplier as integers (x1000; 0 = lethal) for A*'s inner
+        # loop, which runs on ints only. On CPython 3.14.4 the float version
+        # intermittently raised "'<' not supported between 'Costmap' and
+        # 'float'" on `ng < gscore[j]` with every local a float — once in
+        # five to ten full runs, at a different run each time, never under a
+        # standalone stress test (2026-11-02). Integer arithmetic allocates
+        # no floats in the loop; see fleetsim/README.md "Known issues".
+        self.wint = array("l", bytes(array("l").itemsize * grid.size))
         self.version = 0
         self.rebuild()
 
@@ -96,9 +103,11 @@ class Costmap:
         if self.unknown_cost:
             m = m + self.unknown_cost * (self.state[y0:y1, x0:x1] == UNKNOWN)
         m = np.where(cur <= self.r_lethal, np.inf, m).astype(np.float32)
+        wi = np.where(np.isinf(m), 0, np.round(m * 1000.0)).astype(np.dtype(array("l").typecode))
         for r in range(h):
             base = (y0 + r) * g.width + x0
             self.mult[base: base + w] = array("f", m[r].tobytes())
+            self.wint[base: base + w] = array("l", wi[r].tobytes())
         self.version += 1
 
     def lethal(self, idx: int) -> bool:
@@ -145,46 +154,55 @@ class Costmap:
             si = esc
         if si == gi:
             return prefix + [g.centre_of(gi)]
-        w, h, res, mult = g.width, g.height, g.res, self.mult
+        w, h, wint = g.width, g.height, self.wint
         gx, gy = gi % w, gi // w
-
-        def heur(i):
-            dx, dy = abs(i % w - gx), abs(i // w - gy)
-            return res * (max(dx, dy) + (SQRT2 - 1.0) * min(dx, dy))
-
-        gscore = {si: 0.0}
-        came = {}
-        heap = [(heur(si), 0.0, si)]
+        # Integer costs: a step is 1000 (orthogonal) or 1414 (diagonal) per
+        # cell, times the cell's x1000 multiplier; the heuristic is octile in
+        # the same units with multiplier 1000 (the floor), so it never
+        # overestimates. See the note on self.wint.
+        gscore = [-1] * g.size
+        came = [-1] * g.size
+        gscore[si] = 0
+        sx, sy = si % w, si // w
+        ax, ay = abs(sx - gx), abs(sy - gy)
+        h0 = 1000 * (1000 * ax + 414 * ay) if ax > ay else 1000 * (1000 * ay + 414 * ax)
+        heap = [(h0, 0, si)]
         pop, push = heapq.heappop, heapq.heappush
         expansions = 0
+        found = False
         while heap:
             f, gs, i = pop(heap)
             if i == gi:
+                found = True
                 break
-            if gs > gscore.get(i, INF):
+            if gs > gscore[i]:
                 continue
             expansions += 1
             if expansions > max_expansions:
                 return None
             x, y = i % w, i // w
-            for dx, dy, step in NEIGHBOURS:
+            for dx, dy, step in NEIGHBOURS_INT:
                 nx, ny = x + dx, y + dy
                 if nx < 0 or ny < 0 or nx >= w or ny >= h:
                     continue
                 j = ny * w + nx
-                mj = mult[j]
-                if mj == INF:
+                wj = wint[j]
+                if wj == 0:
                     continue
-                if step > 1.0 and (mult[y * w + nx] == INF or mult[ny * w + x] == INF):
+                if step > 1000 and (wint[y * w + nx] == 0 or wint[ny * w + x] == 0):
                     continue
-                ng = gs + step * res * mj
-                if ng < gscore.get(j, INF):
+                ng = gs + step * wj
+                old_g = gscore[j]
+                if old_g < 0 or ng < old_g:
                     gscore[j] = ng
                     came[j] = i
-                    push(heap, (ng + heur(j), ng, j))
-        else:
-            return None
-        if gi not in gscore:
+                    ax, ay = abs(nx - gx), abs(ny - gy)
+                    if ax > ay:
+                        hh = 1000 * (1000 * ax + 414 * ay)
+                    else:
+                        hh = 1000 * (1000 * ay + 414 * ax)
+                    push(heap, (ng + hh, ng, j))
+        if not found:
             return None
         cells = [gi]
         while cells[-1] != si:

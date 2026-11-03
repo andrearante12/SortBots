@@ -1,0 +1,28 @@
+# The fleet splits for a minute and heals. The majority quorum (protocol.py)
+# must keep the cut-off side from claiming what the other side owns.
+name: partition_heal
+title: Four robots cut off from the rest for 60 s
+description: >
+  Ten robots on an ideal network take a steady stream of tasks. From t=60 to
+  t=120 robots 0-3 can talk only to each other: no gateway, no majority. Pass
+  = no task is ever worked by two robots at once, and the fleet still
+  delivers nearly everything announced.
+seed: 1
+duration_s: 1200
+robots: 10
+config:
+  map_share: {prior: truth}
+tasks:  # some already in flight when the split comes
+  - {at_s: 5, pickup: shelf_1_1, dropoff: dock_1}
+  - {at_s: 10, pickup: shelf_3_4, dropoff: dock_5}
+  - {at_s: 15, pickup: shelf_5_6, dropoff: dock_9}
+  - {at_s: 20, pickup: shelf_7_2, dropoff: dock_3}
+task_arrival: {rate_hz: 0.1, pickups: "shelf_*", dropoffs: "dock_*", start_s: 25, until_s: 240}
+disturbances:
+  - {at_s: 60, duration_s: 60, partition: [[robot_0, robot_1, robot_2, robot_3], rest]}
+stop: {until: tasks_done, settle_s: 5}
+metrics:
+  - metric: fleet_tasks
+    pass: {duplicates: {eq: 0}, done_frac: {gte: 0.9}}
+  - metric: contacts
+    pass: {contacts: {eq: 0}}

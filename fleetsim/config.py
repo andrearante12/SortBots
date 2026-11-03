@@ -41,13 +41,14 @@ from pathlib import Path
 import yaml
 
 from simtest import metrics as metrics_lib
+from simtest import world as world_lib
 
 FLEETSIM_DIR = Path(__file__).resolve().parent
 BASE = FLEETSIM_DIR / "configs" / "base.yaml"
 SCENARIOS_DIR = Path(os.environ.get("FLEETSIM_SCENARIOS_DIR") or FLEETSIM_DIR / "scenarios")
 NAME_RX = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 TOP_KEYS = {"name", "title", "description", "seed", "duration_s", "robots", "config", "tasks",
-            "task_arrival", "disturbances", "stop", "metrics"}
+            "task_arrival", "disturbances", "stop", "metrics", "actors"}
 # Blocks whose keys are not fixed by base.yaml.
 FREE_FORM = {("world", "synthetic"), ("fleet_tasks",), ("network", "radio", "radio_model")}
 DISTURBANCE_KINDS = {"kill", "revive", "partition", "block_link", "blockage"}
@@ -123,9 +124,26 @@ def resolve(raw: dict, *, sets: list[tuple[str, object]] = (), robots: int | Non
         "disturbances": list(raw.get("disturbances") or []),
         "stop": raw.get("stop") or {},
         "metrics": raw.get("metrics") or [],
+        "actors": _actors(name, raw.get("actors"), cfg),
     }
     _validate(out)
     return out
+
+
+def _actors(name: str, inline, cfg: dict) -> list:
+    """Scripted movers: inline `actors:` (simtest/world.py's actor schema —
+    for a synthetic floor, whose coordinates no configs/worlds file shares),
+    or config.world.actors naming a configs/worlds world."""
+    if inline and cfg["world"]["actors"]:
+        raise ScenarioError("actors: give inline actors or config.world.actors, not both")
+    try:
+        if inline:
+            return world_lib.validate({"name": name, "actors": inline})["actors"]
+        if cfg["world"]["actors"]:
+            return world_lib.load(cfg["world"]["actors"])["actors"]
+    except world_lib.WorldError as e:
+        raise ScenarioError(f"actors: {e}") from None
+    return []
 
 
 def _validate(s: dict) -> None:

@@ -101,6 +101,7 @@ class Sim:
         self.contacts_active: set = set()
         self._contacts_now: set = set()
         self._pending_announces = 0
+        self.items: dict[str, str] = {}
         self.announced: list[dict] = []
         self.counts = {"contacts": 0, "announced": 0}
         self._schedule_inputs()
@@ -146,9 +147,7 @@ class Sim:
                                                   grid.oy + grid.height * grid.res / 2)
         # Scripted movers from a simtest world (configs/worlds/): the same
         # actors, paths and timing Isaac plays.
-        self.actors = []
-        if w.get("actors"):
-            self.actors = world_lib.load(w["actors"])["actors"]
+        self.actors = list(self.scn.get("actors") or [])
         self.actor_owner = np.zeros((grid.height, grid.width), dtype=np.int16)
         self.actor_owner_flat = self.actor_owner.reshape(-1)
         self.actor_pose: dict[str, dict] = {}
@@ -164,6 +163,19 @@ class Sim:
         if len(homes) < n:
             raise ValueError(f"room for only {len(homes)} robots on this map, asked for {n}")
         return homes[:n]
+
+    # One physical item per task: on its shelf, on a robot, or delivered.
+    def item_at(self, task_id: str) -> str:
+        return self.items.get(task_id, "shelf")
+
+    def take_item(self, task_id: str, rid: str) -> bool:
+        if self.item_at(task_id) != "shelf":
+            return False
+        self.items[task_id] = rid
+        return True
+
+    def place_item(self, task_id: str) -> None:
+        self.items[task_id] = "delivered"
 
     def waypoint_xy(self, name: str) -> tuple[float, float]:
         w = self.waypoints[name]
@@ -537,17 +549,40 @@ class Sim:
                                     for kk, vv in p.items()} for k, p in self.actor_pose.items()}})
 
     def _belief_sample(self) -> None:
+        """Each robot's map against the truth. Errors on the occupied side
+        are counted on obstacle SURFACES only (occupied cells with a free
+        4-neighbour): a camera never sees inside a pallet, and planning
+        only needs its faces."""
         truth = self.static
-        free_n = int((~truth).sum())
+        free = ~truth
+        surf = truth.copy()
+        inner = np.ones_like(truth)
+        inner[1:, :] &= truth[:-1, :]
+        inner[:-1, :] &= truth[1:, :]
+        inner[:, 1:] &= truth[:, :-1]
+        inner[:, :-1] &= truth[:, 1:]
+        surf &= ~inner
+        free_n = int(free.sum())
+        # The fleet's best knowledge: per cell, the newest observation any
+        # robot holds. `stale` is how far a robot is from it — the gap map
+        # sharing exists to close, whatever the truth is.
+        if self.robots:
+            stamps = np.stack([r.belief.stamp for r in self.robots])
+            newest = stamps.argmax(axis=0)
+            states = np.stack([r.belief.state for r in self.robots])
+            best = np.take_along_axis(states, newest[None], axis=0)[0]
+            seen = stamps.max(axis=0) > -1e8  # someone actually observed it (not just a prior)
         rows = {}
-        for r in self.robots:
+        for k, r in enumerate(self.robots):
             s = r.belief.state
-            known_free = int(((s == FREE) & ~truth).sum())
+            known_free = int(((s == FREE) & free).sum())
             rows[r.rid] = {"known_free": round(known_free / max(free_n, 1), 4),
-                           "wrong_free": int(((s == FREE) & truth).sum()),
-                           "wrong_occ": int(((s == OCC) & ~truth).sum()),
+                           "wrong_free": int(((s == FREE) & surf).sum()),
+                           "wrong_occ": int(((s == OCC) & free).sum()),
+                           "stale": int((seen & (s != best)).sum()),
                            "known": int((s != -1).sum())}
-        self.record({"s": "belief", "free_cells": free_n, "cell_m": self.grid.res, "robots": rows})
+        self.record({"s": "belief", "free_cells": free_n, "surface_cells": int(surf.sum()),
+                     "cell_m": self.grid.res, "robots": rows})
 
     def _net_sample(self) -> None:
         self.record({"s": "net", "model": self.cfg["network"]["model"],
