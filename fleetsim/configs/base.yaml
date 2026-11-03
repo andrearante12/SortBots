@@ -1,0 +1,138 @@
+# fleetsim base configuration. A scenario (fleetsim/scenarios/*.yaml) layers
+# its `config:` over this, and `--set a.b=v` layers over that. Keys a scenario
+# sets must exist here (typos fail validation), except inside the free-form
+# blocks marked FREE-FORM.
+#
+# Tags, as in commsim/configs/base.yaml: PLACEHOLDER = a guess awaiting a
+# measurement; MEASURED = taken from a live run or the emulation, with where.
+
+sim:
+  step_s: 0.1                 # motion / protocol tick. Messages are timed exactly
+                              # between steps; motion moves 5 cm per step at 0.5 m/s.
+
+world:
+  source: synthetic           # synthetic | map
+  map: null                   # with source: map — a maps/<name> library entry, or a dir path
+  # Cell size for EVERY grid in the run: the true world, each robot's belief,
+  # each costmap. 0.2 m is the compromise (fleetsim/README.md, "Resolution"):
+  #   * the 0.5 x 0.4 m footprint is ~3 x 2 cells, so inflation and clearance
+  #     still mean something. A robot is planned as a disc of
+  #     footprint_radius_m + half a cell (0.42 m here), so a passage must be
+  #     ~0.84 m clear — and on a saved map, pooling can take up to one more
+  #     cell off each side. At 0.1 m that is 0.74 m + 0.1 m per side;
+  #   * memory and A* time grow as 1/cell^2: 0.1 m is 4x the cells of 0.2 m —
+  #     ~1.5 MB per robot at 0.2 m on the default 60 x 40 m floor, ~6 MB at 0.1 m;
+  #   * a saved 0.05 m map is max-pooled to this size, which thickens walls by
+  #     up to a cell; the run reports how much free floor that cost.
+  # Map-sharing bytes are priced per square metre (map_share.bytes_per_m2),
+  # not per cell, so changing this does not change the radio load.
+  cell_m: 0.2
+  random_waypoints: 40        # a saved map with no waypoints.json gets this many random spots
+  homes: null                 # [[x, y], ...] park spots; default: the synthetic apron, else random
+  gateway: null               # [x, y]; default: the synthetic apron's centre, else the map centre
+  actors: null                # a simtest world (configs/worlds/<name>) whose scripted movers to play
+  synthetic: {}               # FREE-FORM: fleetsim/grid.py SYNTHETIC_DEFAULTS (width_m, height_m,
+                              # aisle_m, rack_depth_m, cross_every_m, docks, ...)
+
+robots:
+  count: 8
+  footprint_radius_m: 0.32    # corner reach of Nav2's 0.5 x 0.4 m footprint (configs/nav2_params.yaml)
+  max_speed_mps: 0.5          # Nav2 max_velocity x
+  accel_mps2: 0.5             # PLACEHOLDER
+  yaw_rate_rps: 1.0           # PLACEHOLDER
+
+sensing:
+  hz: 5.0                     # PLACEHOLDER: how often a scan reaches the map (the camera is 30 Hz;
+                              # the grid updates far slower)
+  idle_hz: 1.0                # a robot that hasn't moved since its last scan scans this often
+  range_m: 4.5                # obstacle_detector max_range_m
+  fov_deg: 87.0               # D435 (configs/sensors/d435.json)
+
+nav:
+  inflation_m: 0.65           # Nav2 inflation_radius
+  cost_scaling: 2.5           # Nav2 cost_scaling_factor
+  cost_weight: 3.0            # step cost = length * (1 + cost_weight * inflation cost)
+  unknown_cost: 0.0           # 0 = optimistic (team decision 2026-11-02); > 0 penalises unknown cells
+  goal_tolerance_m: 0.5       # a goal in lethal space snaps to free space this close
+  max_expansions: 200000      # A* gives up past this many cells
+  stop_distance_m: 0.9        # local layer looks this far along the path for obstacles
+  clearance_margin_m: 0.1     # obstacle counts as in the way within body + its radius + this
+  detection_ttl_s: 0.5        # a camera detection is trusted this long
+  bump_ttl_s: 5.0             # a physical bump stays an obstacle this long
+  block_replan_s: 2.0         # blocked this long -> replan around it (lower priority first)
+  block_fail_s: 45.0          # blocked this long -> the leg fails (Nav2 abort after recoveries)
+  plan_fail_s: 10.0           # no path for this long -> the leg fails
+  overlay_ttl_s: 6.0          # replanned-around obstacles stay lethal in the costmap this long
+  replan_period_s: 10.0       # backstop replan while driving (Nav2's BT replans at 1 Hz)
+  min_replan_s: 0.5           # never replan more often than this
+  hiccup_rate_hz: 0.0         # PLACEHOLDER: random recovery pauses per driving second; calibrate
+  hiccup_s: 4.0               #   against Isaac's task timings (README, "Calibration")
+  return_home_s: 10.0         # idle this long -> drive back to the home spot (null = stay put)
+
+tasks:
+  dwell_s: 2.0                # task_manager DWELL_SEC
+  bid_cost: path              # path = A* on the bidder's own belief; straight = straight line
+
+# configs/fleet_tasks.yaml is loaded first; this block overrides it (FREE-FORM).
+# protocol.quorum_nodes defaults to robots + 1 (every node, gateway included).
+fleet_tasks: {}
+
+status:                       # nodes/fleet_radio.py /fleet/status
+  hz: 5.0                     # fleet_radio status_hz
+  ttl_s: 1.0                  # fleet_radio status_ttl_s: a peer pose older than this is ignored
+  recipients: all             # all | radius
+  radius_m: 15.0              # with recipients: radius (the gateway always gets every Status)
+  # FleetTasks hears a peer's Status as liveness at most this often per pair.
+  # The allocator's timeouts are seconds (status_timeout_s 6), so 1 s loses
+  # nothing and keeps fleet-wide liveness from costing n^2 * status_hz calls.
+  liveness_poll_s: 1.0
+  # Count a live zenoh session to a peer as hearing it (Allocator.heard_network),
+  # as the commsim DES does. Needed for the quorum once Status is neighbour-only
+  # (recipients: radius). nodes/fleet_tasks.py does NOT do this today — turning
+  # it on tests a design, not the robots as they are.
+  session_liveness: false
+
+map_share:                    # commsim/docs/brief.md "Obstacles and maps"
+  enabled: true
+  prior: none                 # none = every robot starts blind; truth = every robot starts with the
+                              # true map (a localize-on-saved-map run), so only CHANGES need sharing
+  tile_m: 6.4                 # region size: sequence numbers and refresh are per tile
+  publish_s: 2.0              # brief: every 2-5 s
+  refresh_s: 60.0             # PLACEHOLDER: a full pass of snapshots over a robot's observed tiles
+  rate_cap_bps: 100000        # brief: PLACEHOLDER 100 kbps per robot, every copy counted
+  bytes_per_m2: 100.0         # PLACEHOLDER: compressed patch size (0.25 B per 0.05 m cell)
+  chunk_bytes: 8192           # brief: up to ~8 KB per chunk
+  recipients: radius          # all | radius ("region subscribers": robots near the tile)
+  radius_m: 20.0
+  resync_backoff_s: 2.0       # one MapResync per (origin, tile) per this long
+
+obstacle_share:               # #18: tell peers about movers they may not see
+  enabled: true
+  radius_m: 10.0
+  expiry_s: 3.0
+  min_interval_s: 0.5
+
+network:
+  model: ideal                # ideal | radio (fleetsim/network.py)
+  rto_s: 0.2                  # reliable retransmit timer (Linux TCP minimum RTO), doubling
+  transport_lease_s: 4.0      # commsim base.yaml zenoh transport_lease_ms
+  ideal:
+    delay_s: 0.003            # MEASURED: emulation 1-hop p50 3.89 ms (commsim des/sim.py)
+    loss: 0.0                 # best-effort only
+  radio:
+    band: g24
+    topo_s: 1.0               # route recompute (commsim DES TOPO_DT)
+    reroute_delay_s: 2.0      # MEASURED: batman reroute ~1.95-3 s (commsim sim_log step 19)
+    ogm_interval_s: 0.25      # commsim base.yaml batman orig_interval_ms
+    contention: global        # global (the DES's single domain, calibrated) | spatial (per node)
+    background_load: 0.0      # airtime share used by other networks on the channel
+    ref_frame_bytes: 300      # frame size the per-hop error rate is computed at
+    radio_cell_m: 0.5         # walls are pooled to this before rack extraction
+    radio_model: {}           # FREE-FORM: commsim/des/radio.py RadioParams overrides
+
+record:
+  gt_hz: 5.0                  # ground truth (Isaac publishes 10 Hz)
+  belief_s: 5.0               # map divergence sample (0 = off)
+  net_s: 1.0
+  board_s: 5.0
+  fleet_log: false            # every FleetTasks log line as an event (verbose)

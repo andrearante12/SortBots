@@ -205,7 +205,10 @@ class FleetTasks:
         # after every Release, and the task never reaches anyone else.
         self.failed: dict[tuple, float] = {}
         self.now = now
-        self._next_id = int(time.time() * 10)
+        # Task IDs are seeded from this clock (see request()). fleetsim swaps
+        # in a fixed one so a seeded run hands out the same IDs every time.
+        self._wall = time.time
+        self._next_id = int(self._wall() * 10)
         self._next_reannounce = now
         self._next_heartbeat = now
         self._last_alloc: str | None = None
@@ -258,7 +261,12 @@ class FleetTasks:
         if got is None:
             self._log(f"dropped malformed message: {raw[:120]!r}")
             return
-        sender, m = got
+        self.on_message(*got, now)
+
+    def on_message(self, sender: int, m: dict, now: float) -> None:
+        """An already-decoded /fleet/tasks message. fleetsim delivers one
+        message to many robots and decodes it once; `m` is never mutated."""
+        self.now = now
         if sender == self.num:
             return  # DDS delivers our own publications back to us
         if m["type"] == "TaskAnnounce" and "pickup_station" in m:
@@ -413,7 +421,7 @@ class FleetTasks:
         # Seeded from the wall clock so a restarted gateway never reuses an ID:
         # robots ignore a re-announce of a task they already know, so a reused
         # ID would make the new task invisible to them.
-        tid = self._next_id = max(self._next_id + 1, int(time.time() * 10))
+        tid = self._next_id = max(self._next_id + 1, int(self._wall() * 10))
         self.names[tid] = (pickup, dropoff)
         self._announced[tid] = now
         self.alloc.announce(tid, self._xy(pickup, wps), self._xy(dropoff, wps), now)
