@@ -339,6 +339,8 @@
   // and whether the robot's red obstacle marker sits on it. Same data and look as
   // app.js's overlay; neither topic exists on a real robot, so nothing draws there.
   const WORLD_TRUTH_TTL_MS = 3000; // sim gone quiet: stop drawing walkers frozen mid-stride
+  const PACKAGE_HELD_INK = "#16a34a";   // a package the magnet is holding
+  const PACKAGE_PLATE_INK = "#1b1b1f";  // the magnet plate's face (simtest.world.PLATE_COLOR, near-black)
   let worldLayout = null, worldTruth = null, worldTruthAt = -Infinity;
   topic("/sim/world", "std_msgs/String").subscribe((msg) => {
     try { worldLayout = JSON.parse(msg.data); } catch (e) { return; }
@@ -379,6 +381,33 @@
       ctx.fill(); ctx.stroke();
     }
     ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
+    // Packages the magnet effector picks up (simtest/magnet.py). Where one IS comes from
+    // ground truth; it turns green while the magnet holds it, and the thick dark edge is
+    // the face that carries the magnet plate (the side the arm has to come at).
+    const PLATE_EDGE = { "+x": [[1, 1], [1, -1]], "-x": [[-1, 1], [-1, -1]],
+                         "+y": [[1, 1], [-1, 1]], "-y": [[1, -1], [-1, -1]] };
+    for (const k of worldLayout.packages || []) {
+      const p = worldTruth.packages && worldTruth.packages[k.id];
+      if (!p) continue;
+      const held = !!p.held_by, [sx, sy] = k.size, c = Math.cos(p.yaw), s = Math.sin(p.yaw);
+      const at = (x, y) => [p.x + c * x - s * y, p.y + s * x + c * y];
+      traceShape(["poly", [[sx / 2, sy / 2], [-sx / 2, sy / 2], [-sx / 2, -sy / 2], [sx / 2, -sy / 2]]
+        .map(([x, y]) => at(x, y))]);
+      ctx.fillStyle = rgba(k.color, 0.95); ctx.strokeStyle = held ? PACKAGE_HELD_INK : palette.robotInk;
+      ctx.lineWidth = held ? 3 : 1.5; ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = PACKAGE_PLATE_INK; ctx.lineWidth = 4; ctx.beginPath();
+      if (PLATE_EDGE[k.magnet_face]) {
+        const [[ax, ay], [bx, by]] = PLATE_EDGE[k.magnet_face];
+        const [pa, pb] = [at(ax * sx / 2, ay * sy / 2), at(bx * sx / 2, by * sy / 2)].map(([x, y]) => toPx(x, y));
+        ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]);
+      } else { // a plate on top: a dot in the middle
+        const [cx0, cy0] = toPx(p.x, p.y); ctx.moveTo(cx0, cy0); ctx.lineTo(cx0 + 0.1, cy0);
+      }
+      ctx.stroke();
+      const [lx, ly] = toPx(p.x, p.y);
+      ctx.fillStyle = held ? PACKAGE_HELD_INK : palette.ink;
+      ctx.fillText((k.label || k.id) + (held ? " (held)" : ""), lx, ly + Math.max(sx, sy) * view.scale / 2 + 13);
+    }
     for (const a of worldLayout.actors || []) {
       // The route it walks: dotted and faint, so it never reads as a Nav2 plan.
       ctx.setLineDash([2, 5]); ctx.strokeStyle = rgba(a.color, 0.5); ctx.lineWidth = 1.5;

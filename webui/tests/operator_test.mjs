@@ -475,6 +475,35 @@ async function main() {
     await shot(`${vp.label}-walker`);
     await sleep(3600); // > WORLD_TRUTH_TTL_MS with no ground truth
     check(`${vp.label}: walkers vanish when the sim stops sending ground truth`, (await greenNear(1, 1, 30)) === 0);
+
+    // Packages the magnet picks up: cardboard-coloured at their ground-truth pose, green
+    // while the magnet holds one (simtest/magnet.py; configs/worlds/pick_*.yaml).
+    const cardboardNear = (x, y, rad) => page.eval(`(() => {
+      const c = document.getElementById('map'), s = c.width / c.clientWidth, [cx, cy] = window.__operator.toPx(${x}, ${y});
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0;
+      for (let py = 0; py < c.height; py++) for (let px = 0; px < c.width; px++) {
+        if (Math.hypot(px / s - cx, py / s - cy) > ${rad}) continue;
+        const i = (py * c.width + px) * 4;
+        if (d[i] > 175 && d[i] < 210 && d[i + 1] > 135 && d[i + 1] < 170 && d[i + 2] > 92 && d[i + 2] < 130) n++;
+      }
+      return n; })()`);
+    const packageWorld = { world: 'pick_bench', title: 'Pick bench', props: [], actors: [],
+      packages: [{ id: 'pkg_0', label: 'box A', size: [0.8, 0.6, 0.12], color: [0.76, 0.6, 0.42], magnet_face: '+x', z: 0.8 }] };
+    const packageTruth = (heldBy) => ({ t: 9, wt: 4.2, running: true, robots: {}, actors: {},
+      packages: { pkg_0: { x: 2, y: 0, z: 0.8, yaw: 0.3, held_by: heldBy } } });
+    await emit('/sim/world', { data: JSON.stringify(packageWorld) });
+    await emit('/sim/ground_truth', { data: JSON.stringify(packageTruth(null)) });
+    await sleep(300);
+    check(`${vp.label}: a package is drawn at its ground-truth pose`, (await cardboardNear(2, 0, 16)) > 40, String(await cardboardNear(2, 0, 16)));
+    check(`${vp.label}: ... and is not green while nothing holds it`, (await greenNear(2, 0, 22)) === 0, String(await greenNear(2, 0, 22)));
+    await shot(`${vp.label}-package`);
+    await emit('/sim/ground_truth', { data: JSON.stringify(packageTruth('robot_0')) });
+    await sleep(300);
+    check(`${vp.label}: ... and turns green while the magnet holds it`, (await greenNear(2, 0, 22)) > 15, String(await greenNear(2, 0, 22)));
+    await emit('/sim/ground_truth', { data: JSON.stringify({ t: 10, wt: 4.3, running: true, robots: {}, actors: {} }) });
+    await sleep(200);
+    check(`${vp.label}: a package missing from ground truth is not drawn`, (await cardboardNear(2, 0, 30)) === 0 && (await greenNear(2, 0, 30)) === 0);
+    await sleep(3400); // let the stale package world lapse (WORLD_TRUTH_TTL_MS) before the checks below
     await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); // that wait outlasted ONLINE_TTL_MS
     await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
 

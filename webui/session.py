@@ -477,30 +477,37 @@ def load_scenarios() -> list[dict]:
     `error` string rather than being dropped — a silently missing scenario is
     much harder to debug than a card that says why it won't load.
     """
-    out = []
-    for path in sorted(SCENARIO_DIR.glob("*.yaml")):
-        try:
-            with open(path) as f:
-                out.append(_validate(path, yaml.safe_load(f)))
-        except (ScenarioError, yaml.YAMLError, OSError) as exc:
-            out.append({
-                "name": path.stem,
-                "title": path.stem,
-                "description": "",
-                "status": "invalid",
-                "platform": None,
-                "run": {},
-                "overrides": [],
-                "capture": {"bag": False},
-                "error": f"{path.name}: {exc}",
-            })
-    return out
+    return [_load_one(path) for path in sorted(SCENARIO_DIR.glob("*.yaml"))]
+
+
+def _load_one(path: Path) -> dict:
+    """One scenario file, validated: or the `invalid` card that says why not."""
+    try:
+        with open(path) as f:
+            return _validate(path, yaml.safe_load(f))
+    except (ScenarioError, yaml.YAMLError, OSError) as exc:
+        return {
+            "name": path.stem,
+            "title": path.stem,
+            "description": "",
+            "status": "invalid",
+            "platform": None,
+            "run": {},
+            "overrides": [],
+            "capture": {"bag": False},
+            "error": f"{path.name}: {exc}",
+        }
 
 
 def get_scenario(name: str) -> dict:
-    for scenario in load_scenarios():
-        if scenario["name"] == name:
-            return scenario
+    # A scenario's name must equal its file's stem (_validate enforces it), so the one
+    # wanted can be read directly. Scanning every file here made resolving a single
+    # test case cost a parse of ALL the scenarios, and listing the Tests tab quadratic
+    # in the number of tests (0.9 s for a dozen, pure-python YAML).
+    if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        path = SCENARIO_DIR / f"{name}.yaml"
+        if path.is_file():
+            return _load_one(path)
     raise ScenarioError(f"no such scenario: {name!r}")
 
 
