@@ -1,0 +1,40 @@
+# nodes/package_detector.py tuning (the vision itself: nodes/package_vision.py).
+# Every key overrides package_vision.DEFAULTS; `sim:` / `real:` are laid over the top
+# for that platform, so the two never have to share a threshold.
+
+# Frames processed per second, on the steady clock. The camera runs at 30; a package
+# does not move, and the pick controller wants a stable pose more than a fast one.
+rate_hz: 10.0
+
+# How a plate is remembered once it leaves the camera's view, in sim seconds (the node
+# runs on image time): long enough for the pick controller to keep docking on it while
+# the robot turns, short enough that a package someone moved is not chased.
+track:
+  assoc_m: 0.15
+  ema: 0.4
+  drop_after_s: 2.0
+
+# Fit quality. A plate is a flat steel disc-ish thing 4 mm proud of a flat box face:
+# its depth pixels fit a plane to a couple of millimetres. 12 mm lets the real
+# D435's depth noise (about 1% of range, so ~1.5 cm at 1.5 m) through at close range
+# and rejects a curved or edge-mixed blob.
+plane_rms_m: 0.012
+min_points: 25
+min_range_m: 0.3
+max_range_m: 4.0
+plate_thickness_m: 0.004
+
+sim:
+  # The colours simtest/world.py authors: cardboard (0.76, 0.60, 0.42) and a
+  # near-black plate (0.05, 0.05, 0.06), after Isaac's lighting. Loose on purpose; the
+  # plate also has to touch a cardboard blob, which is what keeps shadows out.
+  box: {h: [6, 26], s: [50, 230], v: [70, 255]}
+  plate: {v_max: 60, s_max: 140}
+
+real:
+  # UNMEASURED. These are the sim's numbers carried over so the node starts; tune them
+  # against a real brown box and a real steel plate under the warehouse's lights (the
+  # D435 colour stream auto-exposes, so the plate's V moves with the scene). Do not
+  # trust a real run until someone has looked at the segmentation masks.
+  box: {h: [6, 26], s: [50, 230], v: [70, 255]}
+  plate: {v_max: 70, s_max: 160}
