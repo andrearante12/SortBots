@@ -77,6 +77,42 @@ robot that stops correctly can still be walked into. Lay paths out so a robot
 that yields has somewhere to be; the clearance metric counts contact whoever
 moved.
 
+### Packages
+
+A world may also carry boxes the robot's magnet effector can pick up
+([`manipulation.md`](manipulation.md) has the model and the pipeline):
+
+```yaml
+props:
+  - {id: bench_a, shape: box, size: [0.7, 0.4, 0.80], pose: [-7.9, 9.8, 0.0]}
+packages:                   # up to 16; ids are shared with props and actors
+  - id: pkg_0
+    size: [0.24, 0.18, 0.12]  # the default: a light amazon box
+    pose: [-7.9, 9.9, 1.5708] # centre x, y, yaw
+    z: 0.80                   # height of the BOTTOM: 0 = the floor, else a prop's exact top
+    magnet_face: "+x"         # +x -x +y -y top; yaw turns it (1.5708 faces +y)
+    color: [0.76, 0.60, 0.42] # cardboard; the plate itself is always near-black
+```
+
+A package has to stand on the floor or on a prop whose top is exactly its `z` and that
+holds its centre and corners (it may overhang the edge by 3 cm); anything else is rejected
+when the world loads ("floating", "inside prop"). Packages are visual only: nothing collides
+with them, the magnet snaps them (`simtest/magnet.py`). `scripts/pick_layout.py` computes a
+package's pose on a deck and the robot's dock for it.
+
+`/sim/world` lists them (size, colour, face), and `/sim/ground_truth` carries where they are
+and what the magnet holds:
+
+```
+"packages": {"pkg_0": {"x", "y", "z" (bottom), "yaw", "held_by": "robot_0" | null}},
+"magnet":   {"robot_0": {"energized", "held", "tcp": [x,y,z], "approach": [x,y,z],
+                          "nearest": {"id", "dist_m", "angle_deg"} | null}}
+```
+
+Both are only present in a world with packages, so every other test's recorded events are
+exactly what they were. The operator view draws them: cardboard-coloured, a thick dark edge
+on the plate's face, green while held.
+
 ### The world clock and ground truth
 
 `spawn_warehouse.py --world NAME` authors the props and moves the actors every
@@ -124,6 +160,12 @@ goals:                               # per robot, in order
     timeout_s: 120                   # cancelled and scored `timeout` after this
 tasks:                               # optional task_manager deliveries
   - {robot: robot_0, pickup: shelf_a, dropoff: zone_a, at_s: 10}
+  - robot: robot_0                   # a PACKAGE task: really picked and placed by the magnet
+    package: pkg_0                   # must be in the world's packages:
+    pickup: dock                     # dock/here: no Nav2 leg, the pick controller drives itself;
+    dropoff: dock                    #   or a waypoint NAME, or a pose [x, y, yaw] to drive to first
+    place: {shift: [-0.12, 0]}       # where it comes to rest: shifted from where it started, or
+                                     #   [x, y] / [x, y, yaw]; z is whatever is under that spot
 stop:
   sim_s: 150                         # hard cap after t0
   until: [goals_done]                # goals_done | tasks_done | explorer_done
@@ -146,7 +188,29 @@ Full schema: `simtest/spec.py`. Validation is complete before anything
 launches — scenario and overrides through `session.py`'s allowlist, every
 variant resolved, every metric's params and criteria checked, and each metric
 asked whether it can be computed at all (a clearance metric on a world with no
-actors fails here, not after a 5-minute run).
+actors fails here, not after a 5-minute run). A package task is checked against
+its world too: the package must exist, and its `place` has to be somewhere the
+box can actually rest (a place that overhangs its deck is "floating", at load).
+
+### Pick and place tests
+
+The scenario is `pick_bench` (fresh map, no Nav2 goals: the pick controller finds
+the package, docks and picks on its own localization) unless the test sends Nav2
+somewhere first (`pick_route` uses `moving_obstacles_mapped`). Both offer a
+`perception` override: `camera` (default) or `oracle` (ground truth, sim only), which
+is how a failure is split into "didn't see it" and "saw it and couldn't do it".
+
+| test | asks | passes when |
+|---|---|---|
+| `pick_place_smoke` | one box on a bench, picked and set down 12 cm over; variants `camera` and `oracle` | placed within 15 cm, on the bench, not dropped |
+| `pick_orientations` | four boxes whose plates face N, E, W and S, so the base docks from each side | all four placed, all four plates seen, no drops |
+| `pick_heights` | three decks, 0.70, 0.78 and 0.90 m | all three placed |
+| `pick_unreachable` | a box on a 0.30 m deck, and on the floor (variants) | the task FAILS inside the timeout, nothing picked, nothing unfinished |
+| `pick_detect_sweep` | no tasks: drive past four boxes, score the detector alone | all four plates found within 5 cm, normals within 15 degrees, no false plates |
+| `pick_route` | Nav2 to the aisle deck, pick, Nav2 across the floor, place (saved map) | placed within 15 cm on the second deck |
+
+`docs/manipulation.md` has what each world is laid out to test and why the decks are
+the heights they are.
 
 ### Render cost
 
@@ -239,6 +303,7 @@ view didn't test what it says.
 | `detection` | dyn, gt | `dynamic_obstacles` recall vs ground truth, false-positive frames, latency to first detection |
 | `coverage` | map, end | free / known area, mapping rate |
 | `tasks` | dispatch, task | task_manager delivery outcomes and durations |
+| `pick_place` | gt, dispatch, task, detect | per package task: picked (the MAGNET held it, from ground truth), placed (at rest, not held, within tolerance of the asked spot and height), drops, false picks, time to pick; and the plate detector against the true plates (found, error, normal error, false detections) |
 | `run_stats` | start, end, gt | sim/wall time, real-time factor, stop reason, ground-truth rate |
 
 `scripts/simtest.py metrics` prints every param and value with its meaning.
@@ -267,9 +332,11 @@ probe — QoS for every topic is chosen there, centrally, never per metric (no
 image topic, ever: CLAUDE.md). Metrics must be deterministic functions of
 their events, or rescoring stops meaning anything.
 
-Streams always recorded: `start end gt goal dispatch task explore map`
-(`map` every 5 sim-s plus the last). `dyn` (dynamic obstacle points in the map
-frame, ≤5 Hz, 0.1 m voxels) only when a metric needs it or `record: [dyn]`.
+Streams always recorded: `start end gt goal dispatch task explore map detect`
+(`map` every 5 sim-s plus the last; `detect` is the pick controller's plate
+detections, ≤2 Hz, map-frame centre + normal only, and silent in a test with no
+packages). `dyn` (dynamic obstacle points in the map frame, ≤5 Hz, 0.1 m voxels)
+only when a metric needs it or `record: [dyn]`.
 
 ## Testing the test layer
 
@@ -277,9 +344,13 @@ All offline, seconds:
 
 ```bash
 /usr/bin/python3 -m pytest tests/simtest_world_test.py tests/simtest_metrics_test.py tests/simtest_spec_test.py
+/usr/bin/python3 -m pytest tests/simtest_pick_test.py tests/pick_planner_test.py   # the pick tests' scoring + the controller in a closed loop
 node webui/tests/operator_test.mjs        # operator view: world overlay, tests tab, launch form
 scripts/simtest.py validate               # every committed test case resolves
 ```
+
+(`operator_test.mjs` serves on port 8201 by default; if another session's console is
+already there the Tests-tab checks fail against ITS configs, so pass `--port N --cdp-port M`.)
 
 `pipeline_smoke` is the cheapest live end-to-end check of the harness itself
 (one short goal, ground truth rate); run it after touching the probe, the
