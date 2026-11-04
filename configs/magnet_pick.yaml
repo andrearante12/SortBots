@@ -1,0 +1,69 @@
+# nodes/magnet_pick.py / nodes/pick_planner.py tuning. Every key overrides
+# pick_planner.DEFAULTS; docs/manipulation.md explains the pick these numbers shape.
+
+# How often the planner is ticked and the arm/base commands refreshed, on the steady
+# clock. The planner's own deadlines are in SIM seconds and only move when ground truth
+# does (10 Hz sim), so ticking faster than that just repeats the last answer.
+stream_hz: 20.0
+
+# The safe pose: the arm folded upright behind the shoulder, every link behind it (found
+# by sampling the joint space for the pose that minimizes how far forward any joint or
+# the TCP reaches: nodes/arm_kin.py has the chain). The sim boots with the arm straight
+# out front at deck height, which would drive its tip into the box at the dock, so every
+# request starts here, and driving and carrying happen here.
+tuck_q: [0.0, 1.95, -0.05, 0.0, 0.0, 0.0]
+
+# Arm moves are ramps from the last command (there is no /joint_states): duration is
+# the largest joint travel at this speed, clamped. The position drives are stiff
+# (stiffness 1000), so a step command would slew near-instantly.
+arm_speed_rad_s: 1.0
+arm_min_move_s: 0.8
+arm_max_move_s: 4.0
+# Dwell after a ramp ends, standing in for "the joints have arrived".
+settle_s: 0.4
+
+# Where the dock puts the plate, radially from the shoulder. 0.27 is simtest.magnet's
+# nominal reach, the closest the chassis' frame lets a plate on a full-height deck get.
+reach_m: 0.27
+# The staging point in front of the plate, before the straight push in; and where the
+# base backs out to after a pick or place.
+stage_m: 0.35
+# Aim this far INTO the plate when picking, so the magnet is certainly in capture range.
+push_m: 0.008
+
+capture_timeout_s: 2.5      # magnet on -> held, in sim seconds
+release_timeout_s: 2.5
+budget_s: 300.0             # a whole request, sim seconds: the hard stop
+
+dock:
+  pos_tol_m: 0.02
+  yaw_tol_rad: 0.05         # ~3 degrees
+  v_max: 0.30
+  v_final: 0.12             # the last stretch into the dock, slow
+  wz_max: 0.6
+  kp: 1.2
+  kyaw: 1.5
+  timeout_s: 45.0
+  skip_within_m: 0.55       # already this close to the dock and lined up: no staging
+  skip_lateral_m: 0.06
+
+acquire:
+  assoc_m: 0.5              # a detection counts as the package if its plate is this near the work order's location
+  min_conf: 0.2
+  max_age_s: 1.0
+  stable_ticks: 2
+  view_m: 1.7               # drive to within this of the package before looking: a plate on a deck is only in the head camera's view from ~1 m
+  scan_rate: 0.5            # rad/s, turning on the spot
+  orbit_m: 1.5
+  orbit_steps: 8
+  orbit_settle_s: 1.5
+  timeout_s: 120.0
+
+# Re-aiming at fresh detections while docking: only when the plate is well in view
+# (close up it is clipped by the image edge and its centroid is biased).
+update:
+  track_m: 0.25
+  min_dist_m: 0.9
+  max_age_s: 0.35
+  image: [848, 480]
+  border_px: 6

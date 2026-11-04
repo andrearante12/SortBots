@@ -12,10 +12,11 @@ title: Pick and place — one package on a bench
 description: >
   robot_0 starts 1.9 m from a bench in its aisle, facing away from it. The box on
   the bench carries a magnet plate toward the robot. Pass = the pick controller
-  turned, found the plate (within 5 cm of where it really is), docked, picked the
-  box with the magnet, carried it and set it down within 15 cm of the spot 12 cm to
-  the side, on the bench, without dropping it or touching anything else. Scored
-  from ground truth (simtest/metrics/pick_place.py), not from the robot's report.
+  turned, found the plate, docked, picked the box with the magnet, carried it and
+  set it down within 15 cm of the spot 12 cm to the side, on the bench, without
+  dropping it. Scored from ground truth (simtest/metrics/pick_place.py), not from the
+  robot's report. Runs twice over: aimed at the camera's detections, and at ground
+  truth (variants), so a failure says which half broke.
 
 scenario: pick_bench
 overrides: {world: pick_bench}
@@ -40,8 +41,10 @@ metrics:
       max_place_z_error_m: {lte: 0.05}
       drops: {eq: 0}
       false_picks: {eq: 0}
-      detected: {gte: 1}
-      mean_detect_err_m: {lte: 0.05}
+  - metric: pick_place          # the same metric twice needs an id; this one only reports:
+    id: perception              # in the oracle variant the camera is not in the loop, so
+                                # detection is judged by pick_detect_sweep, and (in the
+                                # camera variant) by the pick not being possible without it
   - metric: tasks
     pass:
       success_rate: {gte: 1.0}
@@ -49,3 +52,10 @@ metrics:
 
 repeats: 2
 pass_rate: 1.0
+
+# The same pick twice: aiming at the head camera's plate detections (the default), and at
+# the simulator's ground truth. Both pass = the whole chain works. Only `camera` failing =
+# perception (look at pick_detect_sweep). Both failing = the dock, the arm or the magnet.
+variants:
+  - {label: camera, set: {overrides.perception: camera}}
+  - {label: oracle, set: {overrides.perception: oracle}}

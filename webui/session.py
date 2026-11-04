@@ -305,6 +305,11 @@ RUN_FLAGS = {
     "explore": _switch("--explore", when=True),
     "map": _map_path("--map"),
     "world": _world_name("--world"),
+    # What the magnet pick controller aims at (nodes/magnet_pick.py): `camera` is the
+    # head camera's plate detections, `oracle` the simulator's ground truth (a sim-only
+    # diagnostic that separates perception failures from dock/arm ones). Stock value
+    # emits no flag, so every existing scenario's argv is unchanged.
+    "perception": _omit_at("camera", _choice("--perception", {"camera", "oracle"})),
 }
 
 RUN_DEFAULTS = {
@@ -324,6 +329,7 @@ RUN_DEFAULTS = {
     "explore": False,
     "map": None,
     "world": None,
+    "perception": "camera",
 }
 
 

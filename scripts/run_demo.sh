@@ -22,6 +22,7 @@
 #                       [--no-chase-cam | --chase-cam-robots N]
 #                       [--render-every N] [--lite-render] [--half-res-cams]
 #                       [--map PATH] [--explore] [--world NAME] [--keep-console]
+#                       [--perception camera|oracle]
 #   scripts/run_demo.sh stop [--keep-console]   # tear the pipeline down
 #
 # --robots N spawns N robots in Isaac (configs/robots.yaml order) AND brings
@@ -37,6 +38,11 @@
 # --world NAME adds configs/worlds/NAME.yaml to the scene: static props and
 # scripted movers (see simtest/world.py). Validated by name in
 # spawn_warehouse.py before Isaac boots, so a bad name fails in a second.
+#
+# --perception camera|oracle picks what the magnet pick controller (nodes/magnet_pick.py)
+# aims at: the head camera's plate detections (default), or the simulator's ground
+# truth. Oracle is a sim-only diagnostic: run a failing pick test both ways to tell a
+# perception failure from a dock or arm one (docs/manipulation.md).
 #
 # Default is --robots 2: SortBots is a fleet project, so the plain demo comes
 # up as a collaborative fleet. Pass --robots 1 for the single-robot case
@@ -117,11 +123,12 @@ PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz
                    controller_server planner_server smoother_server behavior_server \
                    bt_navigator waypoint_follower velocity_smoother lifecycle_manager \
                    collision_monitor \
-                   component_container task_manager.py scripted_pick.py explorer.py \
+                   component_container task_manager.py scripted_pick.py magnet_pick.py \
+                   explorer.py \
                    rtabmap_cloud_pump.py recon_cloud_relay.py wasd_teleop \
                    map_merge.py static_transform_publisher \
                    fleet_radio.py fleet_tasks.py dynamic_obstacle_filter.py recon_cloud_merge.py \
-                   depth_colorizer.py feature_overlay.py obstacle_detector.py \
+                   depth_colorizer.py feature_overlay.py obstacle_detector.py package_detector.py \
                    map_handoff.py sortbots_bringup.launch.py mem_guard.py \
                    "spawn_warehouse.py")
 # Note scripts/save_map.sh --watch is deliberately absent from that list. Its
@@ -208,7 +215,7 @@ CHASE_CAM_ARGS=""
 # scripts/bench_sim.sh before relying on either (numbers in its header).
 # --half-res-cams is for large fleets: see spawn_warehouse.py --help.
 RENDER_ARGS=""
-LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false; WORLD_ARGS=""
+LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false; WORLD_ARGS=""; PERCEPTION="camera"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
@@ -232,11 +239,13 @@ while [[ $# -gt 0 ]]; do
     # rejects anything that isn't simtest.world.NAME_RX.
     --world)    [[ "$2" =~ ^[a-z0-9][a-z0-9_-]{0,63}$ ]] || { echo "[run_demo] bad --world name: $2"; exit 2; }
                 WORLD_ARGS="--world $2"; shift 2;;
+    --perception) [[ "$2" == "camera" || "$2" == "oracle" ]] || { echo "[run_demo] --perception is camera or oracle, not: $2"; exit 2; }
+                PERCEPTION="$2"; shift 2;;
     # Set by webui/session.py when the Scenarios tab launches a run: the
     # dashboard console is already up and owns rosbridge/web_video_server, so
     # don't kill it on teardown and don't start a second copy in the bringup.
     --keep-console) KEEP_CONSOLE=true; shift;;
-    -h|--help) sed -n '2,61p' "$0"; exit 0;;
+    -h|--help) sed -n '2,68p' "$0"; exit 0;;
     *) echo "[run_demo] unknown arg: $1"; exit 2;;
   esac
 done
@@ -387,7 +396,7 @@ setsid "$ROS_BASH" -c "source '$ROS_SETUP'; \
        webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
        delete_db_on_start:=$DELETE_DB_ON_START shared_map:=$SHARED_MAP \
-       explore:=true explore_autostart:=$EXPLORE" \
+       explore:=true explore_autostart:=$EXPLORE perception:=$PERCEPTION" \
   >"$BRINGUP_LOG" 2>&1 &
 BRINGUP_PID=$!  # setsid execs, as for SIM_PID; ros_bash.sh stays up as long as the launch does
 sleep 12

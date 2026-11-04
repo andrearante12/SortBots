@@ -146,6 +146,15 @@ def cmd_show(a) -> int:
             log(f"  goal {g['id']}: {g['robot']} -> {g['waypoint'] or g['pose']}  "
                 f"(at_s>={g['at_s']:g}, timeout {g['timeout_s']:g}s)")
         for tk in r["tasks"]:
+            if tk.get("package"):
+                leg = lambda v: "dock" if v is None else (v["name"] if v["name"] != "pose"  # noqa: E731
+                                                          else f"({v['x']:g}, {v['y']:g})")
+                pl = tk["place"]
+                log(f"  task {tk['id']}: {tk['robot']} picks {tk['package']} "
+                    f"[{leg(tk['pickup'])} -> {leg(tk['dropoff'])}], places it at "
+                    f"({pl['x']:g}, {pl['y']:g}) on {pl['support']} z={pl['z']:g} "
+                    f"(at_s>={tk['at_s']:g})")
+                continue
             log(f"  task {tk['id']}: {tk['robot']} {tk['pickup']} -> {tk['dropoff']} "
                 f"(at_s>={tk['at_s']:g})")
         for e in r["metrics"]:

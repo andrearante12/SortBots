@@ -86,6 +86,36 @@ def test_pick_tests_ask_for_every_package_in_their_world(name):
     assert asked == {p["id"] for p in r["world"]["packages"]}, (name, label)
 
 
+def test_smoke_test_runs_camera_and_oracle_variants():
+    t = spec.load("pick_place_smoke")
+    assert [label for label, _ in t["variants"]] == ["camera", "oracle"]
+    sm = spec._session()
+    argv = {label: sm.build_argv(r["run"], "sim") for label, r in t["variants"]}
+    assert "--perception" not in argv["camera"]                    # the stock value emits nothing
+    i = argv["oracle"].index("--perception")
+    assert argv["oracle"][i + 1] == "oracle"
+    assert argv["oracle"][:i] + argv["oracle"][i + 2:] == argv["camera"]   # and nothing else differs
+
+
+def test_perception_is_an_allowlisted_run_key_with_two_values():
+    sm = spec._session()
+    assert sm.build_argv({"perception": "oracle"}, "sim") == ["--perception", "oracle"]
+    assert sm.build_argv({"perception": "camera"}, "sim") == []
+    with pytest.raises(sm.ScenarioError, match="expected one of"):
+        sm.build_argv({"perception": "telepathy"}, "sim")
+    # sim-only: ground truth does not exist on the real robot, so a real scenario naming it
+    # is rejected when it loads (the same rule as every other sim-only key)
+    assert "perception" in sm.RUN_FLAGS and "perception" not in sm.REAL_RUN_FLAGS
+    assert sm.RUN_DEFAULTS["perception"] == "camera"
+
+
+def test_a_test_may_only_override_perception_where_the_scenario_allows_it():
+    # moving_obstacles has no `perception` in its overrides: the pick controller isn't its business
+    with pytest.raises(spec.SpecError, match="not offered"):
+        spec.validate(pick(scenario="moving_obstacles", overrides={"perception": "oracle"},
+                           tasks=[], stop={"sim_s": 10}, metrics=[{"metric": "run_stats"}]))
+
+
 # -- spec: package tasks ---------------------------------------------------------
 
 def test_package_task_resolves_legs_and_place():
