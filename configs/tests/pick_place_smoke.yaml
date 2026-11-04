@@ -1,0 +1,51 @@
+# A test case: one scored, repeatable question (simtest/spec.py has the full
+# schema; docs/testing.md the how-to). Run it with:
+#
+#   scripts/simtest.py run pick_place_smoke
+#
+# The cheapest end-to-end check of pick and place: one box on a bench, no Nav2, no
+# saved map. Run it first after touching the pick controller, the magnet, the
+# detector or the package runtime, before trusting the longer pick tests.
+
+name: pick_place_smoke
+title: Pick and place — one package on a bench
+description: >
+  robot_0 starts 1.9 m from a bench in its aisle, facing away from it. The box on
+  the bench carries a magnet plate toward the robot. Pass = the pick controller
+  turned, found the plate (within 5 cm of where it really is), docked, picked the
+  box with the magnet, carried it and set it down within 15 cm of the spot 12 cm to
+  the side, on the bench, without dropping it or touching anything else. Scored
+  from ground truth (simtest/metrics/pick_place.py), not from the robot's report.
+
+scenario: pick_bench
+overrides: {world: pick_bench}
+
+warmup_s: 2
+
+tasks:
+  - robot: robot_0
+    package: pkg_0
+    place: {shift: [-0.12, 0]}     # 12 cm west of where it started, same bench
+
+stop:
+  sim_s: 240
+  until: [tasks_done]
+  settle_s: 3
+
+metrics:
+  - metric: pick_place
+    pass:
+      placed: {gte: 1}
+      max_place_error_m: {lte: 0.15}
+      max_place_z_error_m: {lte: 0.05}
+      drops: {eq: 0}
+      false_picks: {eq: 0}
+      detected: {gte: 1}
+      mean_detect_err_m: {lte: 0.05}
+  - metric: tasks
+    pass:
+      success_rate: {gte: 1.0}
+  - metric: run_stats
+
+repeats: 2
+pass_rate: 1.0

@@ -1,0 +1,55 @@
+# A test case: one scored, repeatable question (simtest/spec.py has the full
+# schema; docs/testing.md the how-to).
+#
+# The requirement this exists for: pick a package reliably whichever way its magnet
+# plate faces. The arm approaches only along the line from its shoulder, so the base
+# has to come round to the plate's side each time; four plates, four sides.
+#
+# Each package is set down 12 cm along its own deck's edge, in the direction that
+# keeps it on the deck. Task order is the order the docks were laid out in, which
+# keeps every transit between them clear of the other decks (tests/simtest_world_test.py
+# checks that against the world).
+
+name: pick_orientations
+title: Four packages, plates facing four ways
+description: >
+  Four decks down robot_0's aisle, each with a box whose plate faces north, east,
+  west or south. The robot has to dock from a different side for each. Pass = all
+  four are picked and placed within 15 cm of their asked spot, none dropped, none
+  picked by mistake, every plate seen. A single miss fails the test: the point is
+  that the pick does not depend on which way the plate faces.
+
+scenario: pick_bench
+overrides: {world: pick_orientations}
+
+warmup_s: 2
+
+tasks:
+  - {robot: robot_0, package: pkg_0, place: {shift: [-0.12, 0.0]}}    # plate north
+  - {robot: robot_0, package: pkg_1, place: {shift: [0.0, 0.12]}}     # plate east
+  - {robot: robot_0, package: pkg_2, place: {shift: [0.0, -0.12]}}    # plate west
+  - {robot: robot_0, package: pkg_3, place: {shift: [0.12, 0.0]}}     # plate south
+
+stop:
+  sim_s: 700
+  until: [tasks_done]
+  settle_s: 3
+
+metrics:
+  - metric: pick_place
+    pass:
+      success_rate: {gte: 1.0}
+      max_place_error_m: {lte: 0.15}
+      max_place_z_error_m: {lte: 0.05}
+      drops: {eq: 0}
+      false_picks: {eq: 0}
+      detected: {gte: 4}
+      mean_detect_err_m: {lte: 0.05}
+      mean_normal_err_deg: {lte: 15}
+  - metric: tasks
+    pass:
+      success_rate: {gte: 1.0}
+  - metric: run_stats
+
+repeats: 2
+pass_rate: 1.0

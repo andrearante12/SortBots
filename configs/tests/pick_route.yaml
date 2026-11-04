@@ -1,0 +1,49 @@
+# A test case: one scored, repeatable question (simtest/spec.py has the full
+# schema; docs/testing.md the how-to).
+#
+# The whole delivery: Nav2 to the pickup deck, pick, Nav2 across the open floor, place.
+# Runs on a saved map (the same one the avoidance tests use, and for the same reason:
+# Nav2's global costmap is only as large as /map). Nav2 stops ~0.7 m short of each
+# plate, in front of it; the pick controller does the last stretch itself, because
+# Nav2's 0.25 m goal tolerance is wider than the arm's whole reach margin.
+
+name: pick_route
+title: Pick in the aisle, place across the floor
+description: >
+  robot_0 drives to the deck at the north end of its aisle, picks the box (plate
+  facing south), drives out of the aisle and across the open floor and sets it down
+  on the second deck, 11 m away. Pass = the box rests within 15 cm of the asked spot
+  on the second deck, was not dropped on the way, and the task finished DONE.
+
+scenario: moving_obstacles_mapped
+overrides: {world: pick_route}
+
+warmup_s: 5
+
+tasks:
+  - robot: robot_0
+    package: pkg_0
+    pickup: [-8.033, 14.25, 1.5708]     # 0.7 m in front of the plate, facing it
+    dropoff: [-8.867, 5.65, -1.5708]    # 0.7 m in front of deck_drop's plate spot, facing it
+    place: [-9.0, 4.65, 1.5708]         # on deck_drop, plate toward the robot
+
+stop:
+  sim_s: 700
+  until: [tasks_done]
+  settle_s: 3
+
+metrics:
+  - metric: pick_place
+    pass:
+      placed: {gte: 1}
+      max_place_error_m: {lte: 0.15}
+      max_place_z_error_m: {lte: 0.05}
+      drops: {eq: 0}
+      false_picks: {eq: 0}
+  - metric: tasks
+    pass:
+      success_rate: {gte: 1.0}
+  - metric: run_stats
+
+repeats: 2
+pass_rate: 1.0

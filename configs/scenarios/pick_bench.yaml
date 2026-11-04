@@ -1,0 +1,37 @@
+# Scenario definition for the dashboard's Scenarios tab — see the header of
+# configs/scenarios/explore_fresh.yaml for the schema. `world:` names a layout
+# in configs/worlds/ (simtest/world.py has that schema).
+
+name: pick_bench
+
+title: Pick and place — a package on a bench (test base)
+description: >
+  robot_0 in the NVIDIA warehouse with the magnet effector's package world,
+  explorer idle. The pick controller (nodes/magnet_pick.py) turns, finds the
+  box's magnet plate with the head camera, drives up to it, picks it and sets it
+  down; dispatch one from the operator view or let a test case do it. Packages are
+  drawn on the map from /sim/ground_truth, turning green while the magnet holds one.
+
+  This is the scenario the pick tests in configs/tests/ build on. It starts on a
+  fresh map and sends no Nav2 goals: the pick controller docks with its own
+  localization, so a pick needs nothing but the camera and the arm (docs/manipulation.md).
+
+status: ready
+
+run:
+  scene: nvidia
+  robots: 1
+  robot_id: robot_0
+  headless: true
+  chase_cam: false
+  explore: false
+  resume: false
+  localize: false
+  teleop: false
+  map: null
+  world: pick_bench
+
+overrides: [world, headless, chase_cam, render_every, lite_render]
+
+capture:
+  bag: false
