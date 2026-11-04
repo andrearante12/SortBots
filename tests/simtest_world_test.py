@@ -213,6 +213,24 @@ def test_too_many_packages():
         world.validate(raw)
 
 
+@pytest.mark.parametrize("face", world.FACES)
+def test_plate_sits_on_its_face_and_agrees_with_the_magnet_module(face):
+    from simtest import magnet
+
+    size = (0.24, 0.18, 0.12)
+    psize, centre = world.plate_geometry(size, face)
+    pose = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
+    face_centre, normal = magnet.magnet_face_pose(pose, size, face)
+    # the plate's centre is half its thickness out from the face plane, along the normal
+    off = [centre[i] - face_centre[i] for i in range(3)]
+    assert off == pytest.approx([n * world.PLATE_THICKNESS_M / 2 for n in normal], abs=1e-12)
+    # thin along the normal, 60% of the face across it
+    thin = [abs(n) > 0.5 for n in normal]
+    assert [s for s, t in zip(psize, thin) if t] == [world.PLATE_THICKNESS_M]
+    across = [s / f for s, f, t in zip(psize, size, thin) if not t]
+    assert across == pytest.approx([world.PLATE_FRACTION] * 2)
+
+
 def test_top_z_of_each_prop_shape():
     w = world.validate({"name": "t", "props": [
         {"id": "b", "shape": "box", "size": [1, 1, 0.7], "pose": [0, 0]},

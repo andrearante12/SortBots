@@ -178,6 +178,7 @@ def test_the_committed_config_matches_the_vision_defaults_and_detects():
     merged = pv.merged(sim)
     for key in ("box", "plate", "plane_rms_m", "min_range_m", "max_range_m", "plate_thickness_m"):
         assert merged[key] == pv.DEFAULTS[key], key        # one set of numbers, two places
+    assert pv.DEFAULTS["plate_thickness_m"] == world.PLATE_THICKNESS_M    # what the sim authors
     rects, c_true, _ = box_with_plate((0.1, 0.3, 1.5), 20)
     (p,) = pv.detect_plates(*render(rects), K, sim)
     assert np.linalg.norm(np.array(p["c"]) - c_true) < 0.015

@@ -76,6 +76,8 @@ DEFAULT_PACKAGE_COLOR = (0.76, 0.60, 0.42)   # cardboard
 # The magnet plate. Both colours are authored by the sim and thresholded on by
 # nodes/package_detector.py (configs/package_detector.yaml): change them together.
 PLATE_COLOR = (0.05, 0.05, 0.06)
+PLATE_THICKNESS_M = 0.004   # how far the plate stands proud of the box face
+PLATE_FRACTION = 0.6        # the plate covers this fraction of the face's width and height
 SUPPORT_EPS_M = 0.001    # a package's bottom must match its deck's top within this
 SUPPORT_MARGIN_M = 0.03  # the package may overhang its deck by this much
 
@@ -247,6 +249,23 @@ def top_z(item: dict) -> float:
 def package_footprint(pkg: dict) -> tuple:
     x, y, yaw = pkg["pose"]
     return geometry.rect(x, y, yaw, pkg["size"][0], pkg["size"][1])
+
+
+def plate_geometry(size, face: str) -> tuple[tuple, tuple]:
+    """The magnet plate as a box in the package's own frame: (size, centre), centre
+    relative to the package's (x, y, bottom z). A thin slab on the named face, standing
+    PLATE_THICKNESS_M proud of it. This is what scripts/spawn_warehouse.py authors and
+    what nodes/package_vision.py looks for; its INNER face is the face plane that
+    simtest.magnet.magnet_face_pose reports."""
+    sx, sy, sz = size
+    t, f = PLATE_THICKNESS_M, PLATE_FRACTION
+    if face in ("+x", "-x"):
+        return (t, f * sy, f * sz), (math.copysign(sx / 2 + t / 2, 1 if face == "+x" else -1),
+                                     0.0, sz / 2)
+    if face in ("+y", "-y"):
+        return (f * sx, t, f * sz), (0.0, math.copysign(sy / 2 + t / 2, 1 if face == "+y" else -1),
+                                     sz / 2)
+    return (f * sx, f * sy, t), (0.0, 0.0, sz + t / 2)
 
 
 def support_for(w: dict, pkg: dict) -> dict | None:
