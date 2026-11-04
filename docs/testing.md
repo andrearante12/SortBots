@@ -205,7 +205,7 @@ is how a failure is split into "didn't see it" and "saw it and couldn't do it".
 | `pick_place_smoke` | one box on a bench, picked and set down 12 cm over; variants `camera` and `oracle` | placed within 15 cm, on the bench, not dropped |
 | `pick_orientations` | four boxes whose plates face N, E, W and S, so the base docks from each side | all four placed, all four plates seen, no drops |
 | `pick_heights` | three decks, 0.70, 0.78 and 0.90 m | all three placed |
-| `pick_unreachable` | a box on a 0.30 m deck, and on the floor (variants) | the task FAILS inside the timeout, nothing picked, nothing unfinished |
+| `pick_unreachable` | a box on a 0.30 m deck, and on the floor (variants); oracle perception, since the camera cannot see a plate that low from anywhere near | the task FAILS inside the timeout, nothing picked, nothing unfinished |
 | `pick_detect_sweep` | no tasks: drive past four boxes, score the detector alone | all four plates found within 5 cm, normals within 15 degrees, no false plates |
 | `pick_route` | Nav2 to the aisle deck, pick, Nav2 across the floor, place (saved map) | placed within 15 cm on the second deck |
 

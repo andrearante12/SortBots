@@ -32,7 +32,13 @@ pytestmark = pytest.mark.skipif(not arm_kin.URDF_PATH.exists(),
 
 DT = 0.1                      # ground truth is 10 Hz sim time
 SPAWN = (-7.15, 11.62, 0.0)
-CAM_Z = 1.25                  # head camera height above the floor, roughly
+# The head camera, from the URDF's joint chain at pan = tilt = 0: (-0.092, 0.02, 1.191) in
+# base_link, so 1.24 m above the floor and 9 cm BEHIND the base origin, looking along +x.
+# Its field of view from the D435 intrinsics (fx = fy = 605, 848 x 480): 35 and 21.6 degrees
+# either side of the axis; the fake sees a plate only when all of it fits, so 33 and 19.
+CAM_BASE = (-0.092, 0.02)
+CAM_Z = 1.24
+CAM_HALF_H_DEG, CAM_HALF_V_DEG = 33.0, 19.0
 IMG = (848, 480)
 
 
@@ -76,14 +82,17 @@ class FakeWorld:
                 continue
             pose = self.msim.pose(pid)
             c, n = magnet.magnet_face_pose(pose, spec["size"], spec["magnet_face"])
-            dx, dy = c[0] - self.base[0], c[1] - self.base[1]
+            cy_, sy_ = math.cos(self.base[2]), math.sin(self.base[2])
+            cam = (self.base[0] + cy_ * CAM_BASE[0] - sy_ * CAM_BASE[1],
+                   self.base[1] + sy_ * CAM_BASE[0] + cy_ * CAM_BASE[1])
+            dx, dy = c[0] - cam[0], c[1] - cam[1]
             dist = math.hypot(dx, dy)
             facing = -(n[0] * dx + n[1] * dy) / max(dist, 1e-6)          # plate looks at us
             off = abs(math.atan2(math.sin(math.atan2(dy, dx) - self.base[2]),
                                  math.cos(math.atan2(dy, dx) - self.base[2])))
             elev = math.degrees(math.atan2(c[2] - CAM_Z, max(dist, 1e-6)))
-            if not (0.8 <= dist <= 3.5 and off <= math.radians(40) and facing >= 0.3
-                    and abs(elev) <= 26):
+            if not (0.8 <= dist <= 4.0 and off <= math.radians(CAM_HALF_H_DEG) and facing >= 0.3
+                    and abs(elev) <= CAM_HALF_V_DEG):
                 continue
             j = (lambda s: self.rng.gauss(0.0, s)) if self.noise else (lambda s: 0.0)
             nn = (n[0] + j(0.03), n[1] + j(0.03), n[2] + j(0.03))

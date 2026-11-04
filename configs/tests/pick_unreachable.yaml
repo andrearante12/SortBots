@@ -13,8 +13,15 @@ description: >
   within the pick timeout, the robot never held the box, never picked anything else,
   and task_manager is left idle (nothing unfinished).
 
+  Runs with ORACLE perception, on purpose. The head camera is 1.24 m up with a 21.6
+  degree vertical half-FOV, so a plate 0.9 m below the lens is out of its view from
+  anywhere nearer than 2.6 m (and the floor from anywhere inside its 4 m range): a
+  camera run of this test would end in "plate not found" after a two-minute search,
+  which is a true but different failure. This test is about the arm's refusal, which
+  the oracle reaches in seconds.
+
 scenario: pick_bench
-overrides: {world: pick_low}
+overrides: {world: pick_low, perception: oracle}
 
 warmup_s: 2
 

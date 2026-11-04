@@ -100,6 +100,16 @@ faces away from the camera, so the controller turns on the spot and, failing tha
 circle round the package. On synthetic frames it finds the plate centre within 1.5 cm and
 the normal within 5 degrees from 1 to 2.5 m at yaw up to 45 degrees.
 
+**What the camera can actually see.** The head camera is at (-0.092, 0.02, 1.191) in
+`base_link`, 1.24 m up and 9 cm behind the base origin, looking level (its pose comes from
+the URDF's joint chain, and the sim's extrinsic is captured at head tilt 0). The D435
+intrinsics (fx = fy = 605, 848 x 480) give half-angles of 35 degrees across and **21.6
+degrees vertically**, not the 43 and 29 of a wider lens. A plate centred 0.4 to 0.5 m below
+the lens is fully in view only from about 1.1 to 1.5 m away, and one on a 0.30 m deck from
+2.6 m, the floor from beyond the 4 m range. So the controller looks from `view_m` = 2.6 m,
+the robot is never closer than 0.27 m to the plate when docked (where the plate is far below
+the view), and the dock runs on the last good fix rather than on live detections.
+
 **`--perception oracle`** (scenario run key `perception`, sim only) aims at ground truth
 instead of the camera. `pick_place_smoke` runs both: both pass = the chain works; only
 `camera` fails = perception (then `pick_detect_sweep`); both fail = the dock, the arm or the

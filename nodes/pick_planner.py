@@ -62,7 +62,7 @@ DEFAULTS = {
              "wz_max": 0.6, "kp": 1.2, "kyaw": 1.5, "timeout_s": 45.0,
              "skip_within_m": 0.55, "skip_lateral_m": 0.06},
     "acquire": {"assoc_m": 0.5, "min_conf": 0.2, "max_age_s": 1.0, "stable_ticks": 2,
-                "view_m": 1.7, "scan_rate": 0.5, "orbit_m": 1.5, "orbit_steps": 8,
+                "view_m": 2.6, "scan_rate": 0.5, "orbit_m": 1.5, "orbit_steps": 8,
                 "orbit_settle_s": 1.5, "timeout_s": 120.0},
     "update": {"track_m": 0.25, "min_dist_m": 0.9, "max_age_s": 0.35,
                "image": [848, 480], "border_px": 6},

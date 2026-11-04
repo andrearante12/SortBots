@@ -52,7 +52,12 @@ acquire:
   min_conf: 0.2
   max_age_s: 1.0
   stable_ticks: 2
-  view_m: 1.7               # drive to within this of the package before looking: a plate on a deck is only in the head camera's view from ~1 m
+  # Drive to within this of the package before looking. The head camera is 1.24 m up with
+  # a 21.6 degree vertical half-FOV (fy 605 over 480 rows), so a plate 0.4-0.5 m below the
+  # lens is fully in view from ~1.1-1.5 m and one on a 0.30 m deck (0.9 m below it) from
+  # 2.6 m; the floor is out of the 4 m range. Further away costs pixels (a plate at 2.6 m is
+  # ~24 x 16 px) but not detections.
+  view_m: 2.6
   scan_rate: 0.5            # rad/s, turning on the spot
   orbit_m: 1.5
   orbit_steps: 8
