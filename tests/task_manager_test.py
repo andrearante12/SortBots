@@ -402,6 +402,30 @@ def test_a_malformed_package_task_is_rejected_on_the_status_stream(tm, payload):
     assert len(tm.queue) == 0
 
 
+def test_the_seams_probe_to_task_manager_to_pick_controller(tm):
+    """What the test layer sends, what task_manager makes of it and what the pick
+    controller reads must be the same contract: each side is otherwise only tested
+    against its own stand-in for the other."""
+    sys.path.insert(0, str(REPO_ROOT))
+    from simtest import spec
+    from simtest.probe import dispatch_body
+    from magnet_pick import parse_request
+
+    resolved = spec.load("pick_place_smoke")["variants"][0][1]["tasks"][0]
+    body = dispatch_body(dict(resolved, task_id="simtest_t0"))
+    dispatch(tm, **body)
+    assert "rejected" not in statuses(tm)[-1], statuses(tm)[-1]
+    assert statuses(tm)[-1]["queue"][0]["package"] == "pkg_0"
+    tm._tick()
+    attach = requests(tm)[0]
+    assert parse_request(json.dumps(attach)) == attach and attach["at"] == body["at"]
+    result(tm, "picked")
+    detach = requests(tm)[-1]
+    assert parse_request(json.dumps(detach)) == detach and detach["place"] == body["place"]
+    result(tm, "placed")
+    assert statuses(tm)[-2]["state"] == "DONE" and statuses(tm)[-2]["task_id"] == "simtest_t0"
+
+
 def test_nav_only_dispatches_are_untouched_by_all_this(tm):
     dispatch(tm, pickup="A", dropoff="B", task_id="n1")
     assert "package" not in statuses(tm)[-1]["queue"][0]

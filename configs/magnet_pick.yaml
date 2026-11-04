@@ -33,6 +33,7 @@ push_m: 0.008
 
 capture_timeout_s: 2.5      # magnet on -> held, in sim seconds
 release_timeout_s: 2.5
+pose_wait_s: 15.0           # how long the robot's own pose (TF map -> base_link) may be missing, e.g. while SLAM starts, before the request fails
 budget_s: 300.0             # a whole request, sim seconds: the hard stop
 
 dock:

@@ -57,6 +57,7 @@ DEFAULTS = {
     "push_m": 0.008,
     "capture_timeout_s": 2.5,
     "release_timeout_s": 2.5,
+    "pose_wait_s": 15.0,
     "budget_s": 300.0,
     "dock": {"pos_tol_m": 0.02, "yaw_tol_rad": 0.05, "v_max": 0.30, "v_final": 0.12,
              "wz_max": 0.6, "kp": 1.2, "kyaw": 1.5, "timeout_s": 45.0,
@@ -122,6 +123,7 @@ class PickPlanner:
         self.ramp: dict | None = None
         self.arm_end = 0.0                  # sim time the latest ramp ends
         self.pending = "failed"             # the result to report once the base has backed out
+        self.t_nopose: float | None = None  # when the robot's pose first went missing
         self.req: dict | None = None
         self.mode: str | None = None
         self.phase = "idle"
@@ -226,6 +228,20 @@ class PickPlanner:
         d.q = self._ramp_q(obs.now)
         return d
 
+    def _no_pose(self, obs: Obs, d: Decision) -> bool:
+        """True while the robot's own pose is unknown. TF can lag the first seconds of a
+        run (SLAM has not published map -> odom yet), so wait up to pose_wait_s with the
+        base held still, and only then give up."""
+        if obs.base is not None:
+            self.t_nopose = None
+            return False
+        if self.t_nopose is None:
+            self.t_nopose = obs.now
+        d.vel = (0.0, 0.0, 0.0)
+        if obs.now - self.t_nopose > self.cfg["pose_wait_s"]:
+            self._fail(d, obs, "no robot pose")
+        return True
+
     def _fail(self, d: Decision, obs: Obs, why: str) -> None:
         d.result, d.note, d.pick_cmd = "failed", why, "detach"
         d.vel = (0.0, 0.0, 0.0)
@@ -273,8 +289,8 @@ class PickPlanner:
 
     def _ph_acquire(self, obs: Obs, d: Decision) -> None:
         a = self.cfg["acquire"]
-        if obs.base is None:
-            return self._fail(d, obs, "no robot pose")
+        if self._no_pose(obs, d):
+            return
         d.vel = (0.0, 0.0, 0.0)
         cand = self._candidate(obs)
         self._seen = self._seen + 1 if cand else 0
@@ -409,8 +425,8 @@ class PickPlanner:
 
     def _ph_dock(self, obs: Obs, d: Decision) -> None:
         dk = self.cfg["dock"]
-        if obs.base is None:
-            return self._fail(d, obs, "no robot pose")
+        if self._no_pose(obs, d):
+            return
         if obs.now - self.t_phase > dk["timeout_s"]:
             return self._fail(d, obs, "dock timeout")
         self._refresh(obs)

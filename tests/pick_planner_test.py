@@ -298,6 +298,40 @@ def test_asked_to_place_with_nothing_held_fails(kin):
     assert d.result == "failed" and "nothing held" in d.note
 
 
+def test_a_robot_pose_that_arrives_late_is_waited_for(kin):
+    """TF can lag the first seconds of a run: no pose is not a failure yet."""
+    fw = FakeWorld(kin, "pick_bench")
+    planner = pp.PickPlanner(kin)
+    planner.request(pick_req(fw.w, "pkg_0"), fw.now)
+    for step in range(200):                            # 20 s of sim: pose missing for the first 8
+        o = fw.obs()
+        if step < 80:
+            o.base = None
+        d = planner.tick(o)
+        fw.apply(d)
+        assert d.result is None, d.note
+        if step == 60:
+            assert planner.phase in ("tuck", "acquire") and fw.vel == (0.0, 0.0, 0.0)
+    assert planner.busy and planner.phase != "tuck"    # and it carried on once the pose came
+
+
+def test_a_robot_pose_that_never_arrives_fails_after_the_grace(kin):
+    fw = FakeWorld(kin, "pick_bench")
+    planner = pp.PickPlanner(kin, {"pose_wait_s": 5.0})
+    planner.request(pick_req(fw.w, "pkg_0"), fw.now)
+    result = None
+    for _ in range(400):
+        o = fw.obs()
+        o.base = None
+        d = planner.tick(o)
+        fw.apply(d)
+        if d.result:
+            result = d
+            break
+    assert result is not None and result.result == "failed" and "no robot pose" in result.note
+    assert fw.cmd == "detach" and fw.vel == (0.0, 0.0, 0.0)
+
+
 def test_the_budget_is_a_hard_stop(kin):
     fw = FakeWorld(kin, "pick_bench")
     d = do(fw, pp.PickPlanner(kin, {"budget_s": 6.0}), pick_req(fw.w, "pkg_0"))
