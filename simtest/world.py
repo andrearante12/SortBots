@@ -4,7 +4,7 @@ A world (configs/worlds/<name>.yaml) is the third layer of a test, under the
 scenario (how the stack is launched) and the test case (what is asked of it
 and how it is scored):
 
-    world     props + scripted movers, placed in a named scene
+    world     props + scripted movers + graspable packages, placed in a named scene
     scenario  world + stack config (robots, map mode, explore, render knobs)
     test      scenario + goals + stop condition + metrics with pass criteria
 
@@ -65,6 +65,19 @@ MODES = ("once", "loop", "pingpong")
 MAX_SPEED = 3.0          # m/s — a brisk human is ~1.4; anything faster is a typo
 MAX_COORD = 200.0        # m — the NVIDIA warehouse is ~30 x 40
 MAX_ITEMS = 64
+MAX_PACKAGES = 16
+# Which face of a package carries the magnet plate: the four sides in the
+# package's own frame (+x is the way yaw 0 points), or the top.
+FACES = ("+x", "-x", "+y", "-y", "top")
+# A "very light amazon box", small enough that the SO-101's ~0.33 m horizontal
+# reach (docs/manipulation.md) still has room for the box's own depth.
+DEFAULT_PACKAGE_SIZE = (0.24, 0.18, 0.12)
+DEFAULT_PACKAGE_COLOR = (0.76, 0.60, 0.42)   # cardboard
+# The magnet plate. Both colours are authored by the sim and thresholded on by
+# nodes/package_detector.py (configs/package_detector.yaml): change them together.
+PLATE_COLOR = (0.05, 0.05, 0.06)
+SUPPORT_EPS_M = 0.001    # a package's bottom must match its deck's top within this
+SUPPORT_MARGIN_M = 0.03  # the package may overhang its deck by this much
 
 DEFAULT_ACTOR_COLOR = (0.95, 0.45, 0.10)
 DEFAULT_PROP_COLOR = (0.55, 0.42, 0.28)
@@ -198,12 +211,77 @@ def _validate_item(raw, what, *, actor: bool) -> dict:
     return out
 
 
+def _validate_package(raw, what) -> dict:
+    if not isinstance(raw, dict):
+        raise WorldError(f"{what}: expected a mapping")
+    unknown = set(raw) - {"id", "size", "pose", "z", "magnet_face", "color", "label"}
+    if unknown:
+        raise WorldError(f"{what}: unknown key(s) {sorted(unknown)}")
+    pid = raw.get("id")
+    if not isinstance(pid, str) or not ID_RX.match(pid):
+        raise WorldError(f"{what}.id: must match {ID_RX.pattern}")
+    size = raw.get("size", DEFAULT_PACKAGE_SIZE)
+    if not isinstance(size, (list, tuple)) or len(size) != 3:
+        raise WorldError(f"{what}.size: expected [x, y, z] metres")
+    face = raw.get("magnet_face", "+x")
+    if face not in FACES:
+        raise WorldError(f"{what}.magnet_face: expected one of {list(FACES)}, got {face!r}")
+    return {
+        "id": pid,
+        "size": tuple(_num(v, f"{what}.size", 0.0, 1.0, strict_lo=True) for v in size),
+        "pose": _pose(raw.get("pose"), f"{what}.pose"),
+        "z": _num(raw.get("z", 0.0), f"{what}.z", 0.0, 3.0),   # BOTTOM height
+        "magnet_face": face,
+        "color": _color(raw.get("color"), f"{what}.color", DEFAULT_PACKAGE_COLOR),
+        "label": str(raw.get("label") or pid)[:40],
+    }
+
+
+def top_z(item: dict) -> float:
+    """Height of a prop's top surface above the floor (props stand on it)."""
+    if item["shape"] == "box":
+        return item["size"][2]
+    return item["height"]
+
+
+def package_footprint(pkg: dict) -> tuple:
+    x, y, yaw = pkg["pose"]
+    return geometry.rect(x, y, yaw, pkg["size"][0], pkg["size"][1])
+
+
+def support_for(w: dict, pkg: dict) -> dict | None:
+    """The prop a package stands on, or None when it stands on the floor.
+
+    Raises WorldError for a layout that cannot exist: a package floating with
+    nothing under it (or on a prop of a different height), or sunk into a prop.
+    Packages never move by themselves, so this is checked once at load rather
+    than left to the physics."""
+    fp = package_footprint(pkg)
+    x, y, _ = pkg["pose"]
+    if pkg["z"] <= SUPPORT_EPS_M:
+        for prop in w["props"]:
+            if geometry.distance(fp, prop_footprint(prop)) <= 0.0:
+                raise WorldError(f"package {pkg['id']!r}: sits on the floor inside prop "
+                                 f"{prop['id']!r} — give it z: {top_z(prop):g} to put it on top")
+        return None
+    for prop in w["props"]:
+        pf = prop_footprint(prop)
+        if abs(top_z(prop) - pkg["z"]) > SUPPORT_EPS_M:
+            continue
+        if geometry.contains(pf, (x, y)) and all(
+                geometry.contains(pf, c, SUPPORT_MARGIN_M) for c in fp[1]):
+            return prop
+    raise WorldError(f"package {pkg['id']!r}: floating at z={pkg['z']:g} — no prop of that "
+                     f"height under it (props' tops: "
+                     f"{sorted({round(top_z(p), 3) for p in w['props']})})")
+
+
 def validate(raw, *, stem: str | None = None) -> dict:
     """A world mapping -> a normalized, fully-defaulted dict. Raises WorldError."""
     if not isinstance(raw, dict):
         raise WorldError("world file must contain a YAML mapping")
     unknown = set(raw) - {"name", "title", "description", "scenes", "autostart",
-                          "props", "actors"}
+                          "props", "actors", "packages"}
     if unknown:
         raise WorldError(f"unknown key(s) {sorted(unknown)}")
     name = raw.get("name")
@@ -221,7 +299,8 @@ def validate(raw, *, stem: str | None = None) -> dict:
     items = {}
     out = {"name": name, "title": str(raw.get("title") or name),
            "description": str(raw.get("description") or "").strip(),
-           "scenes": list(scenes), "autostart": autostart, "props": [], "actors": []}
+           "scenes": list(scenes), "autostart": autostart, "props": [], "actors": [],
+           "packages": []}
     for key, actor in (("props", False), ("actors", True)):
         lst = raw.get(key) or []
         if not isinstance(lst, list) or len(lst) > MAX_ITEMS:
@@ -232,6 +311,17 @@ def validate(raw, *, stem: str | None = None) -> dict:
                 raise WorldError(f"{key}[{i}].id: duplicate id {v['id']!r}")
             items[v["id"]] = v
             out[key].append(v)
+    pk = raw.get("packages") or []
+    if not isinstance(pk, list) or len(pk) > MAX_PACKAGES:
+        raise WorldError(f"packages: expected a list of at most {MAX_PACKAGES}")
+    for i, item in enumerate(pk):
+        v = _validate_package(item, f"packages[{i}]")
+        if v["id"] in items:
+            raise WorldError(f"packages[{i}].id: duplicate id {v['id']!r}")
+        items[v["id"]] = v
+        out["packages"].append(v)
+    for v in out["packages"]:
+        support_for(out, v)     # raises on a floating or buried package
     return out
 
 
@@ -261,10 +351,12 @@ def list_worlds() -> list[dict]:
             w = load(p.stem)
             out.append({"name": w["name"], "title": w["title"], "description": w["description"],
                         "scenes": w["scenes"], "props": len(w["props"]),
-                        "actors": len(w["actors"]), "status": "ready"})
+                        "actors": len(w["actors"]), "packages": len(w["packages"]),
+                        "status": "ready"})
         except WorldError as e:
             out.append({"name": p.stem, "title": p.stem, "description": "", "scenes": [],
-                        "props": 0, "actors": 0, "status": "invalid", "error": str(e)})
+                        "props": 0, "actors": 0, "packages": 0, "status": "invalid",
+                        "error": str(e)})
     return out
 
 

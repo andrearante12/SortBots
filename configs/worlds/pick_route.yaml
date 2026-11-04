@@ -1,0 +1,21 @@
+# A world layout (simtest/world.py has the full schema; pick_bench.yaml explains
+# packages). Needs a saved map of the warehouse (Nav2 drives between the decks):
+# the aisle mouth opens south onto clear floor at y ~ 8.5.
+
+name: pick_route
+title: Pick in the aisle, place across the floor
+description: >
+  A deck at the north end of robot_0's aisle carries a box whose plate faces south;
+  a second deck on the open floor, 11 m away, is where it goes (plate facing north).
+  The whole job: drive to the aisle deck, pick, drive out of the aisle and across
+  the floor, place.
+
+scenes: [nvidia]
+autostart: true
+
+props:
+  - {id: deck_pick, shape: box, size: [0.5, 0.5, 0.80], pose: [-7.9, 15.4, 0.0]}
+  - {id: deck_drop, shape: box, size: [0.5, 0.5, 0.80], pose: [-9.0, 4.5, 0.0]}
+
+packages:
+  - {id: pkg_0, label: box A, pose: [-7.9, 15.25, -1.5708], z: 0.80, magnet_face: "+x"}

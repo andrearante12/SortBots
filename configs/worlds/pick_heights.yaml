@@ -1,0 +1,28 @@
+# A world layout (simtest/world.py has the full schema; pick_bench.yaml explains
+# packages).
+#
+# The arm cannot reach the floor or a low deck: its TCP stays between 0.65 and
+# 1.29 m above the floor (simtest/magnet.TCP_Z_RANGE_BASE, from the URDF's joint
+# limits). These three decks span the part of that band a warehouse shelf would
+# use; pick_low.yaml and pick_floor.yaml are the ones below it, which must fail
+# cleanly instead.
+
+name: pick_heights
+title: Three packages at three shelf heights
+description: >
+  Three decks in a row south of robot_0's spawn, 0.66, 0.76 and 0.90 m high, each
+  with a box whose plate faces north. Plate centres land 0.72, 0.82 and 0.96 m above
+  the floor, below, level with and above the shoulder (0.83 m).
+
+scenes: [nvidia]
+autostart: true
+
+props:
+  - {id: deck_low,  shape: box, size: [0.5, 0.5, 0.66], pose: [-9.0, 10.0, 0.0]}
+  - {id: deck_mid,  shape: box, size: [0.5, 0.5, 0.76], pose: [-7.8, 10.0, 0.0]}
+  - {id: deck_high, shape: box, size: [0.5, 0.5, 0.90], pose: [-6.6, 10.0, 0.0]}
+
+packages:
+  - {id: pkg_0, label: low,  pose: [-9.0, 10.15, 1.5708], z: 0.66, magnet_face: "+x"}
+  - {id: pkg_1, label: mid,  pose: [-7.8, 10.15, 1.5708], z: 0.76, magnet_face: "+x"}
+  - {id: pkg_2, label: high, pose: [-6.6, 10.15, 1.5708], z: 0.90, magnet_face: "+x"}
