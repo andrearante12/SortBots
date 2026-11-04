@@ -312,7 +312,12 @@ def _tasks(raw, robots: list[str], named: dict | None, world: dict | None = None
         out.append({"id": f"t{i}", "robot": t["robot"], "package": pid,
                     "pickup": _leg(t.get("pickup", "dock"), f"{w}.pickup", named),
                     "dropoff": _leg(t.get("dropoff", "dock"), f"{w}.dropoff", named),
-                    "place": _place(t["place"], f"{w}.place", world, pkg), "at_s": at_s})
+                    "place": _place(t["place"], f"{w}.place", world, pkg),
+                    # What a work order says about the package, so the pick controller can
+                    # tell it from the other plates in view: its size, which face carries
+                    # the magnet, and roughly where it is (the shelf slot, not its pose).
+                    "size": list(pkg["size"]), "face": pkg["magnet_face"],
+                    "at": {"x": pkg["pose"][0], "y": pkg["pose"][1]}, "at_s": at_s})
     return out
 
 

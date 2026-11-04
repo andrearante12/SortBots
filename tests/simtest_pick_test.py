@@ -196,6 +196,9 @@ def test_dispatch_body_is_unchanged_for_plain_deliveries():
     body = dispatch_body(task)
     assert body["package"] == "pkg_0" and body["pickup"] is None
     assert body["place"] == {"x": -8.02, "y": 9.9, "z": 0.8, "yaw": 1.5708}
+    # the work order: what the box is and roughly where, not its pose or which way it faces
+    assert body["size"] == [0.24, 0.18, 0.12] and body["face"] == "+x"
+    assert body["at"] == {"x": -7.9, "y": 9.9}
     json.dumps(body)
 
 

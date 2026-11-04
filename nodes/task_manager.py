@@ -18,7 +18,23 @@ unloading; the state names are kept so the dashboard's labels and status
 stream don't change. Pickup and dropoff are plain named waypoints — the same
 working set the operator edits on the map (data/nav_waypoints.json). Merged
 2026-10-15 from the old `stations` concept, which carried dock + prop geometry
-for a scripted arm pick (nodes/scripted_pick.py) this track no longer drives.
+for a scripted arm pick this track no longer drives.
+
+A PACKAGE task (`{"package": id, "place": {x, y, z, yaw}, ...}`) is the exception:
+PICKING and PLACING are then a real exchange with the pick controller
+(nodes/magnet_pick.py) instead of a dwell, so the magnet effector actually picks
+and places it:
+
+    task_manager --[[/<robot>/pick_request: JSON]]--> magnet_pick
+    magnet_pick  --[[/<robot>/pick_result: "picked" | "placed" | "failed"]]--> task_manager
+
+A package task's legs are each a name, a pose dict {name, x, y, yaw}, or null,
+and null means "no Nav2 leg": the controller finds the package and docks on its
+own (the robot starts wherever it is, which is the point of the pick tests). The
+exchange has PICK_TIMEOUT_SEC as a safety net only. The controller runs its own
+deadlines on SIM time and answers `failed` itself when it can't do the job, so a
+plate out of reach ends the task in seconds, not minutes. A nav-only dispatch
+never touches any of this.
 
 Talks to two things:
   - Nav2 (`launch/sortbots_nav2.launch.py`) via the `navigate_to_pose` action.
@@ -96,6 +112,12 @@ DWELL_SEC = 2.0
 NAV_STARTUP_GRACE_SEC = 90.0
 NAV_RETRY_SEC = 3.0
 
+# Safety net for a package task's pick_request, wall seconds on the steady clock.
+# Generous because the arm moves in SIM time (0.3-0.8x real time here) and a pick is
+# a scan, a dock and two arm sequences; the controller's own sim-time deadlines are
+# what normally end a stuck pick, long before this does.
+PICK_TIMEOUT_SEC = 300.0
+
 
 class Task:
     """One queued job, its waypoints resolved to poses AT DISPATCH.
@@ -112,8 +134,9 @@ class Task:
                   own task the operator can see and cancel.
     """
 
-    def __init__(self, kind: str, stops: list[Waypoint], task_id: str | None = None,
-                 carrying: bool = False):
+    def __init__(self, kind: str, stops: list[Waypoint | None], task_id: str | None = None,
+                 carrying: bool = False, package: str | None = None,
+                 place: dict | None = None, cargo: dict | None = None):
         self.task_id = task_id or uuid.uuid4().hex[:8]
         self.kind = kind
         self.stops = stops
@@ -121,14 +144,31 @@ class Task:
         # fleet task whose dropoff leg failed): skip the pickup leg and its
         # dwell, drive straight to the dropoff.
         self.carrying = carrying and kind == "pickup"
+        # A package task: PICKING/PLACING are the magnet exchange, not a dwell, and a
+        # leg that is None is not driven (the controller docks on its own).
+        self.package = package if kind == "pickup" else None
+        self.place = place       # where the package comes to rest: {x, y, z, yaw}
+        # What a work order says about the package, so the controller can tell it from
+        # the other plates in view: {size: [x, y, z], face: "+x", at: {x, y}} (roughly
+        # where it is, the shelf slot; not its pose or which way it faces).
+        self.cargo = cargo or {}
         self.first_try: float | None = None   # monotonic; see NAV_STARTUP_GRACE_SEC
 
     def summary(self) -> dict:
         if self.kind == "goto":
             return {"task_id": self.task_id, "kind": "goto", "goto": self.stops[0].name}
+        name = lambda s: s.name if s is not None else "here"  # noqa: E731
         return {"task_id": self.task_id, "kind": "pickup",
-                "pickup": self.stops[0].name, "dropoff": self.stops[1].name,
-                **({"carrying": True} if self.carrying else {})}
+                "pickup": name(self.stops[0]), "dropoff": name(self.stops[1]),
+                **({"carrying": True} if self.carrying else {}),
+                **({"package": self.package} if self.package else {})}
+
+    def first_leg_needs_nav(self) -> bool:
+        """Does popping this task need Nav2? Not when it starts with a pick that has no
+        leg to drive (the controller docks itself), so a package task runs without it."""
+        if self.carrying:
+            return self.stops[1] is not None
+        return self.stops[0] is not None
 
 
 class TaskManager(Node):
@@ -161,6 +201,12 @@ class TaskManager(Node):
             QoSProfile(depth=1, reliability=QoSReliabilityPolicy.RELIABLE,
                        durability=QoSDurabilityPolicy.TRANSIENT_LOCAL))
         self.explore_cmd_pub = self.create_publisher(String, f"/{robot_id}/explore_cmd", 10)
+        # The pick controller's pair (package tasks only; nodes/magnet_pick.py).
+        self.pick_request_pub = self.create_publisher(String, f"/{robot_id}/pick_request", 10)
+        self.create_subscription(
+            String, f"/{robot_id}/pick_result", self._on_pick_result, 10
+        )
+        self._pick_deadline: float | None = None   # monotonic; see PICK_TIMEOUT_SEC
 
         self.create_subscription(
             String, f"/{robot_id}/dispatch_task", self._on_dispatch, 10
@@ -183,12 +229,43 @@ class TaskManager(Node):
 
     # -- dispatch -----------------------------------------------------
 
+    def _reject(self, task_id, reason: str) -> None:
+        self.get_logger().error(f"rejected task {task_id}: {reason}")
+        # Say so on the status stream: without it the dashboard row for a
+        # rejected task sits at "waiting" forever.
+        self._publish_status(rejected={"task_id": task_id, "reason": reason})
+
+    def _resolve_legs(self, legs: list, task_id) -> list[Waypoint | None] | None:
+        """A package task's legs: a name from the working set, a pose dict, or None
+        (no Nav2 leg). None back (after rejecting) when one can't be resolved."""
+        out: list[Waypoint | None] = []
+        for leg in legs:
+            if leg is None:
+                out.append(None)
+            elif isinstance(leg, dict):
+                try:
+                    out.append(Waypoint({"name": leg.get("name", "pose"), "x": leg["x"],
+                                         "y": leg["y"], "yaw": leg.get("yaw", 0.0)}))
+                except (KeyError, TypeError, ValueError):
+                    self._reject(task_id, f"bad pose leg {leg!r}: want {{x, y, yaw}}")
+                    return None
+            elif isinstance(leg, str) and leg in self.waypoints:
+                out.append(self.waypoints[leg])
+            else:
+                self._reject(task_id, f"unknown waypoint {leg!r} "
+                                      f"(known: {', '.join(sorted(self.waypoints)) or 'none'})")
+                return None
+        return out
+
     def _on_dispatch(self, msg: String) -> None:
         try:
             payload = json.loads(msg.data)
             task_id = payload.get("task_id")
+            package = payload.get("package")
             if "goto" in payload:
                 kind, names = "goto", [payload["goto"]]
+            elif package:
+                kind, names = "pickup", [payload.get("pickup"), payload.get("dropoff")]
             else:
                 kind, names = "pickup", [payload["pickup"], payload["dropoff"]]
         except (json.JSONDecodeError, KeyError, AttributeError) as exc:
@@ -197,20 +274,36 @@ class TaskManager(Node):
         # Re-read the working set so a waypoint placed on the map since this
         # node started still resolves (the old stations file was load-once).
         self.waypoints = load_waypoints(self.platform)
-        missing = [n for n in names if n not in self.waypoints]
-        if missing:
-            reason = (f"unknown waypoint {', '.join(map(repr, missing))} "
-                      f"(known: {', '.join(sorted(self.waypoints)) or 'none'})")
-            self.get_logger().error(f"rejected task {task_id}: {reason}")
-            # Say so on the status stream: without it the dashboard row for a
-            # rejected task sits at "waiting" forever.
-            self._publish_status(rejected={"task_id": task_id, "reason": reason})
-            return
-        task = Task(kind, [self.waypoints[n] for n in names], task_id=task_id,
-                    carrying=bool(payload.get("carrying", False)))
+        place = cargo = None
+        if package:
+            place = payload.get("place")
+            at, size, face = payload.get("at"), payload.get("size"), payload.get("face")
+            nums = lambda d, keys: isinstance(d, dict) and all(  # noqa: E731
+                isinstance(d.get(k), (int, float)) for k in keys)
+            if not (isinstance(package, str) and nums(place, ("x", "y", "z", "yaw"))
+                    and nums(at, ("x", "y")) and isinstance(face, str)
+                    and isinstance(size, list) and len(size) == 3):
+                self._reject(task_id, "a package task needs package (id), size [x, y, z], "
+                                      "face, at {x, y} and place {x, y, z, yaw}")
+                return
+            cargo = {"size": size, "face": face, "at": {"x": at["x"], "y": at["y"]}}
+            stops = self._resolve_legs(names, task_id)
+            if stops is None:
+                return
+        else:
+            missing = [n for n in names if n not in self.waypoints]
+            if missing:
+                self._reject(task_id, f"unknown waypoint {', '.join(map(repr, missing))} "
+                                      f"(known: {', '.join(sorted(self.waypoints)) or 'none'})")
+                return
+            stops = [self.waypoints[n] for n in names]
+        task = Task(kind, stops, task_id=task_id, carrying=bool(payload.get("carrying", False)),
+                    package=package or None, place=place, cargo=cargo)
         self.queue.append(task)
         self.get_logger().info(
-            f"queued {kind} task {task.task_id}: {' -> '.join(names)} "
+            f"queued {kind} task {task.task_id}: "
+            f"{' -> '.join(s.name if s is not None else 'here' for s in stops)}"
+            f"{' (package ' + package + ')' if package else ''} "
             f"(queue depth {len(self.queue)})"
         )
         self._publish_status()
@@ -230,6 +323,8 @@ class TaskManager(Node):
             self.get_logger().info(f"cancelling running task {self.current_task.task_id}")
             if self._nav_goal_handle is not None:
                 self._nav_goal_handle.cancel_goal_async()
+            if self._pick_deadline is not None:        # mid pick/place: stop the arm, magnet off
+                self._send_pick_request({"cmd": "cancel"})
             self._end_task("CANCELLED")
         elif dropped:
             self.get_logger().info(f"dropped {dropped} queued task(s) for {target!r}")
@@ -254,15 +349,23 @@ class TaskManager(Node):
         # after the robot is visible, and a task popped before then used to fail
         # outright in _start_nav's wait — which made the first demo phase fail
         # on a fresh session. Holding the queue lets it start the moment Nav2 does.
+        # A package task that starts with a pick has no Nav2 leg to wait for (the
+        # controller docks on its own), so it runs even when Nav2 is not up at all.
         if (self.state == "IDLE" and self.queue and self.explorer.may_start_task()
-                and self.nav_client.server_is_ready() and time.monotonic() >= self._hold_until):
+                and (self.nav_client.server_is_ready() or not self.queue[0].first_leg_needs_nav())
+                and time.monotonic() >= self._hold_until):
             self.current_task = self.queue.popleft()
             if self.current_task.first_try is None:
                 self.current_task.first_try = time.monotonic()
             if self.current_task.kind == "goto":
                 self._start_nav(self.current_task.stops[0], next_state="NAV_TO_GOAL")
             elif self.current_task.carrying:
-                self._start_nav(self.current_task.stops[1], next_state="NAV_TO_DROPOFF")
+                if self.current_task.stops[1] is None:
+                    self._begin_place()
+                else:
+                    self._start_nav(self.current_task.stops[1], next_state="NAV_TO_DROPOFF")
+            elif self.current_task.stops[0] is None:
+                self._begin_pick()
             else:
                 self._start_nav(self.current_task.stops[0], next_state="NAV_TO_PICKUP")
         elif self.state == "IDLE" and self.explorer.on_idle(not self.queue):
@@ -274,6 +377,12 @@ class TaskManager(Node):
                 self._start_nav(self.current_task.stops[1], next_state="NAV_TO_DROPOFF")
             elif self.state == "PLACING":
                 self._end_task("DONE")
+        elif self._pick_deadline is not None and time.monotonic() >= self._pick_deadline:
+            self.get_logger().error(
+                f"no pick_result in {PICK_TIMEOUT_SEC:.0f}s ({self.state}) for task "
+                f"{self.current_task.task_id if self.current_task else None} — giving up")
+            self._send_pick_request({"cmd": "cancel"})   # arm stops, magnet off
+            self._end_task("FAILED")
 
     def _start_nav(self, wp: Waypoint, next_state: str) -> None:
         x, y, yaw = wp.x, wp.y, wp.yaw
@@ -342,10 +451,50 @@ class TaskManager(Node):
             return
 
         if self.state == "NAV_TO_PICKUP":
-            self._begin_dwell("PICKING")
+            self._begin_pick() if task.package else self._begin_dwell("PICKING")
         elif self.state == "NAV_TO_DROPOFF":
-            self._begin_dwell("PLACING")
+            self._begin_place() if task.package else self._begin_dwell("PLACING")
         elif self.state == "NAV_TO_GOAL":
+            self._end_task("DONE")
+
+    # -- the magnet exchange (package tasks) ---------------------------------------
+
+    def _send_pick_request(self, body: dict) -> None:
+        msg = String()
+        msg.data = json.dumps(body)
+        self.pick_request_pub.publish(msg)
+
+    def _begin_pick(self) -> None:
+        task = self.current_task
+        self._set_state("PICKING")
+        self._pick_deadline = time.monotonic() + PICK_TIMEOUT_SEC
+        self._send_pick_request({"cmd": "attach", "package": task.package,
+                                 "task_id": task.task_id, **task.cargo})
+
+    def _begin_place(self) -> None:
+        task = self.current_task
+        self._set_state("PLACING")
+        self._pick_deadline = time.monotonic() + PICK_TIMEOUT_SEC
+        self._send_pick_request({"cmd": "detach", "package": task.package,
+                                 "task_id": task.task_id, "place": task.place, **task.cargo})
+
+    def _on_pick_result(self, msg: String) -> None:
+        """The controller's answer. Only meaningful while this task is in the matching
+        state: a late `picked` from a cancelled task must not advance the next one."""
+        result = msg.data.strip()
+        task = self.current_task
+        if task is None or not task.package or self._pick_deadline is None:
+            return
+        if result == "failed":
+            self.get_logger().error(f"pick controller failed in {self.state} for task {task.task_id}")
+            self._end_task("FAILED")
+        elif result == "picked" and self.state == "PICKING":
+            self._pick_deadline = None
+            if task.stops[1] is None:
+                self._begin_place()
+            else:
+                self._start_nav(task.stops[1], next_state="NAV_TO_DROPOFF")
+        elif result == "placed" and self.state == "PLACING":
             self._end_task("DONE")
 
     def _begin_dwell(self, state: str) -> None:
@@ -361,6 +510,7 @@ class TaskManager(Node):
         self._set_state(final)
         self.current_task = None
         self._dwell_deadline = None
+        self._pick_deadline = None
         self._nav_goal_handle = None
         self._set_state("IDLE")
 
