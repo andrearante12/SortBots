@@ -36,6 +36,7 @@ const SCREENSHOT_DIR = args.includes('--screenshot')
 const ROSLIB_STUB = `
 window.__topics = {}; window.__published = []; window.__ops = []; window.__services = [];
 window.__emit = (name, msg) => (window.__topics[name] || []).forEach((cb) => cb(msg));
+window.__noAutoOpen = true; // the card checks below open and close them by hand
 window.ROSLIB = {
   Ros: function () { this.on = () => {}; this.connect = () => {}; this.close = () => {};
                      this.callOnConnection = (op) => window.__ops.push(op); },
@@ -421,6 +422,9 @@ async function main() {
     check(`${vp.label}: closing a card hands control back to the other open one`, (await page.eval(`window.__operator.selected`)) === r1 && (await page.eval(`document.querySelectorAll('#fleet .robot.sel').length`)) === 1);
 
     // -- scored tests: the Session panel's Tests tab, the map chip, the walkers ----------------
+    // Starting and ending a run wipes the page, and the checks after this one still want this
+    // fleet on screen: that wipe has its own section, 'new run'.
+    await page.eval(`window.sortbotsRunStarting = window.sortbotsRunEnded = () => {}`);
     await click('#session-chip');
     await sleep(300);
     await click('#sp-tabs [data-tab="tests"]');
@@ -906,6 +910,9 @@ async function main() {
     // A demo: true session (the Fleet demo preset) starts the task demo by itself, once.
     await page.eval(`window.__published.length = 0; window.__fakeSession = { ...window.__fakeSession, session_id: 's-demo', config: { ...window.__fakeSession.config, demo: true } }`);
     await sleep(3600);
+    // A new session wipes the last one's robots; this one's report in, as they would.
+    await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+    await sleep(600);
     check(`${vp.label}: a demo session runs the task demo by itself`, await page.eval(`localStorage.getItem('sortbots.autoDemo.s-demo') === '1'`));
     check(`${vp.label}: ...and only once per session`, await page.eval(`(() => { const n = document.getElementById('tk-demo').textContent; return n === 'Run demo' || n === 'Stop demo'; })()`));
     if ((await $text('#tk-demo')) === 'Stop demo') await click('#tk-demo');
@@ -1279,6 +1286,49 @@ async function main() {
   await dragX('#rz-left', -(vw - l0)); await sleep(300);
   check('side bars: dragging back brings the map and its size back', await page.eval(`(() => { const c = document.getElementById('map'), r = c.getBoundingClientRect(); return !document.body.classList.contains('map-gone') && r.width > 300 && Math.abs(c.width / (window.devicePixelRatio || 1) - r.width) < 2; })()`));
   await page.eval(`localStorage.clear()`);
+
+  // -- a new run on a page that is still showing the last one --------------------------------------
+  console.log('\n--- new run ---');
+  await page.eval(`localStorage.clear()`); await load();
+  await emit('/map', { info: { width: 4, height: 4, resolution: 0.5, origin: { position: { x: 0, y: 0, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } }, data: new Array(16).fill(0) });
+  await emit('/sim/world', { data: JSON.stringify({ world: 'old', title: 'old', props: [], actors: [], marks: [], packages: [] }) });
+  await sleep(500);
+  check('new run: the last run\'s map hides the empty screen', !(await visible('#empty')));
+  await page.eval(`window.sortbotsRunStarting()`);
+  await sleep(500);
+  check('new run: the starting screen shows at once', await visible('#empty') && /Starting up/.test(await $text('#empty-title')), await $text('#empty-title'));
+  check('new run: with a progress bar', await visible('#empty-boot'));
+  check('new run: the old map is gone', !(await visible('#coverage')));
+  check('new run: no robot still reads as online', await page.eval(`[...window.__operator.robots.values()].every((r) => !r.pose)`));
+  await page.eval(`localStorage.clear()`); await load();
+  await emit('/map', { info: { width: 4, height: 4, resolution: 0.5, origin: { position: { x: 0, y: 0, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } }, data: new Array(16).fill(0) });
+  await sleep(500);
+  await page.eval(`window.sortbotsRunEnded()`);
+  await sleep(500);
+  check('new run: a test ending goes back to the empty screen', await visible('#empty') && !/Starting/.test(await $text('#empty-title')) && !(await visible('#coverage')), await $text('#empty-title'));
+  await page.eval(`localStorage.clear()`); await load();
+
+  // -- cards open by themselves, and side bars can be put away -----------------------------------
+  console.log('\n--- panels ---');
+  const anyId = await page.eval(`[...window.__operator.robots.keys()][0]`);
+  await page.eval(`(() => { window.__noAutoOpen = false; const r = window.__operator.robots.get(${JSON.stringify(anyId)}); r.pose = { x: 0, y: 0, yaw: 0 }; r.linkAt = performance.now() + 60000; })()`);
+  await sleep(600);
+  check('panels: a robot coming online opens its details by itself', await page.eval(`!!document.querySelector('#fleet .robot.sel[data-id="${anyId}"] .cam')`));
+  await click(`#fleet .robot[data-id="${anyId}"] .l1`);
+  await sleep(600);
+  check('panels: closing them keeps them closed', !(await page.eval(`!!document.querySelector('#fleet .robot.sel[data-id="${anyId}"]')`)));
+  const stageW = () => page.eval(`document.getElementById('stage').getBoundingClientRect().width`);
+  const w0 = await stageW();
+  await click('#hide-right'); await sleep(200);
+  check('panels: the task list hides and the map takes its room', !(await visible('#right')) && (await stageW()) > w0 + 200, String(await stageW()));
+  check('panels: Stop all stays on screen', await page.eval(`document.getElementById('estop').getBoundingClientRect().right <= innerWidth`));
+  await click('#hide-left'); await sleep(200);
+  check('panels: the robot list hides too, leaving the map the window', !(await visible('#left')) && Math.abs((await stageW()) - (await page.eval(`innerWidth`))) < 2, String(await stageW()));
+  await load();
+  check('panels: hidden side bars stay hidden after a reload', !(await visible('#left')) && !(await visible('#right')));
+  await click('#hide-left'); await click('#hide-right'); await sleep(200);
+  check('panels: and come back', await visible('#left') && await visible('#right') && Math.abs((await stageW()) - w0) < 4, String(await stageW()));
+  await page.eval(`localStorage.clear()`); await load();
 
   // -- 2D map / 3D cloud -----------------------------------------------------------------------
   console.log('\n--- 3d view ---');

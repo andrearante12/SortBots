@@ -57,6 +57,8 @@
   let platform = null; // "sim" | "real", from serve.py; the Teleport tool is sim-only
   let tasks = []; // [{id, kind: "goto"|"pickup", goto, pickup, dropoff, robot, state, at, reason}]
   let session = null; // last /api/session body, null until the first answer
+  const START_WAIT_MS = 30000;
+  let startAskedAt = null; // when a start was asked for, until the session says it is starting
   let controlAvailable = true; // false once /api/session answers 503
   let mapInfo = null;
   let mapCanvas = null;
@@ -1246,6 +1248,19 @@
     if (fresh) startCam(id);
     refreshSelection();
   }
+  // A robot's card opens by itself the first time it comes online in a run; closed after
+  // that, it stays closed. Control stays with whichever robot already has it.
+  const autoOpened = new Set();
+  function autoOpenCards() {
+    if (window.__noAutoOpen) return; // the operator tests drive the cards by hand
+    for (const r of robots.values()) {
+      if (!online(r) || autoOpened.has(r.id)) continue;
+      autoOpened.add(r.id);
+      const keep = selected;
+      openRobot(r.id);
+      if (keep !== null && keep !== r.id) { selected = keep; refreshSelection(); }
+    }
+  }
   function closeRobot(id) {
     open.delete(id); stopCam(id);
     if (selected === id) selected = [...open].pop() ?? null; // control falls to the newest still open
@@ -1656,6 +1671,13 @@
     sim_ready: "Simulation up", ros_starting: "Starting navigation and mapping", ros_ready: "Navigation up",
   };
   function bootProgress() {
+    // A start was just asked for and the session hasn't said so yet (a test takes a few
+    // seconds to get to launching one): the bar shows now, not at the next poll.
+    if (startAskedAt !== null) {
+      if (session && session.state === "starting") startAskedAt = null;
+      else if (performance.now() - startAskedAt > START_WAIT_MS) startAskedAt = null;
+      else return { p: 0.02, text: "Starting…" };
+    }
     if (!session || !["starting", "running"].includes(session.state)) return null;
     const list = [...robots.values()], up = list.filter(online).length;
     if (session.state === "running") {
@@ -1684,7 +1706,8 @@
   function renderEmpty() {
     const boot = renderBoot();
     const anyOnline = [...robots.values()].some(online);
-    const show = !anyOnline && !mapInfo;
+    // Booting beats a map: a map on screen during a boot can only be the last run's.
+    const show = !anyOnline && (!mapInfo || !!boot);
     $("#empty").hidden = !show;
     if (!show) return;
     const starting = !!boot || (session && session.state === "stopping");
@@ -1710,6 +1733,41 @@
     runDemo();
   }
 
+  // Everything a run leaves on screen, gone: nothing of it says anything about the next one.
+  function clearRun() {
+    tasks = []; renderTasks();
+    mapInfo = null; mapCanvas = null; lastMap = null; knownBox = null; mappedM2 = 0;
+    view.moved = false;
+    tfTree.clear();
+    worldLayout = null; worldTruth = null; worldTruthAt = -Infinity;
+    for (const r of robots.values()) {
+      Object.assign(r, { pose: null, linkAt: -Infinity, plan: [], explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity,
+                         queueDepth: 0, nav: null, seenStamp: {}, odom: null, odomAt: -Infinity, obstacles: null, obstaclesAt: -Infinity,
+                         obstaclesMap: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity });
+    }
+    for (const [id, c] of cams) {
+      c.head.hidden = true; c.perc.hidden = true;
+      c.overlay.getContext("2d").clearRect(0, 0, c.overlay.width, c.overlay.height);
+      if (open.has(id)) startCam(id); else for (const pic of Object.values(c.pics)) pic.style.backgroundImage = "";
+    }
+    autoOpened.clear();
+    lastFleetSig = ""; dirty = true;
+    renderFleet(); renderEmpty();
+  }
+  // Called the moment a session or test is asked for, from whichever panel started it.
+  window.sortbotsRunStarting = () => {
+    startAskedAt = performance.now();
+    clearRun();
+    clearTimeout(sessionTimer); pollSession();
+  };
+
+  // A test is over and has stopped its sim: back to the empty screen, its score on top.
+  window.sortbotsRunEnded = () => {
+    startAskedAt = null;
+    clearRun();
+    clearTimeout(sessionTimer); pollSession();
+  };
+
   let sessionTimer = null, lastSessionId = null;
   async function pollSession() {
     try {
@@ -1718,7 +1776,7 @@
         controlAvailable = true;
         session = await res.json();
         if (session.session_id !== lastSessionId) { // a new run: last run's tasks mean nothing
-          if (lastSessionId !== null) { tasks = []; renderTasks(); }
+          if (lastSessionId !== null) clearRun();
           lastSessionId = session.session_id;
           refreshRoster();
         }
@@ -2218,7 +2276,8 @@
   const SIDES = { left: { min: 200, max: Infinity, dflt: 260 }, right: { min: 240, max: 560, dflt: 296 } };
   const LEFT_SNAP_PX = 24;
   function syncMapGone() {
-    const px = (side) => parseFloat(document.body.style.getPropertyValue(`--${side}-w`)) || SIDES[side].dflt;
+    const px = (side) => (document.body.classList.contains(`hide-${side}`) ? 0
+      : parseFloat(document.body.style.getPropertyValue(`--${side}-w`)) || SIDES[side].dflt);
     // The phone layouts stack the panes and have no handles: there the widths mean nothing.
     const sideBySide = getComputedStyle($("#rz-left")).display !== "none";
     document.body.classList.toggle("map-gone", sideBySide && px("left") + px("right") >= innerWidth);
@@ -2249,6 +2308,25 @@
     h.addEventListener("dblclick", () => setSide(side, null));
   }
   addEventListener("resize", syncMapGone);
+  // Either side bar can be put away altogether; the choice is kept per browser.
+  for (const [side, name] of [["left", "robot list"], ["right", "task list"]]) {
+    const btn = $(`#hide-${side}`), key = `sortbots.hide.${side}`;
+    const apply = (hide) => {
+      document.body.classList.toggle(`hide-${side}`, hide);
+      btn.classList.toggle("on", !hide);
+      btn.title = btn.ariaLabel = `${hide ? "Show" : "Hide"} the ${name}`;
+      syncMapGone();
+      dispatchEvent(new Event("resize"));
+    };
+    let hidden = false;
+    try { hidden = localStorage.getItem(key) === "1"; } catch (e) { /* no storage: shown */ }
+    apply(hidden);
+    btn.addEventListener("click", () => {
+      const hide = !document.body.classList.contains(`hide-${side}`);
+      try { localStorage.setItem(key, hide ? "1" : "0"); } catch (e) { /* this tab only */ }
+      apply(hide);
+    });
+  }
 
   let toastTimer = null;
   function toast(msg) {
@@ -2280,7 +2358,7 @@
       r.obstacles = null; r.obstaclesMap = [];
       drawCamObstacles(r.id); // clears it
     }
-    renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending(); renderPaneBadges(); renderSimFollow();
+    autoOpenCards(); renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending(); renderPaneBadges(); renderSimFollow();
     if (window.sortbotsComms) window.sortbotsComms.sync();
   }, 250);
 

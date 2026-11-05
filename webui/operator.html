@@ -121,6 +121,13 @@
   aside { background: var(--surface); display: flex; flex-direction: column; min-height: 0; overflow: auto; }
   #left { border-right: 1px solid var(--line); }
   #right { border-left: 1px solid var(--line); }
+  /* Placed, not auto-flowed: with a side bar hidden the rest must stay in their columns. */
+  #left { grid-column: 1; grid-row: 2; } #stage { grid-column: 2; grid-row: 2; } #right { grid-column: 3; grid-row: 2; }
+  @media (min-width: 761px) and (min-height: 521px) {
+    body.hide-left { --left-w: 0px !important; }
+    body.hide-right { --right-w: 0px !important; }
+    body.hide-left #left, body.hide-left #rz-left, body.hide-right #right, body.hide-right #rz-right { display: none; }
+  }
   /* Drag handles on the inner edge of each side bar (operator.js: drag to resize,
      double-click to reset). Outside the asides, which scroll. */
   .resizer { position: fixed; top: 50px; bottom: 0; width: 9px; z-index: 4; cursor: col-resize; touch-action: none; }
@@ -466,6 +473,7 @@
     #mode-strip::-webkit-scrollbar { display: none; }
     #session-chip #s-label { max-width: 34vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #session-chip, #estop, #alarms, #theme { flex: none; }
+    #hide-left, #hide-right { display: none; }  /* phones show one pane at a time already */
     #left, #stage, #right { grid-row: 2; grid-column: 1; border: none; }
     body:not([data-pane="robots"]) #left, body:not([data-pane="tasks"]) #right { display: none; }
     body[data-pane="robots"] #stage, body[data-pane="tasks"] #stage { visibility: hidden; }
@@ -552,6 +560,8 @@
 <div id="test-chip" hidden title="A scored test is driving the sim"><span class="tp-dot"></span><span class="k">Test</span>
     <button type="button" class="name" id="tc-name" title="Open the Tests tab"></button><span id="tc-time" class="muted"></span>
     <button type="button" class="btn small stop" id="tc-cancel">Stop test</button></div>
+  <button class="btn icon" id="hide-left" aria-label="Hide the robot list" title="Hide the robot list">&#x25E7;</button>
+  <button class="btn icon" id="hide-right" aria-label="Hide the task list" title="Hide the task list">&#x25E8;</button>
   <button class="btn icon" id="fullscreen" hidden aria-label="Full screen" title="Full screen">&#x26F6;</button>
   <button class="btn icon" id="theme" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
   <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">No session</span></button>

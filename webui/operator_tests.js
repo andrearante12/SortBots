@@ -175,6 +175,7 @@
     btn.disabled = true;
     try {
       run = await api("/api/tests/run", payload);
+      if (window.sortbotsRunStarting) window.sortbotsRunStarting();
       $("#result-card").hidden = true; // the last score is gone once the next run starts
       warn(null);
       $("#tp-log").textContent = ""; logOffset = 0;
@@ -295,7 +296,10 @@
       run = await api(`/api/tests/run${q}`);
       if (logOffset == null) $("#tp-log").textContent = "";
       appendLog(run.log); logOffset = run.offset;
-      if (wasRunning && !run.running && run.name) showResult(run.name, run.exit);
+      if (wasRunning && !run.running && run.name) {
+        showResult(run.name, run.exit);
+        if (window.sortbotsRunEnded) window.sortbotsRunEnded();
+      }
       wasRunning = !!run.running;
     } catch (e) {
       if (visible) warn(`Tests unavailable: ${e.message}`);
