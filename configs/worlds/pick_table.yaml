@@ -20,7 +20,7 @@ description: >
   plate further back than the edge is out of the arm's reach.
 
   The head starts tilted down so the table stays in frame up to the dock, and the Sim
-  camera starts on the table: the card's All view shows it next to the head camera.
+  view starts on the table.
 
 scenes: [nvidia]
 autostart: true

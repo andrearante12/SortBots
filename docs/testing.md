@@ -120,9 +120,8 @@ Three more world keys, all optional. `marks:` are flat painted rectangles
 collide with: they show where a place test wants a package. `head: {pan, tilt}` is where
 the head starts, in radians, tilt > 0 looking down; it is per world because a tilted camera
 sees less of what is ahead, so exploration and Nav2 stay level. `view: {eye, target}` aims the
-Sim camera for this world. The robot card's **All** camera view shows that same camera, which
-renders only while something is showing it (see Render cost). `/sim/ground_truth` carries the
-head's real angles as `head: {robot_0: {pan, tilt}}`, and the card's Head sliders command it.
+Sim view's camera for this world. `/sim/ground_truth` carries the head's real angles as
+`head: {robot_0: {pan, tilt}}`, and the robot card's Tilt and Pan sliders command it.
 
 ### The world clock and ground truth
 

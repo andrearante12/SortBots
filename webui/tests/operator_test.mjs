@@ -309,11 +309,9 @@ async function main() {
     await click(`#fleet .robot[data-id="${r0}"] [data-cam-mode="split"]`);
     await sleep(100);
     const panes = JSON.parse(await page.eval(`JSON.stringify([...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')].map((p) => ({ w: p.offsetWidth, msg: p.textContent })))`));
-    check(`${vp.label}: All shows camera, depth and the external view`, panes.length === 3 && panes.every((p) => p.w > 0), JSON.stringify(panes));
-    check(`${vp.label}: All streams each feed`, /camera/.test(panes[0].msg) && /depth/.test(panes[1].msg) && /external/.test(panes[2].msg), JSON.stringify(panes));
-    check(`${vp.label}: All stacks them vertically`, await page.eval(`(() => { const p = [...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')]; return p[0].offsetLeft === p[2].offsetLeft && p[0].offsetTop < p[1].offsetTop && p[1].offsetTop < p[2].offsetTop; })()`));
-    const viewBeats = () => page.eval(`window.__published.filter((x) => x.topic === '/sim/view_cmd').map((x) => JSON.parse(x.msg.data).on)`);
-    check(`${vp.label}: All keeps the sim camera on`, (await viewBeats()).at(-1) === true, JSON.stringify((await viewBeats()).slice(-3)));
+    check(`${vp.label}: split shows the camera and the depth`, panes.length === 2 && panes.every((p) => p.w > 0), JSON.stringify(panes));
+    check(`${vp.label}: split streams both feeds`, /camera/.test(panes[0].msg) && /depth/.test(panes[1].msg), JSON.stringify(panes));
+    check(`${vp.label}: split stacks them vertically`, await page.eval(`(() => { const p = [...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')]; return p[0].offsetLeft === p[1].offsetLeft && p[0].offsetTop < p[1].offsetTop; })()`));
     await emit('/sim/ground_truth', { data: JSON.stringify({ t: 1, wt: 1, robots: {}, actors: {}, head: { [r0]: { pan: 0.1, tilt: 0.5 } } }) });
     await sleep(100);
     const headSel = `#fleet .robot[data-id="${r0}"] .headctl`;
@@ -324,7 +322,6 @@ async function main() {
     check(`${vp.label}: moving a slider commands the head`, !!headCmd && headCmd.msg.name[1] === 'head_tilt_joint' && headCmd.msg.position[1] === 0.8 && headCmd.msg.position[0] === 0.1, JSON.stringify(headCmd));
     await click(`#fleet .robot[data-id="${r0}"] [data-cam-mode="depth"]`);
     await sleep(100);
-    check(`${vp.label}: leaving All lets the sim camera switch off`, (await viewBeats()).at(-1) === false, JSON.stringify((await viewBeats()).slice(-3)));
     check(`${vp.label}: leaving split shows one picture again`, (await page.eval(`[...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')].filter((p) => p.offsetWidth).length`)) === 1);
     check(`${vp.label}: the other card keeps its own camera mode`, await page.eval(`window.__operator.cams.get(${JSON.stringify(r1)}).mode === ${JSON.stringify(r1Mode)}`));
     check(`${vp.label}: a click inside a card leaves both open`, (await page.eval(`document.querySelectorAll('#fleet .robot.sel').length`)) === 2);

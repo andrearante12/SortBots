@@ -162,11 +162,8 @@
   .more .cam .pics { position: absolute; inset: 0; display: grid; grid-auto-rows: minmax(0, 1fr); gap: 2px; }
   .more .cam .pic { position: relative; min-width: 0; min-height: 0; background: center / cover no-repeat; }
   .more .cam[data-view="rgb"] .pic:not([data-feed="rgb"]), .more .cam[data-view="depth"] .pic:not([data-feed="depth"]) { display: none; }
-  /* All: the feeds stacked, each at the cameras' own 16:9 so nothing is cropped. The
-     external view is the sim's own camera, so a real robot has two. */
-  .more .cam[data-view="split"] { aspect-ratio: 16/27; }
-  .more .cam[data-view="split"][data-sim="off"] { aspect-ratio: 16/18; }
-  .more .cam[data-sim="off"] .pic[data-feed="sim"] { display: none; }
+  /* Split: the feeds stacked, each at the camera's own 16:9 so nothing is cropped. */
+  .more .cam[data-view="split"] { aspect-ratio: 16/18; }
   /* Head sliders (operator.js camFor): shown once the sim reports the head's angles. */
   .headctl { display: grid; gap: 4px; font-size: .8rem; color: var(--muted); }
   .headctl label { display: grid; grid-template-columns: 30px minmax(0, 1fr) 118px; gap: 8px; align-items: center; }

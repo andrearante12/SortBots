@@ -318,9 +318,9 @@
     const r = robots.get(id), p = r && r.obstacles;
     if (!p || performance.now() - r.obstaclesAt > OBSTACLE_TTL_MS || !p.w || !p.h) return;
     g.font = '600 10px "IBM Plex Sans", system-ui, sans-serif'; g.textBaseline = "bottom";
-    // Each head-camera picture showing gets the boxes: the depth is aligned to colour, so
-    // the same pixels apply to both.
-    for (const pic of c.el.querySelectorAll('.pic:not([data-feed="sim"])')) {
+    // Each picture showing gets the boxes: the depth is aligned to colour, so the same
+    // pixels apply to both.
+    for (const pic of c.el.querySelectorAll(".pic")) {
       const pw = pic.offsetWidth, ph = pic.offsetHeight, px = pic.offsetLeft, py = pic.offsetTop;
       if (!pw || !ph) continue;
       const k = Math.max(pw / p.w, ph / p.h), ox = px + (pw - p.w * k) / 2, oy = py + (ph - p.h * k) / 2;
@@ -940,14 +940,11 @@
   // Camera tile per open robot: short /snapshot polls, never MJPEG, and always
   // qos_profile=sensor_data (see app.js for the failure mode both avoid). The element
   // outlives list rebuilds (renderFleet re-slots it), so the picture doesn't blink.
-  // Camera, depth or all of them stacked, per card; a new card starts on whichever was
-  // picked last. "split" adds the Sim camera as an external view, sim only.
+  // Camera, depth or both stacked, per card; a new card starts on whichever was picked last.
   const CAM_TOPIC = { rgb: "camera/rgb", depth: "camera/depth_color" };
-  const CAM_LABEL = { rgb: "camera", depth: "depth", sim: "external view" };
-  const hasSimCam = () => platform !== "real";
-  const feedsOf = (mode) => (mode === "split" ? ["rgb", "depth", ...(hasSimCam() ? ["sim"] : [])] : [mode]);
-  const feedTopic = (id, feed) => (feed === "sim" ? "/sim/view/rgb" : `/${id}/${CAM_TOPIC[feed]}`);
-  const cams = new Map(); // id -> {el, head, pics: {rgb, depth, sim}, mode, timers, token}
+  const CAM_LABEL = { rgb: "camera", depth: "depth" };
+  const feedsOf = (mode) => (mode === "split" ? ["rgb", "depth"] : [mode]);
+  const cams = new Map(); // id -> {el, head, pics: {rgb, depth}, mode, timers, token}
   let camDefault = "rgb";
   try { const m = localStorage.getItem("sortbots.camMode"); if (m === "depth" || m === "split") camDefault = m; } catch (e) { /* storage blocked: rgb */ }
 
@@ -956,8 +953,8 @@
     if (c) return c;
     const el = document.createElement("div");
     el.className = "cam";
-    el.innerHTML = `<div class="pics"><div class="pic" data-feed="rgb" data-label="Camera"><span class="msg"></span></div><div class="pic" data-feed="depth" data-label="Depth"><span class="msg"></span></div><div class="pic" data-feed="sim" data-label="External"><span class="msg"></span></div></div><canvas class="obst"></canvas>
-      <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button><button type="button" data-cam-mode="split" title="Camera, depth and an external view, stacked. The external view is one more rendered camera, so the sim runs slower while it shows">All</button></div>
+    el.innerHTML = `<div class="pics"><div class="pic" data-feed="rgb" data-label="Camera"><span class="msg"></span></div><div class="pic" data-feed="depth" data-label="Depth"><span class="msg"></span></div></div><canvas class="obst"></canvas>
+      <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button><button type="button" data-cam-mode="split" title="Camera and depth, stacked">Split</button></div>
       <div class="drive" role="group" aria-label="Drive by hand" title="Drive by hand: hold an arrow. Keys W/A/S/D move, Q/E rotate, Space stops (they drive the robot in control)">
         <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
@@ -966,7 +963,7 @@
     const head = document.createElement("div");
     head.className = "headctl"; head.hidden = true;
     head.innerHTML = HEAD_AXES.map(([key, label, lo, hi]) => `<label>${label}<input type="range" data-head="${key}" min="${lo}" max="${hi}" step="0.01" value="0" aria-label="Head ${key}"><output data-head-out="${key}"></output></label>`).join("");
-    c = { el, head, pics: { rgb: el.querySelector('[data-feed="rgb"]'), depth: el.querySelector('[data-feed="depth"]'), sim: el.querySelector('[data-feed="sim"]') },
+    c = { el, head, pics: { rgb: el.querySelector('[data-feed="rgb"]'), depth: el.querySelector('[data-feed="depth"]') },
           overlay: el.querySelector("canvas.obst"), mode: camDefault, timers: {}, token: 0, headAt: -Infinity, headSent: 0 };
     cams.set(id, c);
     wireHead(id, c);
@@ -1093,7 +1090,7 @@
   document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAllDrives(); });
   function syncCamButtons(c) {
     for (const b of c.el.querySelectorAll("[data-cam-mode]")) b.classList.toggle("on", b.dataset.camMode === c.mode);
-    c.el.dataset.view = c.mode; c.el.dataset.sim = hasSimCam() ? "on" : "off";
+    c.el.dataset.view = c.mode;
   }
   function setCamMode(id, mode) {
     const c = camFor(id);
@@ -1102,7 +1099,6 @@
     try { localStorage.setItem("sortbots.camMode", mode); } catch (e) { /* this tab only */ }
     syncCamButtons(c);
     startCam(id);
-    syncSimBeat();
   }
   function startCam(id) {
     stopCam(id);
@@ -1124,7 +1120,7 @@
           msg.textContent = `No ${label} feed`;
           c.timers[feed] = setTimeout(tick, 3000);
         };
-        probe.src = `${VIDEO_BASE}/snapshot?topic=${feedTopic(id, feed)}&qos_profile=sensor_data&_=${Date.now()}`;
+        probe.src = `${VIDEO_BASE}/snapshot?topic=/${id}/${CAM_TOPIC[feed]}&qos_profile=sensor_data&_=${Date.now()}`;
       };
       pic.style.backgroundImage = ""; msg.textContent = `Connecting to ${label}…`;
       tick();
@@ -1142,11 +1138,10 @@
     const fresh = !open.has(id);
     open.add(id); selected = id;
     if (fresh) startCam(id);
-    syncSimBeat();
     refreshSelection();
   }
   function closeRobot(id) {
-    open.delete(id); stopCam(id); syncSimBeat();
+    open.delete(id); stopCam(id);
     if (selected === id) selected = [...open].pop() ?? null; // control falls to the newest still open
     refreshSelection();
   }
@@ -1931,26 +1926,16 @@
   // the tab is visible, and says "off" on the way out; a closed tab or a phone gone to
   // sleep just stops beating, and Isaac switches the camera off a few seconds later.
   const SIM_BEAT_MS = 2000;
-  const simView = { on: false, beating: false, beat: null, timer: null, token: 0 };
-  // One heartbeat for everything showing this camera: the Sim view, and any open card on All.
-  function syncSimBeat() {
-    const onCard = hasSimCam() && [...open].some((id) => { const c = cams.get(id); return c && c.mode === "split"; });
-    const want = simView.on || (onCard && !document.hidden);
-    if (want === simView.beating) return;
-    simView.beating = want;
-    clearInterval(simView.beat);
-    if (!want) { simView.beat = null; publishString("/sim/view_cmd", JSON.stringify({ on: false })); return; }
-    const beat = () => publishString("/sim/view_cmd", JSON.stringify({ on: true }));
-    beat(); simView.beat = setInterval(beat, SIM_BEAT_MS);
-  }
+  const simView = { on: false, beat: null, timer: null, token: 0 };
   function setSimView(on) {
     const want = on && !document.hidden;
     $("#simview").hidden = !on;
-    if (want === simView.on) { syncSimBeat(); return; }
+    if (want === simView.on) return;
     simView.on = want;
-    clearTimeout(simView.timer); simView.token++;
-    syncSimBeat();
-    if (!want) return;
+    clearInterval(simView.beat); clearTimeout(simView.timer); simView.token++;
+    if (!want) { simView.beat = null; publishString("/sim/view_cmd", JSON.stringify({ on: false })); return; }
+    const beat = () => publishString("/sim/view_cmd", JSON.stringify({ on: true }));
+    beat(); simView.beat = setInterval(beat, SIM_BEAT_MS);
     const token = simView.token, pic = $("#simview .pic"), msg = $("#simview .msg");
     const tick = () => {
       if (token !== simView.token) return;

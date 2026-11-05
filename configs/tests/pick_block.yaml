@@ -4,7 +4,7 @@
 #   scripts/simtest.py run pick_block
 #
 # Headless, so nothing needs a local display: follow it in the operator view (Split on the
-# robot's camera, or the Sim view), over Tailscale if you like.
+# robot's camera and the Sim tab), over Tailscale if you like.
 
 name: pick_block
 title: Pick up the target block
