@@ -52,7 +52,7 @@ DEFAULTS = {
     "arm_min_move_s": 0.8,
     "arm_max_move_s": 4.0,
     "settle_s": 0.4,
-    "arm_tol_rad": 0.02,
+    "arm_tol_rad": 0.03,
     "arm_timeout_s": 2.0,
     "reach_m": magnet.REACH_NOM_M,
     "stage_m": 0.35,

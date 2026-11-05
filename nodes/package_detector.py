@@ -131,28 +131,24 @@ def main(argv=None):
             d = pv.depth_to_metres(bytes(m.data), m.encoding, m.height, m.width)
             if d is not None:
                 self.depth = (m.header.stamp.sec + m.header.stamp.nanosec * 1e-9, d,
-                              m.header.frame_id, m.header.stamp)
+                              m.header.frame_id)
 
-        def map_from(self, frame, stamp):
-            """map <- camera for the instant this image was taken.
+        def map_from(self, frame):
+            """map <- camera, as fresh as it can be had.
 
-            Asking for map <- camera at the latest time gets the latest time the WHOLE chain
-            covers, which is as old as SLAM's slow map -> odom. Moving at 0.3 m/s that put
-            the plate 8 cm off, and it cleared half a second after stopping (2026-11-05). So
-            the fast half, odom -> camera, is looked up at the image's own stamp; only
-            map -> odom, which barely moves, is taken as the latest."""
+            Asking for map <- camera in one lookup gets the latest time the WHOLE chain
+            covers, which is as old as SLAM's slow map -> odom: moving at 0.3 m/s that put
+            the plate 8 cm behind where it was (2026-11-05). So the halves are taken apart.
+            The fast one is NOT looked up at the image's stamp: that made it worse, 15 cm,
+            the same direction, so the stamp itself runs behind the picture."""
             def matrix(tr):
                 r, t = tr.transform.rotation, tr.transform.translation
                 return quat_matrix(r.x, r.y, r.z, r.w, (t.x, t.y, t.z))
 
             odom = f"{rid}/odom"
             try:
-                slow = self.tf.lookup_transform("map", odom, rclpy.time.Time())
-                try:
-                    fast = self.tf.lookup_transform(odom, frame, rclpy.time.Time.from_msg(stamp))
-                except Exception:  # noqa: BLE001 - image newer than odom TF: a tick's lag at most
-                    fast = self.tf.lookup_transform(odom, frame, rclpy.time.Time())
-                return matrix(slow) @ matrix(fast)
+                return (matrix(self.tf.lookup_transform("map", odom, rclpy.time.Time()))
+                        @ matrix(self.tf.lookup_transform(odom, frame, rclpy.time.Time())))
             except Exception:  # noqa: BLE001 - a chain with no odom frame of this name
                 try:
                     return matrix(self.tf.lookup_transform("map", frame, rclpy.time.Time()))
@@ -162,10 +158,10 @@ def main(argv=None):
         def step(self):
             if self.K is None or self.rgb is None or self.depth is None:
                 return
-            (t_rgb, rgb), (t_d, depth, frame, stamp) = self.rgb, self.depth
+            (t_rgb, rgb), (t_d, depth, frame) = self.rgb, self.depth
             if abs(t_rgb - t_d) > 0.15 or rgb.shape[:2] != depth.shape:
                 return           # not the same instant, or not the same size: wait
-            T = self.map_from(frame, stamp)
+            T = self.map_from(frame)
             if T is None:
                 return           # no map yet: try the next frame
             if self.manipulating:       # geometry is for when a pick has actually started

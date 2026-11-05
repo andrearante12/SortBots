@@ -20,10 +20,11 @@ arm_speed_rad_s: 1.0
 arm_min_move_s: 0.8
 arm_max_move_s: 4.0
 # Measured joints (/sim/ground_truth `arm`; the servos on the real arm) say when a move is
-# done: within arm_tol_rad, or arm_timeout_s past the ramp's end if they never get there.
+# done: within arm_tol_rad, or arm_timeout_s past the ramp's end if they never get there. The
+# sim's drives settle ~0.024 rad short; 0.03 rad is ~9 mm at the magnet, inside its 3 cm capture.
 # With nothing reporting them, a settle_s dwell stands in for "the joints have arrived".
 settle_s: 0.4
-arm_tol_rad: 0.02
+arm_tol_rad: 0.03
 arm_timeout_s: 2.0
 
 # Where the dock puts the plate, radially from the shoulder. 0.27 is simtest.magnet's
