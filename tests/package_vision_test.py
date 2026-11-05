@@ -196,7 +196,7 @@ def test_to_map_applies_the_camera_pose():
     t = np.eye(4)
     t[:3, :3] = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]])  # columns: x_c, y_c, z_c in map
     t[:3, 3] = (2.0, 3.0, 1.2)
-    p = pv.to_map({"c": (0.1, 0.4, 1.5), "n": (0.0, 0.0, -1.0), "conf": 0.9, "px": (1, 2, 3, 4)}, t)
+    p = pv.to_map({"c": (0.1, 0.4, 1.5), "n": (0.0, 0.0, -1.0), "conf": 0.9, "px": (1, 2, 3, 4), "uv": (2.0, 3.0), "range_m": 1.0}, t)
     assert (p["x"], p["y"], p["z"]) == pytest.approx((2.1, 4.5, 0.8))
     assert (p["nx"], p["ny"], p["nz"]) == pytest.approx((0.0, -1.0, 0.0))
 
