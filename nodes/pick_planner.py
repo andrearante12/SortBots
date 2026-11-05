@@ -64,7 +64,7 @@ DEFAULTS = {
     "dock": {"pos_tol_m": 0.02, "yaw_tol_rad": 0.05, "v_max": 0.30, "v_final": 0.12,
              "wz_max": 0.6, "kp": 1.2, "kyaw": 1.5, "timeout_s": 45.0,
              "skip_within_m": 0.55, "skip_lateral_m": 0.06},
-    "confirm": {"samples": 5, "timeout_s": 3.0, "max_redocks": 2, "redock_m": 0.015},
+    "confirm": {"settle_s": 1.0, "samples": 5, "timeout_s": 4.0, "max_redocks": 2, "redock_m": 0.015},
     "acquire": {"assoc_m": 0.5, "box_assoc_m": 0.25, "min_conf": 0.2, "max_age_s": 1.0, "stable_ticks": 2,
                 "view_m": 2.6, "scan_rate": 0.5, "orbit_m": 1.5, "orbit_steps": 8,
                 "orbit_settle_s": 1.5, "timeout_s": 120.0},
@@ -198,9 +198,9 @@ class PickPlanner:
         out of the comparison only in that neither carries the TCP's position."""
         if obs.q is None:
             return obs.now >= self.arm_end + self.cfg["settle_s"]
-        self.arm_err = max(abs(a - b) for a, b in zip(obs.q[:4], self.q_cmd[:4]))
         if obs.now < self.arm_end:
             return False
+        self.arm_err = max(abs(a - b) for a, b in zip(obs.q[:4], self.q_cmd[:4]))
         return self.arm_err <= self.cfg["arm_tol_rad"] or obs.now >= self.arm_end + self.cfg["arm_timeout_s"]
 
     def _ramp_q(self, now: float) -> list | None:
@@ -510,6 +510,8 @@ class PickPlanner:
         if self._no_pose(obs, d):
             return
         c, u = self.cfg["confirm"], self.cfg["update"]
+        if obs.now - self.t_phase < c["settle_s"]:
+            return          # the tracker is still smoothing frames from while it was moving
         for p in obs.plates:
             fix = (p["x"], p["y"], p["z"], p["nx"], p["ny"], p["nz"])
             if (p.get("age_s", 0.0) <= u["max_age_s"] and not self._clipped(p) and fix not in self.fixes

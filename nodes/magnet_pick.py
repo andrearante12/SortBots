@@ -106,6 +106,12 @@ def camera_plates(msg: dict | None, now: float, stale_s: float = PLATE_STALE_S) 
             for p in msg.get("plates", [])]
 
 
+def compose2d(a: tuple, b: tuple) -> tuple:
+    """Pose `b` (x, y, yaw) given in the frame of pose `a`, in a's parent frame."""
+    c, s = math.cos(a[2]), math.sin(a[2])
+    return (a[0] + c * b[0] - s * b[1], a[1] + s * b[0] + c * b[1], a[2] + b[2])
+
+
 def fresh_boxes(msg: dict | None, now: float, stale_s: float = PLATE_STALE_S) -> list[dict]:
     """Depth geometry's latest boxes, or [] if they are old: same rule as the plates."""
     if not msg or now - float(msg.get("stamp", now)) > stale_s:
@@ -207,12 +213,22 @@ def main(argv=None) -> int:
             if self.oracle:
                 r = (self.gt or {}).get("robots", {}).get(rid)
                 return (r["x"], r["y"], r["yaw"]) if r else None
+            def pose2d(tr):
+                t, q = tr.transform.translation, tr.transform.rotation
+                return (t.x, t.y, yaw_from_quat(q.x, q.y, q.z, q.w))
+
+            # In two halves, as the detector does (package_detector.Detector.map_from): one
+            # lookup would be held back to the age of SLAM's slow map -> odom.
+            latest = rclpy.time.Time()
             try:
-                tr = self.tf.lookup_transform("map", f"{rid}/base_link", rclpy.time.Time())
+                return compose2d(pose2d(self.tf.lookup_transform("map", f"{rid}/odom", latest)),
+                                 pose2d(self.tf.lookup_transform(f"{rid}/odom", f"{rid}/base_link", latest)))
+            except Exception:  # noqa: BLE001 - a chain with no odom frame of this name
+                pass
+            try:
+                return pose2d(self.tf.lookup_transform("map", f"{rid}/base_link", latest))
             except Exception:  # noqa: BLE001 - no map yet: no pose, the planner waits
                 return None
-            t, q = tr.transform.translation, tr.transform.rotation
-            return (t.x, t.y, yaw_from_quat(q.x, q.y, q.z, q.w))
 
         def on_request(self, m):
             req = parse_request(m.data)

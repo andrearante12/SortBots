@@ -53,12 +53,15 @@ dock:
   skip_lateral_m: 0.06
 
 # Stopped at the dock, measure the plate again before moving the arm: the lock was taken from
-# further away and the base has driven on its own localization since. `samples` fresh fixes
-# are averaged; a dock that moves by more than redock_m is driven to, at most max_redocks
-# times. A plate not visible from the dock costs timeout_s, then the arm uses the last fix.
+# further away and the base has driven on its own localization since. Fixes count from
+# settle_s after stopping (the detector's tracker smooths over the frames from before), then
+# `samples` of them are averaged; a dock that moves by more than redock_m is driven to, at most
+# max_redocks times. A plate not visible from the dock costs timeout_s, then the arm uses
+# the last fix.
 confirm:
+  settle_s: 1.0
   samples: 5
-  timeout_s: 3.0
+  timeout_s: 4.0
   max_redocks: 2
   redock_m: 0.015
 

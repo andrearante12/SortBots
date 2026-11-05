@@ -18,8 +18,8 @@ No image is ever published (nothing here can starve Isaac's image writers), and 
 image subscription is sensor-data QoS: a RELIABLE image subscriber kills Isaac's image
 writers at around sim-t=100-140 s (CLAUDE.md).
 
-Frames: the image's own `frame_id` is the optical frame (`<id>/camera_optical`),
-looked up to `map` at the latest time TF has, and it needs only the usual SLAM and
+Frames: the image's own `frame_id` is the optical frame (`<id>/camera_optical`), looked up
+to `map` in two halves (Detector.map_from), and it needs only the usual SLAM and
 static-mount TF. In the sim that TF follows the head (simtest/head.py), so any pan and
 tilt work; on the real robot it is still a fixed mount.
 
@@ -131,20 +131,43 @@ def main(argv=None):
             d = pv.depth_to_metres(bytes(m.data), m.encoding, m.height, m.width)
             if d is not None:
                 self.depth = (m.header.stamp.sec + m.header.stamp.nanosec * 1e-9, d,
-                              m.header.frame_id)
+                              m.header.frame_id, m.header.stamp)
+
+        def map_from(self, frame, stamp):
+            """map <- camera for the instant this image was taken.
+
+            Asking for map <- camera at the latest time gets the latest time the WHOLE chain
+            covers, which is as old as SLAM's slow map -> odom. Moving at 0.3 m/s that put
+            the plate 8 cm off, and it cleared half a second after stopping (2026-11-05). So
+            the fast half, odom -> camera, is looked up at the image's own stamp; only
+            map -> odom, which barely moves, is taken as the latest."""
+            def matrix(tr):
+                r, t = tr.transform.rotation, tr.transform.translation
+                return quat_matrix(r.x, r.y, r.z, r.w, (t.x, t.y, t.z))
+
+            odom = f"{rid}/odom"
+            try:
+                slow = self.tf.lookup_transform("map", odom, rclpy.time.Time())
+                try:
+                    fast = self.tf.lookup_transform(odom, frame, rclpy.time.Time.from_msg(stamp))
+                except Exception:  # noqa: BLE001 - image newer than odom TF: a tick's lag at most
+                    fast = self.tf.lookup_transform(odom, frame, rclpy.time.Time())
+                return matrix(slow) @ matrix(fast)
+            except Exception:  # noqa: BLE001 - a chain with no odom frame of this name
+                try:
+                    return matrix(self.tf.lookup_transform("map", frame, rclpy.time.Time()))
+                except Exception:  # noqa: BLE001
+                    return None
 
         def step(self):
             if self.K is None or self.rgb is None or self.depth is None:
                 return
-            (t_rgb, rgb), (t_d, depth, frame) = self.rgb, self.depth
+            (t_rgb, rgb), (t_d, depth, frame, stamp) = self.rgb, self.depth
             if abs(t_rgb - t_d) > 0.15 or rgb.shape[:2] != depth.shape:
                 return           # not the same instant, or not the same size: wait
-            try:
-                tr = self.tf.lookup_transform("map", frame, rclpy.time.Time())
-            except Exception:  # noqa: BLE001 - no map yet / extrapolation: try next frame
-                return
-            r, t = tr.transform.rotation, tr.transform.translation
-            T = quat_matrix(r.x, r.y, r.z, r.w, (t.x, t.y, t.z))
+            T = self.map_from(frame, stamp)
+            if T is None:
+                return           # no map yet: try the next frame
             if self.manipulating:       # geometry is for when a pick has actually started
                 self.boxes_pub.publish(String(data=json.dumps({
                     "stamp": round(max(t_rgb, t_d), 3), "frame": "map",

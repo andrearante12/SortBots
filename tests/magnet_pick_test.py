@@ -102,3 +102,9 @@ def test_the_arm_joint_order_matches_the_simulator():
     src = (REPO_ROOT / "scripts" / "spawn_warehouse.py").read_text()
     line = next(l for l in src.splitlines() if l.startswith("ARM_JOINT_NAMES"))
     assert json.loads(line.split("=", 1)[1].strip().replace("'", '"')) == mp.ARM_JOINT_NAMES
+
+
+def test_compose2d_places_a_child_pose_in_its_parent():
+    x, y, yaw = mp.compose2d((1.0, 2.0, math.pi / 2), (0.5, 0.0, 0.25))
+    assert (x, y, yaw) == pytest.approx((1.0, 2.5, math.pi / 2 + 0.25))
+    assert mp.compose2d((0.0, 0.0, 0.0), (3.0, 4.0, 1.0)) == pytest.approx((3.0, 4.0, 1.0))
