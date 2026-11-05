@@ -129,6 +129,20 @@ def test_a_dark_hole_behind_the_cardboard_is_not_a_plate():
     assert pv.detect_plates(*render(rects), K) == []
 
 
+def test_a_detection_says_what_the_camera_saw_for_the_operator_view():
+    rects, centre, _ = box_with_plate((0.0, 0.0, 1.2), 0)
+    (p,) = pv.detect_plates(*render(rects), K)
+    u, v, w, h = p["px"]
+    assert u < p["uv"][0] < u + w and v < p["uv"][1] < v + h
+    assert p["range_m"] == pytest.approx(math.dist(centre, (0, 0, 0)), abs=0.01)
+    m = pv.to_map(p, np.eye(4))
+    assert m["uv"] == list(p["uv"]) and m["range_m"] == p["range_m"]
+    t = pv.Tracker()
+    t.update([m], 0.0)
+    (tr,) = t.update([dict(m, uv=[1.0, 2.0], range_m=9.0)], 0.1)
+    assert tr["uv"] == [1.0, 2.0] and tr["range_m"] == 9.0
+
+
 def test_a_plate_near_the_bottom_of_the_frame_still_counts():
     # pick_table's first frame: the plate's lower edge a few rows above the image's
     rects, centre, _ = box_with_plate((0.0, 0.25, 0.75), 0)

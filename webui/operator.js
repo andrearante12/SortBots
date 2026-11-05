@@ -303,6 +303,62 @@
     }
   }
 
+  // Camera tile, in a world with packages: what the plate detector found, which is what the
+  // pick aims at. The obstacle boxes would only frame the table. The target is the plate the
+  // pick controller has locked (/pick_status); anything else it saw is a dashed candidate.
+  const PLATE_INK = "#22c55e", PLATE_OTHER_INK = "rgba(226, 232, 240, .75)";
+  const PLATES_TTL_MS = 1500, PLATE_SEEN_S = 0.35, PLATE_TARGET_M = 0.2;
+  const packageWorld = () => !!(worldLayout && worldLayout.packages && worldLayout.packages.length);
+  const platesSeen = (r) => (r.plates && performance.now() - r.platesAt < PLATES_TTL_MS
+    ? (r.plates.plates || []).filter((p) => (p.age_s || 0) <= PLATE_SEEN_S) : []);
+  function plateTarget(r, plates) {
+    const t = r.pick && r.pick.target;
+    if (!t) return null;
+    const dist = (p) => Math.hypot(p.x - t[0], p.y - t[1], p.z - t[2]);
+    const best = plates.reduce((a, p) => (!a || dist(p) < dist(a) ? p : a), null);
+    return best && dist(best) <= PLATE_TARGET_M ? best : null;
+  }
+  function drawCamPlates(c, g, r) {
+    const plates = platesSeen(r), target = plateTarget(r, plates), iw = r.plates && r.plates.w, ih = r.plates && r.plates.h;
+    syncPerception(c, r, plates, target);
+    if (!plates.length || !iw || !ih) return;
+    g.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; g.textBaseline = "bottom";
+    for (const pic of c.el.querySelectorAll(".pic")) {
+      const pw = pic.offsetWidth, ph = pic.offsetHeight, px = pic.offsetLeft, py = pic.offsetTop;
+      if (!pw || !ph) continue;
+      const k = Math.max(pw / iw, ph / ih), ox = px + (pw - iw * k) / 2, oy = py + (ph - ih * k) / 2;
+      g.save(); g.beginPath(); g.rect(px, py, pw, ph); g.clip();
+      for (const p of plates) {
+        const [u, v, bw, bh] = p.px, x = ox + u * k, y = oy + v * k, on = p === target;
+        g.strokeStyle = on ? PLATE_INK : PLATE_OTHER_INK; g.lineWidth = on ? 3 : 1;
+        g.setLineDash(on ? [] : [4, 3]); g.strokeRect(x, y, bw * k, bh * k); g.setLineDash([]);
+        if (!on) continue;
+        const cx = ox + p.uv[0] * k, cy = oy + p.uv[1] * k;
+        g.beginPath(); g.moveTo(cx - 7, cy); g.lineTo(cx + 7, cy); g.moveTo(cx, cy - 7); g.lineTo(cx, cy + 7); g.stroke();
+        const label = `magnet plate · ${p.range_m.toFixed(2)} m`, tw = g.measureText(label).width + 8, ly = Math.max(y, py + 16);
+        g.fillStyle = PLATE_INK; g.fillRect(x, ly - 15, tw, 15);
+        g.fillStyle = "#06240f"; g.fillText(label, x + 4, ly - 1);
+      }
+      g.restore();
+    }
+  }
+  // The same detection in words: where it was in the picture, how far the depth image says
+  // it is, and where those two put it on the map.
+  function syncPerception(c, r, plates, target) {
+    const set = (key, text) => { const el = c.perc.querySelector(`[data-p="${key}"]`); if (el.textContent !== text) el.textContent = text; };
+    const shown = target || (plates.length === 1 ? plates[0] : null), aim = r.pick && r.pick.target;
+    c.perc.classList.toggle("locked", !!target);
+    set("state", target ? "On target" : aim ? "Aiming at its last fix" : plates.length ? "Candidates" : "Nothing in view");
+    set("n", String(plates.length));
+    if (shown) {
+      set("img", `pixel (${shown.uv.map((v) => Math.round(v)).join(", ")}), ${shown.px[2]} × ${shown.px[3]} px`);
+      set("depth", `${shown.range_m.toFixed(3)} m from the lens, plane fit`);
+    } else { set("img", "—"); set("depth", "—"); }
+    const at = shown ? [shown.x, shown.y, shown.z] : aim;
+    set("map", at ? `x ${at[0].toFixed(3)}  y ${at[1].toFixed(3)}  z ${at[2].toFixed(3)}` : "—");
+    set("face", shown ? `${(Math.atan2(shown.ny, shown.nx) * 180 / Math.PI).toFixed(1)}° in the map, ${Math.round(shown.conf * 100)}% confidence` : "—");
+  }
+
   // Camera tile: every obstacle, boxed in the depth image's pixels (in sim one camera
   // makes both images; the D435's depth is aligned to colour). The picture is drawn
   // `background-size: cover`, so invert a cover crop, not a contain letterbox.
@@ -316,6 +372,8 @@
     const g = cv.getContext("2d");
     g.clearRect(0, 0, w, h);
     const r = robots.get(id), p = r && r.obstacles;
+    c.perc.hidden = !packageWorld();
+    if (r && packageWorld()) return drawCamPlates(c, g, r);
     if (!p || performance.now() - r.obstaclesAt > OBSTACLE_TTL_MS || !p.w || !p.h) return;
     g.font = '600 10px "IBM Plex Sans", system-ui, sans-serif'; g.textBaseline = "bottom";
     // Each picture showing gets the boxes: the depth is aligned to colour, so the same
@@ -391,12 +449,24 @@
       ctx.fill(); ctx.stroke();
     }
     ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
+    const deferred = []; // drawn over the packages
     // Marked areas: where a place test wants the package set down. Under the packages.
     for (const m of worldLayout.marks || []) {
       const [x, y, yaw] = m.pose, [hx, hy] = [m.size[0] / 2, m.size[1] / 2], c = Math.cos(yaw), s = Math.sin(yaw);
       traceShape(["poly", [[hx, hy], [-hx, hy], [-hx, -hy], [hx, -hy]].map(([a, b]) => [x + c * a - s * b, y + s * a + c * b])]);
       ctx.fillStyle = rgba(m.color, 0.3); ctx.strokeStyle = rgba(m.color, 1); ctx.lineWidth = 1.5;
       ctx.setLineDash([5, 3]); ctx.fill(); ctx.stroke(); ctx.setLineDash([]);
+    }
+    // Where the robot itself thinks the plate is, with a tick along its normal: on the box,
+    // if the camera, the depth and the transforms all agree with ground truth.
+    for (const r of robots.values()) {
+      const seen = plateTarget(r, platesSeen(r));
+      if (!seen) continue;
+      const [ax, ay] = toPx(seen.x, seen.y), [bx, by] = toPx(seen.x + seen.nx * 0.25, seen.y + seen.ny * 0.25);
+      deferred.push(() => {
+        ctx.strokeStyle = PLATE_INK; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.arc(ax, ay, 7, 0, 2 * Math.PI); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+      });
     }
     // Packages the magnet effector picks up (simtest/magnet.py). Where one IS comes from
     // ground truth; it turns green while the magnet holds it, and the thick dark edge is
@@ -444,6 +514,7 @@
       ctx.setLineDash([]);
       ctx.fillStyle = palette.ink; ctx.fillText(a.label || a.id, px, py + r + 13);
     }
+    for (const draw of deferred) draw();
     ctx.restore();
   }
 
@@ -550,7 +621,7 @@
       id, color: COLORS[robots.size % COLORS.length], pose: null, linkAt: -Infinity, plan: [],
       explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity, queueDepth: 0,
       nav: null, seenStamp: {}, odom: null, odomAt: -Infinity,
-      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [],
+      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [], plates: null, platesAt: -Infinity, pick: null,
     };
     robots.set(id, r);
     // Kept so removeRobot can drop them when a run leaves this robot out.
@@ -562,6 +633,16 @@
       let p;
       try { p = JSON.parse(msg.data); } catch (e) { return; }
       onObstacles(r, p);
+    });
+
+    // What the plate detector sees and what the pick is aiming at, for the camera tile.
+    sub(`/${id}/packages`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
+      try { r.plates = JSON.parse(msg.data); } catch (e) { return; }
+      r.platesAt = performance.now(); dirty = true;
+      drawCamObstacles(id);
+    });
+    sub(`/${id}/pick_status`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
+      try { r.pick = JSON.parse(msg.data); } catch (e) { /* keep the last one */ }
     });
 
     // Only the twist is used (speed / turn rate on the card); the pose comes from /tf.
@@ -933,7 +1014,7 @@
         </div>` : ""}
       </div>`;
     }).join("") : `<div class="none">No robots found.</div>`;
-    for (const slot of document.querySelectorAll("#fleet .cam-slot")) { const c = camFor(slot.dataset.cam); slot.replaceWith(c.el, c.head); }
+    for (const slot of document.querySelectorAll("#fleet .cam-slot")) { const c = camFor(slot.dataset.cam); slot.replaceWith(c.el, c.perc, c.head); }
     renderTargets();
   }
 
@@ -960,10 +1041,14 @@
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
         <button type="button" data-drive="rot-left" aria-label="Rotate left">&#8634;</button><button type="button" data-drive="back" aria-label="Back">&#9660;</button><button type="button" data-drive="rot-right" aria-label="Rotate right">&#8635;</button>
       </div>`;
+    const perc = document.createElement("div");
+    perc.className = "perc"; perc.hidden = true;
+    perc.innerHTML = `<div class="ph">Plate detection<i><span data-p="state"></span> · <span data-p="n"></span> seen</i></div>
+      <dl><dt>Image</dt><dd data-p="img"></dd><dt>Depth</dt><dd data-p="depth"></dd><dt>Map</dt><dd data-p="map"></dd><dt>Facing</dt><dd data-p="face"></dd></dl>`;
     const head = document.createElement("div");
     head.className = "headctl"; head.hidden = true;
     head.innerHTML = HEAD_AXES.map(([key, label, lo, hi]) => `<label>${label}<input type="range" data-head="${key}" min="${lo}" max="${hi}" step="0.01" value="0" aria-label="Head ${key}"><output data-head-out="${key}"></output></label>`).join("");
-    c = { el, head, pics: { rgb: el.querySelector('[data-feed="rgb"]'), depth: el.querySelector('[data-feed="depth"]') },
+    c = { el, head, perc, pics: { rgb: el.querySelector('[data-feed="rgb"]'), depth: el.querySelector('[data-feed="depth"]') },
           overlay: el.querySelector("canvas.obst"), mode: camDefault, timers: {}, token: 0, headAt: -Infinity, headSent: 0 };
     cams.set(id, c);
     wireHead(id, c);

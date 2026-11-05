@@ -139,6 +139,7 @@ def main(argv=None):
             out = self.tracker.update(plates, max(t_rgb, t_d))
             self.pub.publish(String(data=json.dumps({
                 "stamp": round(max(t_rgb, t_d), 3), "frame": "map",
+                "w": int(rgb.shape[1]), "h": int(rgb.shape[0]),
                 "plates": [{k: (round(v, 4) if isinstance(v, float) else v)
                             for k, v in p.items() if k not in ("last", "hits")} for p in out]})))
 

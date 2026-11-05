@@ -241,8 +241,10 @@ def main(argv=None) -> int:
 
         def publish_status(self, d=None):
             req = self.req or {}
+            aim = self.planner.target if req.get("cmd") == "attach" else None
             self.status_pub.publish(String(data=json.dumps({
                 "phase": self.planner.phase, "busy": self.planner.busy,
+                "target": [round(v, 3) for v in aim["c"]] if aim else None,
                 "perception": a.perception, "cmd": req.get("cmd"), "package": req.get("package"),
                 "note": getattr(d, "note", "") if d else ""})))
 

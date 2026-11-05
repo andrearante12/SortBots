@@ -159,7 +159,8 @@ def _ring_off_plane(ring, depth_m, K, centroid, normal, c) -> float | None:
 
 def detect_plates(rgb: np.ndarray, depth_m: np.ndarray, K, cfg: dict | None = None) -> list[dict]:
     """Every plate found in the frame, in the camera's optical frame:
-    [{c: (x, y, z), n: (nx, ny, nz) outward, conf, px: (u, v, w, h), rms, npts}].
+    [{c: (x, y, z), n: (nx, ny, nz) outward, conf, px: (u, v, w, h), uv: centre pixel,
+    range_m: distance from the lens, rms, npts}].
 
     K = (fx, fy, cx, cy) of the image the depth is aligned to."""
     import cv2
@@ -201,19 +202,23 @@ def detect_plates(rgb: np.ndarray, depth_m: np.ndarray, K, cfg: dict | None = No
         face = centroid - n * c["plate_thickness_m"]    # the plate stands proud of the box
         conf = max(0.1, 1.0 - rms / c["plane_rms_m"]) * min(1.0, int(keep.sum()) / 200.0)
         out.append({"c": tuple(float(v) for v in face), "n": tuple(float(v) for v in n),
-                    "conf": float(conf), "px": bbox, "rms": rms, "npts": int(keep.sum())})
+                    "conf": float(conf), "px": bbox, "rms": rms, "npts": int(keep.sum()),
+                    "uv": (round(float(us[keep].mean()), 1), round(float(vs[keep].mean()), 1)),
+                    "range_m": float(np.linalg.norm(face))})
     return out
 
 
 def to_map(plate: dict, T_map_cam: np.ndarray) -> dict:
-    """A camera-frame plate as {x, y, z, nx, ny, nz, conf, px} in the frame T_map_cam
-    leads to (4x4, map <- optical)."""
+    """A camera-frame plate as {x, y, z, nx, ny, nz, conf, px, uv, range_m} in the frame
+    T_map_cam leads to (4x4, map <- optical). px, uv and range_m stay what the camera saw:
+    the operator view shows them beside the map position they became."""
     r, t = T_map_cam[:3, :3], T_map_cam[:3, 3]
     p = r @ np.array(plate["c"]) + t
     n = r @ np.array(plate["n"])
     return {"x": float(p[0]), "y": float(p[1]), "z": float(p[2]),
             "nx": float(n[0]), "ny": float(n[1]), "nz": float(n[2]),
-            "conf": plate["conf"], "px": list(plate["px"])}
+            "conf": plate["conf"], "px": list(plate["px"]), "uv": list(plate["uv"]),
+            "range_m": plate["range_m"]}
 
 
 class Tracker:
@@ -248,6 +253,7 @@ class Tracker:
             norm = math.sqrt(tr["nx"] ** 2 + tr["ny"] ** 2 + tr["nz"] ** 2) or 1.0
             tr["nx"], tr["ny"], tr["nz"] = tr["nx"] / norm, tr["ny"] / norm, tr["nz"] / norm
             tr["conf"], tr["px"], tr["last"] = p["conf"], p["px"], now
+            tr["uv"], tr["range_m"] = p.get("uv"), p.get("range_m")
             tr["hits"] += 1
             seen.add(best)
         self.tracks = [t for t in self.tracks if now - t["last"] <= self.drop_after_s]

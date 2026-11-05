@@ -164,6 +164,13 @@
   .more .cam[data-view="rgb"] .pic:not([data-feed="rgb"]), .more .cam[data-view="depth"] .pic:not([data-feed="depth"]) { display: none; }
   /* Split: the feeds stacked, each at the camera's own 16:9 so nothing is cropped. */
   .more .cam[data-view="split"] { aspect-ratio: 16/18; }
+  /* What the plate detector made of the frame (operator.js syncPerception). */
+  .perc { display: grid; gap: 3px; padding: 8px 10px; border-radius: 6px; background: var(--ground); font-size: .8rem; }
+  .perc .ph { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; }
+  .perc .ph i { font-style: normal; font-weight: 500; color: var(--muted); }
+  .perc.locked .ph i { color: #16a34a; }
+  .perc dl { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 1px 8px; margin: 0; }
+  .perc dt { color: var(--muted); } .perc dd { margin: 0; }
   /* Head sliders (operator.js camFor): shown once the sim reports the head's angles. */
   .headctl { display: grid; gap: 4px; font-size: .8rem; color: var(--muted); }
   .headctl label { display: grid; grid-template-columns: 30px minmax(0, 1fr) 118px; gap: 8px; align-items: center; }
