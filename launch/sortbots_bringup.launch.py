@@ -435,7 +435,7 @@ def _make_per_robot_actions(
         # timed out on bt_navigator/controller_server and aborted: 1 robot's
         # Nav2 in one run, 2 in the next. Staggered by 8 s: 0, then 1. It
         # softens the spike but doesn't make six full stacks fit a 32-thread
-        # laptop. Four come up either way (configs/tests/fleet_scale_smoke.yaml).
+        # laptop. Four come up either way.
         if idx and stagger_s > 0:
             mine = actions[first:]
             del actions[first:]

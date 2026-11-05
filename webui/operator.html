@@ -394,38 +394,40 @@
   @keyframes tp-pulse { 50% { opacity: .3; } }
   #tp-log { flex-basis: 100%; margin: 4px 0 0; max-height: 220px; overflow: auto; font: .72rem/1.45 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; }
   .tp-h { margin: 0 0 4px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
-  /* Test cases: a list, not cards. A row is title, one line of what it runs, Run;
-     click it for what it checks and how often. */
-  .tp-sec { margin-top: 12px; }
+  /* Test cases: a list, not cards. A row is its name, Run and a chevron; open it for what
+     the test is, what it takes to pass, and a clip of a pass. */
+  .tp-sec { margin-top: 18px; }
   .tp-sec:first-child { margin-top: 0; }
-  .tp-sec-h { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px 4px; background: none; border: none; text-align: left;
-              font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
-  .tp-sec-h:hover { background: var(--hover); }
-  .tp-sec-h .chev { color: var(--faint); font-size: .7rem; transform: rotate(90deg); transition: transform .15s; }
-  .tp-sec-h .n { margin-left: auto; font-weight: 500; letter-spacing: 0; color: var(--faint); }
-  .tp-sec.shut .tp-sec-h .chev { transform: none; }
-  .tp-sec.shut .tp-test { display: none; }
+  .tp-sec-h { margin: 0; padding: 6px 4px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
   .tp-test { border-top: 1px solid var(--line); }
   .tp-test:last-child { border-bottom: 1px solid var(--line); }
-  .tp-row { display: grid; grid-template-columns: 14px 1fr auto; gap: 2px 10px; align-items: center; padding: 10px 4px; cursor: pointer; }
+  .tp-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 8px 4px; cursor: pointer; }
   .tp-row:hover { background: var(--hover); }
-  .tp-row .chev { color: var(--faint); font-size: .7rem; transition: transform .15s; }
-  .tp-test.open .chev { transform: rotate(90deg); }
   .tp-row .t { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .tp-row .btn { grid-column: 3; }
   .tp-row .num { display: inline-block; min-width: 1.6em; color: var(--faint); font-variant-numeric: tabular-nums; }
+  .tp-disc { grid-column: 3; display: grid; place-items: center; width: 32px; height: 32px; padding: 0; background: none; border: none; border-radius: 6px; color: var(--muted); }
+  .tp-disc svg { transition: transform .15s; }
+  .tp-row:hover .tp-disc { color: var(--ink); }
+  .tp-disc[aria-expanded="true"] svg { transform: rotate(180deg); }
+  @media (prefers-reduced-motion: reduce) { .tp-disc svg { transition: none; } }
   .tp-test.invalid .t { color: var(--muted); }
   .tp-more .err { color: var(--warnink); }
-  .tp-more { display: none; padding: 0 4px 14px 28px; font-size: .84rem; gap: 10px; }
+  /* Text and clip side by side where both fit, stacked where they don't: auto-fit, because
+     this panel's width isn't the window's. */
+  .tp-more { display: none; padding: 4px 4px 18px; font-size: .88rem; gap: 14px 24px; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); }
   .tp-test.open .tp-more { display: grid; }
-  .tp-more p { margin: 0; color: var(--muted); line-height: 1.45; }
-  .tp-more dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; }
-  .tp-more dt { color: var(--muted); } .tp-more dd { margin: 0; }
-  .tp-more ul { margin: 0; padding-left: 16px; } .tp-more li { margin: 1px 0; }
-  .tp-more .opts { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .tp-text { display: grid; gap: 10px; align-content: start; }
+  .tp-more p { margin: 0; line-height: 1.45; }
+  .tp-text h5 { margin: 0 0 -6px; font-size: inherit; font-weight: 600; }
+  .tp-more ul { margin: 0; padding-left: 18px; color: var(--muted); line-height: 1.45; }
+  .tp-more li { margin: 2px 0; }
+  .tp-more .opts { display: flex; gap: 6px 16px; align-items: center; flex-wrap: wrap; margin-top: 2px; }
   .tp-more .opts label { display: flex; gap: 6px; align-items: center; color: var(--muted); }
   .tp-more .opts input { width: 4em; }
-  .tp-more code { font-size: .76rem; color: var(--faint); }
+  .tp-more .runs { color: var(--faint); font-size: .8rem; }
+  .tp-clip { margin: 0; }
+  .tp-clip img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; background: var(--segbg); }
+  .tp-clip figcaption { margin-top: 5px; font-size: .76rem; color: var(--faint); }
   .tp-empty { color: var(--muted); font-size: .84rem; padding: 6px 4px; }
   /* A test owns the session it runs: its Stop would abort the run unscored. */
   #session .card.testing #session-finish, #session .card.testing #session-stop { display: none; }

@@ -518,8 +518,7 @@ queued pickup→dropoff workflow instead.
 `configs/robots.yaml` places six robots. A run brings up the first `--robots N`,
 and the idle dashboard lists `default_robots` (2). `fleet_scale` is the scenario
 for more than two: robots wait for goals, render settings are tuned for the
-laptop, and `robots` is overridable. `configs/tests/fleet_scale_smoke.yaml` checks
-that four full stacks come up and drive.
+laptop, and `robots` is overridable.
 
 What a robot costs, measured 2026-10-24 with `scripts/mem_probe.py` on the RTX
 4070 laptop (30 GB RAM, 32 threads):

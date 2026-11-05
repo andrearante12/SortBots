@@ -375,9 +375,18 @@ scripts/simtest.py validate               # every committed test case resolves
 (`operator_test.mjs` serves on port 8201 by default; if another session's console is
 already there the Tests-tab checks fail against ITS configs, so pass `--port N --cdp-port M`.)
 
-`pipeline_smoke` is the cheapest live end-to-end check of the harness itself
-(one short goal, ground truth rate); run it after touching the probe, the
-world runtime or the runner, before trusting a long test's verdict.
+`pick_block` is the cheapest live end-to-end check of the harness: no saved map, no
+Nav2, about two minutes. Run it after touching the probe, the world runtime or the
+runner, before trusting a long test's verdict.
+
+## The Tests tab's text and clips
+
+A row opens on three things, and each has one home. `description:` is the overview: one
+plain sentence, with the engineering detail in the file's comments. "Passes when" is
+written from the thresholds by `simtest/plain.py`, so loosening a threshold can't leave
+the tab promising the old one. The GIF is `webui/test_media/NAME.gif`, cut from a real
+run by `scripts/simtest.py run NAME --clip` (`simtest/clip.py`), which writes the file only if the
+run passes. Re-record it when a test's world or behaviour changes, and commit it.
 
 ## Known limits
 

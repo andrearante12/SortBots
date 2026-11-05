@@ -10,8 +10,7 @@ description: >
   configs/robots.yaml (default 4, up to 6), each with its full stack
   (RTAB-Map, Nav2, explorer idle), on a fresh fused map. The robots wait for
   goals, so a comms or traffic test decides who drives where. Built for the
-  multi-robot comms tests (issue #18) and as the scale smoke test
-  (configs/tests/fleet_scale_smoke.yaml).
+  multi-robot comms tests (issue #18).
   Memory is the limit, not the GPU. Each robot costs ~1.2 GB fixed plus its
   RTAB-Map, which grows only while the robot moves through new space
   (~3.7 MB per sim-second with the malloc cap in
