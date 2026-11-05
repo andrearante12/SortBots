@@ -70,7 +70,7 @@ MAX_SIM_S = 3600.0
 MAX_REPEATS = 50
 MAX_VARIANTS = 20
 DEFAULT_SECTION = "Other"   # the heading a test with no `section:` sits under in the Tests tab
-TOP_KEYS = {"name", "title", "section", "description", "scenario", "overrides", "warmup_s", "goals",
+TOP_KEYS = {"name", "title", "section", "parked", "description", "scenario", "overrides", "warmup_s", "goals",
             "tasks", "stop", "metrics", "repeats", "pass_rate", "variants", "record"}
 # What a variant may change. Not `scenario` or `metrics`: a variant is the
 # same question asked under different conditions, and changing the scoring
@@ -309,11 +309,14 @@ def _tasks(raw, robots: list[str], named: dict | None, world: dict | None = None
             raise SpecError(f"{w}.package: {pid!r} is not in this run's world "
                             f"({'it has ' + ', '.join(have) if have else 'the world has no packages'})")
         if "place" not in t:
-            raise SpecError(f"{w}.place: a package task says where the box comes to rest")
+            raise SpecError(f"{w}.place: a package task says where the box comes to rest, "
+                            "or `hold` to keep it on the magnet")
         out.append({"id": f"t{i}", "robot": t["robot"], "package": pid,
                     "pickup": _leg(t.get("pickup", "dock"), f"{w}.pickup", named),
                     "dropoff": _leg(t.get("dropoff", "dock"), f"{w}.dropoff", named),
-                    "place": _place(t["place"], f"{w}.place", world, pkg),
+                    # `hold`: a pick-only task, done once the box is on the magnet
+                    "place": None if t["place"] == "hold"
+                    else _place(t["place"], f"{w}.place", world, pkg),
                     # What a work order says about the package, so the pick controller can
                     # tell it from the other plates in view: its size, which face carries
                     # the magnet, and roughly where it is (the shelf slot, not its pose).
@@ -413,6 +416,7 @@ def validate(raw, *, stem: str | None = None) -> dict:
 
     return {"name": name, "title": str(raw.get("title") or name),
             "section": str(raw.get("section") or DEFAULT_SECTION),
+            "parked": raw.get("parked") is True,
             "description": str(raw.get("description") or "").strip(),
             "repeats": reps, "pass_rate": pass_rate, "record": list(record),
             "variants": variants}
@@ -462,13 +466,14 @@ def load(name: str, sets: list[tuple[str, object]] = ()) -> dict:
     return t
 
 
-def _section_of(path: Path) -> str:
-    """A test's section even when it doesn't validate: one that only lacks its saved map on
-    this machine still belongs under its heading, not under Other."""
+def _filing_of(path: Path) -> tuple[str, bool]:
+    """A test's (section, parked) even when it doesn't validate: one that only lacks its
+    saved map on this machine still belongs under its heading, not under Other."""
     try:
-        return str((yaml.safe_load(path.read_text()) or {}).get("section") or DEFAULT_SECTION)
+        raw = yaml.safe_load(path.read_text()) or {}
+        return str(raw.get("section") or DEFAULT_SECTION), raw.get("parked") is True
     except (OSError, yaml.YAMLError, AttributeError):
-        return DEFAULT_SECTION
+        return DEFAULT_SECTION, False
 
 
 def list_tests() -> list[dict]:
@@ -479,7 +484,7 @@ def list_tests() -> list[dict]:
             t = load(p.stem)
             base = t["variants"][0][1]
             out.append({
-                "name": t["name"], "title": t["title"], "section": t["section"],
+                "name": t["name"], "title": t["title"], "section": t["section"], "parked": t["parked"],
                 "description": t["description"],
                 "status": "ready", "scenario": base["scenario"],
                 "world": base["run"].get("world"), "robots": base["robots"],
@@ -492,6 +497,13 @@ def list_tests() -> list[dict]:
                             for e in base["metrics"]],
             })
         except SpecError as e:
-            out.append({"name": p.stem, "title": p.stem, "section": _section_of(p), "description": "",
-                        "status": "invalid", "error": str(e)})
+            section, parked = _filing_of(p)
+            out.append({"name": p.stem, "title": p.stem, "section": section, "parked": parked,
+                        "description": "", "status": "invalid", "error": str(e)})
     return out
+
+
+def listed_tests() -> list[dict]:
+    """What the Tests tab offers. A `parked: true` test stays valid and runnable from
+    scripts/simtest.py, and the offline tests keep checking it; it just isn't on the list."""
+    return [t for t in list_tests() if not t["parked"]]

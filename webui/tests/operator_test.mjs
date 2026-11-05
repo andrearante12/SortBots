@@ -402,16 +402,17 @@ async function main() {
     await sleep(900);
     check(`${vp.label}: the session panel has a Tests tab`, await visible('#tests-pane') && !(await visible('#launch-form')));
     const cards = await page.eval(`[...document.querySelectorAll('#tp-list .tp-test')].map((c) => c.dataset.name || 'invalid')`);
-    const onDisk = fs.readdirSync(path.join(REPO_ROOT, 'configs', 'tests')).filter((f) => f.endsWith('.yaml')).length;
-    check(`${vp.label}: it lists every test case in configs/tests/`, cards.length === onDisk, cards.join(','));
+    const onDisk = fs.readdirSync(path.join(REPO_ROOT, 'configs', 'tests')).filter((f) => f.endsWith('.yaml') && !/^parked: true/m.test(fs.readFileSync(path.join(REPO_ROOT, 'configs', 'tests', f), 'utf8'))).length;
+    check(`${vp.label}: it lists every test case in configs/tests/ that isn't parked`, cards.length === onDisk, cards.join(','));
+    check(`${vp.label}: a parked test stays off the list`, !cards.includes('pick_orientations'), cards.join(','));
     const secOf = (name) => page.eval(`document.querySelector('#tp-list .tp-test[data-name="${name}"]').closest('.tp-sec').dataset.section`);
-    check(`${vp.label}: tests sit under their sections`, (await secOf('pick_table')) === 'Pick and place' && (await secOf('crossing_yield')) === 'Obstacle avoidance', await secOf('pick_table'));
+    check(`${vp.label}: tests sit under their sections`, (await secOf('pick_block')) === 'Pick and place' && (await secOf('crossing_yield')) === 'Obstacle avoidance', await secOf('pick_block'));
     await click('#tp-list .tp-sec[data-section="Pick and place"] .tp-sec-h');
-    check(`${vp.label}: a section folds shut`, !(await visible('#tp-list .tp-test[data-name="pick_table"]')));
+    check(`${vp.label}: a section folds shut`, !(await visible('#tp-list .tp-test[data-name="pick_block"]')));
     await sleep(1200);
-    check(`${vp.label}: a folded section stays folded through a refresh`, !(await visible('#tp-list .tp-test[data-name="pick_table"]')));
+    check(`${vp.label}: a folded section stays folded through a refresh`, !(await visible('#tp-list .tp-test[data-name="pick_block"]')));
     await click('#tp-list .tp-sec[data-section="Pick and place"] .tp-sec-h');
-    check(`${vp.label}: and opens again`, await visible('#tp-list .tp-test[data-name="pick_table"]'));
+    check(`${vp.label}: and opens again`, await visible('#tp-list .tp-test[data-name="pick_block"]'));
     check(`${vp.label}: the smoke test is runnable here`,
       await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"] [data-run]'); return !!c && !c.disabled; })()`));
     const smokeTitle = await $text('#tp-list .tp-test[data-name="pipeline_smoke"] .t');

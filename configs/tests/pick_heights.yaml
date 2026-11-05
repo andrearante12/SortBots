@@ -9,6 +9,7 @@
 name: pick_heights
 title: Three packages at three shelf heights
 section: Pick and place
+parked: true       # off the Tests tab for now; scripts/simtest.py still runs it
 description: >
   Three decks, 0.70, 0.78 and 0.90 m high, each with a box whose plate faces north.
   Pass = all three picked and placed within 15 cm of the spot 12 cm to the west, at

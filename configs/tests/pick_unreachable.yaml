@@ -9,6 +9,7 @@
 name: pick_unreachable
 title: Package below the arm's reach — refuse cleanly
 section: Pick and place
+parked: true       # off the Tests tab for now; scripts/simtest.py still runs it
 description: >
   One box on a 0.30 m deck (variant: on the floor). Pass = the task ends FAILED
   within the pick timeout, the robot never held the box, never picked anything else,

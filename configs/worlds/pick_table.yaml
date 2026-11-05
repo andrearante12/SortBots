@@ -1,8 +1,8 @@
 # A world layout (simtest/world.py has the full schema; pick_bench.yaml the package notes).
-# Numbers from: scripts/pick_layout.py package --deck -6.30 11.487 0.36 0.7 0.95 --normal 180
+# Numbers from: scripts/pick_layout.py package --deck -6.30 11.32 0.36 0.9 0.95 --normal 180 --lateral -0.167
 
 name: pick_table
-title: One package on a table, straight ahead of robot_0
+title: A target block on a table straight ahead of robot_0, and a marked area beside it
 description: >
   A table directly in front of robot_0's spawn pose, with a box on it whose magnet
   plate faces the robot, on the arm's line, so the pick is a straight 0.47 m forward
@@ -15,18 +15,29 @@ description: >
   from the first frame; at 0.90 m its lower edge is already out of frame, and at the
   dock itself (0.27 m) no plate on any reachable table is visible.
 
+  The marked area is paint: place_block sets the block down on it. It reaches the table's
+  front edge because the block has to: the chassis stops short of a full-height table, so a
+  plate further back than the edge is out of the arm's reach.
+
 scenes: [nvidia]
 autostart: true
 
 props:
   - id: table
     shape: box
-    size: [0.36, 0.7, 0.95]
-    pose: [-6.30, 11.487, 0.0]
+    size: [0.36, 0.9, 0.95]
+    pose: [-6.30, 11.32, 0.0]
 
 packages:
   - id: pkg_0
-    label: box A
+    label: target block
     pose: [-6.38, 11.487, 3.1416]   # the plate is at x = -6.50, facing the robot
     z: 0.95                         # bottom of the box = top of the table
     magnet_face: "+x"
+
+marks:
+  - id: drop_zone
+    label: drop zone
+    size: [0.34, 0.26]
+    pose: [-6.31, 11.12, 0.0]       # front edge of the table to 2 cm off its back edge
+    z: 0.95

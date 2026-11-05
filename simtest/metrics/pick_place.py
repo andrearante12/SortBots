@@ -53,6 +53,7 @@ class PickPlace(Metric):
         "detected": "packages whose plate was detected at least once (right place, not while "
                     "held): the tasks' packages, or every package in the world when the "
                     "test has no package tasks",
+        "held_at_end": "pick-only tasks (place: hold) whose package was still on the magnet at the end",
         "false_detections": "detected plates that matched no true plate",
         "mean_detect_err_m": "mean distance of a matched detection from the true plate centre",
         "mean_normal_err_deg": "mean angle of a matched detection's normal from the true normal",
@@ -123,7 +124,8 @@ class PickPlace(Metric):
                     rec["picked_at"] = ev["t"]
             elif was and not held:
                 rec = self._task_for(pid, prev["held_by"], picked=True)
-                if rec is not None and self._xy_err(p, rec["place"]) > self.p["place_tol_m"]:
+                if rec is not None and (rec["place"] is None or  # a pick-only task never lets go
+                                        self._xy_err(p, rec["place"]) > self.p["place_tol_m"]):
                     self.drops += 1
             self.pk[pid] = {"held_by": held, "pose": p}
 
@@ -159,8 +161,10 @@ class PickPlace(Metric):
     def _outcome(self, rec) -> dict:
         st = self.pk.get(rec["package"])
         picked = rec["picked_at"] is not None
-        out = {"picked": picked, "placed": False, "xy_err_m": None, "z_err_m": None}
-        if picked and st is not None:
+        out = {"picked": picked, "placed": False, "held": False, "xy_err_m": None, "z_err_m": None}
+        if picked and st is not None and rec["place"] is None:
+            out["held"] = bool(st["held_by"])
+        elif picked and st is not None:
             out["xy_err_m"] = self._xy_err(st["pose"], rec["place"])
             out["z_err_m"] = abs(st["pose"]["z"] - rec["place"]["z"])
             out["placed"] = (not st["held_by"] and out["xy_err_m"] <= self.p["place_tol_m"]
@@ -171,18 +175,22 @@ class PickPlace(Metric):
         outs = [(rec, self._outcome(rec)) for rec in self.tasks.values()]
         picked = [o for _, o in outs if o["picked"]]
         placed = sum(o["placed"] for _, o in outs)
+        held = sum(o["held"] for _, o in outs)
+        xy = [o["xy_err_m"] for o in picked if o["xy_err_m"] is not None]
+        z = [o["z_err_m"] for o in picked if o["z_err_m"] is not None]
         times = [rec["picked_at"] - rec["sent_at"] for rec, o in outs if o["picked"]]
         planned = len(self.planned)
         return {
             "planned": planned,
             "picked": len(picked),
             "placed": placed,
-            "success_rate": round(placed / planned, 3) if planned else None,
+            "held_at_end": held,
+            "success_rate": round((placed + held) / planned, 3) if planned else None,
             "drops": self.drops,
             "false_picks": self.false_picks,
             "mean_time_to_pick_s": _mean(times),
-            "max_place_error_m": round(max(o["xy_err_m"] for o in picked), 4) if picked else None,
-            "max_place_z_error_m": round(max(o["z_err_m"] for o in picked), 4) if picked else None,
+            "max_place_error_m": round(max(xy), 4) if xy else None,
+            "max_place_z_error_m": round(max(z), 4) if z else None,
             "detected": len(self.matched & self.targets),
             "false_detections": self.false_detections,
             "mean_detect_err_m": _mean(self.det_err),

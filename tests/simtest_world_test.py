@@ -173,6 +173,27 @@ def _deck_world(**pkg):
             "packages": [p]}
 
 
+def _marked(**mark):
+    return {"name": "t", "props": [{"id": "deck", "shape": "box", "size": [1, 1, 0.8], "pose": [0, 0, 0]}],
+            "marks": [{"id": "m", "size": [0.3, 0.3], "pose": [0, 0, 0], "z": 0.8, **mark}]}
+
+
+def test_a_mark_is_paint_on_a_surface():
+    (m,) = world.validate(_marked())["marks"]
+    assert m["size"] == (0.3, 0.3) and m["color"] == world.DEFAULT_MARK_COLOR and m["label"] == "m"
+
+
+@pytest.mark.parametrize("mark,err", [
+    ({"z": 0.5}, "floating|inside"),      # not on the deck's top
+    ({"size": [0.3]}, "size"),
+    ({"id": "deck"}, "duplicate"),
+    ({"friction": 1}, "unknown"),
+])
+def test_mark_validation_rejects(mark, err):
+    with pytest.raises(world.WorldError, match=err):
+        world.validate(_marked(**mark))
+
+
 def test_package_defaults_and_support():
     w = world.validate(_deck_world())
     pkg = w["packages"][0]

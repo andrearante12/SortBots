@@ -299,7 +299,7 @@ def dispatch_body(t: dict) -> dict:
     body = {"pickup": t["pickup"], "dropoff": t["dropoff"], "task_id": t["task_id"]}
     if t.get("package"):
         body["package"] = t["package"]
-        body["place"] = {k: t["place"][k] for k in ("x", "y", "z", "yaw")}
+        body["place"] = t["place"] and {k: t["place"][k] for k in ("x", "y", "z", "yaw")}
         body["size"], body["face"], body["at"] = t["size"], t["face"], t["at"]
     return body
 

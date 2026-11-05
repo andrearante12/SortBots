@@ -364,6 +364,46 @@ def test_still_holding_it_at_the_end_is_not_placed():
     assert v["picked"] == 1 and v["placed"] == 0
 
 
+def _hold_dispatch():
+    return dict(dispatch(), place=None)
+
+
+def test_a_pick_only_task_succeeds_by_still_holding_the_package():
+    s = [_hold_dispatch(), pgt(0.0, START), pgt(5.0, dict(START, z=1.0), "robot_0"),
+         pgt(9.0, dict(START, z=1.1), "robot_0")]
+    v = run_metric(s).result()
+    assert (v["picked"], v["held_at_end"], v["placed"], v["success_rate"]) == (1, 1, 0, 1.0)
+    assert v["drops"] == 0 and v["max_place_error_m"] is None
+
+
+def test_a_pick_only_task_that_lets_go_dropped_it():
+    s = [_hold_dispatch(), pgt(0.0, START), pgt(5.0, dict(START, z=1.0), "robot_0"), pgt(6.0, START)]
+    v = run_metric(s).result()
+    assert (v["picked"], v["held_at_end"], v["drops"], v["success_rate"]) == (1, 0, 1, 0.0)
+
+
+def test_pick_block_resolves_to_a_task_with_no_place_all_the_way_to_the_wire():
+    (task,) = spec.load("pick_block")["variants"][0][1]["tasks"]
+    assert task["place"] is None
+    assert dispatch_body(dict(task, task_id="t"))["place"] is None
+
+
+def test_place_block_sets_the_block_down_inside_the_marked_area():
+    r = spec.load("place_block")["variants"][0][1]
+    (task,), (mark,) = r["tasks"], r["world"]["marks"]
+    assert abs(task["place"]["x"] - mark["pose"][0]) < mark["size"][0] / 2
+    assert abs(task["place"]["y"] - mark["pose"][1]) < mark["size"][1] / 2
+    assert task["place"]["z"] == mark["z"]
+
+
+def test_the_tests_tab_offers_two_pick_tests_and_parked_ones_still_validate():
+    listed = {t["name"]: t for t in spec.listed_tests()}
+    assert {n for n, t in listed.items() if t["section"] == "Pick and place"} == {"pick_block", "place_block"}
+    parked = {t["name"] for t in spec.list_tests() if t["parked"]}
+    assert "pick_orientations" in parked and not parked & set(listed)
+    assert spec.load("pick_orientations")["parked"] is True
+
+
 def test_picking_a_package_nobody_asked_for_is_a_false_pick():
     s = [pgt(0.0, START), pgt(2.0, dict(START, z=1.0), "robot_0")]      # no dispatch at all
     v = run_metric(s).result()

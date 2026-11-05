@@ -280,11 +280,13 @@ class TaskManager(Node):
             at, size, face = payload.get("at"), payload.get("size"), payload.get("face")
             nums = lambda d, keys: isinstance(d, dict) and all(  # noqa: E731
                 isinstance(d.get(k), (int, float)) for k in keys)
-            if not (isinstance(package, str) and nums(place, ("x", "y", "z", "yaw"))
+            # place null is a pick-only task: done once the package is on the magnet
+            if not (isinstance(package, str) and "place" in payload
+                    and (place is None or nums(place, ("x", "y", "z", "yaw")))
                     and nums(at, ("x", "y")) and isinstance(face, str)
                     and isinstance(size, list) and len(size) == 3):
                 self._reject(task_id, "a package task needs package (id), size [x, y, z], "
-                                      "face, at {x, y} and place {x, y, z, yaw}")
+                                      "face, at {x, y} and place {x, y, z, yaw} or null")
                 return
             cargo = {"size": size, "face": face, "at": {"x": at["x"], "y": at["y"]}}
             stops = self._resolve_legs(names, task_id)
@@ -490,7 +492,9 @@ class TaskManager(Node):
             self._end_task("FAILED")
         elif result == "picked" and self.state == "PICKING":
             self._pick_deadline = None
-            if task.stops[1] is None:
+            if task.place is None:
+                self._end_task("DONE")
+            elif task.stops[1] is None:
                 self._begin_place()
             else:
                 self._start_nav(task.stops[1], next_state="NAV_TO_DROPOFF")

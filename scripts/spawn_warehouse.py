@@ -1089,6 +1089,18 @@ def _spawn_world(stage, w: dict) -> tuple[dict, dict]:
         packages[pkg["id"]] = (t_op, r_op)
         emit(f"  world package {pkg['id']}: {sx}x{sy}x{sz} at ({x}, {y}) z={pkg['z']} "
              f"plate on {pkg['magnet_face']}")
+    for mark in w["marks"]:
+        # Paint: 2 mm proud of the surface so it can't z-fight it, and nothing to hit.
+        path = f"{WORLD_ROOT}/marks/{mark['id']}"
+        x, y, yaw = mark["pose"]
+        xf = UsdGeom.Xform.Define(stage, path)
+        xf.ClearXformOpOrder()
+        xf.AddTranslateOp().Set(Gf.Vec3d(x, y, mark["z"]))
+        xf.AddRotateXYZOp().Set(Gf.Vec3f(0.0, 0.0, math.degrees(yaw)))
+        paint = _author_box(stage, f"{path}/paint", (*mark["size"], 0.002), (0.0, 0.0, 0.001),
+                            collider=False)
+        _bind(paint, _world_color_material(stage, materials, mark["color"]))
+        emit(f"  world mark {mark['id']}: {mark['size']} at ({x}, {y}) z={mark['z']}")
     return actors, packages
 
 
@@ -1160,7 +1172,7 @@ class _WorldRuntime:
         """/sim/world: the static half — what to draw, and the shapes the
         metrics use. Footprints via simtest.world so both agree exactly."""
         if not self.world:
-            return {"world": None, "props": [], "actors": [], "packages": []}
+            return {"world": None, "props": [], "actors": [], "packages": [], "marks": []}
         from simtest import world as wl
 
         def common(i):
@@ -1178,6 +1190,9 @@ class _WorldRuntime:
             "packages": [{"id": p["id"], "label": p["label"], "size": list(p["size"]),
                           "color": list(p["color"]), "magnet_face": p["magnet_face"],
                           "z": p["z"]} for p in self.world["packages"]],
+            "marks": [{"id": m["id"], "label": m["label"], "size": list(m["size"]),
+                       "pose": list(m["pose"]), "color": list(m["color"])}
+                      for m in self.world["marks"]],
         }
 
     def _on_cmd(self, msg) -> None:

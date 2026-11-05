@@ -12,6 +12,7 @@
 name: pick_detect_sweep
 title: Plate detection — drive past four packages
 section: Pick and place
+parked: true       # off the Tests tab for now; scripts/simtest.py still runs it
 description: >
   robot_0 drives to four viewpoints, one in front of each plate in pick_orientations,
   each facing it. Pass = all four plates detected within 5 cm of where they really are,

@@ -390,6 +390,13 @@
       ctx.fill(); ctx.stroke();
     }
     ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
+    // Marked areas: where a place test wants the package set down. Under the packages.
+    for (const m of worldLayout.marks || []) {
+      const [x, y, yaw] = m.pose, [hx, hy] = [m.size[0] / 2, m.size[1] / 2], c = Math.cos(yaw), s = Math.sin(yaw);
+      traceShape(["poly", [[hx, hy], [-hx, hy], [-hx, -hy], [hx, -hy]].map(([a, b]) => [x + c * a - s * b, y + s * a + c * b])]);
+      ctx.fillStyle = rgba(m.color, 0.3); ctx.strokeStyle = rgba(m.color, 1); ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 3]); ctx.fill(); ctx.stroke(); ctx.setLineDash([]);
+    }
     // Packages the magnet effector picks up (simtest/magnet.py). Where one IS comes from
     // ground truth; it turns green while the magnet holds it, and the thick dark edge is
     // the face that carries the magnet plate (the side the arm has to come at).

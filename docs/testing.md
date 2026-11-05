@@ -151,6 +151,7 @@ ros2 topic pub --once /sim/world_cmd std_msgs/String '{data: "{\"cmd\": \"restar
 ```yaml
 name: crossing_yield
 section: Obstacle avoidance          # its heading in the Tests tab; none = Other
+parked: true                         # off the Tests tab; still valid, and simtest.py still runs it
 scenario: moving_obstacles_mapped    # localizes on a saved map (see below)
 overrides: {world: aisle_crossing}   # only keys the scenario lists in overrides:
 warmup_s: 5                          # sim-s after the stack is ready, before t0
@@ -165,7 +166,7 @@ tasks:                               # optional task_manager deliveries
     package: pkg_0                   # must be in the world's packages:
     pickup: dock                     # dock/here: no Nav2 leg, the pick controller drives itself;
     dropoff: dock                    #   or a waypoint NAME, or a pose [x, y, yaw] to drive to first
-    place: {shift: [-0.12, 0]}       # where it comes to rest: shifted from where it started, or
+    place: {shift: [-0.12, 0]}       # where it comes to rest: shifted from where it started, `hold` (stays on the magnet: the task ends at the pick), or
                                      #   [x, y] / [x, y, yaw]; z is whatever is under that spot
 stop:
   sim_s: 150                         # hard cap after t0
@@ -204,7 +205,8 @@ is how a failure is split into "didn't see it" and "saw it and couldn't do it".
 | test | asks | passes when |
 |---|---|---|
 | `pick_place_smoke` | one box on a bench, picked and set down 12 cm over; variants `camera` and `oracle` | placed within 15 cm, on the bench, not dropped |
-| `pick_table` | the one to watch: a box on a table straight ahead of the robot, from the Tests tab, followed in the Sim view | placed, plate seen by the camera, no drops |
+| `pick_block` | the robot starts in front of a table and only has to pick up the target block (`place: hold`), from the Tests tab | the magnet has it at the end, plate seen by the camera, no drops |
+| `place_block` | the same, then set the block down on the marked area further along the table | block's centre within 8 cm of the target, on the table, no drops |
 | `pick_orientations` | four boxes whose plates face N, E, W and S, so the base docks from each side | all four placed, all four plates seen, no drops |
 | `pick_heights` | three decks, 0.70, 0.78 and 0.90 m | all three placed |
 | `pick_unreachable` | a box on a 0.30 m deck, and on the floor (variants); oracle perception, since the camera cannot see a plate that low from anywhere near | the task FAILS inside the timeout, nothing picked, nothing unfinished |

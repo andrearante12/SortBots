@@ -149,7 +149,7 @@ def cmd_show(a) -> int:
             if tk.get("package"):
                 leg = lambda v: "dock" if v is None else (v["name"] if v["name"] != "pose"  # noqa: E731
                                                           else f"({v['x']:g}, {v['y']:g})")
-                pl = tk["place"]
+                pl = tk["place"] or {"x": 0.0, "y": 0.0, "z": 0.0, "support": "(hold: stays on the magnet)"}
                 log(f"  task {tk['id']}: {tk['robot']} picks {tk['package']} "
                     f"[{leg(tk['pickup'])} -> {leg(tk['dropoff'])}], places it at "
                     f"({pl['x']:g}, {pl['y']:g}) on {pl['support']} z={pl['z']:g} "

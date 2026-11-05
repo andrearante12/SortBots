@@ -426,6 +426,21 @@ def test_the_seams_probe_to_task_manager_to_pick_controller(tm):
     assert statuses(tm)[-2]["state"] == "DONE" and statuses(tm)[-2]["task_id"] == "simtest_t0"
 
 
+def test_a_pick_only_task_is_done_at_the_pick_and_never_lets_go(tm):
+    dispatch(tm, task_id="p1", package="pkg_0", pickup=None, dropoff=None, place=None, **CARGO)
+    assert "rejected" not in statuses(tm)[-1], statuses(tm)[-1]
+    tm._tick()
+    assert requests(tm)[-1]["cmd"] == "attach"
+    result(tm, "picked")
+    assert tm.state == "IDLE" and statuses(tm)[-2]["state"] == "DONE"
+    assert [r["cmd"] for r in requests(tm)] == ["attach"]        # no detach, ever
+
+
+def test_a_package_task_that_says_nothing_about_placing_is_refused(tm):
+    dispatch(tm, task_id="p1", package="pkg_0", pickup=None, dropoff=None, **CARGO)
+    assert "rejected" in statuses(tm)[-1]
+
+
 def test_nav_only_dispatches_are_untouched_by_all_this(tm):
     dispatch(tm, pickup="A", dropoff="B", task_id="n1")
     assert "package" not in statuses(tm)[-1]["queue"][0]

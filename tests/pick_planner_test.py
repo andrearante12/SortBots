@@ -237,6 +237,21 @@ def test_every_package_in_a_pick_world_in_order(kin, name, order):
     assert fw.min_gap > 0.0, "the chassis drove into a deck"
 
 
+def test_the_block_goes_down_on_pick_tables_marked_area(kin):
+    fw = FakeWorld(kin, "pick_table")
+    planner = pp.PickPlanner(kin)
+    assert do(fw, planner, pick_req(fw.w, "pkg_0")).result == "picked", fw.log[-4:]
+    block = fw.spec["pkg_0"]
+    (mark,) = fw.w["marks"]
+    d = do(fw, planner, place_req(fw.w, "pkg_0", (0.0, mark["pose"][1] - block["pose"][1])))
+    assert d.result == "placed", d.note
+    pose = fw.package_pose("pkg_0")
+    assert abs(pose["x"] - mark["pose"][0]) < mark["size"][0] / 2
+    assert abs(pose["y"] - mark["pose"][1]) < mark["size"][1] / 2
+    assert pose["z"] == pytest.approx(block["z"], abs=1e-6)
+    assert fw.min_gap > 0.0, "the chassis drove into the table"
+
+
 def test_it_works_with_noiseless_and_with_biased_vision_alike(kin):
     for noise in (False, True):
         fw = FakeWorld(kin, "pick_bench", noise=noise, seed=5)

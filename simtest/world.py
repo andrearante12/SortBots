@@ -73,6 +73,7 @@ FACES = ("+x", "-x", "+y", "-y", "top")
 # reach (docs/manipulation.md) still has room for the box's own depth.
 DEFAULT_PACKAGE_SIZE = (0.24, 0.18, 0.12)
 DEFAULT_PACKAGE_COLOR = (0.76, 0.60, 0.42)   # cardboard
+DEFAULT_MARK_COLOR = (0.16, 0.65, 0.35)
 # The magnet plate. Both colours are authored by the sim and thresholded on by
 # nodes/package_detector.py (configs/package_detector.yaml): change them together.
 PLATE_COLOR = (0.05, 0.05, 0.06)
@@ -295,12 +296,36 @@ def support_for(w: dict, pkg: dict) -> dict | None:
                      f"{sorted({round(top_z(p), 3) for p in w['props']})})")
 
 
+def _validate_mark(raw, what) -> dict:
+    """A painted rectangle on a surface: where a place test wants a package set down.
+    Nothing to collide with and nothing a package rests on: it only shows the spot."""
+    if not isinstance(raw, dict):
+        raise WorldError(f"{what}: expected a mapping")
+    unknown = set(raw) - {"id", "size", "pose", "z", "color", "label"}
+    if unknown:
+        raise WorldError(f"{what}: unknown key(s) {sorted(unknown)}")
+    mid = raw.get("id")
+    if not isinstance(mid, str) or not ID_RX.match(mid):
+        raise WorldError(f"{what}.id: must match {ID_RX.pattern}")
+    size = raw.get("size")
+    if not isinstance(size, (list, tuple)) or len(size) != 2:
+        raise WorldError(f"{what}.size: expected [x, y] metres")
+    return {
+        "id": mid,
+        "size": tuple(_num(v, f"{what}.size", 0.0, 5.0, strict_lo=True) for v in size),
+        "pose": _pose(raw.get("pose"), f"{what}.pose"),
+        "z": _num(raw.get("z", 0.0), f"{what}.z", 0.0, 3.0),     # the surface it is painted on
+        "color": _color(raw.get("color"), f"{what}.color", DEFAULT_MARK_COLOR),
+        "label": str(raw.get("label") or mid)[:40],
+    }
+
+
 def validate(raw, *, stem: str | None = None) -> dict:
     """A world mapping -> a normalized, fully-defaulted dict. Raises WorldError."""
     if not isinstance(raw, dict):
         raise WorldError("world file must contain a YAML mapping")
     unknown = set(raw) - {"name", "title", "description", "scenes", "autostart",
-                          "props", "actors", "packages"}
+                          "props", "actors", "packages", "marks"}
     if unknown:
         raise WorldError(f"unknown key(s) {sorted(unknown)}")
     name = raw.get("name")
@@ -319,7 +344,7 @@ def validate(raw, *, stem: str | None = None) -> dict:
     out = {"name": name, "title": str(raw.get("title") or name),
            "description": str(raw.get("description") or "").strip(),
            "scenes": list(scenes), "autostart": autostart, "props": [], "actors": [],
-           "packages": []}
+           "packages": [], "marks": []}
     for key, actor in (("props", False), ("actors", True)):
         lst = raw.get(key) or []
         if not isinstance(lst, list) or len(lst) > MAX_ITEMS:
@@ -341,6 +366,17 @@ def validate(raw, *, stem: str | None = None) -> dict:
         out["packages"].append(v)
     for v in out["packages"]:
         support_for(out, v)     # raises on a floating or buried package
+    mk = raw.get("marks") or []
+    if not isinstance(mk, list) or len(mk) > MAX_PACKAGES:
+        raise WorldError(f"marks: expected a list of at most {MAX_PACKAGES}")
+    for i, item in enumerate(mk):
+        v = _validate_mark(item, f"marks[{i}]")
+        if v["id"] in items:
+            raise WorldError(f"marks[{i}].id: duplicate id {v['id']!r}")
+        items[v["id"]] = v
+        out["marks"].append(v)
+        # paint goes on something: the same check a package gets, as a flat package
+        support_for(out, {**v, "size": (*v["size"], 0.01)})
     return out
 
 
