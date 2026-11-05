@@ -11,12 +11,16 @@ cardboard and the plate near-black (simtest/world.py DEFAULT_PACKAGE_COLOR and
 PLATE_COLOR), and a real package would carry a dark steel plate on a brown box, so
 
     1. segment  colour thresholds in HSV: cardboard body, dark plate
-    2. gate     a plate blob counts only if it touches a cardboard blob: a shadow, a
-                dark rack leg or a tyre never does
+    2. gate     a plate blob counts only if cardboard surrounds it: merely touching
+                some is not enough, the gaps between cartons on a rack do that
+                (2026-11-05, ~1500 false plates in one 38 s run of the full warehouse)
     3. fit      back-project the plate's depth pixels (the depth image is aligned to
                 the colour one), least-squares plane through them, the normal turned
                 to face the camera; refuse a fit that isn't flat
-    4. report   plate centre (the plane point under the mean, minus the plate's own
+    4. check    in metres now the depth is known: plate-sized, and lying in the plane
+                of the cardboard around it (a dark gap is behind its carton, a plate
+                is on it)
+    5. report   plate centre (the plane point under the mean, minus the plate's own
                 thickness) and normal, in the camera's optical frame; to_map() moves
                 them to the map frame
 
@@ -41,7 +45,12 @@ DEFAULTS = {
     "plate": {"v_max": 60, "s_max": 140},
     "plate_thickness_m": 0.004,
     "min_plate_px": 40,
-    "touch_px": 12,            # cardboard pixels in the ring around the plate blob
+    "ring_px": 5,              # width of the ring looked at around a plate blob
+    "ring_frac": 0.5,          # how much of that ring has to be cardboard
+    "ring_plane_m": 0.02,      # how far the ring's cardboard may lie off the plate's plane
+    "min_plate_m": 0.03,       # the plate's long side...
+    "max_plate_m": 0.2,        # ...and the ceiling on it
+    "min_plate_short_m": 0.02,  # its short side: a thin dark strip is a rack edge
     "min_range_m": 0.3,
     "max_range_m": 4.0,
     "min_points": 25,
@@ -89,11 +98,15 @@ def segment(rgb: np.ndarray, cfg: dict | None = None) -> tuple[np.ndarray, np.nd
 
 
 def _plate_blobs(box: np.ndarray, plate: np.ndarray, c: dict):
-    """(mask, bbox) of every dark blob big enough and touching cardboard."""
+    """(mask, cardboard ring, bbox) of every dark blob big enough and ringed by cardboard.
+
+    The ring is measured inside the image, so a plate cut off by the frame's edge is
+    judged on the part of it that shows."""
     import cv2
 
     n, labels, stats, _ = cv2.connectedComponentsWithStats(plate.astype(np.uint8), connectivity=8)
-    ring_k = np.ones((7, 7), np.uint8)
+    side = 2 * c["ring_px"] + 1
+    ring_k = np.ones((side, side), np.uint8)
     out = []
     for i in range(1, n):
         x, y, w, h, area = stats[i]
@@ -101,9 +114,10 @@ def _plate_blobs(box: np.ndarray, plate: np.ndarray, c: dict):
             continue
         blob = labels == i
         ring = cv2.dilate(blob.astype(np.uint8), ring_k).astype(bool) & ~blob
-        if int((ring & box).sum()) < c["touch_px"]:
+        cardboard = ring & box
+        if int(cardboard.sum()) < c["ring_frac"] * int(ring.sum()):
             continue
-        out.append((blob, (int(x), int(y), int(w), int(h))))
+        out.append((blob, cardboard, (int(x), int(y), int(w), int(h))))
     return out
 
 
@@ -116,6 +130,33 @@ def fit_plane(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
     return c, n, rms
 
 
+def plate_extent(points: np.ndarray, centroid: np.ndarray, normal: np.ndarray) -> tuple[float, float]:
+    """(long, short) side in metres of (N, 3) points on a plane. 2nd to 98th percentile,
+    so a few stray edge pixels do not stretch it."""
+    d = points - centroid
+    d = d - np.outer(d @ normal, normal)
+    _, _, vt = np.linalg.svd(d, full_matrices=False)
+    sides = [float(np.ptp(np.percentile(d @ axis, [2, 98]))) for axis in vt[:2]]
+    return max(sides), min(sides)
+
+
+def _back_project(us, vs, z, K) -> np.ndarray:
+    fx, fy, cx, cy = K
+    return np.stack([(us - cx) * z / fx, (vs - cy) * z / fy, z], axis=1)
+
+
+def _ring_off_plane(ring, depth_m, K, centroid, normal, c) -> float | None:
+    """Median distance of the cardboard ring's depth pixels from the plate's plane, or
+    None if the ring has no usable depth (holes are not evidence either way)."""
+    vs, us = np.nonzero(ring)
+    z = depth_m[vs, us].astype(np.float64)
+    ok = np.isfinite(z) & (z > c["min_range_m"]) & (z < c["max_range_m"])
+    if not ok.any():
+        return None
+    pts = _back_project(us[ok], vs[ok], z[ok], K)
+    return float(np.median(np.abs((pts - centroid) @ normal)))
+
+
 def detect_plates(rgb: np.ndarray, depth_m: np.ndarray, K, cfg: dict | None = None) -> list[dict]:
     """Every plate found in the frame, in the camera's optical frame:
     [{c: (x, y, z), n: (nx, ny, nz) outward, conf, px: (u, v, w, h), rms, npts}].
@@ -124,10 +165,9 @@ def detect_plates(rgb: np.ndarray, depth_m: np.ndarray, K, cfg: dict | None = No
     import cv2
 
     c = merged(cfg)
-    fx, fy, cx, cy = K
     box, plate = segment(rgb, c)
     out = []
-    for blob, bbox in _plate_blobs(box, plate, c):
+    for blob, ring, bbox in _plate_blobs(box, plate, c):
         # the blob's edge pixels mix plate and cardboard depth: fit on its interior
         core = cv2.erode(blob.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
         if core.sum() < c["min_points"]:
@@ -140,7 +180,7 @@ def detect_plates(rgb: np.ndarray, depth_m: np.ndarray, K, cfg: dict | None = No
         if int(ok.sum()) < c["min_points"]:
             continue
         us, vs, z = us[ok], vs[ok], z[ok]
-        pts = np.stack([(us - cx) * z / fx, (vs - cy) * z / fy, z], axis=1)
+        pts = _back_project(us, vs, z, K)
         # a plate is one flat thing: depth pixels from behind it (the wall past the
         # box's edge) would tilt the fit, so keep the pixels near the median range
         med = np.median(z)
@@ -149,6 +189,12 @@ def detect_plates(rgb: np.ndarray, depth_m: np.ndarray, K, cfg: dict | None = No
             continue
         centroid, n, rms = fit_plane(pts[keep])
         if rms > c["plane_rms_m"]:
+            continue
+        long_m, short_m = plate_extent(pts[keep], centroid, n)
+        if not c["min_plate_m"] <= long_m <= c["max_plate_m"] or short_m < c["min_plate_short_m"]:
+            continue
+        off = _ring_off_plane(ring, depth_m, K, centroid, n, c)
+        if off is not None and off > c["ring_plane_m"]:
             continue
         if n @ (-centroid) < 0:          # turn the normal to face the camera
             n = -n

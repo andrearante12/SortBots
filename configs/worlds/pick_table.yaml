@@ -1,0 +1,32 @@
+# A world layout (simtest/world.py has the full schema; pick_bench.yaml the package notes).
+# Numbers from: scripts/pick_layout.py package --deck -6.30 11.487 0.36 0.7 0.95 --normal 180
+
+name: pick_table
+title: One package on a table, straight ahead of robot_0
+description: >
+  A table directly in front of robot_0's spawn pose, with a box on it whose magnet
+  plate faces the robot, on the arm's line, so the pick is a straight 0.47 m forward
+  and no turn. The robot spawns where it does (configs/robots.yaml has no per-world
+  start), so the table came to the robot.
+
+  This is as close as the camera lets a table be. The head camera is 1.24 m up with a
+  21.6 degree vertical half-FOV, and the racks east of the aisle stop at x = -6, which
+  leaves 1.15 m. At 0.95 m high the plate is 0.74 m from the lens and all of it is in view
+  from the first frame; at 0.90 m its lower edge is already out of frame, and at the
+  dock itself (0.27 m) no plate on any reachable table is visible.
+
+scenes: [nvidia]
+autostart: true
+
+props:
+  - id: table
+    shape: box
+    size: [0.36, 0.7, 0.95]
+    pose: [-6.30, 11.487, 0.0]
+
+packages:
+  - id: pkg_0
+    label: box A
+    pose: [-6.38, 11.487, 3.1416]   # the plate is at x = -6.50, facing the robot
+    z: 0.95                         # bottom of the box = top of the table
+    magnet_face: "+x"

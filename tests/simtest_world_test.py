@@ -242,10 +242,10 @@ def test_top_z_of_each_prop_shape():
 
 # -- the committed pick worlds ---------------------------------------------------
 
-PICK_WORLDS = ("pick_bench", "pick_orientations", "pick_heights", "pick_route")
+PICK_WORLDS = ("pick_bench", "pick_table", "pick_orientations", "pick_heights", "pick_route")
 # Worlds where Nav2 is not involved: the robot docks on its own from the spawn pose,
 # one package after the other in file order, so every straight transit must be clear.
-SELF_DOCK_WORLDS = ("pick_bench", "pick_orientations", "pick_heights")
+SELF_DOCK_WORLDS = ("pick_bench", "pick_table", "pick_orientations", "pick_heights")
 STAGE_M = 0.35          # nodes/pick_planner.py backs out this far before a transit
 CIRCLE_R = 0.26         # the chassis' swept radius, from its collision frame's corners
 

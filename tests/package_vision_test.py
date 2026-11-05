@@ -96,6 +96,47 @@ def test_a_dark_thing_not_touching_cardboard_is_not_a_plate():
     assert pv.detect_plates(*render(dark), K) == []
 
 
+def _dark(c, hu, hv):
+    return {"c": c, "u": (1, 0, 0), "v": (0, 1, 0), "hu": hu, "hv": hv, "rgb": PLATE}
+
+
+def _card(c, hu, hv):
+    return {"c": c, "u": (1, 0, 0), "v": (0, 1, 0), "hu": hu, "hv": hv, "rgb": CARDBOARD}
+
+
+def test_a_dark_gap_beside_a_carton_is_not_a_plate():
+    # what filled the full warehouse with false plates: plate-sized and flat, and it
+    # touches cardboard, but only along one side
+    rects = [_card((-0.2, 0, 1.2), 0.15, 0.15), _dark((0.0, 0, 1.2), 0.05, 0.04)]
+    assert pv.detect_plates(*render(rects), K) == []
+
+
+def test_a_dark_panel_too_big_to_be_a_plate_is_refused():
+    rects = [_dark((0, 0, 1.2), 0.15, 0.12), _card((0, 0, 1.21), 0.3, 0.25)]
+    assert pv.detect_plates(*render(rects), K) == []
+
+
+def test_a_thin_dark_strip_on_cardboard_is_refused():
+    rects = [_dark((0, 0, 1.2), 0.08, 0.006), _card((0, 0, 1.21), 0.2, 0.15)]
+    assert pv.detect_plates(*render(rects), K) == []
+
+
+def test_a_dark_hole_behind_the_cardboard_is_not_a_plate():
+    # cardboard all round it, but 30 cm back: a gap seen through a carton's frame
+    frame = [_card((0, 0.12, 1.2), 0.2, 0.08), _card((0, -0.12, 1.2), 0.2, 0.08),
+             _card((-0.14, 0, 1.2), 0.06, 0.05), _card((0.14, 0, 1.2), 0.06, 0.05)]
+    rects = frame + [_dark((0, 0, 1.5), 0.2, 0.2)]
+    assert pv.detect_plates(*render(rects), K) == []
+
+
+def test_a_plate_near_the_bottom_of_the_frame_still_counts():
+    # pick_table's first frame: the plate's lower edge a few rows above the image's
+    rects, centre, _ = box_with_plate((0.0, 0.25, 0.75), 0)
+    found = pv.detect_plates(*render(rects), K)
+    assert len(found) == 1
+    assert math.dist(found[0]["c"], centre) < 0.03
+
+
 def test_two_boxes_two_plates():
     a, ca, _ = box_with_plate((-0.5, 0.3, 1.5), 15)
     b, cb, _ = box_with_plate((0.6, 0.3, 2.0), -20)
