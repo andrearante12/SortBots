@@ -306,6 +306,14 @@ async function main() {
     await page.eval(`window.__operator.cams.get(${JSON.stringify(r0)}).mode = 'rgb'`); // the last pick is remembered across loads
     await click(`#fleet .robot[data-id="${r0}"] [data-cam-mode="depth"]`);
     check(`${vp.label}: the camera tile switches to depth`, await page.eval(`window.__operator.cams.get(${JSON.stringify(r0)}).mode === 'depth' && document.querySelector('#fleet .robot[data-id="${r0}"] [data-cam-mode="depth"]').classList.contains('on')`));
+    await click(`#fleet .robot[data-id="${r0}"] [data-cam-mode="split"]`);
+    await sleep(100);
+    const panes = JSON.parse(await page.eval(`JSON.stringify([...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')].map((p) => ({ w: p.offsetWidth, msg: p.textContent })))`));
+    check(`${vp.label}: split shows the camera and the depth together`, panes.length === 2 && panes.every((p) => p.w > 0), JSON.stringify(panes));
+    check(`${vp.label}: split streams both feeds`, /camera/.test(panes[0].msg) && /depth/.test(panes[1].msg), JSON.stringify(panes));
+    await click(`#fleet .robot[data-id="${r0}"] [data-cam-mode="depth"]`);
+    await sleep(100);
+    check(`${vp.label}: leaving split shows one picture again`, (await page.eval(`[...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')].filter((p) => p.offsetWidth).length`)) === 1);
     check(`${vp.label}: the other card keeps its own camera mode`, await page.eval(`window.__operator.cams.get(${JSON.stringify(r1)}).mode === ${JSON.stringify(r1Mode)}`));
     check(`${vp.label}: a click inside a card leaves both open`, (await page.eval(`document.querySelectorAll('#fleet .robot.sel').length`)) === 2);
     await emit(`/${r0}/odom`, { twist: { twist: { linear: { x: 0.5, y: 0, z: 0 }, angular: { x: 0, y: 0, z: Math.PI / 4 } } } });
@@ -396,6 +404,14 @@ async function main() {
     const cards = await page.eval(`[...document.querySelectorAll('#tp-list .tp-test')].map((c) => c.dataset.name || 'invalid')`);
     const onDisk = fs.readdirSync(path.join(REPO_ROOT, 'configs', 'tests')).filter((f) => f.endsWith('.yaml')).length;
     check(`${vp.label}: it lists every test case in configs/tests/`, cards.length === onDisk, cards.join(','));
+    const secOf = (name) => page.eval(`document.querySelector('#tp-list .tp-test[data-name="${name}"]').closest('.tp-sec').dataset.section`);
+    check(`${vp.label}: tests sit under their sections`, (await secOf('pick_table')) === 'Pick and place' && (await secOf('crossing_yield')) === 'Obstacle avoidance', await secOf('pick_table'));
+    await click('#tp-list .tp-sec[data-section="Pick and place"] .tp-sec-h');
+    check(`${vp.label}: a section folds shut`, !(await visible('#tp-list .tp-test[data-name="pick_table"]')));
+    await sleep(1200);
+    check(`${vp.label}: a folded section stays folded through a refresh`, !(await visible('#tp-list .tp-test[data-name="pick_table"]')));
+    await click('#tp-list .tp-sec[data-section="Pick and place"] .tp-sec-h');
+    check(`${vp.label}: and opens again`, await visible('#tp-list .tp-test[data-name="pick_table"]'));
     check(`${vp.label}: the smoke test is runnable here`,
       await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"] [data-run]'); return !!c && !c.disabled; })()`));
     const smokeTitle = await $text('#tp-list .tp-test[data-name="pipeline_smoke"] .t');
@@ -1223,6 +1239,18 @@ async function main() {
         await page.eval(`(() => { const c = document.getElementById('map'), r = c.getBoundingClientRect(); return Math.abs(c.width / (window.devicePixelRatio || 1) - r.width) < 2 && Math.abs(c.height / (window.devicePixelRatio || 1) - r.height) < 2; })()`));
   await page.eval(`document.body.style.removeProperty('--left-w')`); await sleep(200);
   check('side bars: double-click resets both', Math.abs((await widths())[0] - l0) < 2 && Math.abs((await widths())[1] - r0w) < 2, JSON.stringify(await widths()));
+  const vw = await page.eval(`innerWidth`);
+  await dragX('#rz-left', 700); await sleep(200);
+  check('side bars: the robot list can grow well past its old limit', Math.abs((await widths())[0] - (l0 + 700)) < 4, JSON.stringify(await widths()));
+  await dragX('#rz-left', vw - (l0 + 700) - 8); await sleep(200);
+  check('side bars: dragged to the edge, the robot list fills the window', (await widths())[0] === vw, `${(await widths())[0]} of ${vw}`);
+  check('side bars: the map and task list give way', await page.eval(`document.body.classList.contains('map-gone') && getComputedStyle(document.getElementById('stage')).visibility === 'hidden' && getComputedStyle(document.getElementById('right')).display === 'none'`));
+  check('side bars: nothing scrolls sideways at full width', await page.eval(`document.documentElement.scrollWidth <= innerWidth`));
+  check('side bars: its handle stays on screen', await page.eval(`(() => { const r = document.getElementById('rz-left').getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth; })()`));
+  await load();
+  check('side bars: full width survives a reload', (await widths())[0] === vw && await page.eval(`document.body.classList.contains('map-gone')`), JSON.stringify(await widths()));
+  await dragX('#rz-left', -(vw - l0)); await sleep(300);
+  check('side bars: dragging back brings the map and its size back', await page.eval(`(() => { const c = document.getElementById('map'), r = c.getBoundingClientRect(); return !document.body.classList.contains('map-gone') && r.width > 300 && Math.abs(c.width / (window.devicePixelRatio || 1) - r.width) < 2; })()`));
   await page.eval(`localStorage.clear()`);
 
   // -- 2D map / 3D cloud -----------------------------------------------------------------------

@@ -9,6 +9,7 @@
 
 name: pick_place_smoke
 title: Pick and place — one package on a bench
+section: Pick and place
 description: >
   robot_0 starts 1.9 m from a bench in its aisle, facing away from it. The box on
   the bench carries a magnet plate toward the robot. Pass = the pick controller

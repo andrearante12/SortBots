@@ -12,6 +12,7 @@
 
 name: pick_orientations
 title: Four packages, plates facing four ways
+section: Pick and place
 description: >
   Four decks down robot_0's aisle, each with a box whose plate faces north, east,
   west or south. The robot has to dock from a different side for each. Pass = all

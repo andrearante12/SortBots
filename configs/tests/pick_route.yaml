@@ -9,6 +9,7 @@
 
 name: pick_route
 title: Pick in the aisle, place across the floor
+section: Pick and place
 description: >
   robot_0 drives to the deck at the north end of its aisle, picks the box (plate
   facing south), drives out of the aisle and across the open floor and sets it down

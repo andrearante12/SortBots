@@ -150,6 +150,7 @@ ros2 topic pub --once /sim/world_cmd std_msgs/String '{data: "{\"cmd\": \"restar
 
 ```yaml
 name: crossing_yield
+section: Obstacle avoidance          # its heading in the Tests tab; none = Other
 scenario: moving_obstacles_mapped    # localizes on a saved map (see below)
 overrides: {world: aisle_crossing}   # only keys the scenario lists in overrides:
 warmup_s: 5                          # sim-s after the stack is ready, before t0

@@ -69,7 +69,8 @@ UNTIL = ("goals_done", "tasks_done", "explorer_done")
 MAX_SIM_S = 3600.0
 MAX_REPEATS = 50
 MAX_VARIANTS = 20
-TOP_KEYS = {"name", "title", "description", "scenario", "overrides", "warmup_s", "goals",
+DEFAULT_SECTION = "Other"   # the heading a test with no `section:` sits under in the Tests tab
+TOP_KEYS = {"name", "title", "section", "description", "scenario", "overrides", "warmup_s", "goals",
             "tasks", "stop", "metrics", "repeats", "pass_rate", "variants", "record"}
 # What a variant may change. Not `scenario` or `metrics`: a variant is the
 # same question asked under different conditions, and changing the scoring
@@ -411,6 +412,7 @@ def validate(raw, *, stem: str | None = None) -> dict:
             raise SpecError(f"variant {v['label']!r}: {e}") from None
 
     return {"name": name, "title": str(raw.get("title") or name),
+            "section": str(raw.get("section") or DEFAULT_SECTION),
             "description": str(raw.get("description") or "").strip(),
             "repeats": reps, "pass_rate": pass_rate, "record": list(record),
             "variants": variants}
@@ -460,6 +462,15 @@ def load(name: str, sets: list[tuple[str, object]] = ()) -> dict:
     return t
 
 
+def _section_of(path: Path) -> str:
+    """A test's section even when it doesn't validate: one that only lacks its saved map on
+    this machine still belongs under its heading, not under Other."""
+    try:
+        return str((yaml.safe_load(path.read_text()) or {}).get("section") or DEFAULT_SECTION)
+    except (OSError, yaml.YAMLError, AttributeError):
+        return DEFAULT_SECTION
+
+
 def list_tests() -> list[dict]:
     """Every configs/tests/*.yaml; invalid ones kept and explained."""
     out = []
@@ -468,7 +479,8 @@ def list_tests() -> list[dict]:
             t = load(p.stem)
             base = t["variants"][0][1]
             out.append({
-                "name": t["name"], "title": t["title"], "description": t["description"],
+                "name": t["name"], "title": t["title"], "section": t["section"],
+                "description": t["description"],
                 "status": "ready", "scenario": base["scenario"],
                 "world": base["run"].get("world"), "robots": base["robots"],
                 "variants": [label for label, _ in t["variants"]],
@@ -480,6 +492,6 @@ def list_tests() -> list[dict]:
                             for e in base["metrics"]],
             })
         except SpecError as e:
-            out.append({"name": p.stem, "title": p.stem, "description": "",
+            out.append({"name": p.stem, "title": p.stem, "section": _section_of(p), "description": "",
                         "status": "invalid", "error": str(e)})
     return out

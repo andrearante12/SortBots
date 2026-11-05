@@ -8,6 +8,7 @@
 
 name: pick_table
 title: Pick and place — box on a table in front of the robot
+section: Pick and place
 description: >
   robot_0 starts facing a table with a box on it, the magnet plate toward the robot and
   in the head camera's view from the first frame. Pass = it found the plate with the

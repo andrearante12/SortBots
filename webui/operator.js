@@ -214,6 +214,7 @@
 
   function resize() {
     const r = canvas.parentElement.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+    if (!r.width || !r.height) return; // the left bar has taken the whole window: keep the last fit
     cssW = r.width; cssH = r.height;
     canvas.width = Math.round(cssW * d); canvas.height = Math.round(cssH * d);
     ctx.setTransform(d, 0, 0, d, 0, 0);
@@ -316,19 +317,27 @@
     g.clearRect(0, 0, w, h);
     const r = robots.get(id), p = r && r.obstacles;
     if (!p || performance.now() - r.obstaclesAt > OBSTACLE_TTL_MS || !p.w || !p.h) return;
-    const k = Math.max(w / p.w, h / p.h), ox = (w - p.w * k) / 2, oy = (h - p.h * k) / 2;
     g.font = '600 10px "IBM Plex Sans", system-ui, sans-serif'; g.textBaseline = "bottom";
-    for (const o of p.obstacles || []) {
-      const [u0, v0, u1, v1] = o.uv;
-      const x = ox + u0 * k, y = oy + v0 * k, bh = (v1 - v0) * k, color = o.moving ? OBSTACLE_RED : "#f5a524";
-      g.strokeStyle = color; g.lineWidth = o.moving ? 2.5 : 1.5;
-      g.strokeRect(x, y, (u1 - u0) * k, bh);
-      const label = o.moving ? `moving · ${o.range_m.toFixed(1)} m` : `${o.range_m.toFixed(1)} m`;
-      // Inside the box's bottom edge: the top of the tile belongs to the Camera/Depth
-      // switch, and a person's box reaches it.
-      const tw = g.measureText(label).width + 6, ly = Math.min(y + bh, h);
-      g.fillStyle = color; g.fillRect(x, ly - 13, tw, 13);
-      g.fillStyle = o.moving ? "#fff" : "#15191e"; g.fillText(label, x + 3, ly - 1);
+    // Each picture showing gets the boxes: one, or two in the split view, where the
+    // depth is aligned to colour, so the same pixels apply to both.
+    for (const pic of c.el.querySelectorAll(".pic")) {
+      const pw = pic.offsetWidth, ph = pic.offsetHeight, px = pic.offsetLeft, py = pic.offsetTop;
+      if (!pw || !ph) continue;
+      const k = Math.max(pw / p.w, ph / p.h), ox = px + (pw - p.w * k) / 2, oy = py + (ph - p.h * k) / 2;
+      g.save(); g.beginPath(); g.rect(px, py, pw, ph); g.clip();
+      for (const o of p.obstacles || []) {
+        const [u0, v0, u1, v1] = o.uv;
+        const x = ox + u0 * k, y = oy + v0 * k, bh = (v1 - v0) * k, color = o.moving ? OBSTACLE_RED : "#f5a524";
+        g.strokeStyle = color; g.lineWidth = o.moving ? 2.5 : 1.5;
+        g.strokeRect(x, y, (u1 - u0) * k, bh);
+        const label = o.moving ? `moving · ${o.range_m.toFixed(1)} m` : `${o.range_m.toFixed(1)} m`;
+        // Inside the box's bottom edge: the top of the tile belongs to the Camera/Depth
+        // switch, and a person's box reaches it.
+        const tw = g.measureText(label).width + 6, ly = Math.min(y + bh, py + ph);
+        g.fillStyle = color; g.fillRect(x, ly - 13, tw, 13);
+        g.fillStyle = o.moving ? "#fff" : "#15191e"; g.fillText(label, x + 3, ly - 1);
+      }
+      g.restore();
     }
   }
 
@@ -923,25 +932,29 @@
   // Camera tile per open robot: short /snapshot polls, never MJPEG, and always
   // qos_profile=sensor_data (see app.js for the failure mode both avoid). The element
   // outlives list rebuilds (renderFleet re-slots it), so the picture doesn't blink.
-  // Camera or depth, per card; a new card starts on whichever was picked last.
+  // Camera, depth or both side by side, per card; a new card starts on whichever was
+  // picked last.
   const CAM_TOPIC = { rgb: "camera/rgb", depth: "camera/depth_color" };
-  const cams = new Map(); // id -> {el, pic, msg, mode, timer, token}
+  const CAM_LABEL = { rgb: "camera", depth: "depth" };
+  const feedsOf = (mode) => (mode === "split" ? ["rgb", "depth"] : [mode]);
+  const cams = new Map(); // id -> {el, pics: {rgb, depth}, mode, timers: {rgb, depth}, token}
   let camDefault = "rgb";
-  try { if (localStorage.getItem("sortbots.camMode") === "depth") camDefault = "depth"; } catch (e) { /* storage blocked: rgb */ }
+  try { const m = localStorage.getItem("sortbots.camMode"); if (m === "depth" || m === "split") camDefault = m; } catch (e) { /* storage blocked: rgb */ }
 
   function camFor(id) {
     let c = cams.get(id);
     if (c) return c;
     const el = document.createElement("div");
     el.className = "cam";
-    el.innerHTML = `<div class="pic"></div><canvas class="obst"></canvas><span class="msg">Connecting to camera…</span>
-      <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button></div>
+    el.innerHTML = `<div class="pics"><div class="pic" data-feed="rgb" data-label="Camera"><span class="msg"></span></div><div class="pic" data-feed="depth" data-label="Depth"><span class="msg"></span></div></div><canvas class="obst"></canvas>
+      <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button><button type="button" data-cam-mode="split" title="Camera and depth together. Widen the robot list to put them side by side">Split</button></div>
       <div class="drive" role="group" aria-label="Drive by hand" title="Drive by hand: hold an arrow. Keys W/A/S/D move, Q/E rotate, Space stops (they drive the robot in control)">
         <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
         <button type="button" data-drive="rot-left" aria-label="Rotate left">&#8634;</button><button type="button" data-drive="back" aria-label="Back">&#9660;</button><button type="button" data-drive="rot-right" aria-label="Rotate right">&#8635;</button>
       </div>`;
-    c = { el, pic: el.querySelector(".pic"), overlay: el.querySelector("canvas.obst"), msg: el.querySelector(".msg"), mode: camDefault, timer: null, token: 0 };
+    c = { el, pics: { rgb: el.querySelector('[data-feed="rgb"]'), depth: el.querySelector('[data-feed="depth"]') },
+          overlay: el.querySelector("canvas.obst"), mode: camDefault, timers: {}, token: 0 };
     cams.set(id, c);
     syncCamButtons(c);
     wireDrivePad(id, el.querySelector(".drive"));
@@ -1034,6 +1047,7 @@
   document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAllDrives(); });
   function syncCamButtons(c) {
     for (const b of c.el.querySelectorAll("[data-cam-mode]")) b.classList.toggle("on", b.dataset.camMode === c.mode);
+    c.el.dataset.view = c.mode;
   }
   function setCamMode(id, mode) {
     const c = camFor(id);
@@ -1045,28 +1059,31 @@
   }
   function startCam(id) {
     stopCam(id);
-    const c = camFor(id), token = c.token, label = c.mode === "depth" ? "depth" : "camera";
-    const tick = () => {
-      if (token !== c.token) return;
-      const probe = new Image();
-      probe.onload = () => {
+    const c = camFor(id), token = c.token;
+    for (const feed of feedsOf(c.mode)) {
+      const pic = c.pics[feed], msg = pic.querySelector(".msg"), label = CAM_LABEL[feed];
+      const tick = () => {
         if (token !== c.token) return;
-        c.pic.style.backgroundImage = `url(${probe.src})`;
-        c.msg.textContent = "";
-        c.timer = setTimeout(tick, 400);
+        const probe = new Image();
+        probe.onload = () => {
+          if (token !== c.token) return;
+          pic.style.backgroundImage = `url(${probe.src})`;
+          msg.textContent = "";
+          c.timers[feed] = setTimeout(tick, 400);
+        };
+        probe.onerror = () => {
+          if (token !== c.token) return;
+          pic.style.backgroundImage = "";
+          msg.textContent = `No ${label} feed`;
+          c.timers[feed] = setTimeout(tick, 3000);
+        };
+        probe.src = `${VIDEO_BASE}/snapshot?topic=/${id}/${CAM_TOPIC[feed]}&qos_profile=sensor_data&_=${Date.now()}`;
       };
-      probe.onerror = () => {
-        if (token !== c.token) return;
-        c.pic.style.backgroundImage = "";
-        c.msg.textContent = `No ${label} feed`;
-        c.timer = setTimeout(tick, 3000);
-      };
-      probe.src = `${VIDEO_BASE}/snapshot?topic=/${id}/${CAM_TOPIC[c.mode]}&qos_profile=sensor_data&_=${Date.now()}`;
-    };
-    c.pic.style.backgroundImage = ""; c.msg.textContent = `Connecting to ${label}…`;
-    tick();
+      pic.style.backgroundImage = ""; msg.textContent = `Connecting to ${label}…`;
+      tick();
+    }
   }
-  function stopCam(id) { const c = cams.get(id); if (c) { c.token++; clearTimeout(c.timer); } }
+  function stopCam(id) { const c = cams.get(id); if (c) { c.token++; Object.values(c.timers).forEach(clearTimeout); } }
 
   function refreshSelection() {
     lastFleetSig = "";
@@ -2047,11 +2064,23 @@
   // The grid's outer columns are --left-w / --right-w on <body>. Each handle drags its
   // bar's inner edge; widths persist per browser, double-click resets. The stage
   // canvases size from their parent, so a resize event re-fits the map and overlay.
-  const SIDES = { left: { min: 200, max: 520, dflt: 260 }, right: { min: 240, max: 560, dflt: 296 } };
+  // The left bar has no ceiling but the window, for watching the cameras big: it eats
+  // the map, then pushes the task list off the edge, and snaps to full width near the end.
+  const SIDES = { left: { min: 200, max: Infinity, dflt: 260 }, right: { min: 240, max: 560, dflt: 296 } };
+  const LEFT_SNAP_PX = 24;
+  function syncMapGone() {
+    const px = (side) => parseFloat(document.body.style.getPropertyValue(`--${side}-w`)) || SIDES[side].dflt;
+    // The phone layouts stack the panes and have no handles: there the widths mean nothing.
+    const sideBySide = getComputedStyle($("#rz-left")).display !== "none";
+    document.body.classList.toggle("map-gone", sideBySide && px("left") + px("right") >= innerWidth);
+    document.body.classList.toggle("left-full", sideBySide && px("left") >= innerWidth);
+  }
   function setSide(side, w, save = true) {
     const { min, max, dflt } = SIDES[side];
-    const v = w == null ? dflt : Math.round(Math.min(max, Math.max(min, w)));
+    let v = w == null ? dflt : Math.round(Math.min(max, innerWidth, Math.max(min, w)));
+    if (side === "left" && w != null && v >= innerWidth - LEFT_SNAP_PX) v = innerWidth;
     document.body.style.setProperty(`--${side}-w`, `${v}px`);
+    syncMapGone();
     if (save) { try { if (w == null) localStorage.removeItem(`sortbots.${side}W`); else localStorage.setItem(`sortbots.${side}W`, String(v)); } catch (e) { /* this tab only */ } }
     dispatchEvent(new Event("resize"));
   }
@@ -2070,6 +2099,7 @@
     h.addEventListener("pointerup", end); h.addEventListener("pointercancel", end);
     h.addEventListener("dblclick", () => setSide(side, null));
   }
+  addEventListener("resize", syncMapGone);
 
   let toastTimer = null;
   function toast(msg) {

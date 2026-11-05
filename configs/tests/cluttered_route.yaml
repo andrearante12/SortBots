@@ -2,6 +2,7 @@
 
 name: cluttered_route
 title: Two-leg route through clutter and two walkers
+section: Obstacle avoidance
 description: >
   robot_0 leaves its aisle for the far west of the open floor, then cuts back
   south-east past a crate, a barrel row and a pallet stack, crossing both
