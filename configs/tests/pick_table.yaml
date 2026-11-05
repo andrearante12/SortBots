@@ -3,9 +3,8 @@
 #
 #   scripts/simtest.py run pick_table
 #
-# The one to WATCH: it opens Isaac's window (headless: false), which pick_place_smoke
-# leaves closed to keep the rendering cost down. It needs a display on the sim's machine;
-# on one without, run it with --set overrides.headless=true.
+# The one to WATCH: start it from the Tests tab and follow it in the operator view's Sim
+# view, over Tailscale if you like. Isaac runs headless, so nothing needs a local display.
 
 name: pick_table
 title: Pick and place — box on a table in front of the robot
@@ -13,11 +12,11 @@ description: >
   robot_0 starts facing a table with a box on it, the magnet plate toward the robot and
   in the head camera's view from the first frame. Pass = it found the plate with the
   camera, drove 0.47 m up to the table, picked the box with the magnet and set it down
-  15 cm along the table, without dropping it. Scored from ground truth. Isaac's window
-  opens for this one, and stays up 10 s after the box is down.
+  15 cm along the table, without dropping it. Scored from ground truth. The sim stays
+  up 10 s after the box is down.
 
 scenario: pick_bench
-overrides: {world: pick_table, headless: false}
+overrides: {world: pick_table, headless: true}
 
 warmup_s: 2
 
