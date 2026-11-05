@@ -100,6 +100,7 @@ def main(argv=None):
             self.pub = self.create_publisher(String, f"/{rid}/packages", 10)
             self.boxes_pub = self.create_publisher(String, f"/{rid}/boxes", 10)
             self.manipulating = False
+            self.marker_only = False    # the pick under way goes by a marker id
             self.create_subscription(String, f"/{rid}/pick_status", self.on_status, 10)
             self.create_subscription(CameraInfo, f"/{rid}/camera/camera_info",
                                      self.on_info, qos_profile_sensor_data)
@@ -115,7 +116,9 @@ def main(argv=None):
 
         def on_status(self, m):
             try:
-                self.manipulating = json.loads(m.data).get("mode") == "manipulation"
+                status = json.loads(m.data)
+                self.manipulating = status.get("mode") == "manipulation"
+                self.marker_only = status.get("marker") is not None
             except ValueError:
                 pass
 
@@ -171,8 +174,11 @@ def main(argv=None):
                     "stamp": round(max(t_rgb, t_d), 3), "frame": "map",
                     "w": int(rgb.shape[1]), "h": int(rgb.shape[0]),
                     "boxes": box_geometry.find_boxes(depth, self.K, T, cfg.get("boxes"))})))
-            seen = pv.prefer_markers(pv.detect_markers(rgb, depth, self.K, cfg),
-                                     pv.detect_plates(rgb, depth, self.K, cfg))
+            # A pick that goes by a marker has no use for the colour guess, and on a rack
+            # of printed cartons every letter and icon looks like a plate to it.
+            markers = pv.detect_markers(rgb, depth, self.K, cfg)
+            seen = markers if self.marker_only else pv.prefer_markers(
+                markers, pv.detect_plates(rgb, depth, self.K, cfg))
             plates = [pv.to_map(p, T) for p in seen]
             out = self.tracker.update(plates, max(t_rgb, t_d))
             self.pub.publish(String(data=json.dumps({

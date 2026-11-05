@@ -310,8 +310,11 @@
   const PLATE_INK = "#22c55e", PLATE_OTHER_INK = "#f59e0b", BOX_INK = "#38bdf8";
   const PLATES_TTL_MS = 1500, PLATE_SEEN_S = 0.35, PLATE_TARGET_M = 0.2;
   const packageWorld = () => !!(worldLayout && worldLayout.packages && worldLayout.packages.length);
+  // In a world whose packages carry markers, a colour guess is noise: printed cartons
+  // are full of dark shapes.
+  const markerWorld = () => packageWorld() && worldLayout.packages.some((k) => k.marker != null);
   const platesSeen = (r) => (r.plates && performance.now() - r.platesAt < PLATES_TTL_MS
-    ? (r.plates.plates || []).filter((p) => (p.age_s || 0) <= PLATE_SEEN_S) : []);
+    ? (r.plates.plates || []).filter((p) => (p.age_s || 0) <= PLATE_SEEN_S && (p.marker != null || !markerWorld())) : []);
   function plateTarget(r, plates) {
     const t = r.pick && r.pick.target;
     if (!t) return null;

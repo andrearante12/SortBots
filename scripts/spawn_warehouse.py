@@ -1291,7 +1291,7 @@ class _WorldRuntime:
                         "mode": a["path"]["mode"]} for a in self.world["actors"]],
             # Static facts only: where a package IS lives in /sim/ground_truth.
             "packages": [{"id": p["id"], "label": p["label"], "size": list(p["size"]),
-                          "color": list(p["color"]), "magnet_face": p["magnet_face"],
+                          "color": list(p["color"]), "magnet_face": p["magnet_face"], "marker": p["marker"],
                           "z": p["z"]} for p in self.world["packages"]],
             "marks": [{"id": m["id"], "label": m["label"], "size": list(m["size"]),
                        "pose": list(m["pose"]), "color": list(m["color"])}

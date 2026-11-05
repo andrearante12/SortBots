@@ -279,6 +279,7 @@ def main(argv=None) -> int:
                 # The robot's state as far as perception goes: while a pick or place runs it
                 # is looking for packages, not driving among obstacles.
                 "mode": "manipulation" if self.planner.busy else "nav",
+                "marker": req.get("marker") if self.planner.busy else None,
                 "arm_err_rad": self.planner.arm_err, "dock_shift_m": self.planner.dock_shift,
                 "target": [round(v, 3) for v in aim["c"]] if aim else None,
                 "perception": a.perception, "cmd": req.get("cmd"), "package": req.get("package"),

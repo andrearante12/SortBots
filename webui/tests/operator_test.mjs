@@ -312,7 +312,7 @@ async function main() {
     check(`${vp.label}: split shows the camera and the depth`, panes.length === 2 && panes.every((p) => p.w > 0), JSON.stringify(panes));
     check(`${vp.label}: split streams both feeds`, /camera/.test(panes[0].msg) && /depth/.test(panes[1].msg), JSON.stringify(panes));
     check(`${vp.label}: split stacks them vertically`, await page.eval(`(() => { const p = [...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')]; return p[0].offsetLeft === p[1].offsetLeft && p[0].offsetTop < p[1].offsetTop; })()`));
-    await emit('/sim/world', { data: JSON.stringify({ world: 't', title: 't', props: [], actors: [], marks: [], packages: [{ id: 'pkg_0', label: 'b', size: [0.1, 0.1, 0.1], color: [0.7, 0.6, 0.4], magnet_face: '+x', z: 0 }] }) });
+    await emit('/sim/world', { data: JSON.stringify({ world: 't', title: 't', props: [], actors: [], marks: [], packages: [{ id: 'pkg_0', label: 'b', size: [0.1, 0.1, 0.1], color: [0.7, 0.6, 0.4], magnet_face: '+x', z: 0, marker: 0 }] }) });
     await emit(`/${r0}/pick_status`, { data: JSON.stringify({ phase: 'dock', target: [-6.5, 11.49, 1.0] }) });
     await emit(`/${r0}/packages`, { data: JSON.stringify({ w: 848, h: 480, plates: [
       { x: -6.501, y: 11.487, z: 1.0, nx: -1, ny: 0, nz: 0, conf: 0.97, px: [380, 300, 90, 60], uv: [425, 330], range_m: 0.742, age_s: 0, marker: 0 },
@@ -323,7 +323,7 @@ async function main() {
     const percSel = `#fleet .robot[data-id="${r0}"] .perc`;
     check(`${vp.label}: the panel names the manipulation state and the box geometry found`, /Manipulation/.test(await $text(`${percSel} [data-p="mode"]`)) && /-6\.430/.test(await $text(`${percSel} [data-p="box"]`)), await $text(`${percSel} dl`));
     check(`${vp.label}: the detection panel shows in a package world`, await visible(percSel));
-    check(`${vp.label}: it locks the plate the pick is aiming at, not the other candidate`, /On target/.test(await $text(`${percSel} .ph`)) && /2 seen/.test(await $text(`${percSel} .ph`)), await $text(`${percSel} .ph`));
+    check(`${vp.label}: it locks the marker the pick is aiming at, and drops the colour guess`, /On target/.test(await $text(`${percSel} .ph`)) && /1 seen/.test(await $text(`${percSel} .ph`)), await $text(`${percSel} .ph`));
     check(`${vp.label}: it names the ArUco marker`, /ArUco 0/.test(await $text(`${percSel} [data-p="marker"]`)), await $text(`${percSel} [data-p="marker"]`));
     check(`${vp.label}: it spells out pixel, depth and map`, /425, 330/.test(await $text(`${percSel} [data-p="img"]`)) && /0\.742 m/.test(await $text(`${percSel} [data-p="depth"]`)) && /-6\.501/.test(await $text(`${percSel} [data-p="map"]`)), await $text(`${percSel} dl`));
     check(`${vp.label}: the plate is drawn on the camera tile in green`, await page.eval(`(() => { const c = window.__operator.cams.get(${JSON.stringify(r0)}).overlay, d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; for (let i = 0; i < d.length; i += 4) if (d[i + 1] > 150 && d[i] < 90 && d[i + 3] > 200) return true; return false; })()`));
