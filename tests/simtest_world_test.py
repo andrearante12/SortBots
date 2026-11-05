@@ -194,6 +194,15 @@ def test_mark_validation_rejects(mark, err):
         world.validate(_marked(**mark))
 
 
+def test_a_table_is_a_box_prop_in_looks_only():
+    raw = {"name": "t", "props": [{"id": "desk", "shape": "box", "size": [1, 1, 0.8], "pose": [0, 0, 0], "style": "table"}]}
+    (prop,) = world.validate(raw)["props"]
+    assert prop["style"] == "table" and world.top_z(prop) == 0.8
+    raw["props"][0]["style"] = "chair"
+    with pytest.raises(world.WorldError, match="style"):
+        world.validate(raw)
+
+
 def test_package_defaults_and_support():
     w = world.validate(_deck_world())
     pkg = w["packages"][0]

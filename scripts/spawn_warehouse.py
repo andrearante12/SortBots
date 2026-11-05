@@ -1074,6 +1074,27 @@ def _author_world_shape(stage, path: str, item: dict, *, collider: bool):
                             (0.0, 0.0, item["height"] / 2.0), collider=collider)
 
 
+TABLE_TOP_M, TABLE_LEG_M, TABLE_LEG_INSET_M = 0.04, 0.05, 0.03
+TABLE_LEG_RGB = (0.16, 0.17, 0.19)
+
+
+def _author_table(stage, path: str, prop: dict, materials: dict) -> None:
+    """A table's looks for a box prop: its top in the prop's colour on four legs, filling the
+    same volume. Visual only, so the pick's geometry is the box's, as it always was."""
+    from build_warehouse import _author_box, _bind
+
+    sx, sy, sz = prop["size"]
+    top = _author_box(stage, f"{path}/table_top", (sx, sy, TABLE_TOP_M), (0.0, 0.0, sz - TABLE_TOP_M / 2),
+                      collider=False)
+    _bind(top, _world_color_material(stage, materials, prop["color"]))
+    legs = _world_color_material(stage, materials, TABLE_LEG_RGB)
+    h = sz - TABLE_TOP_M
+    dx, dy = sx / 2 - TABLE_LEG_INSET_M - TABLE_LEG_M / 2, sy / 2 - TABLE_LEG_INSET_M - TABLE_LEG_M / 2
+    for i, (ax, ay) in enumerate(((1, 1), (1, -1), (-1, 1), (-1, -1))):
+        _bind(_author_box(stage, f"{path}/table_leg{i}", (TABLE_LEG_M, TABLE_LEG_M, h),
+                          (ax * dx, ay * dy, h / 2), collider=False), legs)
+
+
 def _author_quads(stage, path: str, quads: list):
     """One mesh of flat four-cornered faces, seen from both sides, nothing to collide with."""
     from pxr import UsdGeom
@@ -1150,6 +1171,9 @@ def _spawn_world(stage, w: dict) -> tuple[dict, dict]:
         xf.AddRotateXYZOp().Set(Gf.Vec3f(0.0, 0.0, math.degrees(yaw)))
         geom = _author_world_shape(stage, path, prop, collider=prop["collider"])
         _bind(geom, _world_color_material(stage, materials, prop["color"]))
+        if prop.get("style") == "table":
+            UsdGeom.Imageable(geom).MakeInvisible()     # the box stays as the collider
+            _author_table(stage, path, prop, materials)
         emit(f"  world prop {prop['id']}: {prop['shape']} at ({x}, {y})")
 
     actors = {}

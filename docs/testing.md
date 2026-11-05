@@ -122,7 +122,8 @@ and it can't take another plate for its own.
 
 ### Marks, head and view
 
-Three more world keys, all optional. `marks:` are flat painted rectangles
+A box prop can say `style: table`: it looks like a top on four legs, in the prop's colour, and
+collides as the same solid box. Three more world keys, all optional. `marks:` are flat painted rectangles
 (`{id, size: [x, y], pose: [x, y, yaw], z, color, label}`), on a surface, with nothing to
 collide with: they show where a place test wants a package. `head: {pan, tilt}` is where
 the head starts, in radians, tilt > 0 looking down; it is per world because a tilted camera

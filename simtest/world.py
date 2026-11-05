@@ -192,7 +192,7 @@ def _validate_item(raw, what, *, actor: bool) -> dict:
     if not isinstance(raw, dict):
         raise WorldError(f"{what}: expected a mapping")
     allowed = {"id", "shape", "size", "radius", "height", "color", "label"}
-    allowed |= {"path"} if actor else {"pose", "ref", "scale", "footprint", "collider"}
+    allowed |= {"path"} if actor else {"pose", "ref", "scale", "footprint", "collider", "style"}
     unknown = set(raw) - allowed
     if unknown:
         raise WorldError(f"{what}: unknown key(s) {sorted(unknown)}")
@@ -211,6 +211,12 @@ def _validate_item(raw, what, *, actor: bool) -> dict:
         if not isinstance(collider, bool):
             raise WorldError(f"{what}.collider: expected a boolean")
         out["collider"] = collider
+        # What a box prop looks like. `table`: a top on four legs, the same size and collider
+        # as the box, so nothing that measures it changes.
+        style = raw.get("style", "box")
+        if style not in ("box", "table") or (style == "table" and out["shape"] != "box"):
+            raise WorldError(f"{what}.style: expected box, or table on a box prop; got {style!r}")
+        out["style"] = style
     return out
 
 
