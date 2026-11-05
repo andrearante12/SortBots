@@ -183,7 +183,7 @@
   .headctl label { display: grid; grid-template-columns: 30px minmax(0, 1fr) 118px; gap: 8px; align-items: center; }
   .headctl input { width: 100%; margin: 0; accent-color: var(--info); }
   .headctl output { color: var(--ink); text-align: right; white-space: nowrap; }
-  .more .cam[data-view="split"] .pic::before { content: attr(data-label); position: absolute; top: 6px; left: 6px; padding: 1px 6px; border-radius: 4px;
+  .more .cam[data-view="split"] .pic::before { content: attr(data-label); position: absolute; right: 6px; bottom: 6px; padding: 1px 6px; border-radius: 4px;
                                                background: rgba(10,12,16,.6); color: #e6ebf0; font-size: .7rem; }
   .more .cam canvas.obst { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .more .cam .msg { position: absolute; inset: 0; display: grid; place-items: center; color: #8b95a0; font-size: .8rem; pointer-events: none; }
@@ -200,6 +200,11 @@
   .cam .drive button.held { background: rgba(255,255,255,.9); color: #15191e; }
   .cam .drive [data-drive="stop"] { color: #ff8a80; }
   @media (pointer: coarse) { .cam .drive { grid-template-columns: repeat(3, 36px); } .cam .drive button { width: 36px; height: 32px; font-size: .9rem; } }
+  .more .cam canvas.feat { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .featbtn { position: absolute; top: 6px; left: 6px; background: rgba(10,12,16,.6); border: 1px solid transparent; color: #c3cad2; font-size: .72rem; padding: 3px 9px; border-radius: 6px; }
+  .featbtn.on { background: rgba(61,220,132,.9); color: #15191e; font-weight: 600; }
+  .featstat { position: absolute; top: 32px; left: 6px; font-size: .68rem; color: #e6eaee; background: rgba(10,12,16,.6); padding: 1px 6px; border-radius: 4px; pointer-events: none; }
+  .featstat:empty { display: none; }
   .camsel { position: absolute; top: 6px; right: 6px; display: flex; background: rgba(10,12,16,.6); border-radius: 6px; padding: 2px; }
   .camsel button { background: none; border: none; color: #c3cad2; font-size: .72rem; padding: 2px 8px; border-radius: 4px; }
   .camsel button.on { background: rgba(255,255,255,.9); color: #15191e; font-weight: 600; }
