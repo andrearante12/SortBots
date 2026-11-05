@@ -304,9 +304,10 @@
   }
 
   // Camera tile, in a world with packages: what the plate detector found, which is what the
-  // pick aims at. The obstacle boxes would only frame the table. The target is the plate the
-  // pick controller has locked (/pick_status); anything else it saw is a dashed candidate.
-  const PLATE_INK = "#22c55e", PLATE_OTHER_INK = "rgba(226, 232, 240, .75)";
+  // pick aims at. The obstacle boxes would only frame the table. Green is the plate the pick
+  // controller has locked (/pick_status); amber is everything else the detector reports. Both
+  // solid and labelled: a faint dashed box vanished against cardboard (2026-11-05).
+  const PLATE_INK = "#22c55e", PLATE_OTHER_INK = "#f59e0b";
   const PLATES_TTL_MS = 1500, PLATE_SEEN_S = 0.35, PLATE_TARGET_M = 0.2;
   const packageWorld = () => !!(worldLayout && worldLayout.packages && worldLayout.packages.length);
   const platesSeen = (r) => (r.plates && performance.now() - r.platesAt < PLATES_TTL_MS
@@ -330,14 +331,13 @@
       g.save(); g.beginPath(); g.rect(px, py, pw, ph); g.clip();
       for (const p of plates) {
         const [u, v, bw, bh] = p.px, x = ox + u * k, y = oy + v * k, on = p === target;
-        g.strokeStyle = on ? PLATE_INK : PLATE_OTHER_INK; g.lineWidth = on ? 3 : 1;
-        g.setLineDash(on ? [] : [4, 3]); g.strokeRect(x, y, bw * k, bh * k); g.setLineDash([]);
-        if (!on) continue;
+        g.strokeStyle = on ? PLATE_INK : PLATE_OTHER_INK; g.lineWidth = on ? 3 : 2;
+        g.strokeRect(x, y, bw * k, bh * k);
         const cx = ox + p.uv[0] * k, cy = oy + p.uv[1] * k;
         g.beginPath(); g.moveTo(cx - 7, cy); g.lineTo(cx + 7, cy); g.moveTo(cx, cy - 7); g.lineTo(cx, cy + 7); g.stroke();
-        const label = `magnet plate · ${p.range_m.toFixed(2)} m`, tw = g.measureText(label).width + 8, ly = Math.max(y, py + 16);
-        g.fillStyle = PLATE_INK; g.fillRect(x, ly - 15, tw, 15);
-        g.fillStyle = "#06240f"; g.fillText(label, x + 4, ly - 1);
+        const label = `${on ? "target plate" : "plate?"} · ${p.range_m.toFixed(2)} m`, tw = g.measureText(label).width + 8, ly = Math.max(y, py + 16);
+        g.fillStyle = on ? PLATE_INK : PLATE_OTHER_INK; g.fillRect(x, ly - 15, tw, 15);
+        g.fillStyle = "#14130a"; g.fillText(label, x + 4, ly - 1);
       }
       g.restore();
     }
@@ -346,7 +346,8 @@
   // it is, and where those two put it on the map.
   function syncPerception(c, r, plates, target) {
     const set = (key, text) => { const el = c.perc.querySelector(`[data-p="${key}"]`); if (el.textContent !== text) el.textContent = text; };
-    const shown = target || (plates.length === 1 ? plates[0] : null), aim = r.pick && r.pick.target;
+    const shown = target || plates.reduce((a, p) => (!a || p.conf * p.px[2] * p.px[3] > a.conf * a.px[2] * a.px[3] ? p : a), null);
+    const aim = r.pick && r.pick.target;
     c.perc.classList.toggle("locked", !!target);
     set("state", target ? "On target" : aim ? "Aiming at its last fix" : plates.length ? "Candidates" : "Nothing in view");
     set("n", String(plates.length));
