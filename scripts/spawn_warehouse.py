@@ -626,6 +626,45 @@ def _base_to_prim_transform(stage, base_prim_path: str, child_prim_path: str):
     )
 
 
+EFFECTOR_BODY_RGB = (0.72, 0.74, 0.77)     # printed PETG
+EFFECTOR_MAGNET_RGB = (0.16, 0.17, 0.19)   # the electromagnet's steel
+
+
+def _fit_magnet_effector(stage, robot_path: str) -> None:
+    """Swap the first arm's gripper for the magnet effector, as on the real robot.
+
+    The links stay: `Fixed_Jaw` is what simtest/magnet.py measures the TCP from, and the
+    importer's joints and the arm's dof order would all move if it went. What goes is what
+    the gripper LOOKS like and what it collides with, and the effector's own mesh (from
+    hardware/magnet_effector, simtest/stl.py) is authored on the link in its place. Visual
+    only, like the packages. The second arm has no magnet, so it keeps its gripper."""
+    from pxr import Sdf, UsdGeom, Vt, Gf
+
+    from build_warehouse import _bind, _make_color_material
+    from simtest import stl
+
+    for link in ("Fixed_Jaw", "Moving_Jaw"):
+        prim = stage.GetPrimAtPath(f"{robot_path}/{link}")
+        children = [c.GetName() for c in prim.GetChildren()]
+        emit(f"  gripper {link}: children {children}")
+        for child in prim.GetChildren():
+            if child.GetName() == "visuals":
+                UsdGeom.Imageable(child).MakeInvisible()
+            elif child.GetName() == "collisions":
+                child.SetActive(False)
+    for name, path, rgb in (("body", stl.BODY_STL, EFFECTOR_BODY_RGB),
+                            ("magnet", stl.MAGNET_STL, EFFECTOR_MAGNET_RGB)):
+        tri = stl.to_link_frame(stl.read_stl(path))
+        mesh = UsdGeom.Mesh.Define(stage, f"{robot_path}/{ARM_TCP_LINK}/magnet_effector_{name}")
+        mesh.CreatePointsAttr(Vt.Vec3fArray.FromNumpy(tri.reshape(-1, 3).astype("float32")))
+        mesh.CreateFaceVertexCountsAttr([3] * len(tri))
+        mesh.CreateFaceVertexIndicesAttr(list(range(3 * len(tri))))
+        mesh.CreateSubdivisionSchemeAttr("none")
+        mesh.CreateDoubleSidedAttr(True)
+        _bind(mesh.GetPrim(), _make_color_material(stage, f"{robot_path}/EffectorLooks/{name}", rgb))
+    emit(f"  magnet effector mesh on {robot_path}/{ARM_TCP_LINK}")
+
+
 class _HeadTf:
     """Keeps robot_0's base_link -> camera_optical true while the head moves.
 
@@ -1562,6 +1601,8 @@ def main() -> int:
         )
         emit(f"  {name} base->optical t={base_to_camera[0]} q={base_to_camera[1]}")
         CAMERA_ZERO[name] = base_to_camera
+        if name == "robot_0":
+            _fit_magnet_effector(stage, f"/World/{name}")
         build_robot_graphs(
             robot_prim_path=f"/World/{name}",
             chassis_subpath="base_link",
