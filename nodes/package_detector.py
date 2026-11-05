@@ -134,13 +134,15 @@ def main(argv=None):
                               m.header.frame_id)
 
         def map_from(self, frame):
-            """map <- camera, as fresh as it can be had.
+            """map <- camera, as fresh as it can be had, in two halves so the fast one is
+            not held back to the age of SLAM's map -> odom.
 
-            Asking for map <- camera in one lookup gets the latest time the WHOLE chain
-            covers, which is as old as SLAM's slow map -> odom: moving at 0.3 m/s that put
-            the plate 8 cm behind where it was (2026-11-05). So the halves are taken apart.
-            The fast one is NOT looked up at the image's stamp: that made it worse, 15 cm,
-            the same direction, so the stamp itself runs behind the picture."""
+            OPEN (2026-11-05): a plate seen while the base moves at 0.3 m/s still reads
+            8-15 cm towards the robot, whichever way this is looked up (whole chain, odom
+            at the image's stamp, latest odom), and reads to the millimetre within ~1 s of
+            stopping. The cause isn't found; TF messages queueing behind images in this
+            single-threaded node would fit. So nothing may trust a fix taken on the move:
+            the pick controller re-measures at the dock, stopped (`confirm`)."""
             def matrix(tr):
                 r, t = tr.transform.rotation, tr.transform.translation
                 return quat_matrix(r.x, r.y, r.z, r.w, (t.x, t.y, t.z))

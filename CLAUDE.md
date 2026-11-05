@@ -48,7 +48,7 @@ This is **not a colcon workspace** — there is no `src/`, no `package.xml`, no
 | `configs/` | tuning YAML, `scenarios/` presets |
 | `simtest/` | scored-test layer: `configs/worlds/` (props + scripted movers + graspable packages), `configs/tests/` (goals + metrics), probe, versioned metrics — `docs/testing.md`. `simtest/magnet.py` is the magnet's capture rule, shared by Isaac, the pick controller and the tests |
 | `hardware/` | the real magnet end effector's CAD (`magnet_effector/`, CadQuery in its own `hardware/.venv`, never the sim/ROS/lerobot envs); `params.py` is the source of truth for the TCP offset `simtest/magnet.py` uses |
-| pick and place | `nodes/{package_detector,package_vision,magnet_pick,pick_planner,arm_kin}.py`: camera → plate pose → dock → IK, numpy only (no torch in the stack). The `pick_*` tests, `--perception oracle`, the envelope numbers and what is not yet verified live: `docs/manipulation.md` |
+| pick and place | `nodes/{package_detector,package_vision,box_geometry,magnet_pick,pick_planner,arm_kin}.py`: camera → plate pose → dock → IK, numpy only (no torch in the stack). The `pick_*` tests, `--perception oracle`, the envelope numbers and what is not yet verified live: `docs/manipulation.md` |
 | `maps/` | saved map library — named, committed snapshots of explored maps |
 | `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `docs/splat.md`) |
 | `commsim/` | fleet comms simulation (mesh, Zenoh, task auction), system python3 only; `core/protocol.py` is the allocator `nodes/fleet_tasks.py` runs, `viz/demo.py` the model behind the operator's Comms overlay (`commsim/README.md`) |
