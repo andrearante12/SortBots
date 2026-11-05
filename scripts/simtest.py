@@ -534,6 +534,11 @@ def main(argv=None) -> int:
     rp.add_argument("dirs", nargs="+")
     rp.set_defaults(fn=cmd_report)
     a = ap.parse_args(argv)
+    # The dashboard's Stop test is a SIGINT, but a console started by `sim_ctl.sh console
+    # start` is a background job: bash leaves SIGINT ignored for it, this process inherits
+    # that, and Python then installs no handler. Stop did nothing until the probe was up
+    # (rclpy sets its own), and a run whose sim had died sat in startup (2026-11-05).
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     # SIGTERM (dashboard cancel fallback) behaves like Ctrl-C: stop the sim cleanly.
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     return a.fn(a)
