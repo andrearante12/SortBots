@@ -355,6 +355,7 @@ args = parse_args()
 # Validate --world BEFORE SimulationApp: a typo'd name or a bad layout should
 # cost a second, not Isaac's 60 s startup plus an asset stream.
 WORLD = None
+CAMERA_ZERO = {}    # robot -> base_link -> camera_optical as measured with the head at 0
 if args.world:
     sys.path.insert(0, str(REPO_ROOT))
     from simtest import world as world_lib  # noqa: E402
@@ -625,6 +626,32 @@ def _base_to_prim_transform(stage, base_prim_path: str, child_prim_path: str):
     )
 
 
+class _HeadTf:
+    """Keeps robot_0's base_link -> camera_optical true while the head moves.
+
+    The extrinsics graph republishes whatever its Tf0 node holds every tick, so this only
+    has to rewrite those two inputs. Without it the camera's TF stays at the zero pose
+    however far the head has tilted, and RTAB-Map, the obstacle clouds and the plate
+    detector all place their points wrongly. simtest/head.py has the geometry."""
+
+    INPUTS = "/World/robot_0/ExtrinsicsTfGraph/Tf0.inputs:"
+
+    def __init__(self, zero):
+        from simtest.head import HeadKin
+
+        self.kin, self.zero, self.last = HeadKin(), zero, (0.0, 0.0)
+
+    def update(self, pan: float, tilt: float) -> None:
+        if max(abs(pan - self.last[0]), abs(tilt - self.last[1])) < 1e-3:
+            return
+        import omni.graph.core as og
+
+        translation, rotation = self.kin.extrinsic(pan, tilt, self.zero)
+        og.Controller.set(og.Controller.attribute(f"{self.INPUTS}translation"), list(translation))
+        og.Controller.set(og.Controller.attribute(f"{self.INPUTS}rotation"), list(rotation))
+        self.last = (pan, tilt)
+
+
 def _orient_camera_to_ros(cam) -> None:
     """Apply a local rotation so the camera's USD axes align with ROS
     optical-frame convention (Z forward, X right, Y down).
@@ -689,7 +716,7 @@ def _look_at(eye, target):
     return Gf.Matrix4d().SetLookAt(Gf.Vec3d(*eye), Gf.Vec3d(*target), Gf.Vec3d(0, 0, 1)).GetInverse()
 
 
-def _spawn_sim_view(scene: str, build_graph):
+def _spawn_sim_view(scene: str, build_graph, view: dict | None = None):
     """The operator view's Sim camera: a look-at camera from configs/sim_view.yaml,
     and its (disabled) RGB graph. Returns {attr: the graph's `enabled` attribute path,
     path: the camera prim, eye, target: its default pose}, or None when the scene has
@@ -703,6 +730,7 @@ def _spawn_sim_view(scene: str, build_graph):
     if not sc:
         emit(f"  sim view: no camera for scene {scene!r} in {SIM_VIEW_CONFIG.name}")
         return None
+    sc = {**sc, **(view or {})}     # a world can aim it at what it is about
     stage = omni.usd.get_context().get_stage()
     path = "/World/sim_view_cam"
     cam = UsdGeom.Camera.Define(stage, path)
@@ -1144,6 +1172,7 @@ class _WorldRuntime:
         self.last_sim = None
         self.pending: list[str] = []
         self.magnet_rt = None   # scripts/_magnet_runtime.MagnetRuntime, set by main() when there are packages
+        self.head_indices = None   # robot_0's [pan, tilt] dof indices, set by main()
 
         self.node = Node("sim_world")
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -1377,6 +1406,11 @@ class _WorldRuntime:
             out["robots"][name] = {"x": round(sx + float(q[0]), 4),
                                    "y": round(sy + float(q[1]), 4),
                                    "yaw": round(yaw, 4)}
+            if name == "robot_0" and self.head_indices is not None:
+                # Where the head IS, for the operator view's readout; the only robot with
+                # a head_cmd subscriber.
+                pan_i, tilt_i = self.head_indices
+                out["head"] = {name: {"pan": round(float(q[pan_i]), 4), "tilt": round(float(q[tilt_i]), 4)}}
         if self.world:
             from simtest import world as wl
 
@@ -1527,6 +1561,7 @@ def main() -> int:
             stage, f"/World/{name}/base_link", optical_path
         )
         emit(f"  {name} base->optical t={base_to_camera[0]} q={base_to_camera[1]}")
+        CAMERA_ZERO[name] = base_to_camera
         build_robot_graphs(
             robot_prim_path=f"/World/{name}",
             chassis_subpath="base_link",
@@ -1558,7 +1593,7 @@ def main() -> int:
     sim_view = None
     if args.sim_view:
         try:
-            sim_view = _spawn_sim_view(args.scene, build_view_camera_graph)
+            sim_view = _spawn_sim_view(args.scene, build_view_camera_graph, WORLD and WORLD["view"])
         except Exception as exc:  # cosmetic: never fail a run over it
             emit(f"  sim view camera skipped: {exc}")
 
@@ -1569,6 +1604,9 @@ def main() -> int:
     if "robot_0" in robots:
         extra_ros_node, pick_cmd_state, head_cmd_state = _start_extra_ros_subscribers("robot_0")
         emit("  pick_cmd/head_cmd rclpy subscriber started")
+        if WORLD and WORLD["head"]:
+            head_cmd_state.update(WORLD["head"])
+            emit(f"  head starts at {WORLD['head']} (the world's head:)")
 
         # The magnet's link has never been confirmed against a live session (nor was the
         # gripper tip it replaces). The TCP is computed from the joint positions, not read
@@ -1644,6 +1682,9 @@ def main() -> int:
         head_joint_indices = _dof_indices(dof_names, HEAD_JOINT_NAMES)
         emit(f"  arm_joint_indices={arm_joint_indices} head_joint_indices={head_joint_indices}")
 
+    world_rt.head_indices = head_joint_indices
+    head_tf = _HeadTf(CAMERA_ZERO["robot_0"]) if extra_ros_node is not None and "robot_0" in CAMERA_ZERO else None
+
     dt = 1.0 / 60.0
     n_steps = None if args.forever else int(args.duration / dt)
     step = 0
@@ -1710,6 +1751,9 @@ def main() -> int:
                             joint_indices=np.array(head_joint_indices),
                         )
                     )
+                    if head_tf is not None:
+                        q_head = robot.get_joint_positions()[head_joint_indices]
+                        head_tf.update(float(q_head[0]), float(q_head[1]))
         # (The magnet is stepped inside world_rt.step below: it needs the arm's pose AFTER
         # the commands above landed, and the packages moved before the frame is rendered.)
         # Physics every step, pixels only every --render-every steps (default

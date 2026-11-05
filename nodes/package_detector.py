@@ -20,8 +20,8 @@ writers at around sim-t=100-140 s (CLAUDE.md).
 
 Frames: the image's own `frame_id` is the optical frame (`<id>/camera_optical`),
 looked up to `map` at the latest time TF has, and it needs only the usual SLAM and
-static-mount TF. With the head level: the sim's camera extrinsic is captured at head
-tilt 0 and does not follow a tilt.
+static-mount TF. In the sim that TF follows the head (simtest/head.py), so any pan and
+tilt work; on the real robot it is still a fixed mount.
 
     python3 nodes/package_detector.py --robot-id robot_0 [--platform real]
 """

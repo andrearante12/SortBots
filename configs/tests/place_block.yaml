@@ -13,7 +13,7 @@ section: Pick and place
 description: >
   robot_0 picks up the target block as in Pick up the target block, then sets it down on
   the green marked area further along the same table. Pass = the block rests on the table
-  with its centre inside the marked area (within 8 cm of the target), and was never
+  with its centre inside the marked area (within 5 cm of the target), and was never
   dropped. Scored from ground truth. The sim stays up 10 s afterwards.
 
 scenario: pick_bench
@@ -24,7 +24,7 @@ warmup_s: 2
 tasks:
   - robot: robot_0
     package: pkg_0
-    place: [-6.38, 11.12]
+    place: [-6.43, 11.12]
 
 stop:
   sim_s: 240
@@ -33,11 +33,11 @@ stop:
 
 metrics:
   - metric: pick_place
-    params: {place_tol_m: 0.08}
+    params: {place_tol_m: 0.05}
     pass:
       placed: {gte: 1}
       detected: {gte: 1}
-      max_place_error_m: {lte: 0.08}
+      max_place_error_m: {lte: 0.05}
       max_place_z_error_m: {lte: 0.05}
       drops: {eq: 0}
       false_picks: {eq: 0}

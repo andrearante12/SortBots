@@ -57,7 +57,7 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.4 "IBM Plex Sans", system-ui, sans-serif;
-         font-variant-numeric: tabular-nums; display: grid; grid-template-columns: min(var(--left-w, 260px), 100vw) minmax(0, 1fr) var(--right-w, 296px); grid-template-rows: 50px 1fr; overflow: hidden; }
+         font-variant-numeric: tabular-nums; display: grid; grid-template-columns: min(var(--left-w, 260px), 100vw) minmax(0, 1fr) min(var(--right-w, 296px), max(0px, calc(100vw - var(--left-w, 260px)))); grid-template-rows: 50px 1fr; overflow: hidden; }
   button, select, input { font: inherit; color: inherit; }
   button { cursor: pointer; }
   button:disabled { cursor: not-allowed; opacity: .5; }
@@ -131,8 +131,11 @@
   body.resizing { cursor: col-resize; user-select: none; }
   /* The left bar has taken the map's whole column: the task list is past the window's
      edge, and what's left of the stage must not float over the bar. */
-  body.map-gone #stage { visibility: hidden; }
+  body.map-gone #stage { visibility: hidden; overflow: hidden; }
   body.map-gone #rz-right { display: none; }
+  /* The columns always fit the window, because the header spans them and Stop all has to
+     stay on screen; so the task list keeps its width and slides out past its shrinking column. */
+  body.map-gone #right { min-width: var(--right-w, 296px); }
   /* Off the window entirely: out of the layout too, or tabbing into it scrolls the page. */
   body.left-full #right { display: none; }
   .head { display: flex; align-items: baseline; gap: 8px; padding: 14px 16px 8px; position: sticky; top: 0; background: var(--surface); z-index: 1; }
@@ -154,18 +157,21 @@
   .robot .tag { margin-left: auto; font-size: .8rem; color: var(--muted); }
   .robot .l2 { margin: 2px 0 0 18px; font-size: .84rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .more { margin: 10px 0 2px 18px; display: grid; gap: 10px; }
-  .more { cursor: default; container-type: inline-size; }
+  .more { cursor: default; }
   .more .cam { width: 100%; aspect-ratio: 16/9; border-radius: 6px; background: #0b0d10; position: relative; overflow: hidden; }
   .more .cam .pics { position: absolute; inset: 0; display: grid; grid-auto-rows: minmax(0, 1fr); gap: 2px; }
   .more .cam .pic { position: relative; min-width: 0; min-height: 0; background: center / cover no-repeat; }
-  .more .cam[data-view="rgb"] .pic[data-feed="depth"], .more .cam[data-view="depth"] .pic[data-feed="rgb"] { display: none; }
-  /* Split: stacked while the card is narrow, side by side once it is wide enough for two
-     useful pictures. Either way each keeps the camera's own 16:9, so nothing is cropped. */
-  .more .cam[data-view="split"] { aspect-ratio: 16/18; }
-  @container (min-width: 420px) {
-    .more .cam[data-view="split"] { aspect-ratio: 32/9; }
-    .more .cam[data-view="split"] .pics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  }
+  .more .cam[data-view="rgb"] .pic:not([data-feed="rgb"]), .more .cam[data-view="depth"] .pic:not([data-feed="depth"]) { display: none; }
+  /* All: the feeds stacked, each at the cameras' own 16:9 so nothing is cropped. The
+     external view is the sim's own camera, so a real robot has two. */
+  .more .cam[data-view="split"] { aspect-ratio: 16/27; }
+  .more .cam[data-view="split"][data-sim="off"] { aspect-ratio: 16/18; }
+  .more .cam[data-sim="off"] .pic[data-feed="sim"] { display: none; }
+  /* Head sliders (operator.js camFor): shown once the sim reports the head's angles. */
+  .headctl { display: grid; gap: 4px; font-size: .8rem; color: var(--muted); }
+  .headctl label { display: grid; grid-template-columns: 30px minmax(0, 1fr) 118px; gap: 8px; align-items: center; }
+  .headctl input { width: 100%; margin: 0; accent-color: var(--info); }
+  .headctl output { color: var(--ink); text-align: right; white-space: nowrap; }
   .more .cam[data-view="split"] .pic::before { content: attr(data-label); position: absolute; top: 6px; left: 6px; padding: 1px 6px; border-radius: 4px;
                                                background: rgba(10,12,16,.6); color: #e6ebf0; font-size: .7rem; }
   .more .cam canvas.obst { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }

@@ -113,6 +113,17 @@ Both are only present in a world with packages, so every other test's recorded e
 exactly what they were. The operator view draws them: cardboard-coloured, a thick dark edge
 on the plate's face, green while held.
 
+### Marks, head and view
+
+Three more world keys, all optional. `marks:` are flat painted rectangles
+(`{id, size: [x, y], pose: [x, y, yaw], z, color, label}`), on a surface, with nothing to
+collide with: they show where a place test wants a package. `head: {pan, tilt}` is where
+the head starts, in radians, tilt > 0 looking down; it is per world because a tilted camera
+sees less of what is ahead, so exploration and Nav2 stay level. `view: {eye, target}` aims the
+Sim camera for this world. The robot card's **All** camera view shows that same camera, which
+renders only while something is showing it (see Render cost). `/sim/ground_truth` carries the
+head's real angles as `head: {robot_0: {pan, tilt}}`, and the card's Head sliders command it.
+
 ### The world clock and ground truth
 
 `spawn_warehouse.py --world NAME` authors the props and moves the actors every
@@ -206,7 +217,7 @@ is how a failure is split into "didn't see it" and "saw it and couldn't do it".
 |---|---|---|
 | `pick_place_smoke` | one box on a bench, picked and set down 12 cm over; variants `camera` and `oracle` | placed within 15 cm, on the bench, not dropped |
 | `pick_block` | the robot starts in front of a table and only has to pick up the target block (`place: hold`), from the Tests tab | the magnet has it at the end, plate seen by the camera, no drops |
-| `place_block` | the same, then set the block down on the marked area further along the table | block's centre within 8 cm of the target, on the table, no drops |
+| `place_block` | the same, then set the block down on the marked area further along the table | block's centre within 5 cm of the target, on the table, no drops |
 | `pick_orientations` | four boxes whose plates face N, E, W and S, so the base docks from each side | all four placed, all four plates seen, no drops |
 | `pick_heights` | three decks, 0.70, 0.78 and 0.90 m | all three placed |
 | `pick_unreachable` | a box on a 0.30 m deck, and on the floor (variants); oracle perception, since the camera cannot see a plate that low from anywhere near | the task FAILS inside the timeout, nothing picked, nothing unfinished |

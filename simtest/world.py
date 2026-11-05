@@ -296,6 +296,32 @@ def support_for(w: dict, pkg: dict) -> dict | None:
                      f"{sorted({round(top_z(p), 3) for p in w['props']})})")
 
 
+def _validate_head(raw) -> dict | None:
+    """Where the head starts, radians. Tilt > 0 looks down. Per world, because a tilted
+    camera sees less of what is ahead: exploration and Nav2 keep theirs level."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) - {"pan", "tilt"}:
+        raise WorldError("head: expected {pan, tilt} in radians")
+    return {"pan": _num(raw.get("pan", 0.0), "head.pan", -1.57, 1.57),
+            "tilt": _num(raw.get("tilt", 0.0), "head.tilt", -0.76, 1.45)}
+
+
+def _validate_view(raw) -> dict | None:
+    """Where the Sim camera starts in this world, instead of configs/sim_view.yaml's."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) != {"eye", "target"}:
+        raise WorldError("view: expected {eye: [x, y, z], target: [x, y, z]}")
+    out = {}
+    for key in ("eye", "target"):
+        v = raw[key]
+        if not isinstance(v, (list, tuple)) or len(v) != 3:
+            raise WorldError(f"view.{key}: expected [x, y, z]")
+        out[key] = [_num(c, f"view.{key}", -200, 200) for c in v]
+    return out
+
+
 def _validate_mark(raw, what) -> dict:
     """A painted rectangle on a surface: where a place test wants a package set down.
     Nothing to collide with and nothing a package rests on: it only shows the spot."""
@@ -325,7 +351,7 @@ def validate(raw, *, stem: str | None = None) -> dict:
     if not isinstance(raw, dict):
         raise WorldError("world file must contain a YAML mapping")
     unknown = set(raw) - {"name", "title", "description", "scenes", "autostart",
-                          "props", "actors", "packages", "marks"}
+                          "props", "actors", "packages", "marks", "head", "view"}
     if unknown:
         raise WorldError(f"unknown key(s) {sorted(unknown)}")
     name = raw.get("name")
@@ -344,7 +370,8 @@ def validate(raw, *, stem: str | None = None) -> dict:
     out = {"name": name, "title": str(raw.get("title") or name),
            "description": str(raw.get("description") or "").strip(),
            "scenes": list(scenes), "autostart": autostart, "props": [], "actors": [],
-           "packages": [], "marks": []}
+           "packages": [], "marks": [], "head": _validate_head(raw.get("head")),
+           "view": _validate_view(raw.get("view"))}
     for key, actor in (("props", False), ("actors", True)):
         lst = raw.get(key) or []
         if not isinstance(lst, list) or len(lst) > MAX_ITEMS:

@@ -101,8 +101,10 @@ circle round the package. On synthetic frames it finds the plate centre within 1
 the normal within 5 degrees from 1 to 2.5 m at yaw up to 45 degrees.
 
 **What the camera can actually see.** The head camera is at (-0.092, 0.02, 1.191) in
-`base_link`, 1.24 m up and 9 cm behind the base origin, looking level (its pose comes from
-the URDF's joint chain, and the sim's extrinsic is captured at head tilt 0). The D435
+`base_link`, 1.24 m up and 9 cm behind the base origin, looking level at head tilt 0. A world
+can start the head tilted (`head:`, tilt > 0 looks down) and the operator view's Head sliders
+move it live; the sim's camera TF follows either way (simtest/head.py). Figures below are
+for a level head. The D435
 intrinsics (fx = fy = 605, 848 x 480) give half-angles of 35 degrees across and **21.6
 degrees vertically**, not the 43 and 29 of a wider lens. A plate centred 0.4 to 0.5 m below
 the lens is fully in view only from about 1.1 to 1.5 m away, and one on a 0.30 m deck from
