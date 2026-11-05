@@ -146,6 +146,15 @@ def cmd_show(a) -> int:
             log(f"  goal {g['id']}: {g['robot']} -> {g['waypoint'] or g['pose']}  "
                 f"(at_s>={g['at_s']:g}, timeout {g['timeout_s']:g}s)")
         for tk in r["tasks"]:
+            if tk.get("package"):
+                leg = lambda v: "dock" if v is None else (v["name"] if v["name"] != "pose"  # noqa: E731
+                                                          else f"({v['x']:g}, {v['y']:g})")
+                pl = tk["place"] or {"x": 0.0, "y": 0.0, "z": 0.0, "support": "(hold: stays on the magnet)"}
+                log(f"  task {tk['id']}: {tk['robot']} picks {tk['package']} "
+                    f"[{leg(tk['pickup'])} -> {leg(tk['dropoff'])}], places it at "
+                    f"({pl['x']:g}, {pl['y']:g}) on {pl['support']} z={pl['z']:g} "
+                    f"(at_s>={tk['at_s']:g})")
+                continue
             log(f"  task {tk['id']}: {tk['robot']} {tk['pickup']} -> {tk['dropoff']} "
                 f"(at_s>={tk['at_s']:g})")
         for e in r["metrics"]:
@@ -525,6 +534,11 @@ def main(argv=None) -> int:
     rp.add_argument("dirs", nargs="+")
     rp.set_defaults(fn=cmd_report)
     a = ap.parse_args(argv)
+    # The dashboard's Stop test is a SIGINT, but a console started by `sim_ctl.sh console
+    # start` is a background job: bash leaves SIGINT ignored for it, this process inherits
+    # that, and Python then installs no handler. Stop did nothing until the probe was up
+    # (rclpy sets its own), and a run whose sim had died sat in startup (2026-11-05).
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     # SIGTERM (dashboard cancel fallback) behaves like Ctrl-C: stop the sim cleanly.
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     return a.fn(a)

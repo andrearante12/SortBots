@@ -71,6 +71,11 @@ def test_committed_tests_validate(name):
     assert t["variants"] and all(label for label, _ in t["variants"])
 
 
+def test_every_test_case_names_its_section():
+    missing = [t["name"] for t in spec.list_tests() if t["section"] == spec.DEFAULT_SECTION]
+    assert missing == []
+
+
 def test_list_tests_reports_every_file():
     names = {t["name"]: t for t in spec.list_tests()}
     assert set(names) == {p.stem for p in spec.TESTS_DIR.glob("*.yaml")}

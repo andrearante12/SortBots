@@ -143,6 +143,15 @@ scripts/simtest.py run crossing_yield          # verdict + data/simtests/<dir>/r
 scripts/simtest.py rescore data/simtests/<dir> # re-score recorded events, no sim
 ```
 
+Pick and place (the magnet effector, `docs/manipulation.md`): `pick_block` and `place_block`
+are the two on the Tests tab, a block on a table in front of the robot. The other `pick_*`
+tests are parked (`parked: true`): off the tab, still runnable here, on the `pick_bench`
+scenario. `scripts/simtest.py run pick_place_smoke` is the one to diagnose with: its
+`oracle` variant (`perception=oracle`, ground truth instead of the camera) isolates the
+dock, arm and magnet; the `camera` variant adds perception. The sim log's `arm tcp link`
+and `magnet tcp: FK ... vs USD` lines say whether the arm's frames are right. The robot's
+arm is tucked upright while it drives: that is the planner, not a fault.
+
 Exit codes: 0 pass, 1 fail, 2 invalid test, 3 no run produced a score, 130
 interrupted. **On a shared network, export a private `ROS_DOMAIN_ID` before
 `console start`** — another machine's stack on domain 0 freezes Isaac at sim

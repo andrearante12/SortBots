@@ -2,6 +2,7 @@
 
 name: fleet_traffic
 title: Fleet exploration under foot traffic
+section: Fleet
 description: >
   Both robots explore the warehouse from empty while two walkers cross the
   open floor and crates clutter it. No goals: the explorers pick their own.

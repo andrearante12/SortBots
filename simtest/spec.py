@@ -13,6 +13,13 @@
         timeout_s: 120                  # cancelled + scored `timeout` after this
     tasks:                              # optional task_manager deliveries
       - {robot: robot_0, pickup: shelf_a, dropoff: zone_a, at_s: 10}
+      - robot: robot_0                  # or a PACKAGE task (simtest/world.py `packages:`)
+        package: pkg_0                  # must exist in the run's world
+        pickup: dock                    # dock/here = no Nav2 leg, the pick controller docks;
+                                        # or a waypoint NAME, or a pose [x, y, yaw] to drive to
+        dropoff: dock                   # same, for the place leg
+        place: {shift: [-0.12, 0]}      # where the box comes to rest: shifted from where it
+                                        # started, or [x, y] / [x, y, yaw] (z = what is under it)
     stop:
       sim_s: 180                        # hard cap, sim seconds after t0
       until: [goals_done]               # goals_done | tasks_done | explorer_done
@@ -48,6 +55,7 @@ from pathlib import Path
 
 import yaml
 
+from . import magnet as magnet_lib
 from . import metrics as metrics_lib
 from . import robots as robots_lib
 from . import world as world_lib
@@ -61,7 +69,8 @@ UNTIL = ("goals_done", "tasks_done", "explorer_done")
 MAX_SIM_S = 3600.0
 MAX_REPEATS = 50
 MAX_VARIANTS = 20
-TOP_KEYS = {"name", "title", "description", "scenario", "overrides", "warmup_s", "goals",
+DEFAULT_SECTION = "Other"   # the heading a test with no `section:` sits under in the Tests tab
+TOP_KEYS = {"name", "title", "section", "parked", "description", "scenario", "overrides", "warmup_s", "goals",
             "tasks", "stop", "metrics", "repeats", "pass_rate", "variants", "record"}
 # What a variant may change. Not `scenario` or `metrics`: a variant is the
 # same question asked under different conditions, and changing the scoring
@@ -224,7 +233,54 @@ def _goals(raw, robots: list[str], named: dict | None) -> list[dict]:
     return out
 
 
-def _tasks(raw, robots: list[str], named: dict | None) -> list[dict]:
+def _leg(value, w: str, named: dict | None) -> dict | None:
+    """A package task's pickup/dropoff: None (no Nav2 leg: `dock`/`here`, the pick
+    controller drives itself to the package), a pose to drive to, or a saved
+    waypoint's pose. Always a plain dict, so the dispatch needs no map to resolve it."""
+    if value in (None, "dock", "here"):
+        return None
+    if isinstance(value, list):
+        if len(value) != 3:
+            raise SpecError(f"{w}: a pose is [x, y, yaw]")
+        return {"name": "pose", "x": _num(value[0], f"{w}[0]", -200, 200),
+                "y": _num(value[1], f"{w}[1]", -200, 200),
+                "yaw": _num(value[2], f"{w}[2]", -2 * math.pi, 2 * math.pi)}
+    if isinstance(value, str):
+        p = _waypoint(named, value, w)
+        return {"name": value, "x": float(p["x"]), "y": float(p["y"]), "yaw": float(p["yaw"])}
+    raise SpecError(f"{w}: expected dock | here | a waypoint name | [x, y, yaw]")
+
+
+def _place(value, w: str, world: dict, pkg: dict) -> dict:
+    """Where a package has to come to rest: {x, y, z, yaw, support}. z is whatever is
+    under that spot (a deck's top, or the floor), and the spot has to hold the box:
+    a place that hangs off its deck is a mis-written test, not a hard one."""
+    x0, y0, yaw0 = pkg["pose"]
+    if isinstance(value, dict) and set(value) == {"shift"}:
+        s = value["shift"]
+        if not isinstance(s, list) or len(s) != 2:
+            raise SpecError(f"{w}.shift: expected [dx, dy]")
+        x, y, yaw = (x0 + _num(s[0], f"{w}.shift[0]", -20, 20),
+                     y0 + _num(s[1], f"{w}.shift[1]", -20, 20), yaw0)
+    elif isinstance(value, list) and len(value) in (2, 3):
+        x, y = _num(value[0], f"{w}[0]", -200, 200), _num(value[1], f"{w}[1]", -200, 200)
+        yaw = _num(value[2], f"{w}[2]", -2 * math.pi, 2 * math.pi) if len(value) == 3 else yaw0
+    else:
+        raise SpecError(f"{w}: expected {{shift: [dx, dy]}} or [x, y] or [x, y, yaw]")
+    z = magnet_lib.support_top_z(world, x, y)
+    virtual = {"id": pkg["id"], "size": pkg["size"], "pose": (x, y, yaw), "z": z}
+    try:
+        under = world_lib.support_for({"props": world["props"]}, virtual)
+    except world_lib.WorldError as e:
+        raise SpecError(f"{w}: {e}") from None
+    return {"x": round(x, 4), "y": round(y, 4), "z": z, "yaw": round(yaw, 4),
+            "support": under["id"] if under else "floor"}
+
+
+TASK_KEYS = {"robot", "pickup", "dropoff", "at_s", "package", "place", "find"}
+
+
+def _tasks(raw, robots: list[str], named: dict | None, world: dict | None = None) -> list[dict]:
     if raw is None:
         return []
     if not isinstance(raw, list):
@@ -232,16 +288,44 @@ def _tasks(raw, robots: list[str], named: dict | None) -> list[dict]:
     out = []
     for i, t in enumerate(raw):
         w = f"tasks[{i}]"
-        if not isinstance(t, dict) or set(t) - {"robot", "pickup", "dropoff", "at_s"}:
-            raise SpecError(f"{w}: expected {{robot, pickup, dropoff, at_s}}")
+        if not isinstance(t, dict) or set(t) - TASK_KEYS:
+            raise SpecError(f"{w}: expected {{robot, pickup, dropoff, at_s, package?, place?, find?}}")
         if t.get("robot") not in robots:
             raise SpecError(f"{w}.robot: {t.get('robot')!r} is not in this run ({robots})")
-        # task_manager takes waypoint names; any waypoint can be either end.
-        for key in ("pickup", "dropoff"):
-            _waypoint(named, t.get(key), f"{w}.{key}")
-        out.append({"id": f"t{i}", "robot": t["robot"], "pickup": t["pickup"],
-                    "dropoff": t["dropoff"],
-                    "at_s": _num(t.get("at_s", 0.0), f"{w}.at_s", 0, MAX_SIM_S)})
+        at_s = _num(t.get("at_s", 0.0), f"{w}.at_s", 0, MAX_SIM_S)
+        if "package" not in t:
+            if "place" in t:
+                raise SpecError(f"{w}.place: only a package task has a place")
+            # task_manager takes waypoint names; any waypoint can be either end.
+            for key in ("pickup", "dropoff"):
+                _waypoint(named, t.get(key), f"{w}.{key}")
+            out.append({"id": f"t{i}", "robot": t["robot"], "pickup": t["pickup"],
+                        "dropoff": t["dropoff"], "package": None, "place": None, "at_s": at_s})
+            continue
+        pid = t["package"]
+        pkg = next((p for p in (world or {}).get("packages", []) if p["id"] == pid), None)
+        if pkg is None:
+            have = [p["id"] for p in (world or {}).get("packages", [])]
+            raise SpecError(f"{w}.package: {pid!r} is not in this run's world "
+                            f"({'it has ' + ', '.join(have) if have else 'the world has no packages'})")
+        if t.get("find", "geometry") != "geometry":
+            raise SpecError(f"{w}.find: the only way to find a package is `geometry`")
+        if "place" not in t:
+            raise SpecError(f"{w}.place: a package task says where the box comes to rest, "
+                            "or `hold` to keep it on the magnet")
+        out.append({"id": f"t{i}", "robot": t["robot"], "package": pid,
+                    "pickup": _leg(t.get("pickup", "dock"), f"{w}.pickup", named),
+                    "dropoff": _leg(t.get("dropoff", "dock"), f"{w}.dropoff", named),
+                    # `hold`: a pick-only task, done once the box is on the magnet
+                    "place": None if t["place"] == "hold"
+                    else _place(t["place"], f"{w}.place", world, pkg),
+                    # What a work order says about the package, so the pick controller can
+                    # tell it from the other plates in view: its size, which face carries
+                    # the magnet, and roughly where it is (the shelf slot, not its pose).
+                    "size": list(pkg["size"]), "face": pkg["magnet_face"], "marker": pkg["marker"],
+                    # `find: geometry` leaves that out: the robot finds it from depth alone
+                    "at": None if t.get("find") == "geometry"
+                    else {"x": pkg["pose"][0], "y": pkg["pose"][1]}, "at_s": at_s})
     return out
 
 
@@ -269,7 +353,7 @@ def _resolve_one(raw: dict) -> dict:
     named = _named_waypoints(run) if raw.get("goals") or raw.get("tasks") else None
     world = world_lib.load(run["world"]) if run.get("world") else None
     goals = _goals(raw.get("goals"), robots, named)
-    tasks = _tasks(raw.get("tasks"), robots, named)
+    tasks = _tasks(raw.get("tasks"), robots, named, world)
     stop = _stop(raw.get("stop"), goals, tasks, bool(run.get("explore")))
     try:
         entries = metrics_lib.validate_list(raw.get("metrics"))
@@ -335,6 +419,8 @@ def validate(raw, *, stem: str | None = None) -> dict:
             raise SpecError(f"variant {v['label']!r}: {e}") from None
 
     return {"name": name, "title": str(raw.get("title") or name),
+            "section": str(raw.get("section") or DEFAULT_SECTION),
+            "parked": raw.get("parked") is True,
             "description": str(raw.get("description") or "").strip(),
             "repeats": reps, "pass_rate": pass_rate, "record": list(record),
             "variants": variants}
@@ -384,6 +470,16 @@ def load(name: str, sets: list[tuple[str, object]] = ()) -> dict:
     return t
 
 
+def _filing_of(path: Path) -> tuple[str, bool]:
+    """A test's (section, parked) even when it doesn't validate: one that only lacks its
+    saved map on this machine still belongs under its heading, not under Other."""
+    try:
+        raw = yaml.safe_load(path.read_text()) or {}
+        return str(raw.get("section") or DEFAULT_SECTION), raw.get("parked") is True
+    except (OSError, yaml.YAMLError, AttributeError):
+        return DEFAULT_SECTION, False
+
+
 def list_tests() -> list[dict]:
     """Every configs/tests/*.yaml; invalid ones kept and explained."""
     out = []
@@ -392,7 +488,8 @@ def list_tests() -> list[dict]:
             t = load(p.stem)
             base = t["variants"][0][1]
             out.append({
-                "name": t["name"], "title": t["title"], "description": t["description"],
+                "name": t["name"], "title": t["title"], "section": t["section"], "parked": t["parked"],
+                "description": t["description"],
                 "status": "ready", "scenario": base["scenario"],
                 "world": base["run"].get("world"), "robots": base["robots"],
                 "variants": [label for label, _ in t["variants"]],
@@ -404,6 +501,13 @@ def list_tests() -> list[dict]:
                             for e in base["metrics"]],
             })
         except SpecError as e:
-            out.append({"name": p.stem, "title": p.stem, "description": "",
-                        "status": "invalid", "error": str(e)})
+            section, parked = _filing_of(p)
+            out.append({"name": p.stem, "title": p.stem, "section": section, "parked": parked,
+                        "description": "", "status": "invalid", "error": str(e)})
     return out
+
+
+def listed_tests() -> list[dict]:
+    """What the Tests tab offers. A `parked: true` test stays valid and runnable from
+    scripts/simtest.py, and the offline tests keep checking it; it just isn't on the list."""
+    return [t for t in list_tests() if not t["parked"]]

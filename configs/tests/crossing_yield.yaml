@@ -8,6 +8,7 @@
 
 name: crossing_yield
 title: Walker crosses the aisle mouth — see it, yield, arrive
+section: Obstacle avoidance
 description: >
   robot_0 drives from its spawn pose down its aisle and out onto the open
   floor while a walker paces back and forth across the aisle mouth. With the

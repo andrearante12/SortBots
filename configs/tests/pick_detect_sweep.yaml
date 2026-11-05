@@ -1,0 +1,50 @@
+# A test case: one scored, repeatable question (simtest/spec.py has the full
+# schema; docs/testing.md the how-to).
+#
+# Perception on its own: drive past every package, from the side its plate faces, and
+# score the detector against ground truth. When a pick test fails this separates "never
+# saw the plate" from "saw it and could not reach it". No tasks: pick_place then counts
+# every package in the world.
+#
+# Each goal stands ~1.1 m out from a plate, facing it (a plate on a 0.8 m deck is only
+# in the head camera's view from ~0.8 m away: it sits ~0.4 m below the lens).
+
+name: pick_detect_sweep
+title: Plate detection — drive past four packages
+section: Pick and place
+parked: true       # off the Tests tab for now; scripts/simtest.py still runs it
+description: >
+  robot_0 drives to four viewpoints, one in front of each plate in pick_orientations,
+  each facing it. Pass = all four plates detected within 5 cm of where they really are,
+  normals within 15 degrees, and no detection that matches no plate.
+
+scenario: pick_bench
+overrides: {world: pick_orientations}
+
+warmup_s: 2
+
+goals:
+  - {robot: robot_0, pose: [-7.87, 11.45, -1.5708], timeout_s: 90}   # plate north (deck_n)
+  - {robot: robot_0, pose: [-7.85, 12.27, 3.1416], timeout_s: 90}    # plate east (deck_w)
+  - {robot: robot_0, pose: [-8.15, 13.53, 0.0], timeout_s: 90}       # plate west (deck_e)
+  - {robot: robot_0, pose: [-8.13, 13.95, 1.5708], timeout_s: 90}    # plate south (deck_s)
+
+stop:
+  sim_s: 400
+  until: [goals_done]
+  settle_s: 3
+
+metrics:
+  - metric: pick_place
+    pass:
+      detected: {gte: 4}
+      mean_detect_err_m: {lte: 0.05}
+      mean_normal_err_deg: {lte: 15}
+      false_detections: {eq: 0}
+  - metric: goals
+    pass:
+      success_rate: {gte: 1.0}
+  - metric: run_stats
+
+repeats: 2
+pass_rate: 1.0

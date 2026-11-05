@@ -4,7 +4,7 @@ A world (configs/worlds/<name>.yaml) is the third layer of a test, under the
 scenario (how the stack is launched) and the test case (what is asked of it
 and how it is scored):
 
-    world     props + scripted movers, placed in a named scene
+    world     props + scripted movers + graspable packages, placed in a named scene
     scenario  world + stack config (robots, map mode, explore, render knobs)
     test      scenario + goals + stop condition + metrics with pass criteria
 
@@ -65,6 +65,22 @@ MODES = ("once", "loop", "pingpong")
 MAX_SPEED = 3.0          # m/s — a brisk human is ~1.4; anything faster is a typo
 MAX_COORD = 200.0        # m — the NVIDIA warehouse is ~30 x 40
 MAX_ITEMS = 64
+MAX_PACKAGES = 16
+# Which face of a package carries the magnet plate: the four sides in the
+# package's own frame (+x is the way yaw 0 points), or the top.
+FACES = ("+x", "-x", "+y", "-y", "top")
+# A "very light amazon box", small enough that the SO-101's ~0.33 m horizontal
+# reach (docs/manipulation.md) still has room for the box's own depth.
+DEFAULT_PACKAGE_SIZE = (0.24, 0.18, 0.12)
+DEFAULT_PACKAGE_COLOR = (0.76, 0.60, 0.42)   # cardboard
+DEFAULT_MARK_COLOR = (0.16, 0.65, 0.35)
+# The magnet plate. Both colours are authored by the sim and thresholded on by
+# nodes/package_detector.py (configs/package_detector.yaml): change them together.
+PLATE_COLOR = (0.05, 0.05, 0.06)
+PLATE_THICKNESS_M = 0.004   # how far the plate stands proud of the box face
+PLATE_FRACTION = 0.6        # the plate covers this fraction of the face's width and height
+SUPPORT_EPS_M = 0.001    # a package's bottom must match its deck's top within this
+SUPPORT_MARGIN_M = 0.03  # the package may overhang its deck by this much
 
 DEFAULT_ACTOR_COLOR = (0.95, 0.45, 0.10)
 DEFAULT_PROP_COLOR = (0.55, 0.42, 0.28)
@@ -176,7 +192,7 @@ def _validate_item(raw, what, *, actor: bool) -> dict:
     if not isinstance(raw, dict):
         raise WorldError(f"{what}: expected a mapping")
     allowed = {"id", "shape", "size", "radius", "height", "color", "label"}
-    allowed |= {"path"} if actor else {"pose", "ref", "scale", "footprint", "collider"}
+    allowed |= {"path"} if actor else {"pose", "ref", "scale", "footprint", "collider", "style"}
     unknown = set(raw) - allowed
     if unknown:
         raise WorldError(f"{what}: unknown key(s) {sorted(unknown)}")
@@ -195,7 +211,156 @@ def _validate_item(raw, what, *, actor: bool) -> dict:
         if not isinstance(collider, bool):
             raise WorldError(f"{what}.collider: expected a boolean")
         out["collider"] = collider
+        # What a box prop looks like. `table`: a top on four legs, the same size and collider
+        # as the box, so nothing that measures it changes.
+        style = raw.get("style", "box")
+        if style not in ("box", "table") or (style == "table" and out["shape"] != "box"):
+            raise WorldError(f"{what}.style: expected box, or table on a box prop; got {style!r}")
+        out["style"] = style
     return out
+
+
+def _validate_package(raw, what) -> dict:
+    if not isinstance(raw, dict):
+        raise WorldError(f"{what}: expected a mapping")
+    unknown = set(raw) - {"id", "size", "pose", "z", "magnet_face", "color", "label", "marker"}
+    if unknown:
+        raise WorldError(f"{what}: unknown key(s) {sorted(unknown)}")
+    pid = raw.get("id")
+    if not isinstance(pid, str) or not ID_RX.match(pid):
+        raise WorldError(f"{what}.id: must match {ID_RX.pattern}")
+    size = raw.get("size", DEFAULT_PACKAGE_SIZE)
+    if not isinstance(size, (list, tuple)) or len(size) != 3:
+        raise WorldError(f"{what}.size: expected [x, y, z] metres")
+    face = raw.get("magnet_face", "+x")
+    if face not in FACES:
+        raise WorldError(f"{what}.magnet_face: expected one of {list(FACES)}, got {face!r}")
+    size = tuple(_num(v, f"{what}.size", 0.0, 1.0, strict_lo=True) for v in size)
+    marker = raw.get("marker")
+    if marker is not None:
+        from . import aruco
+
+        if marker not in aruco.DATA:
+            raise WorldError(f"{what}.marker: expected one of {sorted(aruco.DATA)}, got {marker!r}")
+        if min(s for s in plate_geometry(size, face)[0] if s > PLATE_THICKNESS_M) < aruco.BACKING_M - 1e-9:
+            raise WorldError(f"{what}.marker: the plate on face {face} is too small for a "
+                             f"{aruco.BACKING_M * 100:g} cm marker")
+    return {
+        "id": pid,
+        "size": size,
+        "pose": _pose(raw.get("pose"), f"{what}.pose"),
+        "z": _num(raw.get("z", 0.0), f"{what}.z", 0.0, 3.0),   # BOTTOM height
+        "magnet_face": face,
+        "marker": marker,       # the ArUco id printed on the plate, or None (simtest/aruco.py)
+        "color": _color(raw.get("color"), f"{what}.color", DEFAULT_PACKAGE_COLOR),
+        "label": str(raw.get("label") or pid)[:40],
+    }
+
+
+def top_z(item: dict) -> float:
+    """Height of a prop's top surface above the floor (props stand on it)."""
+    if item["shape"] == "box":
+        return item["size"][2]
+    return item["height"]
+
+
+def package_footprint(pkg: dict) -> tuple:
+    x, y, yaw = pkg["pose"]
+    return geometry.rect(x, y, yaw, pkg["size"][0], pkg["size"][1])
+
+
+def plate_geometry(size, face: str) -> tuple[tuple, tuple]:
+    """The magnet plate as a box in the package's own frame: (size, centre), centre
+    relative to the package's (x, y, bottom z). A thin slab on the named face, standing
+    PLATE_THICKNESS_M proud of it. This is what scripts/spawn_warehouse.py authors and
+    what nodes/package_vision.py looks for; its INNER face is the face plane that
+    simtest.magnet.magnet_face_pose reports."""
+    sx, sy, sz = size
+    t, f = PLATE_THICKNESS_M, PLATE_FRACTION
+    if face in ("+x", "-x"):
+        return (t, f * sy, f * sz), (math.copysign(sx / 2 + t / 2, 1 if face == "+x" else -1),
+                                     0.0, sz / 2)
+    if face in ("+y", "-y"):
+        return (f * sx, t, f * sz), (0.0, math.copysign(sy / 2 + t / 2, 1 if face == "+y" else -1),
+                                     sz / 2)
+    return (f * sx, f * sy, t), (0.0, 0.0, sz + t / 2)
+
+
+def support_for(w: dict, pkg: dict) -> dict | None:
+    """The prop a package stands on, or None when it stands on the floor.
+
+    Raises WorldError for a layout that cannot exist: a package floating with
+    nothing under it (or on a prop of a different height), or sunk into a prop.
+    Packages never move by themselves, so this is checked once at load rather
+    than left to the physics."""
+    fp = package_footprint(pkg)
+    x, y, _ = pkg["pose"]
+    if pkg["z"] <= SUPPORT_EPS_M:
+        for prop in w["props"]:
+            if geometry.distance(fp, prop_footprint(prop)) <= 0.0:
+                raise WorldError(f"package {pkg['id']!r}: sits on the floor inside prop "
+                                 f"{prop['id']!r} — give it z: {top_z(prop):g} to put it on top")
+        return None
+    for prop in w["props"]:
+        pf = prop_footprint(prop)
+        if abs(top_z(prop) - pkg["z"]) > SUPPORT_EPS_M:
+            continue
+        if geometry.contains(pf, (x, y)) and all(
+                geometry.contains(pf, c, SUPPORT_MARGIN_M) for c in fp[1]):
+            return prop
+    raise WorldError(f"package {pkg['id']!r}: floating at z={pkg['z']:g} — no prop of that "
+                     f"height under it (props' tops: "
+                     f"{sorted({round(top_z(p), 3) for p in w['props']})})")
+
+
+def _validate_head(raw) -> dict | None:
+    """Where the head starts, radians. Tilt > 0 looks down. Per world, because a tilted
+    camera sees less of what is ahead: exploration and Nav2 keep theirs level."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) - {"pan", "tilt"}:
+        raise WorldError("head: expected {pan, tilt} in radians")
+    return {"pan": _num(raw.get("pan", 0.0), "head.pan", -1.57, 1.57),
+            "tilt": _num(raw.get("tilt", 0.0), "head.tilt", -0.76, 1.45)}
+
+
+def _validate_view(raw) -> dict | None:
+    """Where the Sim camera starts in this world, instead of configs/sim_view.yaml's."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) != {"eye", "target"}:
+        raise WorldError("view: expected {eye: [x, y, z], target: [x, y, z]}")
+    out = {}
+    for key in ("eye", "target"):
+        v = raw[key]
+        if not isinstance(v, (list, tuple)) or len(v) != 3:
+            raise WorldError(f"view.{key}: expected [x, y, z]")
+        out[key] = [_num(c, f"view.{key}", -200, 200) for c in v]
+    return out
+
+
+def _validate_mark(raw, what) -> dict:
+    """A painted rectangle on a surface: where a place test wants a package set down.
+    Nothing to collide with and nothing a package rests on: it only shows the spot."""
+    if not isinstance(raw, dict):
+        raise WorldError(f"{what}: expected a mapping")
+    unknown = set(raw) - {"id", "size", "pose", "z", "color", "label"}
+    if unknown:
+        raise WorldError(f"{what}: unknown key(s) {sorted(unknown)}")
+    mid = raw.get("id")
+    if not isinstance(mid, str) or not ID_RX.match(mid):
+        raise WorldError(f"{what}.id: must match {ID_RX.pattern}")
+    size = raw.get("size")
+    if not isinstance(size, (list, tuple)) or len(size) != 2:
+        raise WorldError(f"{what}.size: expected [x, y] metres")
+    return {
+        "id": mid,
+        "size": tuple(_num(v, f"{what}.size", 0.0, 5.0, strict_lo=True) for v in size),
+        "pose": _pose(raw.get("pose"), f"{what}.pose"),
+        "z": _num(raw.get("z", 0.0), f"{what}.z", 0.0, 3.0),     # the surface it is painted on
+        "color": _color(raw.get("color"), f"{what}.color", DEFAULT_MARK_COLOR),
+        "label": str(raw.get("label") or mid)[:40],
+    }
 
 
 def validate(raw, *, stem: str | None = None) -> dict:
@@ -203,7 +368,7 @@ def validate(raw, *, stem: str | None = None) -> dict:
     if not isinstance(raw, dict):
         raise WorldError("world file must contain a YAML mapping")
     unknown = set(raw) - {"name", "title", "description", "scenes", "autostart",
-                          "props", "actors"}
+                          "props", "actors", "packages", "marks", "head", "view"}
     if unknown:
         raise WorldError(f"unknown key(s) {sorted(unknown)}")
     name = raw.get("name")
@@ -221,7 +386,9 @@ def validate(raw, *, stem: str | None = None) -> dict:
     items = {}
     out = {"name": name, "title": str(raw.get("title") or name),
            "description": str(raw.get("description") or "").strip(),
-           "scenes": list(scenes), "autostart": autostart, "props": [], "actors": []}
+           "scenes": list(scenes), "autostart": autostart, "props": [], "actors": [],
+           "packages": [], "marks": [], "head": _validate_head(raw.get("head")),
+           "view": _validate_view(raw.get("view"))}
     for key, actor in (("props", False), ("actors", True)):
         lst = raw.get(key) or []
         if not isinstance(lst, list) or len(lst) > MAX_ITEMS:
@@ -232,6 +399,28 @@ def validate(raw, *, stem: str | None = None) -> dict:
                 raise WorldError(f"{key}[{i}].id: duplicate id {v['id']!r}")
             items[v["id"]] = v
             out[key].append(v)
+    pk = raw.get("packages") or []
+    if not isinstance(pk, list) or len(pk) > MAX_PACKAGES:
+        raise WorldError(f"packages: expected a list of at most {MAX_PACKAGES}")
+    for i, item in enumerate(pk):
+        v = _validate_package(item, f"packages[{i}]")
+        if v["id"] in items:
+            raise WorldError(f"packages[{i}].id: duplicate id {v['id']!r}")
+        items[v["id"]] = v
+        out["packages"].append(v)
+    for v in out["packages"]:
+        support_for(out, v)     # raises on a floating or buried package
+    mk = raw.get("marks") or []
+    if not isinstance(mk, list) or len(mk) > MAX_PACKAGES:
+        raise WorldError(f"marks: expected a list of at most {MAX_PACKAGES}")
+    for i, item in enumerate(mk):
+        v = _validate_mark(item, f"marks[{i}]")
+        if v["id"] in items:
+            raise WorldError(f"marks[{i}].id: duplicate id {v['id']!r}")
+        items[v["id"]] = v
+        out["marks"].append(v)
+        # paint goes on something: the same check a package gets, as a flat package
+        support_for(out, {**v, "size": (*v["size"], 0.01)})
     return out
 
 
@@ -261,10 +450,12 @@ def list_worlds() -> list[dict]:
             w = load(p.stem)
             out.append({"name": w["name"], "title": w["title"], "description": w["description"],
                         "scenes": w["scenes"], "props": len(w["props"]),
-                        "actors": len(w["actors"]), "status": "ready"})
+                        "actors": len(w["actors"]), "packages": len(w["packages"]),
+                        "status": "ready"})
         except WorldError as e:
             out.append({"name": p.stem, "title": p.stem, "description": "", "scenes": [],
-                        "props": 0, "actors": 0, "status": "invalid", "error": str(e)})
+                        "props": 0, "actors": 0, "packages": 0, "status": "invalid",
+                        "error": str(e)})
     return out
 
 

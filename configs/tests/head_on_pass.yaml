@@ -2,6 +2,7 @@
 
 name: head_on_pass
 title: Walker comes down the aisle head-on — pass or wait, don't collide
+section: Obstacle avoidance
 description: >
   robot_0 drives up its own aisle while a walker comes down it toward the
   robot. The aisle is ~4 m wide, so passing is possible — but the closing

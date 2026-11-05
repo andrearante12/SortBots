@@ -230,7 +230,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         elif route == "/api/worlds":
             self._serve_json({"worlds": simtest_world.list_worlds()})
         elif route == "/api/tests":
-            self._serve_json({"tests": simtest_spec.list_tests(),
+            self._serve_json({"tests": simtest_spec.listed_tests(),
                               "metrics": simtest_metrics.catalog(),
                               "control": TESTS is not None})
         elif route == "/api/tests/results":

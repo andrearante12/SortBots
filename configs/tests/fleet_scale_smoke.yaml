@@ -7,6 +7,7 @@
 
 name: fleet_scale_smoke
 title: Fleet smoke — four robots, one short goal each
+section: Fleet
 description: >
   robot_0..robot_3 from their configs/robots.yaml spawns, each sent ~1.5 m
   into known-free floor (an aisle or the open apron). Pass = every goal

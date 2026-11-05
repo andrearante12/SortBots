@@ -57,6 +57,8 @@
   let platform = null; // "sim" | "real", from serve.py; the Teleport tool is sim-only
   let tasks = []; // [{id, kind: "goto"|"pickup", goto, pickup, dropoff, robot, state, at, reason}]
   let session = null; // last /api/session body, null until the first answer
+  const START_WAIT_MS = 30000;
+  let startAskedAt = null; // when a start was asked for, until the session says it is starting
   let controlAvailable = true; // false once /api/session answers 503
   let mapInfo = null;
   let mapCanvas = null;
@@ -214,6 +216,7 @@
 
   function resize() {
     const r = canvas.parentElement.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+    if (!r.width || !r.height) return; // the left bar has taken the whole window: keep the last fit
     cssW = r.width; cssH = r.height;
     canvas.width = Math.round(cssW * d); canvas.height = Math.round(cssH * d);
     ctx.setTransform(d, 0, 0, d, 0, 0);
@@ -302,6 +305,78 @@
     }
   }
 
+  // Camera tile, in a world with packages: what the plate detector found, which is what the
+  // pick aims at. The obstacle boxes would only frame the table. Green is the plate the pick
+  // controller has locked (/pick_status); amber is everything else the detector reports. Both
+  // solid and labelled: a faint dashed box vanished against cardboard (2026-11-05).
+  const PLATE_INK = "#22c55e", PLATE_OTHER_INK = "#f59e0b", BOX_INK = "#38bdf8";
+  const PLATES_TTL_MS = 1500, PLATE_SEEN_S = 0.35, PLATE_TARGET_M = 0.2;
+  const packageWorld = () => !!(worldLayout && worldLayout.packages && worldLayout.packages.length);
+  // In a world whose packages carry markers, a colour guess is noise: printed cartons
+  // are full of dark shapes.
+  const markerWorld = () => packageWorld() && worldLayout.packages.some((k) => k.marker != null);
+  const platesSeen = (r) => (r.plates && performance.now() - r.platesAt < PLATES_TTL_MS
+    ? (r.plates.plates || []).filter((p) => (p.age_s || 0) <= PLATE_SEEN_S && (p.marker != null || !markerWorld())) : []);
+  function plateTarget(r, plates) {
+    const t = r.pick && r.pick.target;
+    if (!t) return null;
+    const dist = (p) => Math.hypot(p.x - t[0], p.y - t[1], p.z - t[2]);
+    const best = plates.reduce((a, p) => (!a || dist(p) < dist(a) ? p : a), null);
+    return best && dist(best) <= PLATE_TARGET_M ? best : null;
+  }
+  function drawCamPlates(c, g, r) {
+    const plates = platesSeen(r), target = plateTarget(r, plates), iw = r.plates && r.plates.w, ih = r.plates && r.plates.h;
+    const boxes = r.boxes && performance.now() - r.boxesAt < PLATES_TTL_MS ? r.boxes.boxes || [] : [];
+    syncPerception(c, r, plates, target, boxes);
+    if ((!plates.length && !boxes.length) || !iw || !ih) return;
+    g.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; g.textBaseline = "bottom";
+    for (const pic of c.el.querySelectorAll(".pic")) {
+      const pw = pic.offsetWidth, ph = pic.offsetHeight, px = pic.offsetLeft, py = pic.offsetTop;
+      if (!pw || !ph) continue;
+      const k = Math.max(pw / iw, ph / ih), ox = px + (pw - iw * k) / 2, oy = py + (ph - ih * k) / 2;
+      g.save(); g.beginPath(); g.rect(px, py, pw, ph); g.clip();
+      for (const b of boxes) { // from depth alone: the box, where the plates below are its magnet
+        const [u, v, bw, bh] = b.px, x = ox + u * k, y = oy + v * k;
+        g.strokeStyle = BOX_INK; g.lineWidth = 2.5; g.strokeRect(x, y, bw * k, bh * k);
+        const label = `box · ${b.size.map((s) => Math.round(s * 100)).join(" × ")} cm`, tw = g.measureText(label).width + 8, ly = Math.min(y + bh * k + 15, py + ph);
+        g.fillStyle = BOX_INK; g.fillRect(x, ly - 15, tw, 15);
+        g.fillStyle = "#04202e"; g.fillText(label, x + 4, ly - 1);
+      }
+      for (const p of plates) {
+        const [u, v, bw, bh] = p.px, x = ox + u * k, y = oy + v * k, on = p === target;
+        g.strokeStyle = on ? PLATE_INK : PLATE_OTHER_INK; g.lineWidth = on ? 3 : 2;
+        g.strokeRect(x, y, bw * k, bh * k);
+        const cx = ox + p.uv[0] * k, cy = oy + p.uv[1] * k;
+        g.beginPath(); g.moveTo(cx - 7, cy); g.lineTo(cx + 7, cy); g.moveTo(cx, cy - 7); g.lineTo(cx, cy + 7); g.stroke();
+        const label = `${p.marker != null ? `marker ${p.marker}` : on ? "target plate" : "plate?"} · ${p.range_m.toFixed(2)} m`, tw = g.measureText(label).width + 8, ly = Math.max(y, py + 16);
+        g.fillStyle = on ? PLATE_INK : PLATE_OTHER_INK; g.fillRect(x, ly - 15, tw, 15);
+        g.fillStyle = "#14130a"; g.fillText(label, x + 4, ly - 1);
+      }
+      g.restore();
+    }
+  }
+  // The same detection in words: where it was in the picture, how far the depth image says
+  // it is, and where those two put it on the map.
+  function syncPerception(c, r, plates, target, boxes) {
+    const set = (key, text) => { const el = c.perc.querySelector(`[data-p="${key}"]`); if (el.textContent !== text) el.textContent = text; };
+    const shown = target || plates.reduce((a, p) => (!a || p.conf * p.px[2] * p.px[3] > a.conf * a.px[2] * a.px[3] ? p : a), null);
+    const aim = r.pick && r.pick.target;
+    c.perc.classList.toggle("locked", !!target);
+    set("state", target ? "On target" : aim ? "Aiming at its last fix" : plates.length ? "Candidates" : "Nothing in view");
+    set("n", String(plates.length));
+    set("mode", r.pick && r.pick.mode === "manipulation" ? "Manipulation" : "Nav");
+    set("marker", shown && shown.marker != null ? `ArUco ${shown.marker}: this side has the magnet` : "—");
+    const b = boxes[0];
+    set("box", b ? `x ${b.x.toFixed(3)}  y ${b.y.toFixed(3)}  z ${b.z.toFixed(3)}, on a surface at ${b.support_z.toFixed(2)} m` : "—");
+    if (shown) {
+      set("img", `pixel (${shown.uv.map((v) => Math.round(v)).join(", ")}), ${shown.px[2]} × ${shown.px[3]} px`);
+      set("depth", `${shown.range_m.toFixed(3)} m from the lens, plane fit`);
+    } else { set("img", "—"); set("depth", "—"); }
+    const at = shown ? [shown.x, shown.y, shown.z] : aim;
+    set("map", at ? `x ${at[0].toFixed(3)}  y ${at[1].toFixed(3)}  z ${at[2].toFixed(3)}` : "—");
+    set("face", shown ? `${(Math.atan2(shown.ny, shown.nx) * 180 / Math.PI).toFixed(1)}° in the map, ${Math.round(shown.conf * 100)}% confidence` : "—");
+  }
+
   // Camera tile: every obstacle, boxed in the depth image's pixels (in sim one camera
   // makes both images; the D435's depth is aligned to colour). The picture is drawn
   // `background-size: cover`, so invert a cover crop, not a contain letterbox.
@@ -315,20 +390,30 @@
     const g = cv.getContext("2d");
     g.clearRect(0, 0, w, h);
     const r = robots.get(id), p = r && r.obstacles;
+    c.perc.hidden = !packageWorld();
+    if (r && packageWorld()) return drawCamPlates(c, g, r);
     if (!p || performance.now() - r.obstaclesAt > OBSTACLE_TTL_MS || !p.w || !p.h) return;
-    const k = Math.max(w / p.w, h / p.h), ox = (w - p.w * k) / 2, oy = (h - p.h * k) / 2;
     g.font = '600 10px "IBM Plex Sans", system-ui, sans-serif'; g.textBaseline = "bottom";
-    for (const o of p.obstacles || []) {
-      const [u0, v0, u1, v1] = o.uv;
-      const x = ox + u0 * k, y = oy + v0 * k, bh = (v1 - v0) * k, color = o.moving ? OBSTACLE_RED : "#f5a524";
-      g.strokeStyle = color; g.lineWidth = o.moving ? 2.5 : 1.5;
-      g.strokeRect(x, y, (u1 - u0) * k, bh);
-      const label = o.moving ? `moving · ${o.range_m.toFixed(1)} m` : `${o.range_m.toFixed(1)} m`;
-      // Inside the box's bottom edge: the top of the tile belongs to the Camera/Depth
-      // switch, and a person's box reaches it.
-      const tw = g.measureText(label).width + 6, ly = Math.min(y + bh, h);
-      g.fillStyle = color; g.fillRect(x, ly - 13, tw, 13);
-      g.fillStyle = o.moving ? "#fff" : "#15191e"; g.fillText(label, x + 3, ly - 1);
+    // Each picture showing gets the boxes: the depth is aligned to colour, so the same
+    // pixels apply to both.
+    for (const pic of c.el.querySelectorAll(".pic")) {
+      const pw = pic.offsetWidth, ph = pic.offsetHeight, px = pic.offsetLeft, py = pic.offsetTop;
+      if (!pw || !ph) continue;
+      const k = Math.max(pw / p.w, ph / p.h), ox = px + (pw - p.w * k) / 2, oy = py + (ph - p.h * k) / 2;
+      g.save(); g.beginPath(); g.rect(px, py, pw, ph); g.clip();
+      for (const o of p.obstacles || []) {
+        const [u0, v0, u1, v1] = o.uv;
+        const x = ox + u0 * k, y = oy + v0 * k, bh = (v1 - v0) * k, color = o.moving ? OBSTACLE_RED : "#f5a524";
+        g.strokeStyle = color; g.lineWidth = o.moving ? 2.5 : 1.5;
+        g.strokeRect(x, y, (u1 - u0) * k, bh);
+        const label = o.moving ? `moving · ${o.range_m.toFixed(1)} m` : `${o.range_m.toFixed(1)} m`;
+        // Inside the box's bottom edge: the top of the tile belongs to the Camera/Depth
+        // switch, and a person's box reaches it.
+        const tw = g.measureText(label).width + 6, ly = Math.min(y + bh, py + ph);
+        g.fillStyle = color; g.fillRect(x, ly - 13, tw, 13);
+        g.fillStyle = o.moving ? "#fff" : "#15191e"; g.fillText(label, x + 3, ly - 1);
+      }
+      g.restore();
     }
   }
 
@@ -339,6 +424,8 @@
   // and whether the robot's red obstacle marker sits on it. Same data and look as
   // app.js's overlay; neither topic exists on a real robot, so nothing draws there.
   const WORLD_TRUTH_TTL_MS = 3000; // sim gone quiet: stop drawing walkers frozen mid-stride
+  const PACKAGE_HELD_INK = "#16a34a";   // a package the magnet is holding
+  const PACKAGE_PLATE_INK = "#1b1b1f";  // the magnet plate's face (simtest.world.PLATE_COLOR, near-black)
   let worldLayout = null, worldTruth = null, worldTruthAt = -Infinity;
   topic("/sim/world", "std_msgs/String").subscribe((msg) => {
     try { worldLayout = JSON.parse(msg.data); } catch (e) { return; }
@@ -347,6 +434,7 @@
   topic("/sim/ground_truth", "std_msgs/String", { throttle_rate: 100, queue_length: 1 }).subscribe((msg) => {
     try { worldTruth = JSON.parse(msg.data); } catch (e) { return; }
     worldTruthAt = performance.now(); dirty = true;
+    syncHeads();
     // The Sim camera's pose as Isaac has it, unless the viewer is mid-move (their
     // newer pose would be overwritten by one the sim hasn't caught up to yet).
     if (stageView === "sim" && !$("#simview").classList.contains("dragging") && performance.now() - simCam.lastSend > 1000) simCamFromTruth();
@@ -379,6 +467,52 @@
       ctx.fill(); ctx.stroke();
     }
     ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
+    const deferred = []; // drawn over the packages
+    // Marked areas: where a place test wants the package set down. Under the packages.
+    for (const m of worldLayout.marks || []) {
+      const [x, y, yaw] = m.pose, [hx, hy] = [m.size[0] / 2, m.size[1] / 2], c = Math.cos(yaw), s = Math.sin(yaw);
+      traceShape(["poly", [[hx, hy], [-hx, hy], [-hx, -hy], [hx, -hy]].map(([a, b]) => [x + c * a - s * b, y + s * a + c * b])]);
+      ctx.fillStyle = rgba(m.color, 0.3); ctx.strokeStyle = rgba(m.color, 1); ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 3]); ctx.fill(); ctx.stroke(); ctx.setLineDash([]);
+    }
+    // Where the robot itself thinks the plate is, with a tick along its normal: on the box,
+    // if the camera, the depth and the transforms all agree with ground truth.
+    for (const r of robots.values()) {
+      const seen = plateTarget(r, platesSeen(r));
+      if (!seen) continue;
+      const [ax, ay] = toPx(seen.x, seen.y), [bx, by] = toPx(seen.x + seen.nx * 0.25, seen.y + seen.ny * 0.25);
+      deferred.push(() => {
+        ctx.strokeStyle = PLATE_INK; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.arc(ax, ay, 7, 0, 2 * Math.PI); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+      });
+    }
+    // Packages the magnet effector picks up (simtest/magnet.py). Where one IS comes from
+    // ground truth; it turns green while the magnet holds it, and the thick dark edge is
+    // the face that carries the magnet plate (the side the arm has to come at).
+    const PLATE_EDGE = { "+x": [[1, 1], [1, -1]], "-x": [[-1, 1], [-1, -1]],
+                         "+y": [[1, 1], [-1, 1]], "-y": [[1, -1], [-1, -1]] };
+    for (const k of worldLayout.packages || []) {
+      const p = worldTruth.packages && worldTruth.packages[k.id];
+      if (!p) continue;
+      const held = !!p.held_by, [sx, sy] = k.size, c = Math.cos(p.yaw), s = Math.sin(p.yaw);
+      const at = (x, y) => [p.x + c * x - s * y, p.y + s * x + c * y];
+      traceShape(["poly", [[sx / 2, sy / 2], [-sx / 2, sy / 2], [-sx / 2, -sy / 2], [sx / 2, -sy / 2]]
+        .map(([x, y]) => at(x, y))]);
+      ctx.fillStyle = rgba(k.color, 0.95); ctx.strokeStyle = held ? PACKAGE_HELD_INK : palette.robotInk;
+      ctx.lineWidth = held ? 3 : 1.5; ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = PACKAGE_PLATE_INK; ctx.lineWidth = 4; ctx.beginPath();
+      if (PLATE_EDGE[k.magnet_face]) {
+        const [[ax, ay], [bx, by]] = PLATE_EDGE[k.magnet_face];
+        const [pa, pb] = [at(ax * sx / 2, ay * sy / 2), at(bx * sx / 2, by * sy / 2)].map(([x, y]) => toPx(x, y));
+        ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]);
+      } else { // a plate on top: a dot in the middle
+        const [cx0, cy0] = toPx(p.x, p.y); ctx.moveTo(cx0, cy0); ctx.lineTo(cx0 + 0.1, cy0);
+      }
+      ctx.stroke();
+      const [lx, ly] = toPx(p.x, p.y);
+      ctx.fillStyle = held ? PACKAGE_HELD_INK : palette.ink;
+      ctx.fillText((k.label || k.id) + (held ? " (held)" : ""), lx, ly + Math.max(sx, sy) * view.scale / 2 + 13);
+    }
     for (const a of worldLayout.actors || []) {
       // The route it walks: dotted and faint, so it never reads as a Nav2 plan.
       ctx.setLineDash([2, 5]); ctx.strokeStyle = rgba(a.color, 0.5); ctx.lineWidth = 1.5;
@@ -398,6 +532,7 @@
       ctx.setLineDash([]);
       ctx.fillStyle = palette.ink; ctx.fillText(a.label || a.id, px, py + r + 13);
     }
+    for (const draw of deferred) draw();
     ctx.restore();
   }
 
@@ -504,7 +639,7 @@
       id, color: COLORS[robots.size % COLORS.length], pose: null, linkAt: -Infinity, plan: [],
       explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity, queueDepth: 0,
       nav: null, seenStamp: {}, odom: null, odomAt: -Infinity,
-      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [],
+      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity,
     };
     robots.set(id, r);
     // Kept so removeRobot can drop them when a run leaves this robot out.
@@ -516,6 +651,21 @@
       let p;
       try { p = JSON.parse(msg.data); } catch (e) { return; }
       onObstacles(r, p);
+    });
+
+    // What the plate detector sees and what the pick is aiming at, for the camera tile.
+    sub(`/${id}/packages`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
+      try { r.plates = JSON.parse(msg.data); } catch (e) { return; }
+      r.platesAt = performance.now(); dirty = true;
+      drawCamObstacles(id);
+    });
+    sub(`/${id}/boxes`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
+      try { r.boxes = JSON.parse(msg.data); } catch (e) { return; }
+      r.boxesAt = performance.now();
+      drawCamObstacles(id);
+    });
+    sub(`/${id}/pick_status`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
+      try { r.pick = JSON.parse(msg.data); } catch (e) { /* keep the last one */ }
     });
 
     // Only the twist is used (speed / turn rate on the card); the pose comes from /tf.
@@ -887,39 +1037,82 @@
         </div>` : ""}
       </div>`;
     }).join("") : `<div class="none">No robots found.</div>`;
-    for (const slot of document.querySelectorAll("#fleet .cam-slot")) slot.replaceWith(camFor(slot.dataset.cam).el);
+    for (const slot of document.querySelectorAll("#fleet .cam-slot")) { const c = camFor(slot.dataset.cam); slot.replaceWith(c.el, c.perc, c.head); }
     renderTargets();
   }
 
   // Camera tile per open robot: short /snapshot polls, never MJPEG, and always
   // qos_profile=sensor_data (see app.js for the failure mode both avoid). The element
   // outlives list rebuilds (renderFleet re-slots it), so the picture doesn't blink.
-  // Camera or depth, per card; a new card starts on whichever was picked last.
+  // Camera, depth or both stacked, per card; a new card starts on whichever was picked last.
   const CAM_TOPIC = { rgb: "camera/rgb", depth: "camera/depth_color" };
-  const cams = new Map(); // id -> {el, pic, msg, mode, timer, token}
+  const CAM_LABEL = { rgb: "camera", depth: "depth" };
+  const feedsOf = (mode) => (mode === "split" ? ["rgb", "depth"] : [mode]);
+  const cams = new Map(); // id -> {el, head, pics: {rgb, depth}, mode, timers, token}
   let camDefault = "rgb";
-  try { if (localStorage.getItem("sortbots.camMode") === "depth") camDefault = "depth"; } catch (e) { /* storage blocked: rgb */ }
+  try { const m = localStorage.getItem("sortbots.camMode"); if (m === "depth" || m === "split") camDefault = m; } catch (e) { /* storage blocked: rgb */ }
 
   function camFor(id) {
     let c = cams.get(id);
     if (c) return c;
     const el = document.createElement("div");
     el.className = "cam";
-    el.innerHTML = `<div class="pic"></div><canvas class="obst"></canvas><canvas class="feat"></canvas><span class="msg">Connecting to camera…</span>
+    el.innerHTML = `<div class="pics"><div class="pic" data-feed="rgb" data-label="Camera"><span class="msg"></span></div><div class="pic" data-feed="depth" data-label="Depth"><span class="msg"></span></div></div><canvas class="obst"></canvas><canvas class="feat"></canvas>
       <button type="button" class="featbtn" data-cam-features aria-pressed="false" title="Show the visual features RTAB-Map is tracking (green = inlier driving the pose, amber = matched to the map, grey = detected only)">Features</button>
       <span class="featstat"></span>
-      <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button></div>
+      <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button><button type="button" data-cam-mode="split" title="Camera and depth, stacked">Split</button></div>
       <div class="drive" role="group" aria-label="Drive by hand" title="Drive by hand: hold an arrow. Keys W/A/S/D move, Q/E rotate, Space stops (they drive the robot in control)">
         <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
         <button type="button" data-drive="rot-left" aria-label="Rotate left">&#8634;</button><button type="button" data-drive="back" aria-label="Back">&#9660;</button><button type="button" data-drive="rot-right" aria-label="Rotate right">&#8635;</button>
       </div>`;
-    c = { el, pic: el.querySelector(".pic"), overlay: el.querySelector("canvas.obst"), feat: el.querySelector("canvas.feat"), featStat: el.querySelector(".featstat"),
-      msg: el.querySelector(".msg"), mode: camDefault, timer: null, token: 0, features: false, featSub: null, featData: null, featAt: -Infinity };
+    const perc = document.createElement("div");
+    perc.className = "perc"; perc.hidden = true;
+    perc.innerHTML = `<div class="ph">Plate detection<i><span data-p="state"></span> · <span data-p="n"></span> seen</i></div>
+      <dl><dt>State</dt><dd data-p="mode"></dd><dt>Box</dt><dd data-p="box"></dd><dt>Marker</dt><dd data-p="marker"></dd><dt>Image</dt><dd data-p="img"></dd><dt>Depth</dt><dd data-p="depth"></dd><dt>Map</dt><dd data-p="map"></dd><dt>Facing</dt><dd data-p="face"></dd></dl>`;
+    const head = document.createElement("div");
+    head.className = "headctl"; head.hidden = true;
+    head.innerHTML = HEAD_AXES.map(([key, label, lo, hi]) => `<label>${label}<input type="range" data-head="${key}" min="${lo}" max="${hi}" step="0.01" value="0" aria-label="Head ${key}"><output data-head-out="${key}"></output></label>`).join("");
+    c = { el, head, perc, pics: { rgb: el.querySelector('[data-feed="rgb"]'), depth: el.querySelector('[data-feed="depth"]') },
+          overlay: el.querySelector("canvas.obst"), feat: el.querySelector("canvas.feat"), featStat: el.querySelector(".featstat"),
+          mode: camDefault, timers: {}, token: 0, headAt: -Infinity, headSent: 0, features: false, featSub: null, featData: null, featAt: -Infinity };
     cams.set(id, c);
+    wireHead(id, c);
     syncCamButtons(c);
     wireDrivePad(id, el.querySelector(".drive"));
     return c;
+  }
+
+  // -- the head (the sliders under the camera tile) ----------------------------------------------
+  // Tilt > 0 looks down. Limits are xlerobot.urdf's. The readout is where the head IS, from
+  // /sim/ground_truth, so it can be read off and put in a world's `head:`; the camera's
+  // TF follows it in Isaac (simtest/head.py), so moving it doesn't throw off the map.
+  const HEAD_AXES = [["tilt", "Tilt", -0.76, 1.45], ["pan", "Pan", -1.57, 1.57]];
+  const HEAD_HZ = 10, HEAD_HANDS_OFF_MS = 1000;
+  const headText = (rad) => `${(rad * 180 / Math.PI).toFixed(1)}° · ${rad.toFixed(2)} rad`;
+  function wireHead(id, c) {
+    const send = () => {
+      c.headSent = performance.now();
+      const v = (key) => Number(c.head.querySelector(`[data-head="${key}"]`).value);
+      publish(`/${id}/head_cmd`, "sensor_msgs/JointState", { name: ["head_pan_joint", "head_tilt_joint"], position: [v("pan"), v("tilt")] });
+    };
+    c.head.addEventListener("input", (e) => {
+      c.headAt = performance.now();
+      c.head.querySelector(`[data-head-out="${e.target.dataset.head}"]`).textContent = headText(Number(e.target.value));
+      if (performance.now() - c.headSent >= 1000 / HEAD_HZ) send();
+    });
+    c.head.addEventListener("change", send); // the last position, whatever the rate limit dropped
+  }
+  function syncHeads() {
+    for (const [id, c] of cams) {
+      const h = worldTruth && worldTruth.head && worldTruth.head[id];
+      c.head.hidden = !h;
+      if (!h || performance.now() - c.headAt < HEAD_HANDS_OFF_MS) continue; // not under the operator's hand
+      for (const [key] of HEAD_AXES) {
+        c.head.querySelector(`[data-head="${key}"]`).value = h[key];
+        c.head.querySelector(`[data-head-out="${key}"]`).textContent = headText(h[key]);
+      }
+    }
   }
 
   // -- manual drive (the camera tile's pad) ------------------------------------------------------
@@ -1048,7 +1241,11 @@
       return;
     }
     c.featStat.textContent = p.lost ? "SLAM lost" : `${p.inliers} inliers · ${p.matches} matched · ${p.features} features`;
-    const k = Math.max(w / p.w, h / p.h), ox = (w - p.w * k) / 2, oy = (h - p.h * k) / 2;
+    // On the picture, not the whole tile: Split stacks two (the depth aligns to the colour).
+    const pic = c.pics.rgb.offsetWidth ? c.pics.rgb : c.pics.depth;
+    const pw = pic.offsetWidth, ph = pic.offsetHeight;
+    const k = Math.max(pw / p.w, ph / p.h), ox = pic.offsetLeft + (pw - p.w * k) / 2, oy = pic.offsetTop + (ph - p.h * k) / 2;
+    g.save(); g.beginPath(); g.rect(pic.offsetLeft, pic.offsetTop, pw, ph); g.clip();
     // Weakest first, so the inliers that drive the pose are never hidden under grey dots.
     // Plain fixed-size points: the keypoint's own scale only turned dense areas into blobs.
     const DOT = [2, 3, 3];
@@ -1059,11 +1256,13 @@
         if (st === state) g.fillRect(Math.round(ox + x * k - d / 2), Math.round(oy + y * k - d / 2), d, d);
       }
     }
+    g.restore();
   }
   setInterval(() => { for (const [id, c] of cams) if (c.features && c.featData && performance.now() - c.featAt > FEATURE_TTL_MS) drawCamFeatures(id); }, 1000);
 
   function syncCamButtons(c) {
     for (const b of c.el.querySelectorAll("[data-cam-mode]")) b.classList.toggle("on", b.dataset.camMode === c.mode);
+    c.el.dataset.view = c.mode;
   }
   function setCamMode(id, mode) {
     const c = camFor(id);
@@ -1075,28 +1274,31 @@
   }
   function startCam(id) {
     stopCam(id);
-    const c = camFor(id), token = c.token, label = c.mode === "depth" ? "depth" : "camera";
-    const tick = () => {
-      if (token !== c.token) return;
-      const probe = new Image();
-      probe.onload = () => {
+    const c = camFor(id), token = c.token;
+    for (const feed of feedsOf(c.mode)) {
+      const pic = c.pics[feed], msg = pic.querySelector(".msg"), label = CAM_LABEL[feed];
+      const tick = () => {
         if (token !== c.token) return;
-        c.pic.style.backgroundImage = `url(${probe.src})`;
-        c.msg.textContent = "";
-        c.timer = setTimeout(tick, 400);
+        const probe = new Image();
+        probe.onload = () => {
+          if (token !== c.token) return;
+          pic.style.backgroundImage = `url(${probe.src})`;
+          msg.textContent = "";
+          c.timers[feed] = setTimeout(tick, 400);
+        };
+        probe.onerror = () => {
+          if (token !== c.token) return;
+          pic.style.backgroundImage = "";
+          msg.textContent = `No ${label} feed`;
+          c.timers[feed] = setTimeout(tick, 3000);
+        };
+        probe.src = `${VIDEO_BASE}/snapshot?topic=/${id}/${CAM_TOPIC[feed]}&qos_profile=sensor_data&_=${Date.now()}`;
       };
-      probe.onerror = () => {
-        if (token !== c.token) return;
-        c.pic.style.backgroundImage = "";
-        c.msg.textContent = `No ${label} feed`;
-        c.timer = setTimeout(tick, 3000);
-      };
-      probe.src = `${VIDEO_BASE}/snapshot?topic=/${id}/${CAM_TOPIC[c.mode]}&qos_profile=sensor_data&_=${Date.now()}`;
-    };
-    c.pic.style.backgroundImage = ""; c.msg.textContent = `Connecting to ${label}…`;
-    tick();
+      pic.style.backgroundImage = ""; msg.textContent = `Connecting to ${label}…`;
+      tick();
+    }
   }
-  function stopCam(id) { const c = cams.get(id); if (c) { c.token++; clearTimeout(c.timer); } }
+  function stopCam(id) { const c = cams.get(id); if (c) { c.token++; Object.values(c.timers).forEach(clearTimeout); } }
 
   function refreshSelection() {
     lastFleetSig = "";
@@ -1109,6 +1311,19 @@
     open.add(id); selected = id;
     if (fresh) startCam(id);
     refreshSelection();
+  }
+  // A robot's card opens by itself the first time it comes online in a run; closed after
+  // that, it stays closed. Control stays with whichever robot already has it.
+  const autoOpened = new Set();
+  function autoOpenCards() {
+    if (window.__noAutoOpen) return; // the operator tests drive the cards by hand
+    for (const r of robots.values()) {
+      if (!online(r) || autoOpened.has(r.id)) continue;
+      autoOpened.add(r.id);
+      const keep = selected;
+      openRobot(r.id);
+      if (keep !== null && keep !== r.id) { selected = keep; refreshSelection(); }
+    }
   }
   function closeRobot(id) {
     open.delete(id); stopCam(id); setCamFeatures(id, false);
@@ -1520,6 +1735,13 @@
     sim_ready: "Simulation up", ros_starting: "Starting navigation and mapping", ros_ready: "Navigation up",
   };
   function bootProgress() {
+    // A start was just asked for and the session hasn't said so yet (a test takes a few
+    // seconds to get to launching one): the bar shows now, not at the next poll.
+    if (startAskedAt !== null) {
+      if (session && session.state === "starting") startAskedAt = null;
+      else if (performance.now() - startAskedAt > START_WAIT_MS) startAskedAt = null;
+      else return { p: 0.02, text: "Starting…" };
+    }
     if (!session || !["starting", "running"].includes(session.state)) return null;
     const list = [...robots.values()], up = list.filter(online).length;
     if (session.state === "running") {
@@ -1548,7 +1770,8 @@
   function renderEmpty() {
     const boot = renderBoot();
     const anyOnline = [...robots.values()].some(online);
-    const show = !anyOnline && !mapInfo;
+    // Booting beats a map: a map on screen during a boot can only be the last run's.
+    const show = !anyOnline && (!mapInfo || !!boot);
     $("#empty").hidden = !show;
     if (!show) return;
     const starting = !!boot || (session && session.state === "stopping");
@@ -1574,6 +1797,41 @@
     runDemo();
   }
 
+  // Everything a run leaves on screen, gone: nothing of it says anything about the next one.
+  function clearRun() {
+    tasks = []; renderTasks();
+    mapInfo = null; mapCanvas = null; lastMap = null; knownBox = null; mappedM2 = 0;
+    view.moved = false;
+    tfTree.clear();
+    worldLayout = null; worldTruth = null; worldTruthAt = -Infinity;
+    for (const r of robots.values()) {
+      Object.assign(r, { pose: null, linkAt: -Infinity, plan: [], explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity,
+                         queueDepth: 0, nav: null, seenStamp: {}, odom: null, odomAt: -Infinity, obstacles: null, obstaclesAt: -Infinity,
+                         obstaclesMap: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity });
+    }
+    for (const [id, c] of cams) {
+      c.head.hidden = true; c.perc.hidden = true; c.featData = null; drawCamFeatures(id);
+      c.overlay.getContext("2d").clearRect(0, 0, c.overlay.width, c.overlay.height);
+      if (open.has(id)) startCam(id); else for (const pic of Object.values(c.pics)) pic.style.backgroundImage = "";
+    }
+    autoOpened.clear();
+    lastFleetSig = ""; dirty = true;
+    renderFleet(); renderEmpty();
+  }
+  // Called the moment a session or test is asked for, from whichever panel started it.
+  window.sortbotsRunStarting = () => {
+    startAskedAt = performance.now();
+    clearRun();
+    clearTimeout(sessionTimer); pollSession();
+  };
+
+  // A test is over and has stopped its sim: back to the empty screen, its score on top.
+  window.sortbotsRunEnded = () => {
+    startAskedAt = null;
+    clearRun();
+    clearTimeout(sessionTimer); pollSession();
+  };
+
   let sessionTimer = null, lastSessionId = null;
   async function pollSession() {
     try {
@@ -1582,7 +1840,7 @@
         controlAvailable = true;
         session = await res.json();
         if (session.session_id !== lastSessionId) { // a new run: last run's tasks mean nothing
-          if (lastSessionId !== null) { tasks = []; renderTasks(); }
+          if (lastSessionId !== null) clearRun();
           lastSessionId = session.session_id;
           refreshRoster();
         }
@@ -2078,11 +2336,24 @@
   // The grid's outer columns are --left-w / --right-w on <body>. Each handle drags its
   // bar's inner edge; widths persist per browser, double-click resets. The stage
   // canvases size from their parent, so a resize event re-fits the map and overlay.
-  const SIDES = { left: { min: 200, max: 520, dflt: 260 }, right: { min: 240, max: 560, dflt: 296 } };
+  // The left bar has no ceiling but the window, for watching the cameras big: it eats
+  // the map, then pushes the task list off the edge, and snaps to full width near the end.
+  const SIDES = { left: { min: 200, max: Infinity, dflt: 260 }, right: { min: 240, max: 560, dflt: 296 } };
+  const LEFT_SNAP_PX = 24;
+  function syncMapGone() {
+    const px = (side) => (document.body.classList.contains(`hide-${side}`) ? 0
+      : parseFloat(document.body.style.getPropertyValue(`--${side}-w`)) || SIDES[side].dflt);
+    // The phone layouts stack the panes and have no handles: there the widths mean nothing.
+    const sideBySide = getComputedStyle($("#rz-left")).display !== "none";
+    document.body.classList.toggle("map-gone", sideBySide && px("left") + px("right") >= innerWidth);
+    document.body.classList.toggle("left-full", sideBySide && px("left") >= innerWidth);
+  }
   function setSide(side, w, save = true) {
     const { min, max, dflt } = SIDES[side];
-    const v = w == null ? dflt : Math.round(Math.min(max, Math.max(min, w)));
+    let v = w == null ? dflt : Math.round(Math.min(max, innerWidth, Math.max(min, w)));
+    if (side === "left" && w != null && v >= innerWidth - LEFT_SNAP_PX) v = innerWidth;
     document.body.style.setProperty(`--${side}-w`, `${v}px`);
+    syncMapGone();
     if (save) { try { if (w == null) localStorage.removeItem(`sortbots.${side}W`); else localStorage.setItem(`sortbots.${side}W`, String(v)); } catch (e) { /* this tab only */ } }
     dispatchEvent(new Event("resize"));
   }
@@ -2100,6 +2371,26 @@
     const end = (e) => { if (h.hasPointerCapture(e.pointerId)) h.releasePointerCapture(e.pointerId); h.classList.remove("drag"); document.body.classList.remove("resizing"); };
     h.addEventListener("pointerup", end); h.addEventListener("pointercancel", end);
     h.addEventListener("dblclick", () => setSide(side, null));
+  }
+  addEventListener("resize", syncMapGone);
+  // Either side bar can be put away altogether; the choice is kept per browser.
+  for (const [side, name] of [["left", "robot list"], ["right", "task list"]]) {
+    const btn = $(`#hide-${side}`), key = `sortbots.hide.${side}`;
+    const apply = (hide) => {
+      document.body.classList.toggle(`hide-${side}`, hide);
+      btn.classList.toggle("on", !hide);
+      btn.title = btn.ariaLabel = `${hide ? "Show" : "Hide"} the ${name}`;
+      syncMapGone();
+      dispatchEvent(new Event("resize"));
+    };
+    let hidden = false;
+    try { hidden = localStorage.getItem(key) === "1"; } catch (e) { /* no storage: shown */ }
+    apply(hidden);
+    btn.addEventListener("click", () => {
+      const hide = !document.body.classList.contains(`hide-${side}`);
+      try { localStorage.setItem(key, hide ? "1" : "0"); } catch (e) { /* this tab only */ }
+      apply(hide);
+    });
   }
 
   let toastTimer = null;
@@ -2132,7 +2423,7 @@
       r.obstacles = null; r.obstaclesMap = [];
       drawCamObstacles(r.id); // clears it
     }
-    renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending(); renderPaneBadges(); renderSimFollow();
+    autoOpenCards(); renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending(); renderPaneBadges(); renderSimFollow();
     if (window.sortbotsComms) window.sortbotsComms.sync();
   }, 250);
 

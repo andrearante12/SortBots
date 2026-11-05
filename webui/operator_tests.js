@@ -41,6 +41,9 @@
   let wasRunning = false;
   let lastListSig = "";
   const expanded = new Set();
+  const collapsed = new Set(); // section headings folded shut
+  const sectionOf = (t) => t.section || "Other";
+  const listSig = () => JSON.stringify([tests, control, isRunning(), [...expanded], [...collapsed]]);
 
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
@@ -93,13 +96,13 @@
 
   function renderList() {
     const busy = isRunning();
-    const sig = JSON.stringify([tests, control, busy, [...expanded]]);
+    const sig = listSig();
     if (sig === lastListSig) return; // don't rebuild under the operator's cursor
     lastListSig = sig;
     const ready = tests.filter((t) => t.status === "ready").length;
     $("#tp-count").textContent = tests.length ? `· ${ready} ready` : "";
     const why = !control ? "This server can't launch the sim (it isn't the sim console)" : busy ? "A test is already running" : "Launch the sim, run this test and score it";
-    $("#tp-list").innerHTML = tests.length ? tests.map((t, i) => {
+    const row = (t, i) => {
       const open = expanded.has(t.name) ? " open" : "";
       const label = `<span class="t"><span class="num">${i + 1}</span>${esc(titleOf(t.name))}</span>`;
       if (t.status !== "ready") {
@@ -129,10 +132,31 @@
             <code>configs/tests/${esc(t.name)}.yaml</code></div>
         </div>
       </div>`;
+    };
+    // A test names its section in its YAML; alphabetical, whatever has none last. Numbers
+    // run on across sections, so "test 7" means the same row with a section folded.
+    const sections = [...new Set(tests.map(sectionOf))]
+      .sort((a, b) => (a === "Other") - (b === "Other") || a.localeCompare(b));
+    let n = 0;
+    $("#tp-list").innerHTML = tests.length ? sections.map((s) => {
+      const mine = tests.filter((t) => sectionOf(t) === s), shut = collapsed.has(s);
+      return `<section class="tp-sec${shut ? " shut" : ""}" data-section="${esc(s)}">
+        <button type="button" class="tp-sec-h" aria-expanded="${!shut}"><span class="chev">&#9654;</span>${esc(s)}<span class="n">${mine.length}</span></button>
+        ${mine.map((t) => row(t, n++)).join("")}
+      </section>`;
     }).join("") : `<div class="tp-empty">No test cases in configs/tests/.</div>`;
   }
 
   $("#tp-list").addEventListener("click", async (e) => {
+    const head = e.target.closest(".tp-sec-h");
+    if (head) {
+      const sec = head.parentElement, s = sec.dataset.section;
+      if (collapsed.has(s)) collapsed.delete(s); else collapsed.add(s);
+      sec.classList.toggle("shut", collapsed.has(s));
+      head.setAttribute("aria-expanded", String(!collapsed.has(s)));
+      lastListSig = listSig();
+      return;
+    }
     const item = e.target.closest(".tp-test");
     if (!item) return;
     const name = item.dataset.name, btn = e.target.closest("[data-run]");
@@ -140,7 +164,7 @@
       if (!e.target.closest(".tp-row")) return; // a click inside the expanded options
       if (expanded.has(name)) expanded.delete(name); else expanded.add(name);
       item.classList.toggle("open", expanded.has(name));
-      lastListSig = JSON.stringify([tests, control, isRunning(), [...expanded]]);
+      lastListSig = listSig();
       return;
     }
     // Options only exist once a row has been expanded; collapsed, the spec's defaults.
@@ -151,6 +175,7 @@
     btn.disabled = true;
     try {
       run = await api("/api/tests/run", payload);
+      if (window.sortbotsRunStarting) window.sortbotsRunStarting();
       $("#result-card").hidden = true; // the last score is gone once the next run starts
       warn(null);
       $("#tp-log").textContent = ""; logOffset = 0;
@@ -271,7 +296,10 @@
       run = await api(`/api/tests/run${q}`);
       if (logOffset == null) $("#tp-log").textContent = "";
       appendLog(run.log); logOffset = run.offset;
-      if (wasRunning && !run.running && run.name) showResult(run.name, run.exit);
+      if (wasRunning && !run.running && run.name) {
+        showResult(run.name, run.exit);
+        if (window.sortbotsRunEnded) window.sortbotsRunEnded();
+      }
       wasRunning = !!run.running;
     } catch (e) {
       if (visible) warn(`Tests unavailable: ${e.message}`);
