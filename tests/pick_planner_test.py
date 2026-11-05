@@ -66,6 +66,7 @@ class FakeWorld:
         self.msim = magnet.MagnetSim(pk, lambda x, y: magnet.support_top_z(self.w, x, y))
         self.spec = {p["id"]: p for p in self.w["packages"]}
         self.log = []
+        self.q_seen = None      # what a joint encoder would report; None: nothing does
 
     # -- what the planner is shown ------------------------------------------------------
     def tcp(self):
@@ -102,9 +103,17 @@ class FakeWorld:
                         "age_s": 0.0, "px": [300, 200, 60, 40]})
         return out
 
+    def boxes(self):
+        out = []
+        for pid, spec in self.spec.items():
+            if self.msim.held != pid:
+                p = self.msim.pose(pid)
+                out.append({"x": p["x"], "y": p["y"], "z": p["z"] + spec["size"][2] / 2, "size": list(spec["size"])})
+        return out
+
     def obs(self):
         return pp.Obs(now=self.now, base=tuple(self.base), plates=self.plates(),
-                      held=self.msim.held is not None)
+                      held=self.msim.held is not None, q=self.q_seen, boxes=self.boxes())
 
     # -- what the planner does -------------------------------------------------------------
     def apply(self, d):
@@ -235,6 +244,62 @@ def test_every_package_in_a_pick_world_in_order(kin, name, order):
         assert math.hypot(pose["x"] - want[0], pose["y"] - want[1]) < 0.06, pid
         assert pose["z"] == pytest.approx(spec["z"], abs=1e-6), pid
     assert fw.min_gap > 0.0, "the chassis drove into a deck"
+
+
+def test_with_no_location_in_the_work_order_depth_geometry_finds_the_block(kin):
+    fw = FakeWorld(kin, "pick_table")
+    req = dict(pick_req(fw.w, "pkg_0"), at=None)
+    d = do(fw, pp.PickPlanner(kin), req)
+    assert d.result == "picked", (d, fw.log[-3:])
+
+
+def test_no_location_and_no_box_in_view_fails_rather_than_guessing(kin):
+    fw = FakeWorld(kin, "pick_table", sees=False)
+    fw.boxes = lambda: []
+    planner = pp.PickPlanner(kin, {"acquire": {"timeout_s": 5.0}})
+    d = do(fw, planner, dict(pick_req(fw.w, "pkg_0"), at=None))
+    assert d.result == "failed" and "not found" in d.note
+
+
+def test_a_plate_that_moved_is_caught_at_the_dock_and_the_base_docks_again(kin):
+    """Localization drift: the fix at the dock disagrees with the lock by 3 cm."""
+    fw = FakeWorld(kin, "pick_table", noise=False)
+    planner = pp.PickPlanner(kin)
+    real_plates, drift = fw.plates, {"dy": 0.0}
+
+    def seen():                 # the fake camera won't see from the dock: stand in for the tilted head
+        spec = fw.spec["pkg_0"]
+        c, n = magnet.magnet_face_pose(fw.msim.pose("pkg_0"), spec["size"], spec["magnet_face"])
+        if planner.phase == "confirm":
+            drift["dy"] = 0.03
+        out = real_plates() or ([] if fw.msim.held else [{
+            "x": c[0], "y": c[1] + drift["dy"], "z": c[2], "nx": n[0], "ny": n[1], "nz": n[2],
+            "conf": 0.9, "age_s": 0.0, "px": [300, 200, 60, 40]}])
+        return [dict(p, x=p["x"] + 1e-5 * fw.now) for p in out]     # each frame a new measurement
+    fw.plates = seen
+    planner.request(pick_req(fw.w, "pkg_0"), fw.now)
+    while planner.phase != "pre" and fw.now < 200:
+        fw.apply(planner.tick(fw.obs()))
+    plate_y = magnet.magnet_face_pose(fw.msim.pose("pkg_0"), fw.spec["pkg_0"]["size"], fw.spec["pkg_0"]["magnet_face"])[0][1]
+    assert planner.redocks >= 1 and planner.target["c"][1] == pytest.approx(plate_y + 0.03, abs=0.005)
+    assert planner.dock_shift < 0.005          # and the last look agreed with where it stopped
+
+
+def test_a_dock_with_no_view_of_the_plate_goes_on_the_last_fix(kin):
+    fw = FakeWorld(kin, "pick_bench")
+    d = do(fw, pp.PickPlanner(kin), pick_req(fw.w, "pkg_0"))
+    assert d.result == "picked"
+    assert any(p == "confirm" for _, p in fw.log)
+
+
+def test_a_move_waits_for_the_joints_when_they_are_measured(kin):
+    planner = pp.PickPlanner(kin)
+    planner.arm_end, planner.q_cmd = 10.0, [0.5, 0.0, 0.0, 0.0, 0.0, 0.0]
+    behind = pp.Obs(now=10.5, base=(0, 0, 0), q=[0.4, 0.0, 0.0, 0.0, 0.0, 0.0])
+    there = pp.Obs(now=10.5, base=(0, 0, 0), q=[0.495, 0.0, 0.0, 0.0, 0.0, 0.0])
+    gave_up = pp.Obs(now=12.5, base=(0, 0, 0), q=[0.4, 0.0, 0.0, 0.0, 0.0, 0.0])
+    assert not planner._arm_ready(behind) and planner._arm_ready(there) and planner._arm_ready(gave_up)
+    assert planner._arm_ready(pp.Obs(now=10.5, base=(0, 0, 0)))     # nothing measures: the dwell
 
 
 def test_the_block_goes_down_on_pick_tables_marked_area(kin):
@@ -390,7 +455,8 @@ def test_arm_ramps_are_smooth_and_land_exactly(kin):
     assert qs[0] == pytest.approx(0.0)
     assert all(b >= a for a, b in zip(qs, qs[1:]))                    # monotone, no overshoot
     assert qs[-1] == pytest.approx(1.0) and p.ramp is None
-    assert p._arm_done(11.0) and not p._arm_ready(11.2) and p._arm_ready(11.5)
+    at = lambda t: pp.Obs(now=t, base=(0, 0, 0))  # noqa: E731
+    assert p._arm_done(11.0) and not p._arm_ready(at(11.2)) and p._arm_ready(at(11.5))
     assert p._ramp_q(99.0) is None                                    # nothing more to send
 
 

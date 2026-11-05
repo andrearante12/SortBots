@@ -23,6 +23,7 @@ warmup_s: 2
 tasks:
   - robot: robot_0
     package: pkg_0
+    find: geometry                 # no location in the work order: depth geometry finds the block
     place: hold
 
 stop:

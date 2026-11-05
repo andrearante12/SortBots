@@ -176,6 +176,7 @@ tasks:                               # optional task_manager deliveries
     package: pkg_0                   # must be in the world's packages:
     pickup: dock                     # dock/here: no Nav2 leg, the pick controller drives itself;
     dropoff: dock                    #   or a waypoint NAME, or a pose [x, y, yaw] to drive to first
+    find: geometry                   # optional: the work order gives no location, depth finds the box
     place: {shift: [-0.12, 0]}       # where it comes to rest: shifted from where it started, `hold` (stays on the magnet: the task ends at the pick), or
                                      #   [x, y] / [x, y, yaw]; z is whatever is under that spot
 stop:

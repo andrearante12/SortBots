@@ -436,6 +436,13 @@ def test_a_pick_only_task_is_done_at_the_pick_and_never_lets_go(tm):
     assert [r["cmd"] for r in requests(tm)] == ["attach"]        # no detach, ever
 
 
+def test_a_package_task_may_leave_the_location_to_the_robot(tm):
+    dispatch(tm, task_id="p1", package="pkg_0", pickup=None, dropoff=None, place=PLACE, **{**CARGO, "at": None})
+    assert "rejected" not in statuses(tm)[-1], statuses(tm)[-1]
+    tm._tick()
+    assert requests(tm)[-1]["at"] is None
+
+
 def test_a_package_task_that_says_nothing_about_placing_is_refused(tm):
     dispatch(tm, task_id="p1", package="pkg_0", pickup=None, dropoff=None, **CARGO)
     assert "rejected" in statuses(tm)[-1]

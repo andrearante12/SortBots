@@ -277,7 +277,7 @@ def _place(value, w: str, world: dict, pkg: dict) -> dict:
             "support": under["id"] if under else "floor"}
 
 
-TASK_KEYS = {"robot", "pickup", "dropoff", "at_s", "package", "place"}
+TASK_KEYS = {"robot", "pickup", "dropoff", "at_s", "package", "place", "find"}
 
 
 def _tasks(raw, robots: list[str], named: dict | None, world: dict | None = None) -> list[dict]:
@@ -289,7 +289,7 @@ def _tasks(raw, robots: list[str], named: dict | None, world: dict | None = None
     for i, t in enumerate(raw):
         w = f"tasks[{i}]"
         if not isinstance(t, dict) or set(t) - TASK_KEYS:
-            raise SpecError(f"{w}: expected {{robot, pickup, dropoff, at_s, package?, place?}}")
+            raise SpecError(f"{w}: expected {{robot, pickup, dropoff, at_s, package?, place?, find?}}")
         if t.get("robot") not in robots:
             raise SpecError(f"{w}.robot: {t.get('robot')!r} is not in this run ({robots})")
         at_s = _num(t.get("at_s", 0.0), f"{w}.at_s", 0, MAX_SIM_S)
@@ -308,6 +308,8 @@ def _tasks(raw, robots: list[str], named: dict | None, world: dict | None = None
             have = [p["id"] for p in (world or {}).get("packages", [])]
             raise SpecError(f"{w}.package: {pid!r} is not in this run's world "
                             f"({'it has ' + ', '.join(have) if have else 'the world has no packages'})")
+        if t.get("find", "geometry") != "geometry":
+            raise SpecError(f"{w}.find: the only way to find a package is `geometry`")
         if "place" not in t:
             raise SpecError(f"{w}.place: a package task says where the box comes to rest, "
                             "or `hold` to keep it on the magnet")
@@ -321,7 +323,9 @@ def _tasks(raw, robots: list[str], named: dict | None, world: dict | None = None
                     # tell it from the other plates in view: its size, which face carries
                     # the magnet, and roughly where it is (the shelf slot, not its pose).
                     "size": list(pkg["size"]), "face": pkg["magnet_face"],
-                    "at": {"x": pkg["pose"][0], "y": pkg["pose"][1]}, "at_s": at_s})
+                    # `find: geometry` leaves that out: the robot finds it from depth alone
+                    "at": None if t.get("find") == "geometry"
+                    else {"x": pkg["pose"][0], "y": pkg["pose"][1]}, "at_s": at_s})
     return out
 
 

@@ -283,12 +283,13 @@ class TaskManager(Node):
             # place null is a pick-only task: done once the package is on the magnet
             if not (isinstance(package, str) and "place" in payload
                     and (place is None or nums(place, ("x", "y", "z", "yaw")))
-                    and nums(at, ("x", "y")) and isinstance(face, str)
+                    and "at" in payload and (at is None or nums(at, ("x", "y"))) and isinstance(face, str)
                     and isinstance(size, list) and len(size) == 3):
                 self._reject(task_id, "a package task needs package (id), size [x, y, z], "
-                                      "face, at {x, y} and place {x, y, z, yaw} or null")
+                                      "face, at {x, y} or null and place {x, y, z, yaw} or null")
                 return
-            cargo = {"size": size, "face": face, "at": {"x": at["x"], "y": at["y"]}}
+            # at null: the work order doesn't say where it is, the robot finds it
+            cargo = {"size": size, "face": face, "at": at and {"x": at["x"], "y": at["y"]}}
             stops = self._resolve_legs(names, task_id)
             if stops is None:
                 return

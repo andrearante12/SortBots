@@ -52,6 +52,8 @@ DEFAULTS = {
     "arm_min_move_s": 0.8,
     "arm_max_move_s": 4.0,
     "settle_s": 0.4,
+    "arm_tol_rad": 0.02,
+    "arm_timeout_s": 2.0,
     "reach_m": magnet.REACH_NOM_M,
     "stage_m": 0.35,
     "push_m": 0.008,
@@ -62,7 +64,8 @@ DEFAULTS = {
     "dock": {"pos_tol_m": 0.02, "yaw_tol_rad": 0.05, "v_max": 0.30, "v_final": 0.12,
              "wz_max": 0.6, "kp": 1.2, "kyaw": 1.5, "timeout_s": 45.0,
              "skip_within_m": 0.55, "skip_lateral_m": 0.06},
-    "acquire": {"assoc_m": 0.5, "min_conf": 0.2, "max_age_s": 1.0, "stable_ticks": 2,
+    "confirm": {"samples": 5, "timeout_s": 3.0, "max_redocks": 2, "redock_m": 0.015},
+    "acquire": {"assoc_m": 0.5, "box_assoc_m": 0.25, "min_conf": 0.2, "max_age_s": 1.0, "stable_ticks": 2,
                 "view_m": 2.6, "scan_rate": 0.5, "orbit_m": 1.5, "orbit_steps": 8,
                 "orbit_settle_s": 1.5, "timeout_s": 120.0},
     "update": {"track_m": 0.25, "min_dist_m": 0.9, "max_age_s": 0.35,
@@ -86,6 +89,8 @@ class Obs:
     base: tuple | None                      # (x, y, yaw), the frame the plates are in
     plates: list = field(default_factory=list)   # {x,y,z,nx,ny,nz,conf,age_s?,px?}
     held: bool = False                      # the magnet is holding a package
+    q: list | None = None                   # the arm's measured joints, None if nothing reports them
+    boxes: list = field(default_factory=list)    # from depth geometry: {x, y, z, size, ...}
 
 
 @dataclass
@@ -133,6 +138,10 @@ class PickPlanner:
         self.dock: tuple | None = None
         self.sub = "stage"
         self.acq: dict = {}
+        self.fixes: list = []               # fresh plate fixes gathered at the dock
+        self.redocks = 0
+        self.arm_err: float | None = None   # worst joint error last seen, radians
+        self.dock_shift: float | None = None  # how far the fix at the dock moved the target
         self._stop_sent = True
         self._seen = 0
 
@@ -149,6 +158,7 @@ class PickPlanner:
         self.t_req = now
         self.target = self.plan = self.dock = None
         self.acq = {}
+        self.fixes, self.redocks, self.dock_shift = [], 0, None
         self._seen = 0
         self._stop_sent = False
         self._enter("tuck", now)
@@ -181,10 +191,17 @@ class PickPlanner:
         """The commanded ramp has finished."""
         return now >= self.arm_end
 
-    def _arm_ready(self, now: float) -> bool:
-        """... and the drives have had settle_s to catch up with it (there is no
-        /joint_states to ask, so a dwell stands in for convergence)."""
-        return now >= self.arm_end + self.cfg["settle_s"]
+    def _arm_ready(self, obs: Obs) -> bool:
+        """... and the joints have got there. With measured joints that is what is checked,
+        up to arm_timeout_s past the ramp's end; without them (nothing reports them on
+        this platform) a settle_s dwell stands in for it. Wrist roll and the jaw are left
+        out of the comparison only in that neither carries the TCP's position."""
+        if obs.q is None:
+            return obs.now >= self.arm_end + self.cfg["settle_s"]
+        self.arm_err = max(abs(a - b) for a, b in zip(obs.q[:4], self.q_cmd[:4]))
+        if obs.now < self.arm_end:
+            return False
+        return self.arm_err <= self.cfg["arm_tol_rad"] or obs.now >= self.arm_end + self.cfg["arm_timeout_s"]
 
     def _ramp_q(self, now: float) -> list | None:
         r = self.ramp
@@ -272,18 +289,29 @@ class PickPlanner:
             self._fail(d, obs, f"unknown request {self.mode!r}")
 
     # .. acquire (attach only) ..............................................................
-    def _hint(self) -> tuple[float, float]:
-        at = self.req["at"]
-        return (at["x"], at["y"])
+    def _hint(self, obs: Obs) -> tuple[float, float] | None:
+        """Where to look: the work order's location if it gives one, else the box depth
+        geometry found nearest the robot, else nowhere yet."""
+        at = self.req.get("at")
+        if at:
+            return (at["x"], at["y"])
+        if not obs.boxes or obs.base is None:
+            return None
+        b = min(obs.boxes, key=lambda b: math.hypot(b["x"] - obs.base[0], b["y"] - obs.base[1]))
+        return (b["x"], b["y"])
 
     def _candidate(self, obs: Obs):
-        a, hint = self.cfg["acquire"], self._hint()
+        a, hint = self.cfg["acquire"], self._hint(obs)
+        if hint is None:
+            return None
+        # a plate is ON the box geometry found, so that match can be much tighter
+        reach = a["assoc_m"] if self.req.get("at") else a["box_assoc_m"]
         best = None
         for p in obs.plates:
             if p.get("conf", 1.0) < a["min_conf"] or p.get("age_s", 0.0) > a["max_age_s"]:
                 continue
             dist = math.hypot(p["x"] - hint[0], p["y"] - hint[1])
-            if dist <= a["assoc_m"] and (best is None or dist < best[0]):
+            if dist <= reach and (best is None or dist < best[0]):
                 best = (dist, p)
         return best[1] if best else None
 
@@ -298,8 +326,8 @@ class PickPlanner:
             return self._lock(obs, d, cand)
         if obs.now - self.acq["t"] > a["timeout_s"]:
             return self._fail(d, obs, "plate not found")
-        hint = self._hint()
         bx, by, byaw = obs.base
+        hint = self._hint(obs) or (bx, by)      # nothing to go on: look round from here
         bearing = math.atan2(hint[1] - by, hint[0] - bx)
         dist = math.hypot(hint[0] - bx, hint[1] - by)
         sub = self.acq["sub"]
@@ -448,22 +476,73 @@ class PickPlanner:
         if not ok:
             return
         d.vel = (0.0, 0.0, 0.0)
+        if self.mode == "attach":
+            self.fixes = []
+            self._enter("confirm", obs.now)
+            return
+        self._reach(obs, d)
+
+    def _reach(self, obs: Obs, d: Decision) -> None:
         self.plan = self._plan_at(obs.base)         # again, from where we actually stand
         if self.plan is None:
             return self._fail(d, obs, "out of reach: no arm solution after docking")
         self._arm_to(self.plan["pre"]["q"], obs.now)
         self._enter("pre", obs.now)
 
+    # .. confirm (attach only) ...................................................................
+    def _clipped(self, p: dict) -> bool:
+        """The plate touches the image's edge, so its centroid is biased."""
+        u, px = self.cfg["update"], p.get("px")
+        if not px:
+            return False
+        w, h = u["image"]
+        return (px[0] < u["border_px"] or px[1] < u["border_px"]
+                or px[0] + px[2] > w - u["border_px"] or px[1] + px[3] > h - u["border_px"])
+
+    def _ph_confirm(self, obs: Obs, d: Decision) -> None:
+        """Stopped at the dock, measure the plate again before committing the arm.
+
+        The lock was taken from further away and the base has moved on its own localization
+        since, so this is what catches drift. It costs nothing when the fix agrees, and
+        changes nothing when the plate cannot be seen from here: then the arm goes on the
+        last fix, as it always did, and the status says so."""
+        d.vel = (0.0, 0.0, 0.0)
+        if self._no_pose(obs, d):
+            return
+        c, u = self.cfg["confirm"], self.cfg["update"]
+        for p in obs.plates:
+            fix = (p["x"], p["y"], p["z"], p["nx"], p["ny"], p["nz"])
+            if (p.get("age_s", 0.0) <= u["max_age_s"] and not self._clipped(p) and fix not in self.fixes
+                    and math.dist(fix[:3], self.target["c"]) <= u["track_m"]):
+                self.fixes.append(fix)
+        if len(self.fixes) >= c["samples"]:
+            mean = [sum(f[i] for f in self.fixes) / len(self.fixes) for i in range(6)]
+            norm = math.sqrt(sum(v * v for v in mean[3:])) or 1.0
+            self.dock_shift = math.dist(mean[:3], self.target["c"])
+            self.target = {"c": tuple(mean[:3]), "n": tuple(v / norm for v in mean[3:])}
+            self.fixes = []
+            dock = self._dock_pose()
+            if (math.hypot(dock[0] - obs.base[0], dock[1] - obs.base[1]) > c["redock_m"]
+                    and self.redocks < c["max_redocks"]):
+                self.redocks += 1
+                self.dock, self.sub = dock, "final"
+                self._enter("dock", obs.now)
+                return
+            return self._reach(obs, d)
+        if obs.now - self.t_phase > c["timeout_s"]:
+            d.note = "no fresh plate fix at the dock: going on the last one"
+            self._reach(obs, d)
+
     # .. reach ................................................................................
     def _ph_pre(self, obs: Obs, d: Decision) -> None:
         d.vel = (0.0, 0.0, 0.0)
-        if self._arm_ready(obs.now):
+        if self._arm_ready(obs):
             self._arm_to(self.plan["final"]["q"], obs.now)
             self._enter("approach", obs.now)
 
     def _ph_approach(self, obs: Obs, d: Decision) -> None:
         d.vel = (0.0, 0.0, 0.0)
-        if not self._arm_ready(obs.now):
+        if not self._arm_ready(obs):
             return
         if self.mode == "attach":
             d.pick_cmd = "attach"

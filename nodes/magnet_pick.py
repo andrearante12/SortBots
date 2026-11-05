@@ -69,6 +69,7 @@ def parse_request(text: str) -> dict | None:
         return None
     if not isinstance(req, dict) or req.get("cmd") not in ("attach", "detach", "cancel"):
         return None
+    # `at` may be null: the work order doesn't say where, depth geometry finds it
     if req["cmd"] == "attach" and not all(k in req for k in ("package", "size", "face", "at")):
         return None
     if req["cmd"] == "detach" and not all(k in req for k in ("package", "size", "face", "place")):
@@ -103,6 +104,13 @@ def camera_plates(msg: dict | None, now: float, stale_s: float = PLATE_STALE_S) 
         return []
     return [dict(p, age_s=float(p.get("age_s", 0.0)) + max(0.0, behind))
             for p in msg.get("plates", [])]
+
+
+def fresh_boxes(msg: dict | None, now: float, stale_s: float = PLATE_STALE_S) -> list[dict]:
+    """Depth geometry's latest boxes, or [] if they are old: same rule as the plates."""
+    if not msg or now - float(msg.get("stamp", now)) > stale_s:
+        return []
+    return list(msg.get("boxes", []))
 
 
 def load_config(path: Path) -> dict:
@@ -147,6 +155,7 @@ def main(argv=None) -> int:
             self.oracle = a.perception == "oracle"
             self.gt: dict | None = None
             self.packages_msg: dict | None = None
+            self.boxes_msg: dict | None = None
             self.req: dict | None = None
             self.last_phase = None
             self.last_status = -1e9
@@ -160,6 +169,7 @@ def main(argv=None) -> int:
             self.create_subscription(String, f"/{rid}/pick_request", self.on_request, 10)
             self.create_subscription(String, "/sim/ground_truth", self.on_gt, 10)
             self.create_subscription(String, f"/{rid}/packages", self.on_packages, 10)
+            self.create_subscription(String, f"/{rid}/boxes", self.on_boxes, 10)
             self.create_timer(1.0 / stream_hz, self.step,
                               clock=Clock(clock_type=ClockType.STEADY_TIME))
             self.log(f"up for {rid}, perception={a.perception}")
@@ -178,6 +188,12 @@ def main(argv=None) -> int:
         def on_packages(self, m):
             try:
                 self.packages_msg = json.loads(m.data)
+            except ValueError:
+                pass
+
+        def on_boxes(self, m):
+            try:
+                self.boxes_msg = json.loads(m.data)
             except ValueError:
                 pass
 
@@ -244,6 +260,10 @@ def main(argv=None) -> int:
             aim = self.planner.target if req.get("cmd") == "attach" else None
             self.status_pub.publish(String(data=json.dumps({
                 "phase": self.planner.phase, "busy": self.planner.busy,
+                # The robot's state as far as perception goes: while a pick or place runs it
+                # is looking for packages, not driving among obstacles.
+                "mode": "manipulation" if self.planner.busy else "nav",
+                "arm_err_rad": self.planner.arm_err, "dock_shift_m": self.planner.dock_shift,
                 "target": [round(v, 3) for v in aim["c"]] if aim else None,
                 "perception": a.perception, "cmd": req.get("cmd"), "package": req.get("package"),
                 "note": getattr(d, "note", "") if d else ""})))
@@ -256,8 +276,9 @@ def main(argv=None) -> int:
             plates = (oracle_plates(self.gt, self.req) if self.oracle
                       else camera_plates(self.packages_msg, now))
             held = bool(((self.gt.get("magnet") or {}).get(rid) or {}).get("held"))
-            d = self.planner.tick(pick_planner.Obs(now=now, base=self.base_pose(),
-                                                   plates=plates, held=held))
+            d = self.planner.tick(pick_planner.Obs(
+                now=now, base=self.base_pose(), plates=plates, held=held,
+                q=(self.gt.get("arm") or {}).get(rid), boxes=fresh_boxes(self.boxes_msg, now)))
             self.emit(d)
             if d.result:
                 self.req = None

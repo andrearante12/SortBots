@@ -307,7 +307,7 @@
   // pick aims at. The obstacle boxes would only frame the table. Green is the plate the pick
   // controller has locked (/pick_status); amber is everything else the detector reports. Both
   // solid and labelled: a faint dashed box vanished against cardboard (2026-11-05).
-  const PLATE_INK = "#22c55e", PLATE_OTHER_INK = "#f59e0b";
+  const PLATE_INK = "#22c55e", PLATE_OTHER_INK = "#f59e0b", BOX_INK = "#38bdf8";
   const PLATES_TTL_MS = 1500, PLATE_SEEN_S = 0.35, PLATE_TARGET_M = 0.2;
   const packageWorld = () => !!(worldLayout && worldLayout.packages && worldLayout.packages.length);
   const platesSeen = (r) => (r.plates && performance.now() - r.platesAt < PLATES_TTL_MS
@@ -321,14 +321,22 @@
   }
   function drawCamPlates(c, g, r) {
     const plates = platesSeen(r), target = plateTarget(r, plates), iw = r.plates && r.plates.w, ih = r.plates && r.plates.h;
-    syncPerception(c, r, plates, target);
-    if (!plates.length || !iw || !ih) return;
+    const boxes = r.boxes && performance.now() - r.boxesAt < PLATES_TTL_MS ? r.boxes.boxes || [] : [];
+    syncPerception(c, r, plates, target, boxes);
+    if ((!plates.length && !boxes.length) || !iw || !ih) return;
     g.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; g.textBaseline = "bottom";
     for (const pic of c.el.querySelectorAll(".pic")) {
       const pw = pic.offsetWidth, ph = pic.offsetHeight, px = pic.offsetLeft, py = pic.offsetTop;
       if (!pw || !ph) continue;
       const k = Math.max(pw / iw, ph / ih), ox = px + (pw - iw * k) / 2, oy = py + (ph - ih * k) / 2;
       g.save(); g.beginPath(); g.rect(px, py, pw, ph); g.clip();
+      for (const b of boxes) { // from depth alone: the box, where the plates below are its magnet
+        const [u, v, bw, bh] = b.px, x = ox + u * k, y = oy + v * k;
+        g.strokeStyle = BOX_INK; g.lineWidth = 2.5; g.strokeRect(x, y, bw * k, bh * k);
+        const label = `box · ${b.size.map((s) => Math.round(s * 100)).join(" × ")} cm`, tw = g.measureText(label).width + 8, ly = Math.min(y + bh * k + 15, py + ph);
+        g.fillStyle = BOX_INK; g.fillRect(x, ly - 15, tw, 15);
+        g.fillStyle = "#04202e"; g.fillText(label, x + 4, ly - 1);
+      }
       for (const p of plates) {
         const [u, v, bw, bh] = p.px, x = ox + u * k, y = oy + v * k, on = p === target;
         g.strokeStyle = on ? PLATE_INK : PLATE_OTHER_INK; g.lineWidth = on ? 3 : 2;
@@ -344,13 +352,16 @@
   }
   // The same detection in words: where it was in the picture, how far the depth image says
   // it is, and where those two put it on the map.
-  function syncPerception(c, r, plates, target) {
+  function syncPerception(c, r, plates, target, boxes) {
     const set = (key, text) => { const el = c.perc.querySelector(`[data-p="${key}"]`); if (el.textContent !== text) el.textContent = text; };
     const shown = target || plates.reduce((a, p) => (!a || p.conf * p.px[2] * p.px[3] > a.conf * a.px[2] * a.px[3] ? p : a), null);
     const aim = r.pick && r.pick.target;
     c.perc.classList.toggle("locked", !!target);
     set("state", target ? "On target" : aim ? "Aiming at its last fix" : plates.length ? "Candidates" : "Nothing in view");
     set("n", String(plates.length));
+    set("mode", r.pick && r.pick.mode === "manipulation" ? "Manipulation" : "Nav");
+    const b = boxes[0];
+    set("box", b ? `x ${b.x.toFixed(3)}  y ${b.y.toFixed(3)}  z ${b.z.toFixed(3)}, on a surface at ${b.support_z.toFixed(2)} m` : "—");
     if (shown) {
       set("img", `pixel (${shown.uv.map((v) => Math.round(v)).join(", ")}), ${shown.px[2]} × ${shown.px[3]} px`);
       set("depth", `${shown.range_m.toFixed(3)} m from the lens, plane fit`);
@@ -622,7 +633,7 @@
       id, color: COLORS[robots.size % COLORS.length], pose: null, linkAt: -Infinity, plan: [],
       explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity, queueDepth: 0,
       nav: null, seenStamp: {}, odom: null, odomAt: -Infinity,
-      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [], plates: null, platesAt: -Infinity, pick: null,
+      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity,
     };
     robots.set(id, r);
     // Kept so removeRobot can drop them when a run leaves this robot out.
@@ -640,6 +651,11 @@
     sub(`/${id}/packages`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
       try { r.plates = JSON.parse(msg.data); } catch (e) { return; }
       r.platesAt = performance.now(); dirty = true;
+      drawCamObstacles(id);
+    });
+    sub(`/${id}/boxes`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
+      try { r.boxes = JSON.parse(msg.data); } catch (e) { return; }
+      r.boxesAt = performance.now();
       drawCamObstacles(id);
     });
     sub(`/${id}/pick_status`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
@@ -1045,7 +1061,7 @@
     const perc = document.createElement("div");
     perc.className = "perc"; perc.hidden = true;
     perc.innerHTML = `<div class="ph">Plate detection<i><span data-p="state"></span> · <span data-p="n"></span> seen</i></div>
-      <dl><dt>Image</dt><dd data-p="img"></dd><dt>Depth</dt><dd data-p="depth"></dd><dt>Map</dt><dd data-p="map"></dd><dt>Facing</dt><dd data-p="face"></dd></dl>`;
+      <dl><dt>State</dt><dd data-p="mode"></dd><dt>Box</dt><dd data-p="box"></dd><dt>Image</dt><dd data-p="img"></dd><dt>Depth</dt><dd data-p="depth"></dd><dt>Map</dt><dd data-p="map"></dd><dt>Facing</dt><dd data-p="face"></dd></dl>`;
     const head = document.createElement("div");
     head.className = "headctl"; head.hidden = true;
     head.innerHTML = HEAD_AXES.map(([key, label, lo, hi]) => `<label>${label}<input type="range" data-head="${key}" min="${lo}" max="${hi}" step="0.01" value="0" aria-label="Head ${key}"><output data-head-out="${key}"></output></label>`).join("");

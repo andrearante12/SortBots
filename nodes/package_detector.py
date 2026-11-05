@@ -38,6 +38,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import box_geometry  # noqa: E402
 import package_vision as pv  # noqa: E402
 from obstacle_cloud import quat_matrix  # noqa: E402
 
@@ -97,6 +98,9 @@ def main(argv=None):
             self.tf = Buffer()
             self._tfl = TransformListener(self.tf, self)
             self.pub = self.create_publisher(String, f"/{rid}/packages", 10)
+            self.boxes_pub = self.create_publisher(String, f"/{rid}/boxes", 10)
+            self.manipulating = False
+            self.create_subscription(String, f"/{rid}/pick_status", self.on_status, 10)
             self.create_subscription(CameraInfo, f"/{rid}/camera/camera_info",
                                      self.on_info, qos_profile_sensor_data)
             self.create_subscription(Image, f"/{rid}/camera/rgb", self.on_rgb,
@@ -108,6 +112,12 @@ def main(argv=None):
             # rate, not a deadline that stands for distance.
             self.create_timer(1.0 / float(cfg.get("rate_hz", 10.0)), self.step,
                               clock=Clock(clock_type=ClockType.STEADY_TIME))
+
+        def on_status(self, m):
+            try:
+                self.manipulating = json.loads(m.data).get("mode") == "manipulation"
+            except ValueError:
+                pass
 
         def on_info(self, m):
             self.K = (m.k[0], m.k[4], m.k[2], m.k[5])
@@ -135,6 +145,11 @@ def main(argv=None):
                 return
             r, t = tr.transform.rotation, tr.transform.translation
             T = quat_matrix(r.x, r.y, r.z, r.w, (t.x, t.y, t.z))
+            if self.manipulating:       # geometry is for when a pick has actually started
+                self.boxes_pub.publish(String(data=json.dumps({
+                    "stamp": round(max(t_rgb, t_d), 3), "frame": "map",
+                    "w": int(rgb.shape[1]), "h": int(rgb.shape[0]),
+                    "boxes": box_geometry.find_boxes(depth, self.K, T, cfg.get("boxes"))})))
             plates = [pv.to_map(p, T) for p in pv.detect_plates(rgb, depth, self.K, cfg)]
             out = self.tracker.update(plates, max(t_rgb, t_d))
             self.pub.publish(String(data=json.dumps({

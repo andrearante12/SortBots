@@ -36,6 +36,11 @@ min_plate_m: 0.03
 max_plate_m: 0.2
 min_plate_short_m: 0.02
 
+# nodes/box_geometry.py: boxes on a table from depth alone, run only in the manipulation state
+# (while a pick or place is under way), on /<id>/boxes. Any of its DEFAULTS may be set here.
+boxes:
+  max_range_m: 2.5      # further than this, a table's top is too grazing to fit
+
 sim:
   # The colours simtest/world.py authors: cardboard (0.76, 0.60, 0.42) and a
   # near-black plate (0.05, 0.05, 0.06), after Isaac's lighting. Loose on purpose; the

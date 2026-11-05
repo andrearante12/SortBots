@@ -1218,6 +1218,7 @@ class _WorldRuntime:
         self.pending: list[str] = []
         self.magnet_rt = None   # scripts/_magnet_runtime.MagnetRuntime, set by main() when there are packages
         self.head_indices = None   # robot_0's [pan, tilt] dof indices, set by main()
+        self.arm_indices = None    # ... and the arm's, in ARM_JOINT_NAMES order
 
         self.node = Node("sim_world")
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -1456,6 +1457,8 @@ class _WorldRuntime:
                 # a head_cmd subscriber.
                 pan_i, tilt_i = self.head_indices
                 out["head"] = {name: {"pan": round(float(q[pan_i]), 4), "tilt": round(float(q[tilt_i]), 4)}}
+                # The arm's measured joints: what the pick controller checks a move against.
+                out["arm"] = {name: [round(float(q[i]), 4) for i in self.arm_indices]}
         if self.world:
             from simtest import world as wl
 
@@ -1729,7 +1732,7 @@ def main() -> int:
         head_joint_indices = _dof_indices(dof_names, HEAD_JOINT_NAMES)
         emit(f"  arm_joint_indices={arm_joint_indices} head_joint_indices={head_joint_indices}")
 
-    world_rt.head_indices = head_joint_indices
+    world_rt.head_indices, world_rt.arm_indices = head_joint_indices, arm_joint_indices
     head_tf = _HeadTf(CAMERA_ZERO["robot_0"]) if extra_ros_node is not None and "robot_0" in CAMERA_ZERO else None
 
     dt = 1.0 / 60.0
