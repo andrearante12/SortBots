@@ -200,15 +200,16 @@ def _make_per_robot_actions(
             ],
             output="screen",
         ))
-        if platform == "real":
-            actions.append(ExecuteProcess(
-                cmd=[
-                    "python3",
-                    os.path.join(REPO_ROOT, "nodes", "feature_overlay.py"),
-                    "--robot-id", rid,
-                ],
-                output="screen",
-            ))
+        # Both platforms: RTAB-Map's keypoints on real hardware, an ORB stand-in
+        # on camera/rgb in sim (no odom_info there). On demand either way.
+        actions.append(ExecuteProcess(
+            cmd=[
+                "python3",
+                os.path.join(REPO_ROOT, "nodes", "feature_overlay.py"),
+                "--robot-id", rid,
+            ] + ([] if platform == "real" else ["--sim"]),
+            output="screen",
+        ))
 
         # Obstacles in front of the robot, from geometry rather than frame
         # differencing: clusters in base_link plus a `moving` flag from odom

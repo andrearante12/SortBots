@@ -905,14 +905,17 @@
     if (c) return c;
     const el = document.createElement("div");
     el.className = "cam";
-    el.innerHTML = `<div class="pic"></div><canvas class="obst"></canvas><span class="msg">Connecting to camera…</span>
+    el.innerHTML = `<div class="pic"></div><canvas class="obst"></canvas><canvas class="feat"></canvas><span class="msg">Connecting to camera…</span>
+      <button type="button" class="featbtn" data-cam-features aria-pressed="false" title="Show the visual features RTAB-Map is tracking (green = inlier driving the pose, amber = matched to the map, grey = detected only)">Features</button>
+      <span class="featstat"></span>
       <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button></div>
       <div class="drive" role="group" aria-label="Drive by hand" title="Drive by hand: hold an arrow. Keys W/A/S/D move, Q/E rotate, Space stops (they drive the robot in control)">
         <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
         <button type="button" data-drive="rot-left" aria-label="Rotate left">&#8634;</button><button type="button" data-drive="back" aria-label="Back">&#9660;</button><button type="button" data-drive="rot-right" aria-label="Rotate right">&#8635;</button>
       </div>`;
-    c = { el, pic: el.querySelector(".pic"), overlay: el.querySelector("canvas.obst"), msg: el.querySelector(".msg"), mode: camDefault, timer: null, token: 0 };
+    c = { el, pic: el.querySelector(".pic"), overlay: el.querySelector("canvas.obst"), feat: el.querySelector("canvas.feat"), featStat: el.querySelector(".featstat"),
+      msg: el.querySelector(".msg"), mode: camDefault, timer: null, token: 0, features: false, featSub: null, featData: null, featAt: -Infinity };
     cams.set(id, c);
     syncCamButtons(c);
     wireDrivePad(id, el.querySelector(".drive"));
@@ -1003,6 +1006,62 @@
   const releaseAllDrives = () => { for (const [id, d] of drives) if (d.held.size) driveRelease(id); };
   addEventListener("blur", releaseAllDrives);
   document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAllDrives(); });
+  // -- SLAM feature overlay (nodes/feature_overlay.py, real platform) -------------------------
+  // Toggle on a camera tile. /<id>/odom_features is subscribed ONLY while the toggle is on:
+  // the node watches its subscriber count and holds the (large) odom_info subscription just
+  // as long, so an untoggled tile costs the robot nothing. Sim publishes odom directly and
+  // never runs rgbd_odometry, so there the node substitutes ORB on camera/rgb (--sim).
+  const FEATURE_TTL_MS = 1500;
+  const FEATURE_COLOR = ["#9aa4ae", "#f5a524", "#3ddc84"]; // detected, matched, inlier
+  function setCamFeatures(id, on) {
+    const c = camFor(id);
+    if (c.features === on) return;
+    c.features = on;
+    c.el.querySelector("[data-cam-features]").classList.toggle("on", on);
+    c.el.querySelector("[data-cam-features]").setAttribute("aria-pressed", String(on));
+    if (c.featSub) { c.featSub.unsubscribe(); c.featSub = null; }
+    c.featData = null;
+    if (on) {
+      c.featSub = topic(`/${id}/odom_features`, "std_msgs/String", { throttle_rate: 100, queue_length: 1 });
+      c.featSub.subscribe((msg) => {
+        try { c.featData = JSON.parse(msg.data); } catch (e) { return; }
+        c.featAt = performance.now();
+        drawCamFeatures(id);
+      });
+    }
+    drawCamFeatures(id);
+  }
+  // Same cover-crop inversion as drawCamObstacles: the picture is `background-size: cover`.
+  function drawCamFeatures(id) {
+    const c = cams.get(id);
+    if (!c) return;
+    const cv = c.feat, w = cv.clientWidth, h = cv.clientHeight;
+    if (!w || !h) return;
+    if (cv.width !== w) cv.width = w;
+    if (cv.height !== h) cv.height = h;
+    const g = cv.getContext("2d");
+    g.clearRect(0, 0, w, h);
+    if (!c.features) { c.featStat.textContent = ""; return; }
+    const p = c.featData, fresh = p && performance.now() - c.featAt < FEATURE_TTL_MS;
+    if (!fresh || !p.w || !p.h) {
+      c.featStat.textContent = platform === "real" ? "Waiting for SLAM features…" : "Waiting for features (sim: ORB stand-in)";
+      return;
+    }
+    c.featStat.textContent = p.lost ? "SLAM lost" : `${p.inliers} inliers · ${p.matches} matched · ${p.features} features`;
+    const k = Math.max(w / p.w, h / p.h), ox = (w - p.w * k) / 2, oy = (h - p.h * k) / 2;
+    // Weakest first, so the inliers that drive the pose are never hidden under grey dots.
+    // Plain fixed-size points: the keypoint's own scale only turned dense areas into blobs.
+    const DOT = [2, 3, 3];
+    for (const state of [0, 1, 2]) {
+      g.fillStyle = FEATURE_COLOR[state];
+      const d = DOT[state];
+      for (const [x, y, , st] of p.pts) {
+        if (st === state) g.fillRect(Math.round(ox + x * k - d / 2), Math.round(oy + y * k - d / 2), d, d);
+      }
+    }
+  }
+  setInterval(() => { for (const [id, c] of cams) if (c.features && c.featData && performance.now() - c.featAt > FEATURE_TTL_MS) drawCamFeatures(id); }, 1000);
+
   function syncCamButtons(c) {
     for (const b of c.el.querySelectorAll("[data-cam-mode]")) b.classList.toggle("on", b.dataset.camMode === c.mode);
   }
@@ -1052,7 +1111,7 @@
     refreshSelection();
   }
   function closeRobot(id) {
-    open.delete(id); stopCam(id);
+    open.delete(id); stopCam(id); setCamFeatures(id, false);
     if (selected === id) selected = [...open].pop() ?? null; // control falls to the newest still open
     refreshSelection();
   }
@@ -1687,6 +1746,7 @@
     const id = row.dataset.id;
     const act = e.target.closest("[data-act]"), cam = e.target.closest("[data-cam-mode]");
     if (cam) return setCamMode(id, cam.dataset.camMode);
+    if (e.target.closest("[data-cam-features]")) return setCamFeatures(id, !camFor(id).features);
     if (act) {
       if (act.dataset.act === "stop") { stopRobot(id); toast(`${nameOf(id)} stopped`); }
       if (act.dataset.act === "explore") toggleExplore(id);
