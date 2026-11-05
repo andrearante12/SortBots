@@ -47,6 +47,7 @@ packages:
     pose: [-6.43, 11.487, 3.1416]   # the plate is at x = -6.50, facing the robot
     z: 0.95                         # bottom of the box = top of the table
     magnet_face: "+x"
+    marker: 0                       # the ArUco id on its plate: which package, and which side
 
 marks:
   - id: drop_zone

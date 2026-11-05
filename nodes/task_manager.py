@@ -290,6 +290,8 @@ class TaskManager(Node):
                 return
             # at null: the work order doesn't say where it is, the robot finds it
             cargo = {"size": size, "face": face, "at": at and {"x": at["x"], "y": at["y"]}}
+            if isinstance(payload.get("marker"), int):
+                cargo["marker"] = payload["marker"]     # the ArUco id on its plate
             stops = self._resolve_legs(names, task_id)
             if stops is None:
                 return

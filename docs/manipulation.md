@@ -110,6 +110,11 @@ before committing the arm, redocking if it moved: the lock came from further awa
 fix taken while moving is off by 8-15 cm (`package_detector.Detector.map_from`). Obstacle
 perception itself keeps running; only what the operator view draws changes.
 
+**Markers.** A package can carry an ArUco marker on its plate (`simtest/aruco.py`). The image
+finds and names it (which package, and that this side has the magnet); depth under it measures
+the position and normal, which is more accurate than the marker's own corners, and those stay
+as the fallback where depth has holes. A marker of this size needs to be within about 1.5 m.
+
 **What the camera can actually see.** The head camera is at (-0.092, 0.02, 1.191) in
 `base_link`, 1.24 m up and 9 cm behind the base origin, looking level at head tilt 0. A world
 can start the head tilted (`head:`, tilt > 0 looks down) and the operator view's Head sliders

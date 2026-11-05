@@ -91,7 +91,7 @@ def oracle_plates(gt: dict, req: dict | None) -> list[dict]:
         return []
     centre, normal = magnet.magnet_face_pose(pkg, req["size"], req["face"])
     return [{"x": centre[0], "y": centre[1], "z": centre[2], "nx": normal[0], "ny": normal[1],
-             "nz": normal[2], "conf": 1.0, "age_s": 0.0}]
+             "nz": normal[2], "conf": 1.0, "age_s": 0.0, "marker": req.get("marker")}]
 
 
 def camera_plates(msg: dict | None, now: float, stale_s: float = PLATE_STALE_S) -> list[dict]:

@@ -322,7 +322,7 @@ def _tasks(raw, robots: list[str], named: dict | None, world: dict | None = None
                     # What a work order says about the package, so the pick controller can
                     # tell it from the other plates in view: its size, which face carries
                     # the magnet, and roughly where it is (the shelf slot, not its pose).
-                    "size": list(pkg["size"]), "face": pkg["magnet_face"],
+                    "size": list(pkg["size"]), "face": pkg["magnet_face"], "marker": pkg["marker"],
                     # `find: geometry` leaves that out: the robot finds it from depth alone
                     "at": None if t.get("find") == "geometry"
                     else {"x": pkg["pose"][0], "y": pkg["pose"][1]}, "at_s": at_s})

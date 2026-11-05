@@ -301,6 +301,8 @@ def dispatch_body(t: dict) -> dict:
         body["package"] = t["package"]
         body["place"] = t["place"] and {k: t["place"][k] for k in ("x", "y", "z", "yaw")}
         body["size"], body["face"], body["at"] = t["size"], t["face"], t["at"]
+        if t.get("marker") is not None:
+            body["marker"] = t["marker"]
     return body
 
 

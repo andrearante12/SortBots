@@ -396,11 +396,12 @@ def test_place_block_sets_the_block_down_inside_the_marked_area():
     assert task["place"]["z"] == mark["z"]
 
 
-def test_the_tab_tests_give_the_robot_no_location_for_the_block():
+def test_the_tab_tests_give_the_robot_no_location_for_the_block_only_its_marker():
     for name in ("pick_block", "place_block"):
         (task,) = spec.load(name)["variants"][0][1]["tasks"]
-        assert task["at"] is None
-        assert dispatch_body(dict(task, task_id="t"))["at"] is None
+        assert task["at"] is None and task["marker"] == 0
+        body = dispatch_body(dict(task, task_id="t"))
+        assert body["at"] is None and body["marker"] == 0
 
 
 def test_the_tests_tab_offers_two_pick_tests_and_parked_ones_still_validate():

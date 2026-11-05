@@ -443,6 +443,12 @@ def test_a_package_task_may_leave_the_location_to_the_robot(tm):
     assert requests(tm)[-1]["at"] is None
 
 
+def test_the_marker_id_reaches_the_pick_controller(tm):
+    dispatch(tm, task_id="p1", package="pkg_0", pickup=None, dropoff=None, place=PLACE, marker=4, **CARGO)
+    tm._tick()
+    assert requests(tm)[-1]["marker"] == 4
+
+
 def test_a_package_task_that_says_nothing_about_placing_is_refused(tm):
     dispatch(tm, task_id="p1", package="pkg_0", pickup=None, dropoff=None, **CARGO)
     assert "rejected" in statuses(tm)[-1]

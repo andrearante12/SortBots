@@ -100,7 +100,7 @@ class FakeWorld:
             nl = math.sqrt(sum(v * v for v in nn))
             out.append({"x": c[0] + j(0.01), "y": c[1] + j(0.01), "z": c[2] + j(0.01),
                         "nx": nn[0] / nl, "ny": nn[1] / nl, "nz": nn[2] / nl, "conf": 0.9,
-                        "age_s": 0.0, "px": [300, 200, 60, 40]})
+                        "age_s": 0.0, "px": [300, 200, 60, 40], "marker": spec.get("marker")})
         return out
 
     def boxes(self):
@@ -152,7 +152,7 @@ class FakeWorld:
 
 def cargo(w, pid):
     p = next(p for p in w["packages"] if p["id"] == pid)
-    return {"package": pid, "size": list(p["size"]), "face": p["magnet_face"],
+    return {"package": pid, "size": list(p["size"]), "face": p["magnet_face"], "marker": p.get("marker"),
             "at": {"x": p["pose"][0], "y": p["pose"][1]}}
 
 
@@ -253,6 +253,26 @@ def test_with_no_location_in_the_work_order_depth_geometry_finds_the_block(kin):
     assert d.result == "picked", (d, fw.log[-3:])
 
 
+def test_a_marker_id_picks_out_the_package_and_ignores_every_other_plate(kin):
+    fw = FakeWorld(kin, "pick_table", noise=False)
+    real = fw.plates
+    decoy = {"x": -6.6, "y": 11.45, "z": 1.0, "nx": -1.0, "ny": 0.0, "nz": 0.0, "conf": 1.0, "age_s": 0.0,
+             "px": [10, 200, 60, 40], "marker": 7}
+    fw.plates = lambda: [decoy, *real()]
+    planner = pp.PickPlanner(kin)
+    planner.request(dict(pick_req(fw.w, "pkg_0"), at=None), fw.now)
+    while planner.phase in ("tuck", "acquire", "idle") and fw.now < 130:
+        fw.apply(planner.tick(fw.obs()))
+    assert planner.target["c"][0] == pytest.approx(-6.50, abs=0.005)
+
+
+def test_a_marker_that_is_not_in_view_is_not_found_whatever_else_is(kin):
+    fw = FakeWorld(kin, "pick_table")
+    planner = pp.PickPlanner(kin, {"acquire": {"timeout_s": 5.0}})
+    d = do(fw, planner, dict(pick_req(fw.w, "pkg_0"), marker=5))
+    assert d.result == "failed" and "not found" in d.note
+
+
 def test_no_location_and_no_box_in_view_fails_rather_than_guessing(kin):
     fw = FakeWorld(kin, "pick_table", sees=False)
     fw.boxes = lambda: []
@@ -274,7 +294,7 @@ def test_a_plate_that_moved_is_caught_at_the_dock_and_the_base_docks_again(kin):
             drift["dy"] = 0.03
         out = real_plates() or ([] if fw.msim.held else [{
             "x": c[0], "y": c[1] + drift["dy"], "z": c[2], "nx": n[0], "ny": n[1], "nz": n[2],
-            "conf": 0.9, "age_s": 0.0, "px": [300, 200, 60, 40]}])
+            "conf": 0.9, "age_s": 0.0, "px": [300, 200, 60, 40], "marker": spec.get("marker")}])
         return [dict(p, x=p["x"] + 1e-5 * fw.now) for p in out]     # each frame a new measurement
     fw.plates = seen
     planner.request(pick_req(fw.w, "pkg_0"), fw.now)

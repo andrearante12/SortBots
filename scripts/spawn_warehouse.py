@@ -1074,6 +1074,32 @@ def _author_world_shape(stage, path: str, item: dict, *, collider: bool):
                             (0.0, 0.0, item["height"] / 2.0), collider=collider)
 
 
+def _author_quads(stage, path: str, quads: list):
+    """One mesh of flat four-cornered faces, seen from both sides, nothing to collide with."""
+    from pxr import UsdGeom
+
+    mesh = UsdGeom.Mesh.Define(stage, path)
+    mesh.CreatePointsAttr([tuple(float(v) for v in p) for q in quads for p in q])
+    mesh.CreateFaceVertexCountsAttr([4] * len(quads))
+    mesh.CreateFaceVertexIndicesAttr(list(range(4 * len(quads))))
+    mesh.CreateSubdivisionSchemeAttr("none")
+    mesh.CreateDoubleSidedAttr(True)
+    return mesh.GetPrim()
+
+
+def _author_marker(stage, path: str, pkg: dict, materials: dict) -> None:
+    """The ArUco marker on a package's plate, as children of the package so it rides along."""
+    from build_warehouse import _bind
+    from simtest import aruco
+
+    size, face = pkg["size"], pkg["magnet_face"]
+    _bind(_author_quads(stage, f"{path}/marker_backing", [aruco.backing(size, face)]),
+          _world_color_material(stage, materials, (0.95, 0.95, 0.95)))
+    _bind(_author_quads(stage, f"{path}/marker_cells", aruco.dark_cells(size, face, pkg["marker"])),
+          _world_color_material(stage, materials, (0.01, 0.01, 0.01)))
+    emit(f"  world package {pkg['id']}: ArUco marker {pkg['marker']}")
+
+
 def _spawn_world(stage, w: dict) -> tuple[dict, dict]:
     """Author a world's props, actors and packages.
 
@@ -1159,6 +1185,8 @@ def _spawn_world(stage, w: dict) -> tuple[dict, dict]:
         psize, pcentre = world_lib.plate_geometry(pkg["size"], pkg["magnet_face"])
         plate = _author_box(stage, f"{path}/plate", psize, pcentre, collider=False)
         _bind(plate, _world_color_material(stage, materials, world_lib.PLATE_COLOR))
+        if pkg["marker"] is not None:
+            _author_marker(stage, path, pkg, materials)
         packages[pkg["id"]] = (t_op, r_op)
         emit(f"  world package {pkg['id']}: {sx}x{sy}x{sz} at ({x}, {y}) z={pkg['z']} "
              f"plate on {pkg['magnet_face']}")

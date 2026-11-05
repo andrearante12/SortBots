@@ -113,6 +113,13 @@ Both are only present in a world with packages, so every other test's recorded e
 exactly what they were. The operator view draws them: cardboard-coloured, a thick dark edge
 on the plate's face, green while held.
 
+### Markers
+
+A package may carry `marker: N` (0-9), an ArUco id (DICT_4X4_50) printed on its magnet plate:
+5 cm with a 5 mm white border, built from flat squares (`simtest/aruco.py`), so the plate's short
+side has to be at least 6 cm. A task on such a package goes by the id: it needs no location,
+and it can't take another plate for its own.
+
 ### Marks, head and view
 
 Three more world keys, all optional. `marks:` are flat painted rectangles

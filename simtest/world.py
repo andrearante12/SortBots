@@ -217,7 +217,7 @@ def _validate_item(raw, what, *, actor: bool) -> dict:
 def _validate_package(raw, what) -> dict:
     if not isinstance(raw, dict):
         raise WorldError(f"{what}: expected a mapping")
-    unknown = set(raw) - {"id", "size", "pose", "z", "magnet_face", "color", "label"}
+    unknown = set(raw) - {"id", "size", "pose", "z", "magnet_face", "color", "label", "marker"}
     if unknown:
         raise WorldError(f"{what}: unknown key(s) {sorted(unknown)}")
     pid = raw.get("id")
@@ -229,12 +229,23 @@ def _validate_package(raw, what) -> dict:
     face = raw.get("magnet_face", "+x")
     if face not in FACES:
         raise WorldError(f"{what}.magnet_face: expected one of {list(FACES)}, got {face!r}")
+    size = tuple(_num(v, f"{what}.size", 0.0, 1.0, strict_lo=True) for v in size)
+    marker = raw.get("marker")
+    if marker is not None:
+        from . import aruco
+
+        if marker not in aruco.DATA:
+            raise WorldError(f"{what}.marker: expected one of {sorted(aruco.DATA)}, got {marker!r}")
+        if min(s for s in plate_geometry(size, face)[0] if s > PLATE_THICKNESS_M) < aruco.BACKING_M - 1e-9:
+            raise WorldError(f"{what}.marker: the plate on face {face} is too small for a "
+                             f"{aruco.BACKING_M * 100:g} cm marker")
     return {
         "id": pid,
-        "size": tuple(_num(v, f"{what}.size", 0.0, 1.0, strict_lo=True) for v in size),
+        "size": size,
         "pose": _pose(raw.get("pose"), f"{what}.pose"),
         "z": _num(raw.get("z", 0.0), f"{what}.z", 0.0, 3.0),   # BOTTOM height
         "magnet_face": face,
+        "marker": marker,       # the ArUco id printed on the plate, or None (simtest/aruco.py)
         "color": _color(raw.get("color"), f"{what}.color", DEFAULT_PACKAGE_COLOR),
         "label": str(raw.get("label") or pid)[:40],
     }

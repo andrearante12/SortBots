@@ -343,7 +343,7 @@
         g.strokeRect(x, y, bw * k, bh * k);
         const cx = ox + p.uv[0] * k, cy = oy + p.uv[1] * k;
         g.beginPath(); g.moveTo(cx - 7, cy); g.lineTo(cx + 7, cy); g.moveTo(cx, cy - 7); g.lineTo(cx, cy + 7); g.stroke();
-        const label = `${on ? "target plate" : "plate?"} · ${p.range_m.toFixed(2)} m`, tw = g.measureText(label).width + 8, ly = Math.max(y, py + 16);
+        const label = `${p.marker != null ? `marker ${p.marker}` : on ? "target plate" : "plate?"} · ${p.range_m.toFixed(2)} m`, tw = g.measureText(label).width + 8, ly = Math.max(y, py + 16);
         g.fillStyle = on ? PLATE_INK : PLATE_OTHER_INK; g.fillRect(x, ly - 15, tw, 15);
         g.fillStyle = "#14130a"; g.fillText(label, x + 4, ly - 1);
       }
@@ -360,6 +360,7 @@
     set("state", target ? "On target" : aim ? "Aiming at its last fix" : plates.length ? "Candidates" : "Nothing in view");
     set("n", String(plates.length));
     set("mode", r.pick && r.pick.mode === "manipulation" ? "Manipulation" : "Nav");
+    set("marker", shown && shown.marker != null ? `ArUco ${shown.marker}: this side has the magnet` : "—");
     const b = boxes[0];
     set("box", b ? `x ${b.x.toFixed(3)}  y ${b.y.toFixed(3)}  z ${b.z.toFixed(3)}, on a surface at ${b.support_z.toFixed(2)} m` : "—");
     if (shown) {
@@ -1061,7 +1062,7 @@
     const perc = document.createElement("div");
     perc.className = "perc"; perc.hidden = true;
     perc.innerHTML = `<div class="ph">Plate detection<i><span data-p="state"></span> · <span data-p="n"></span> seen</i></div>
-      <dl><dt>State</dt><dd data-p="mode"></dd><dt>Box</dt><dd data-p="box"></dd><dt>Image</dt><dd data-p="img"></dd><dt>Depth</dt><dd data-p="depth"></dd><dt>Map</dt><dd data-p="map"></dd><dt>Facing</dt><dd data-p="face"></dd></dl>`;
+      <dl><dt>State</dt><dd data-p="mode"></dd><dt>Box</dt><dd data-p="box"></dd><dt>Marker</dt><dd data-p="marker"></dd><dt>Image</dt><dd data-p="img"></dd><dt>Depth</dt><dd data-p="depth"></dd><dt>Map</dt><dd data-p="map"></dd><dt>Facing</dt><dd data-p="face"></dd></dl>`;
     const head = document.createElement("div");
     head.className = "headctl"; head.hidden = true;
     head.innerHTML = HEAD_AXES.map(([key, label, lo, hi]) => `<label>${label}<input type="range" data-head="${key}" min="${lo}" max="${hi}" step="0.01" value="0" aria-label="Head ${key}"><output data-head-out="${key}"></output></label>`).join("");

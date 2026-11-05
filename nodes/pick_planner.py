@@ -300,8 +300,17 @@ class PickPlanner:
         b = min(obs.boxes, key=lambda b: math.hypot(b["x"] - obs.base[0], b["y"] - obs.base[1]))
         return (b["x"], b["y"])
 
+    def _ours(self, p: dict) -> bool:
+        """This is the plate asked for, as far as a marker can say."""
+        m = self.req.get("marker")
+        return m is None or p.get("marker") == m
+
     def _candidate(self, obs: Obs):
         a, hint = self.cfg["acquire"], self._hint(obs)
+        if self.req.get("marker") is not None:
+            # the id says which package and which side: no location needed to tell it from
+            # anything else in view
+            return next((p for p in obs.plates if self._ours(p) and p.get("age_s", 0.0) <= a["max_age_s"]), None)
         if hint is None:
             return None
         # a plate is ON the box geometry found, so that match can be much tighter
@@ -434,7 +443,7 @@ class PickPlanner:
             return
         w, h = u["image"]
         for p in obs.plates:
-            if p.get("age_s", 0.0) > u["max_age_s"]:
+            if p.get("age_s", 0.0) > u["max_age_s"] or not self._ours(p):
                 continue
             px = p.get("px")
             if px and (px[0] < u["border_px"] or px[1] < u["border_px"]
@@ -514,7 +523,7 @@ class PickPlanner:
             return          # the tracker is still smoothing frames from while it was moving
         for p in obs.plates:
             fix = (p["x"], p["y"], p["z"], p["nx"], p["ny"], p["nz"])
-            if (p.get("age_s", 0.0) <= u["max_age_s"] and not self._clipped(p) and fix not in self.fixes
+            if (p.get("age_s", 0.0) <= u["max_age_s"] and self._ours(p) and not self._clipped(p) and fix not in self.fixes
                     and math.dist(fix[:3], self.target["c"]) <= u["track_m"]):
                 self.fixes.append(fix)
         if len(self.fixes) >= c["samples"]:

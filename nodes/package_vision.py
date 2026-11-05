@@ -44,6 +44,8 @@ DEFAULTS = {
     "box": {"h": [6, 26], "s": [50, 230], "v": [70, 255]},
     "plate": {"v_max": 60, "s_max": 140},
     "plate_thickness_m": 0.004,
+    "marker_m": 0.05,          # the printed marker's black square, edge to edge
+    "marker_proud_m": 0.001,   # the print's height above the plate
     "min_plate_px": 40,
     "ring_px": 5,              # width of the ring looked at around a plate blob
     "ring_frac": 0.5,          # how much of that ring has to be cardboard
@@ -208,6 +210,93 @@ def detect_plates(rgb: np.ndarray, depth_m: np.ndarray, K, cfg: dict | None = No
     return out
 
 
+def _plane_of(mask: np.ndarray, depth_m: np.ndarray, K, c: dict):
+    """(centroid, normal towards the camera, rms, points) of the depth under a mask, or None."""
+    vs, us = np.nonzero(mask)
+    z = depth_m[vs, us].astype(np.float64)
+    ok = np.isfinite(z) & (z > c["min_range_m"]) & (z < c["max_range_m"])
+    if int(ok.sum()) < c["min_points"]:
+        return None
+    pts = _back_project(us[ok], vs[ok], z[ok], K)
+    keep = np.abs(z[ok] - np.median(z[ok])) < 0.08
+    if int(keep.sum()) < c["min_points"]:
+        return None
+    centroid, n, rms = fit_plane(pts[keep])
+    return centroid, (-n if n @ (-centroid) < 0 else n), rms, int(keep.sum())
+
+
+def detect_markers(rgb: np.ndarray, depth_m: np.ndarray, K, cfg: dict | None = None) -> list[dict]:
+    """ArUco markers on magnet plates, in the same form as detect_plates plus `marker`, the id.
+
+    The image finds and names the marker; DEPTH measures it, a plane fit under the marker.
+    That beats the pose from four corners, which on a marker this small can flip between
+    two mirror solutions. The corners are the fallback for a marker with no usable depth."""
+    import cv2
+
+    c = merged(cfg)
+    a = cv2.aruco
+    gray = cv2.cvtColor(np.ascontiguousarray(rgb), cv2.COLOR_RGB2GRAY)
+    table = a.getPredefinedDictionary(a.DICT_4X4_50)
+    new_api = hasattr(a, "ArucoDetector")       # OpenCV >= 4.7
+    params = a.DetectorParameters() if new_api else a.DetectorParameters_create()
+    # The white margin's outline and the marker's own are two squares a few pixels apart, and
+    # by default the detector calls that one marker and keeps the OUTER square, which then
+    # decodes to nothing. A hard-edged image hides this; any antialiased one shows it.
+    params.minMarkerDistanceRate = 0.01
+    params.cornerRefinementMethod = a.CORNER_REFINE_SUBPIX   # the no-depth fallback ranges off these
+    if new_api:
+        corners, ids, _ = a.ArucoDetector(table, params).detectMarkers(gray)
+    else:
+        corners, ids, _ = a.detectMarkers(gray, table, parameters=params)
+    if ids is None:
+        return []
+    fx, fy, cx, cy = K
+    camera = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+    h = c["marker_m"] / 2
+    square = np.array([[-h, h, 0], [h, h, 0], [h, -h, 0], [-h, -h, 0]], dtype=np.float32)
+    # ... which lets the same marker through twice: keep the tighter square of each id.
+    tightest = {}
+    for quad, mid in zip(corners, ids.ravel()):
+        q = quad.reshape(4, 2)
+        area = cv2.contourArea(q)
+        if int(mid) not in tightest or area < tightest[int(mid)][0]:
+            tightest[int(mid)] = (area, q)
+    out = []
+    for mid, (_, q) in tightest.items():
+        mid_px = q.mean(axis=0)
+        # inside the border, clear of the mixed pixels on its edge
+        inner = (mid_px + (q - mid_px) * 0.85).astype(np.int32)
+        mask = np.zeros(gray.shape, np.uint8)
+        cv2.fillConvexPoly(mask, inner, 1)
+        fit = _plane_of(mask.astype(bool), depth_m, K, c)
+        if fit is not None and fit[2] <= c["plane_rms_m"]:
+            centroid, n, rms, npts = fit
+        else:
+            ok, rvec, tvec = cv2.solvePnP(square, q.astype(np.float32), camera, None,
+                                          flags=cv2.SOLVEPNP_IPPE_SQUARE)
+            if not ok:
+                continue
+            rot, _ = cv2.Rodrigues(rvec)
+            centroid, n, rms, npts = tvec.ravel(), rot[:, 2], 0.0, 0
+            if n @ (-centroid) < 0:
+                n = -n
+        face = centroid - n * (c["plate_thickness_m"] + c["marker_proud_m"])
+        x0, y0 = q.min(axis=0)
+        x1, y1 = q.max(axis=0)
+        out.append({"c": tuple(float(v) for v in face), "n": tuple(float(v) for v in n),
+                    "conf": 1.0, "px": (int(x0), int(y0), int(x1 - x0), int(y1 - y0)), "rms": float(rms),
+                    "npts": npts, "uv": (round(float(mid_px[0]), 1), round(float(mid_px[1]), 1)),
+                    "range_m": float(np.linalg.norm(face)), "marker": int(mid)})
+    return out
+
+
+def prefer_markers(markers: list[dict], plates: list[dict], near_m: float = 0.15) -> list[dict]:
+    """The markers, and whichever colour detections aren't the same plate: the white of a
+    marker leaves a plate's dark strips looking like plates of their own."""
+    return markers + [p for p in plates
+                      if all(math.dist(p["c"], m["c"]) > near_m for m in markers)]
+
+
 def to_map(plate: dict, T_map_cam: np.ndarray) -> dict:
     """A camera-frame plate as {x, y, z, nx, ny, nz, conf, px, uv, range_m} in the frame
     T_map_cam leads to (4x4, map <- optical). px, uv and range_m stay what the camera saw:
@@ -218,7 +307,7 @@ def to_map(plate: dict, T_map_cam: np.ndarray) -> dict:
     return {"x": float(p[0]), "y": float(p[1]), "z": float(p[2]),
             "nx": float(n[0]), "ny": float(n[1]), "nz": float(n[2]),
             "conf": plate["conf"], "px": list(plate["px"]), "uv": list(plate["uv"]),
-            "range_m": plate["range_m"]}
+            "range_m": plate["range_m"], "marker": plate.get("marker")}
 
 
 class Tracker:
@@ -254,6 +343,8 @@ class Tracker:
             tr["nx"], tr["ny"], tr["nz"] = tr["nx"] / norm, tr["ny"] / norm, tr["nz"] / norm
             tr["conf"], tr["px"], tr["last"] = p["conf"], p["px"], now
             tr["uv"], tr["range_m"] = p.get("uv"), p.get("range_m")
+            if p.get("marker") is not None:
+                tr["marker"] = p["marker"]
             tr["hits"] += 1
             seen.add(best)
         self.tracks = [t for t in self.tracks if now - t["last"] <= self.drop_after_s]

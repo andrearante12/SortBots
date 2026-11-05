@@ -171,7 +171,9 @@ def main(argv=None):
                     "stamp": round(max(t_rgb, t_d), 3), "frame": "map",
                     "w": int(rgb.shape[1]), "h": int(rgb.shape[0]),
                     "boxes": box_geometry.find_boxes(depth, self.K, T, cfg.get("boxes"))})))
-            plates = [pv.to_map(p, T) for p in pv.detect_plates(rgb, depth, self.K, cfg)]
+            seen = pv.prefer_markers(pv.detect_markers(rgb, depth, self.K, cfg),
+                                     pv.detect_plates(rgb, depth, self.K, cfg))
+            plates = [pv.to_map(p, T) for p in seen]
             out = self.tracker.update(plates, max(t_rgb, t_d))
             self.pub.publish(String(data=json.dumps({
                 "stamp": round(max(t_rgb, t_d), 3), "frame": "map",

@@ -29,6 +29,11 @@ plate_thickness_m: 0.004
 # package's plate is 11 x 7 cm to 14 x 11 cm depending on the face (60% of it, simtest/world.py).
 # The ring has to fit inside the box's margin round the plate: that margin is 3.6 cm, 8 px
 # at the 2.6 m the pick controller looks from.
+# ArUco markers on the plates (DICT_4X4_50): the print's size, and how far it stands off the
+# plate. Sim: simtest/aruco.py. Real: measure the printed square.
+marker_m: 0.05
+marker_proud_m: 0.001
+
 ring_px: 5
 ring_frac: 0.5
 ring_plane_m: 0.02
