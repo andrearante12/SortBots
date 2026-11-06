@@ -1,6 +1,7 @@
 # SortBots
 
 ![ci](https://github.com/andrearante12/SortBots/actions/workflows/ci.yml/badge.svg)
+![sim](https://github.com/andrearante12/SortBots/actions/workflows/sim.yml/badge.svg)
 
 ![Warehouse simulation environment](docs/media/warehouse_hero.png)
 
@@ -24,6 +25,23 @@ Fleet exploration mapping timelapse - understanding a fresh warehouse enviornmen
 
 Full-quality version: [`docs/media/fleet_explore_timelapse.mp4`](docs/media/fleet_explore_timelapse.mp4).
 
+## Scored sim tests
+
+Each test is a repeatable question asked of the live sim: a world of props and
+scripted walkers, a goal for the robots, and pass criteria (contacts, clearance,
+goal success, detection). They run nightly on a GPU workstation (the `sim`
+badge above) and can be run by hand with `scripts/simtest.py run NAME`.
+
+| Test | Tier | What it shows |
+|---|---|---|
+| `pipeline_smoke` | smoke | the harness itself: clock restarted, ground truth flowing, one short goal reached |
+| `crossing_yield` | regression | a walker paces across the aisle mouth; the robot must see it, yield, and still arrive |
+| `head_on_pass` | regression | a walker comes down the aisle head-on at ~1.3 m/s; pass or wait, never collide |
+| `cluttered_route` | regression | a two-leg route past crates, barrels and a pallet stack, crossing both walkers' paths |
+| `fleet_traffic` | long | two robots explore an empty warehouse under foot traffic; walkers must stay out of the fused map |
+
+How they work, how to add one, and the nightly setup: [`docs/testing.md`](docs/testing.md).
+
 ### Simulation infrastructure
 - **Isaac Sim** Isaac Sim 5.1 supporting SLAM pipelines and integrating with Nvidia packages such as Nvblox
 - **ManiSkill (arm-manipulation sim):** XLeRobot's original sim env with extensive support for training manipulation tasks
@@ -43,6 +61,7 @@ Full-quality version: [`docs/media/fleet_explore_timelapse.mp4`](docs/media/flee
 
 - [`docs/quickstart.md`](docs/quickstart.md) — fresh device to a live fleet in one pass; **start here** (install + first run)
 - [`docs/running.md`](docs/running.md) — running everything: the demo, console mode and scenarios, autonomous exploration, map lifecycle, remote access, dashboard tests
+- [`docs/testing.md`](docs/testing.md) — scored sim tests: worlds, test cases, metrics, the nightly run
 - [`docs/perception_exploration.md`](docs/perception_exploration.md) — perception, exploration, fleet mesh radio, and map/recon fusion architecture
 
 
