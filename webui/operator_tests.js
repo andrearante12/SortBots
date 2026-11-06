@@ -99,8 +99,6 @@
     const sig = listSig();
     if (sig === lastListSig) return; // don't rebuild under the operator's cursor
     lastListSig = sig;
-    const ready = tests.filter((t) => t.status === "ready").length;
-    $("#tp-count").textContent = tests.length ? `· ${ready} ready` : "";
     const why = !control ? "This server can't launch the sim (it isn't the sim console)" : busy ? "A test is already running" : "Launch the sim, run this test and score it";
     const row = (t, i) => {
       const isOpen = expanded.has(t.name), open = isOpen ? " open" : "";

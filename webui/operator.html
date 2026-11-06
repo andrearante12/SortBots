@@ -393,7 +393,6 @@
   #tp-run.done.pass .tp-dot { background: var(--go); } #tp-run.done.fail .tp-dot { background: var(--stop); }
   @keyframes tp-pulse { 50% { opacity: .3; } }
   #tp-log { flex-basis: 100%; margin: 4px 0 0; max-height: 220px; overflow: auto; font: .72rem/1.45 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; }
-  .tp-h { margin: 0 0 4px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
   /* Test cases: a list, not cards. A row is its name, Run and a chevron; open it for what
      the test is, what it takes to pass, and a clip of a pass. */
   .tp-sec { margin-top: 18px; }
@@ -770,7 +769,6 @@
         <pre id="tp-log" hidden></pre>
       </div>
       <section>
-        <h4 class="tp-h">Test cases <span class="muted" id="tp-count"></span></h4>
         <div id="tp-list"></div>
       </section>
     </div>
