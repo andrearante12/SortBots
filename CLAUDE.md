@@ -24,7 +24,7 @@ container** (`docker/jetson/`) because JetPack 6 is Ubuntu 22.04/Humble. Never
 source the Jetson host's `/opt/ros/humble` for SortBots. `scripts/jetson.sh
 console` starts `run_console.sh --platform real` in the container, and `platform:
 real` scenarios run `scripts/run_robot.sh` → `sortbots_bringup.launch.py
-platform:=real`. Runbook: `docs/jetson.md`.
+platform:=real`. Runbook: `docs/real-robot.md`.
 
 - The real stack uses `use_sim_time:=false`, RTAB-Map visual odometry, and no IMU
   (a plain D435 has none, so `wait_imu_to_init` must be false). Nav2 is off until
@@ -50,9 +50,9 @@ This is **not a colcon workspace** — there is no `src/`, no `package.xml`, no
 | `hardware/` | the real magnet end effector's CAD (`magnet_effector/`, CadQuery in its own `hardware/.venv`, never the sim/ROS/lerobot envs); `params.py` is the source of truth for the TCP offset `simtest/magnet.py` uses |
 | pick and place | `nodes/{package_detector,package_vision,box_geometry,magnet_pick,pick_planner,arm_kin}.py`: camera → plate pose → dock → IK, numpy only (no torch in the stack). The `pick_*` tests, `--perception oracle`, the envelope numbers and what is not yet verified live: `docs/manipulation.md` |
 | `maps/` | saved map library — named, committed snapshots of explored maps |
-| `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `docs/splat.md`) |
-| `commsim/` | fleet comms simulation (mesh, Zenoh, task auction), system python3 only; `core/protocol.py` is the allocator `nodes/fleet_tasks.py` runs, `viz/demo.py` the model behind the operator's Comms overlay (`commsim/README.md`) |
-| `docs/running.md` | the full runbook |
+| `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `docs/real-robot.md`) |
+| `commsim/` | fleet comms simulation (mesh, Zenoh, task auction), system python3 only; `core/protocol.py` is the allocator `nodes/fleet_tasks.py` runs, `viz/demo.py` the model behind the operator's Comms overlay (`docs/commsim.md`) |
+| `docs/` | the project docs, one page per topic; `README.md` indexes them |
 
 No custom `.msg`/`.srv`: inter-node protocol is `std_msgs/String` carrying JSON.
 Node tuning is plain YAML loaded by the node itself, not ROS params. Nodes take

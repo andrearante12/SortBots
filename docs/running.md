@@ -1,1303 +1,199 @@
 # Running the sim
 
-Setup and a first run are in [`quickstart.md`](quickstart.md); this is the full
-reference for everything after that.
+## Launching
 
-The doc covers both sim tracks and they share no shell. The **Isaac Sim** track
-(mobile / multi-robot / ROS 2 / SLAM — the active one) runs from a clean shell;
-its scripts source ROS 2 themselves. Jump to
-[The full SLAM + Nav demo](#the-full-slam--nav-demo-web-dashboard). The
-**ManiSkill** track below assumes `conda activate lerobot` and `cd ~/sortbots_ws`;
-never source ROS 2 in that shell.
+### Console mode (day to day)
 
-## The verify script (ManiSkill)
+From a clean shell:
 
 ```bash
-bash scripts/verify_sim.sh
+scripts/run_console.sh          # rosbridge :9090, web_video_server :8080, serve.py :8081. Leave it running.
 ```
 
-Runs three things in order:
+Open <http://localhost:8081/>, click **Session**, pick a scenario and press
+**Start**. The panel streams the launcher's log and its phase (`starting Isaac Sim →
+loading the warehouse → sim publishing → starting RTAB-Map + Nav2 → running`).
+**Save & finish** saves the map into `maps/` and stops the run. **Stop** stops
+without saving. Either way the console stays up. `scripts/run_console.sh stop` takes
+down the console and any running sim.
 
-1. **Sanity imports + headless rollout** — imports `mani_skill`, `torch`, `Xlerobot`, builds a `ReplicaCAD_SceneManipulation-v1` env with the xlerobot agent, resets, and steps 5 zero-actions. Fails fast (before any window opens) if the overlay is broken or the conda env is misconfigured.
-2. **Demo 1** — `demo_random_action` on Fetch in ReplicaCAD, `rt-fast` shader.
-3. **Demo 2** — XLeRobot dual-arm in ReplicaCAD via `scripts/run_xle_demo.py`, `default` shader.
+Each run logs to `data/sessions/<timestamp>_<scenario>/`. A restarted console
+re-adopts a sim that is still running.
 
-Close each SAPIEN viewer window to advance to the next step.
+### Scripted (`sim_ctl.sh`, for automation and agents)
 
-## The XLeRobot demo launcher
-
-ManiSkill's bundled `demo_random_action` works with `-r xlerobot` but only steps random actions. For richer control (keyboard, gamepad, Rerun visualization), use XLeRobot's own example scripts under `third_party/XLeRobot/simulation/Maniskill/examples/`. They don't import `mani_skill.envs` themselves, so a thin shim is required to populate gym's env registry before they run. That shim is `scripts/run_xle_demo.py`:
-
-```bash
-python scripts/run_xle_demo.py <demo_name> [demo args...]
-# List all available demos:
-python scripts/run_xle_demo.py --help
-```
-
-`<demo_name>` is the file stem of any `.py` under the XLeRobot examples directory.
-
-## Demo catalog
-
-All examples below use the ReplicaCAD apartment scene. Substitute another mani-skill env id (e.g. `PushCube-v1`) for tabletop tasks.
-
-### Preset action stepper (what verify_sim.sh runs as Demo 2)
+Exit codes are the interface: `0` ok, `1` failure, `3` no console, `4` nothing
+running, `124` timeout.
 
 ```bash
-python scripts/run_xle_demo.py demo_ctrl_action \
-    -e "ReplicaCAD_SceneManipulation-v1" \
-    -r "xlerobot" \
-    --render-mode="human" \
-    --shader="default" \
-    -c "pd_joint_delta_pos_dual_arm"
-```
-
-### Keyboard end-effector teleop, dual-arm
-
-```bash
-python scripts/run_xle_demo.py demo_ctrl_action_ee_keyboard \
-    -e "ReplicaCAD_SceneManipulation-v1" \
-    -r "xlerobot" \
-    --render-mode="human" \
-    --shader="default" \
-    -c "pd_joint_delta_pos_dual_arm"
-```
-
-Keymap prints on launch (WASD for the mobile base, plus per-arm IK targets).
-
-### Keyboard end-effector teleop, single-arm
-
-```bash
-python scripts/run_xle_demo.py demo_ctrl_action_ee_keyboard_single \
-    -e "ReplicaCAD_SceneManipulation-v1" \
-    -r "xlerobot_single" \
-    --render-mode="human" \
-    --shader="default" \
-    -c "pd_joint_delta_pos"
-```
-
-### Xbox / Switch / Bluetooth controller teleop
-
-```bash
-python scripts/run_xle_demo.py demo_ctrl_action_ee_xbox \
-    -e "ReplicaCAD_SceneManipulation-v1" \
-    -r "xlerobot" \
-    --render-mode="human" --shader="default" \
-    -c "pd_joint_delta_pos_dual_arm"
-```
-
-Sanity-check the controller bindings first with `python scripts/run_xle_demo.py test_xbox`.
-
-### Camera streams visualized with Rerun
-
-```bash
-python scripts/run_xle_demo.py demo_ctrl_action_ee_cam_rerun \
-    -e "ReplicaCAD_SceneManipulation-v1" \
-    -r "xlerobot" \
-    --render-mode="human" --shader="default" \
-    -c "pd_joint_delta_pos_dual_arm"
-```
-
-Opens a Rerun viewer alongside the SAPIEN window with per-camera streams.
-
-### Record a teleop dataset
-
-```bash
-python scripts/run_xle_demo.py demo_ctrl_ee_keyboard_record_dataset \
-    -e "ReplicaCAD_SceneManipulation-v1" \
-    -r "xlerobot" \
-    --render-mode="human" --shader="default" \
-    -c "pd_joint_delta_pos_dual_arm"
-```
-
-Writes episodes to the path the script prints. Useful as input to LeRobot imitation-learning pipelines.
-
-### VR teleop (Quest 3)
-
-```bash
-python scripts/run_xle_demo.py demo_ctrl_action_ee_VR \
-    -e "ReplicaCAD_SceneManipulation-v1" \
-    -r "xlerobot" \
-    --render-mode="human" --shader="default" \
-    -c "pd_joint_delta_pos_dual_arm"
-```
-
-Requires a Quest 3 reachable from the host; see the XLeRobot docs for the pairing flow.
-
-## Supported control modes for xlerobot
-
-Pass with `-c`. From `Xlerobot.supported_control_modes`:
-
-- Dual-arm: `pd_joint_pos_dual_arm`, `pd_joint_delta_pos_dual_arm`
-- Single primary arm: `pd_joint_pos`, `pd_joint_delta_pos`, `pd_joint_target_delta_pos`, `pd_joint_vel`, `pd_joint_pos_vel`, `pd_joint_delta_pos_vel`, `pd_joint_delta_pos_stiff_body`
-- Second arm (suffixed `_arm2`): same set as above with `_arm2` appended
-
-Use `xlerobot_single` as `-r` when running the single-arm variant of XLeRobot.
-
-## Headless usage
-
-For automation / CI / RL rollouts, set `--render-mode="rgb_array"` (returns batched images via `env.render()`) or `--render-mode="sensors"` (only the agent's onboard cameras). The headless smoke test inside `verify_sim.sh` shows the pattern.
-
-## Bumping the XLeRobot submodule
-
-```bash
-git submodule update --remote third_party/XLeRobot
-python scripts/overlay_xlerobot.py    # re-apply overlay against the new submodule
-git add third_party/XLeRobot && git commit -m "bump XLeRobot"
-```
-
-See `scripts/overlay_xlerobot.py`'s module docstring for what the overlay step
-does and when it might need adjustment.
-
-## The full SLAM + Nav demo (web dashboard)
-
-The end-to-end warehouse demo — Isaac Sim, RTAB-Map SLAM, Nav2, and the web
-dashboard — comes up with one command from a **clean** terminal (no ROS
-sourced, no Isaac/conda active):
-
-```bash
-scripts/run_demo.sh              # 2-robot collaborative fleet (the default)
-scripts/run_demo.sh --robots 1   # single robot
-```
-
-It launches Isaac Sim in its own venv, then the whole ROS 2 side in a single
-launch (`launch/sortbots_bringup.launch.py`), and prints the dashboard URL.
-**The default is a two-robot fleet** — `--robots 2` — because SortBots is a
-fleet project: each robot runs its own RTAB-Map, the grids are fused into one
-world-anchored `/map` (`nodes/map_merge.py`), and both explorers pick frontiers
-against space either robot has mapped. `--robots 1` gives the single-robot case
-that the map-lifecycle and teleop sections below are written around. rviz is
-off by default (the dashboard replaces it); add `--teleop` for the WASD
-terminal window. Tear it all down with `scripts/run_demo.sh stop`.
-
-### Console mode: launching scenarios from the dashboard
-
-`run_demo.sh` stays the CLI path and is unchanged. But you can also start and
-stop the sim **from the dashboard's Scenarios tab**, which is the nicer way to
-work through a series of runs (and the only way to do it from your phone).
-
-That needs one structural change, because the dashboard used to be *inside* the
-pipeline: the bringup started rosbridge/web_video_server/`serve.py`, and
-`run_demo.sh stop` killed them. A "start the sim" button can't live in a process
-the sim owns — the first click would kill the page mid-request. So console mode
-splits the dashboard out into a process that outlives sim runs:
-
-```bash
-scripts/run_console.sh          # clean terminal, no ROS sourced. Leave it running.
-```
-
-That starts only rosbridge (9090), web_video_server (8080) and
-`webui/serve.py --control` (8081), prints the dashboard URL, and stays in the
-foreground. Open the dashboard, switch the header to **scenarios**, choose the
-setup in the launch form and hit **Start**: `webui/session.py` runs
-`scripts/run_demo.sh` for you with `--keep-console`, which makes its teardown
-spare the console processes and makes the bringup start with `webui:=false`
-(two rosbridges would fight over port 9090). **Save & finish** saves the run
-into `maps/` and stops it; **Stop** tears the sim down without saving. Either
-way the console — and your open page — stays up.
-
-**The launch form.** One form instead of a card per preset:
-
-| Setting | Choices | Becomes |
-|---|---|---|
-| Environment | NVIDIA warehouse · primitive | `--scene` |
-| Map | new (empty) · working map (`~/.ros`) · a saved map from `maps/` | `--map` |
-| Mode (not for a new map) | extend (keep mapping) · read-only (localize) | `--resume` / `--localize` |
-| Robots | 1..roster size | `--robots` |
-| Start exploring immediately | on/off — the explorer always runs; off = it waits for the Explore button / X+click | `--explore` (autostart) |
-| Waypoints | from map · keep current · start empty | session-side, see below |
-| Advanced | headless, chase cam (+count), teleop, record bag | the matching flags |
-
-The form sends *settings*, never paths or flags: `config_to_run` in
-`webui/session.py` turns them into the same `RUN_FLAGS` allowlist a preset file
-goes through, a saved map is picked by library name only, and the line under
-the form is the server's own `build_argv` preview of exactly what Start will
-run. The robot's console shows only Map, Mode and Waypoints.
-
-**Quick start** lists `configs/scenarios/*.yaml`; picking one just fills the
-form. **Save as preset…** writes the current form to
-`configs/scenarios/<name>.yaml` (`origin: dashboard`, map stored by name so the
-file is portable), validated before it's written; hand-written presets can't be
-overwritten from the UI. From a terminal the same form is
-`scripts/sim_ctl.sh start custom map=warehouse mode=extend robots=2` (and
-`dry-run custom …` to just print the command).
-
-**Waypoints** follow the map: `from map` loads `maps/<name>/waypoints.json` into
-the dashboard's working set (`data/nav_waypoints.json`), `keep current` leaves
-it alone, `start empty` clears it. Save & finish snapshots them back into the map.
-
-- Ctrl-C in the console terminal stops the console only; a running sim keeps
-  going. `scripts/run_console.sh stop` takes down both.
-- Each run gets `data/sessions/<timestamp>_<scenario>/` with `console.log`
-  (what the tab tails) and `session.json`.
-- The console can be restarted mid-run: on startup it re-adopts a live pipeline
-  rather than claiming nothing is running.
-- Without a console, `serve.py` runs read-only and the tab says so instead of
-  offering buttons that can't work.
-
-#### Driving it from a script (or a coding agent)
-
-Everything the tab does is also one command. `scripts/sim_ctl.sh` wraps the
-control API so nothing has to hand-write JSON or reason about foreground vs
-background:
-
-```bash
-scripts/sim_ctl.sh console start                  # detached; waits until :8081 answers
-scripts/sim_ctl.sh list                           # scenarios (works with no console up)
-scripts/sim_ctl.sh dry-run explore_fresh headless=false   # print the command, launch nothing
-scripts/sim_ctl.sh start explore_fresh                  # headless; headless=false opens the window
-scripts/sim_ctl.sh wait running --timeout 420     # first run streams NVIDIA assets
-scripts/sim_ctl.sh status                         # state, phase, scenario, elapsed
+scripts/sim_ctl.sh console start                  # detached
+scripts/sim_ctl.sh list                           # scenarios
+scripts/sim_ctl.sh dry-run explore_fleet          # print the command, launch nothing
+scripts/sim_ctl.sh start explore_fleet headless=true
+scripts/sim_ctl.sh start custom map=warehouse mode=extend robots=2   # the launch form, as k=v
+scripts/sim_ctl.sh wait running --timeout 420     # first run streams assets
+scripts/sim_ctl.sh status
 scripts/sim_ctl.sh log --lines 100
-scripts/sim_ctl.sh stop                           # sim down, console stays up
-scripts/sim_ctl.sh stop --save-map warehouse_full # ...saving the map into maps/ first
+scripts/sim_ctl.sh stop [--save-map NAME [--splat]]
 ```
 
-Saved maps have their own script, `scripts/maps.sh` (`list`/`show`/`save`/
-`verify`/`rm`) — see [Saved map library](#saved-map-library). It is separate
-from `sim_ctl.sh` because it needs system ROS 2 *sourced*, which `sim_ctl.sh`
-and `run_demo.sh` must never be.
+### CLI only (`run_demo.sh`)
 
-Exit codes are the interface — branch on them, not on the text: `0` success,
-`1` command failure (bad scenario, rejected start, run went to `failed`), `3`
-no console, `4` no session (which is how you ask "is anything running?"), `124`
-timed out. `wait` dumps the last 30 log lines when a run fails.
+```bash
+scripts/run_demo.sh                 # 2-robot fleet + dashboard
+scripts/run_demo.sh --explore       # ...exploring autonomously
+scripts/run_demo.sh --robots 1      # single robot
+scripts/run_demo.sh --teleop        # add a WASD terminal window
+scripts/run_demo.sh stop
+```
 
-Coding agents should use the **`sim-run` skill** (`.claude/skills/sim-run/`),
-which carries this runbook plus the failure modes; `CLAUDE.md` points at it.
+`run_demo.sh` returns as soon as everything has launched. Check liveness with
+`pgrep -f spawn_warehouse.py`, not its exit code.
 
-The phase readout (`starting Isaac Sim → loading the warehouse → sim publishing
-→ starting RTAB-Map + Nav2 → ROS 2 stack up → running`) is parsed out of
-`run_demo.sh`'s own progress lines by `PHASE_PATTERNS` in `webui/session.py`.
-If you reword those echoes, update that table in the same commit.
+### Scenarios (`configs/scenarios/`)
 
-> **The control API is not authenticated.** `serve.py` binds `0.0.0.0`, so with
-> `--control` any tailnet device can launch a scenario. Containment is that
-> scenario names resolve by allowlist against `configs/scenarios/`, and every
-> argument handed to `run_demo.sh` is built by the fixed, typed `RUN_FLAGS`
-> table in `webui/session.py` — no free-text value from a request reaches a
-> shell. Tailscale ACLs are the actual perimeter.
+| Scenario | What it does |
+|---|---|
+| `explore_fleet` | **default**: 2 robots explore from empty maps, fused into one `/map` |
+| `explore_fresh` / `explore_resume` | 1 robot, fresh map / extend the working map |
+| `library_localize` / `library_resume` | a saved map from `maps/`, read-only / keep mapping |
+| `fleet_demo` | premapped warehouse, 2 robots, for the task demo |
+| `fleet_scale` | 4+ robots waiting for goals (`robots=` overridable) |
+| `moving_obstacles`, `_mapped`, `_fleet` | worlds with scripted walkers, for watching live and for tests |
+| `pick_bench` | fresh map, no Nav2 goals: the base for pick and place tests ([Pick and place](manipulation.md#pick-and-place-sim)) |
+| `real_map_fresh`, `real_localize`, `real_map_offload` | the Jetson (`platform: real`) |
 
-#### Adding a scenario
-
-A scenario is a reviewable preset for `run_demo.sh`, one YAML per file in
-`configs/scenarios/` (the filename stem must equal `name`):
+A scenario is one YAML file whose filename matches `name`. `run:` accepts only
+allowlisted keys (`RUN_FLAGS` in `webui/session.py`). Unknown keys make the scenario
+`invalid` rather than being passed through.
 
 ```yaml
 name: explore_fresh
 title: Frontier exploration — fresh map
-description: >
-  Shown on the card. Say what the run does and what it proves.
-status: ready                 # ready | planned (planned lists but can't start)
-run:                          # allowlisted keys only — see RUN_FLAGS
+description: Shown in the launch form.
+status: ready                 # ready | planned
+run:
   scene: nvidia               # nvidia | primitive
-  robots: 1                   # 1..2
-  robot_id: robot_0
-  headless: true              # false opens the Isaac window (-> --no-headless)
-  chase_cam: true             # false -> --no-chase-cam
-  chase_cam_robots: null      # null = every spawned robot; int = first N only
+  robots: 1
+  headless: true
+  chase_cam: true
   explore: true
-  resume: false               # resume and localize are mutually exclusive
+  resume: false               # resume / localize are mutually exclusive
   localize: false
-  teleop: false
-  map: null                   # null -> ~/.ros/sortbots_<robot_id>.db
-overrides: [headless, robots] # which keys the card exposes as controls
-capture:
-  bag: false                  # true also records scripts/record_explore_bag.sh
+  map: null                   # null → ~/.ros/sortbots_<robot_id>.db
+overrides: [headless, robots] # keys the launch form may change
+capture: {bag: false}
 ```
 
-Unknown `run:` keys are rejected, not forwarded — the card renders with status
-`invalid` and the reason, which is also what you get from the offline check:
+Check scenarios offline with `python3 webui/session.py --list` or `--print-argv NAME
+[--set k=v]`. **Save as preset…** in the launch form writes a new one.
+
+### Performance knobs
+
+- **Render products dominate cost** (about 85%). Chase cams are off for fleet runs by
+  default. `half_res_cams` renders head cameras at 424×240.
+- On a GPU-bound laptop, `render_every=2` + `lite_render=true` took `explore_fleet`
+  from 0.38× to 0.81×. A CPU-bound desktop only speeds up with fewer render products.
+- **Memory:** Isaac plus the console take about 6.8 GB. Each robot adds about
+  1.5 GB, plus RTAB-Map growth of about 3.5 MB per sim-second while mapping.
+  Past 4 robots the limit is CPU at startup, not RAM. `run_demo.sh` runs the
+  pipeline in a systemd memory fence, and `scripts/mem_guard.py` stops the run
+  cleanly before the OOM killer acts (`SORTBOTS_NO_MEM_GUARD=1` disables it).
+  `scripts/mem_probe.py record|summarize` breaks usage down per robot.
+
+### Always-on console and remote access
 
 ```bash
-python3 webui/session.py --list
-python3 webui/session.py --print-argv explore_resume        # prints the exact command
-python3 webui/session.py --print-argv explore_fresh --set headless=false
+scripts/console_service.sh install    # systemd user service serving this checkout
+scripts/console_service.sh deploy     # serve a worktree of main (~/SortBots-prod), auto-updated every 5 min
+python3 scripts/webui_url.py          # print the tailnet URL
 ```
 
-`status: planned` is for scenarios whose environment doesn't exist yet — the
-card lists them greyed out with a tooltip rather than pretending they run. One
-known gap for the planned test suite: a person-avoidance scene needs a new
-`--scene` value with an animated actor in `scripts/spawn_warehouse.py`.
+Every port binds `0.0.0.0`, so any device on the Tailscale tailnet can reach the
+operator view at `http://<host>.ts.net:8081/`. Use plain http there: the page
+derives its rosbridge and video hosts from its own origin. For a public URL, Tailscale
+Funnel can expose 8081→443, 9090→8443 and 8080→10000. **The control API is not
+authenticated, and rosbridge can publish to any topic.** Tailnet ACLs are the only
+perimeter, so treat a Funnel URL as a secret.
 
-`explore_fleet` (`robots: 2`) is the default scenario and the mode the project
-is built around: `run_demo.sh` derives `--robot-ids` from `--robots` against
-`configs/robots.yaml`'s order and threads it through to the bringup's
-`robot_ids:=`, which brings up a full stack (RTAB-Map + Nav2 + task_manager +
-explorer) per robot, with the per-robot grids fused into one `/map`. The
-`explore_fresh` / `explore_resume` / `library_*` scenarios are the
-single-robot variants. See "Multi-robot" below.
+### The ROS side without the launcher
 
-
-### Keeping the console up (so the site is always there)
-
-The console alone costs no GPU (about 2% of a core, 180 MB): only a running sim holds the GPU.
-To keep it up across logouts and reboots on this machine, so anyone on the tailnet can open the
-operator view and start and stop sims from the Session panel without a terminal:
+With Isaac already running (`scripts/spawn_warehouse.py`), in a ROS-sourced shell:
 
 ```bash
-scripts/console_service.sh install     # systemd USER service; no sudo
-scripts/console_service.sh status
-scripts/console_service.sh uninstall
+ros2 launch ./launch/sortbots_bringup.launch.py robot_ids:=robot_0,robot_1 \
+    [nav2:=false] [webui:=false] [task_manager:=false] [rviz:=true]
 ```
 
-It runs as you, from this checkout, and changes nothing outside `~/.config/systemd/user/`. Other
-machines and the Jetson are untouched unless someone runs it there. It serves whatever branch is
-checked out here (`systemctl --user restart sortbots-console` after switching). Stopping the
-service also stops a running sim, which lives in its own systemd scope. To run at boot without
-anyone logged in, it needs linger: `install` tries `loginctl enable-linger`; if polkit refuses
-(remote or non-interactive shells), run that once yourself.
+## The operator view
 
-**Hosting `main` (prod).** `install` serves the shared checkout, so a teammate's `git checkout`
-changes the site. `scripts/console_service.sh deploy` instead keeps a worktree of `main` at
-`~/SortBots-prod` (`SORTBOTS_PROD_DIR`), points the service at it, and installs a 5-minute timer
-that fast-forwards it. It restarts the console only when `main` moved and no sim is running
-(a restart stops a live sim), so a merge goes live within minutes of the sim ending. Run it once,
-from a checkout that has this script on `main`.
+`webui/operator.html` is the **only** GUI. New UI belongs inside it as a view,
+panel or popover. Never add a second page or port.
 
-**Public URL.** The site is published with Tailscale Funnel, which needs no login and works off any
-network. Funnel only exposes 443, 8443 and 10000, so the page's rosbridge and video connections
-use `wss://HOST:8443` and `https://HOST:10000` when served over https (`operator.js`):
+- **Header:** pick the stage (**Map** / **3D cloud** / **Sim**), the **Comms**
+  overlay, **Session** (the launch form), **Stop all** (cancels every goal and
+  zeroes `cmd_vel`), and the alarm chip.
+- **Robot cards (left):** camera/depth tile, current task, pose, speed and the
+  distance left on the plan. The card used most recently has control: map clicks
+  and waypoint chips go to that robot.
+- **Stage (centre):**
+  - 2D: the fused `/map` with robot poses, Nav2 plans, waypoints and select /
+    waypoint / send-robot tools (drag to set heading).
+  - 3D: `/fleet/recon_cloud`, throttled to one cloud per 8 s.
+  - **Sim:** Isaac's own floor camera. It renders only while a page sends
+    heartbeats; drag to orbit, **Follow** to ride along.
+- **Tasks (right):** per-robot FIFO queues from `task_manager`. **Moves** queues
+  ordered `goto`s. **Pick & drop** queues pickup→dropoff. **Any robot** sends the
+  task to the fleet auction. **Run demo** runs `configs/demo_tasks.yaml` in phases.
+- **Exploring:** each robot card has an **Explore** / **Stop exploring** button.
+  **Save & finish** in Session saves the run into `maps/` and then stops it.
+- **Comms overlay:** commsim's radio model running live on the real poses and map:
+  predicted links, mesh routes and message hops. What-ifs (pull a link, switch off
+  a robot, range slider) change only the model, never the real fleet. Drop the
+  gateway pin with ▲.
+
+Test it offline. There is no sim, no ROS and no npm install; it uses a fake
+ROSLIB in headless Chrome:
 
 ```bash
-tailscale funnel --bg --https=443 8081     # operator view
-tailscale funnel --bg --https=8443 9090    # rosbridge
-tailscale funnel --bg --https=10000 8080   # web_video_server
-tailscale funnel reset                     # off
+node webui/tests/operator_test.mjs [--screenshot DIR]
+scripts/replay_dashboard_bag.sh <bag-dir>     # eyeball a recorded bag with real rosbridge
 ```
 
-There is no authentication, and rosbridge can publish to any topic. Treat the URL as a secret.
+Never point a browser at a live sim to test the UI. Record a bag and replay it.
 
-### Unified ROS-2 bringup on its own
+## Maps
 
-If Isaac Sim is already running (e.g. you launched `scripts/spawn_warehouse.py`
-by hand), bring up just the ROS 2 side from a shell with system ROS 2 Jazzy
-sourced (and `which python3` == `/usr/bin/python3` — see the webui launch
-docstring for why conda's Python breaks rosbridge):
-
-```bash
-source /opt/ros/jazzy/setup.bash
-ros2 launch ./launch/sortbots_bringup.launch.py
-```
-
-This includes RTAB-Map SLAM + Nav2 + the dashboard stack (rosbridge 9090 +
-web_video_server 8080 + serve.py 8081) + `nodes/task_manager.py`. Toggle
-pieces with `nav2:=false`, `webui:=false`, `task_manager:=false`, `rviz:=true`.
-Startup order is tolerant: Nav2 autostarts and retries until RTAB-Map's map/TF
-appear.
-
-> **Every `/snapshot` request to web_video_server MUST carry
-> `qos_profile=sensor_data`.** web_video_server opens a fresh subscription per
-> snapshot request, and its default is RELIABLE; that per-request churn of
-> RELIABLE subscriptions kills Isaac's rgb/depth image writers outright at
-> around sim-t=100–140 s (the sim keeps stepping, `camera_info` — a different
-> publisher — keeps going, and Isaac logs nothing). Bisected live 2026-08-01:
-> Isaac alone is stable indefinitely; the full stack minus web_video_server is
-> stable; a steady RELIABLE subscriber (`depth_to_cloud`) is harmless; only
-> the churning snapshot subscriptions correlate with the death. Both consumers
-> (`webui/operator.js`, `nodes/web_video_watchdog.sh`) already pass the parameter —
-> keep it on any new one, including ad-hoc `curl` checks.
-
-**Multi-robot:** `robot_ids:=robot_0,robot_1` brings up a full independent
-RTAB-Map + Nav2 + `task_manager` + explorer stack per robot (the
-dashboard/rosbridge stack stays singular). `scripts/run_demo.sh --robots N`
-derives this list from `configs/robots.yaml`'s order automatically; pass
-`--robot-ids` directly to override it. `localization`/`database_path`
-(map-lifecycle overrides) still apply only to the single robot named by
-`robot_id` (default `robot_0`) — every other robot in the list gets its own
-auto-computed map path, which is already correct and collision-free without
-an override. `explore`, unlike those, now applies to every robot in the list.
-TF needs no changes for this — frames are already `<robot>/`-prefixed on the
-shared global `/tf` (`scripts/_ros2_graphs.py`). `configs/nav2_params.yaml`
-hardcodes a few frame ids/one topic to `robot_0`; `sortbots_nav2.launch.py`
-rewrites them per-robot at launch time (see that file's docstring for why
-it's plain string substitution, not `nav2_common.RewrittenYaml`).
-
-Architecture for perception, exploration, mesh radio, and 2D/3D fusion is in
-[`docs/perception_exploration.md`](perception_exploration.md).
-
-Each robot's RTAB-Map owns its own SLAM grid, in its own `<robot_id>/map`
-frame (see `sortbots_rtabmap_robot.launch.py`'s `map_frame_id`) — this is
-still NOT collaborative SLAM (no shared pose graph, no inter-robot loop
-closure). What ties the fleet together is `nodes/map_merge.py` (2D `/map`)
-and `nodes/recon_cloud_merge.py` (3D `/fleet/recon_cloud`): the bringup
-publishes a static `map -> <robot_id>/map` transform per robot from its known
-spawn pose (`configs/robots.yaml`, keyed by the `scene` launch arg — must
-match `spawn_warehouse.py --scene`), and the merge nodes use those anchors to
-resample every robot's grid/cloud into one world-anchored frame — occupied beats
-free beats unknown where two robots' grids disagree about a cell. Nav2's
-`global_frame: map` and every explorer's default `--map-topic /map` both
-point at this fused grid, so a robot plans and picks frontiers using space
-ANY robot has mapped. See "Autonomous exploration" below for the
-fleet mesh intent/status layer on top of that.
-
-### What the dashboard shows
-
-Open the printed URL (`http://localhost:8081/` locally, or the tailnet URL).
-The page is sized to fit one viewport — nothing scrolls except the task queue.
-
-**The stage** (the big box on the left) shows one view at a time, with an
-optional picture-in-picture inset:
-
-- **Chase cam** (default) large, no inset. The head camera still renders in
-  Isaac (RTAB-Map needs it) but the dashboard no longer polls it as a PiP —
-  that stream was browser-side load for a view nobody was watching.
-- **Map mode** — the `camera` / `map` buttons in the header swap the map into
-  the stage in place of the cameras; the chase cam stays as the inset so you
-  don't lose sight of the robot while picking a goal. Switching back restores
-  chase cam.
-- **Drive pad** (bottom-left) and **head-aim pad** (bottom-right) float over the
-  stage as translucent overlays — they fade up on hover, or on tap on a phone.
-  The aim pad is hidden in map mode, where head pan/tilt means nothing.
-
-A feed that's off the stage stops being fetched, so map mode isn't paying for
-the chase camera's full-size decode, and the head camera isn't polled at all
-while it's hidden.
-
-Fleet runs (`explore_fleet`) spawn a chase cam on **robot_0 only** by default
-(`chase_cam_robots: 1`) — the dashboard shows that robot's feed, so robot_1's
-3rd-person cam would be a wasted render product. Override with
-`chase_cam_robots=2` (or `=0` / `chase_cam=false`) via `sim_ctl.sh` if needed.
-
-**The right column** is always visible: the **3D reconstruction** viewer on top,
-**dispatch + task queue** below.
-
-- **3D reconstruction** — RTAB-Map's assembled 3D map, orbit with the mouse
-  (drag to orbit, scroll to zoom, right-drag to pan), "reset view" reframes it.
-  Two selects:
-  - **voxels / points** — voxel cubes are lit, so vertical structure actually
-    reads as structure; points are cheaper and are also the automatic fallback
-    above 250k points.
-  - **photo / height** — the cloud's own colour, or a blue→red ramp by height,
-    which is far more legible when everything is warehouse-grey.
-
-  The panel subscribes to `/<robot>/recon_cloud`, not `cloud_map` directly —
-  `nodes/recon_cloud_relay.py` sits in between and enforces a hard 200k-point
-  budget. `cloud_map` grows without bound as the map does, and the vendored
-  roslib can't reassemble fragments once a message passes rosbridge's
-  `max_message_size`, so a budget is the only thing that keeps the panel
-  working on a long run. The info line reports the z range, which is the
-  quickest way to confirm the reconstruction is genuinely 3D.
-
-- **Map view** — the RTAB-Map occupancy grid, the robot's cyan
-  odom trail, plus live Nav2 overlays:
-  - **Planned path** (orange) — Nav2's current global plan, for both
-    click-to-nav and dispatched pickup→dropoff tasks.
-  - **Global costmap** (translucent red tint) — toggle with the "costmap"
-    checkbox; shows inflation/lethal cells around obstacles.
-  - **Goal marker** (orange ring + heading tick) — the current nav goal,
-    derived from the planned path's endpoint so it's correct regardless of who
-    set the goal.
-- **SLAM status badge** (header) — "mapping", flashes "loop closed" and counts
-  total loop closures from `/robot_0/info`; goes red/"stale" if RTAB-Map stops
-  publishing.
-- **Robot switcher** (header, next to the title) — populated from
-  `configs/robots.yaml` via `GET /api/robots`. Picking a different robot
-  reloads the page with `?robot=<id>` — every subscription on the page is
-  robot-specific, so this is a reload, not a live hot-swap.
-
-### Driving
-
-W/A/S/D to move, Q/E to rotate, Space to stop — the keys work anywhere on the
-page, no need to click the pad first (typing in the dispatch selects doesn't
-drive the robot, and switching tabs mid-drive stops it). The pad buttons also
-work by holding the mouse down, or by touch on a phone. This publishes straight
-to `cmd_vel`, so don't drive while a task is active — Nav2 will fight you.
-
-### Click-to-navigate
-
-Switch the stage to **map**, then drag on it (rviz "2D Nav Goal" style):
-**press** sets the goal position, **drag** sets the heading (a plain click uses
-heading 0). The goal that was sent is echoed bottom-right. This sends a
-`NavigateToPose` goal straight to Nav2. **Caveat:** a manual map goal preempts
-whatever `task_manager` is currently navigating — it's a manual override, same
-spirit as the drive-pad note above. Use the **Dispatch task** form for the
-queued pickup→dropoff workflow instead.
-
-## Fleet size: memory, CPU and the memory guard
-
-`configs/robots.yaml` places six robots. A run brings up the first `--robots N`,
-and the idle dashboard lists `default_robots` (2). `fleet_scale` is the scenario
-for more than two: robots wait for goals, render settings are tuned for the
-laptop, and `robots` is overridable.
-
-What a robot costs, measured 2026-10-24 with `scripts/mem_probe.py` on the RTX
-4070 laptop (30 GB RAM, 32 threads):
-
-| | RAM | grows? |
+| Mode | Flags | Pose graph |
 |---|---|---|
-| Isaac + console, any fleet size | ~6.8 GB | no |
-| per robot: Nav2 (10 processes) + Python nodes (13) | ~1.2–1.5 GB | no |
-| per robot: RTAB-Map | ~0.3 GB at start | ~3.5 MB per sim-second while it maps new space; flat when idle or localizing |
-| per robot: head camera | ~0.2 GB GPU | no |
-
-RTAB-Map's growth used to be about 8 MB per sim-second, and that's what ran two
-exploring robots out of memory. Most of it was glibc malloc arenas, not map
-data. `launch/sortbots_rtabmap_robot.launch.py` now starts it with
-`MALLOC_ARENA_MAX=2`, and two exploring robots at sim t=300 s use 9.3 GB of the
-fence instead of 14.3 GB.
-
-The limit past four robots is CPU, not memory. Six full stacks fit in about 12 GB,
-but startup drove the load average past 150 on 32 threads. Nav2 lifecycle managers
-timed out, Isaac fell to ~0.25x, each camera delivered ~1 image/s wall-clock, and
-most robots' RTAB-Map never got a synchronized RGB/depth pair. The bringup
-staggers each robot's stack by `robot_stagger_s` (8 s), which softens the spike but
-doesn't remove it. `half_res_cams` (launch form, or a scenario key) renders the
-head cameras at 424x240. With four idle robots that took the sim from 0.40x to
-0.46x and the GPU from 48 % to 28 %.
-
-**Memory guard.** `run_demo.sh` fences the pipeline in a systemd scope
-(MemoryHigh = RAM − 14 GB, MemoryMax = RAM − 10 GB). Hitting the fence throttles
-the whole sim, then OOM-kills one process in it, usually Isaac. So `run_demo.sh`
-also starts `scripts/mem_guard.py` inside the fence. The guard stops the run
-cleanly (`run_demo.sh stop --keep-console`) when any of these holds for about
-15 s:
-
-- the fence's anonymous memory plus what it swapped out passes 97 % of MemoryHigh
-- the machine's MemAvailable drops under max(3 GB, 10 % of RAM)
-- memory pressure stalls everything (PSI full > 30 %)
-
-It writes the reason to `/tmp/sortbots_mem_guard.json`, and the dashboard shows it
-as the session's error. `scripts/mem_guard.py --check` takes one reading. Use
-`SORTBOTS_NO_MEM_GUARD=1` to run without the guard and
-`SORTBOTS_SIM_MEM_HIGH`/`_MAX` to resize the fence.
-
-To see where a run's memory goes:
-
-```bash
-scripts/mem_probe.py record --out data/memprobe/NAME &   # exits with the pipeline
-scripts/sim_ctl.sh start fleet_scale robots=4 ...
-scripts/mem_probe.py summarize data/memprobe/NAME       # per robot/role, MB per sim-minute
-```
-
-## Autonomous exploration
-
-Module overview (frontiers, mesh intent/status, Nav2 handoff):
-[`docs/perception_exploration.md`](perception_exploration.md).
-
-```bash
-scripts/run_demo.sh --explore              # hands-off: starts exploring immediately
-scripts/run_demo.sh --explore --resume     # EXTEND an existing map instead of starting fresh
-```
-
-(`--resume`, not `--localize`: the latter is read-only and never grows the
-map, so exploring against it just re-walks what was already known. See
-"Resuming exploration into an existing map" below.)
-
-`nodes/explorer.py` finds frontiers (free cells bordering unknown space) in
-the fused `/map` by default (or `/{id}/map` if overridden), drives
-`navigate_to_pose` toward the best-scored one, and repeats until none remain
-reachable — then reports "exploration done" and stops. No waypoints, no
-human input. Multi-robot runs coordinate via `/fleet/intent` + `/fleet/status`
-(not peer TF).
-
-**Motion is deliberately diff-drive, not holonomic.** The sim base can
-physically strafe, but Nav2 now runs MPPI with `motion_model: DiffDrive`
-(`configs/nav2_params.yaml`) — the earlier holonomic DWB setup made the
-robot glide sideways, which looked unnatural and pointed the only obstacle
-sensor (the forward depth camera) away from the direction of travel. Brief
-reverse (−0.15 m/s) is retained so BackUp recovery and corner escapes work.
-Teleop strafing (`q`/`e` in `wasd_teleop.py`) is unaffected — the base is
-still holonomic, Nav2 just never commands `linear.y`.
-
-**Every Nav2 recovery depends on one easily-missed parameter.**
-`behavior_server` reads *three* frames, not two: `global_frame`,
-`robot_base_frame`, and `local_frame` — the odom-ish frame Spin, BackUp,
-DriveOnHeading and AssistedTeleop all integrate against. It defaults to a
-bare `odom`, which does not exist in a namespaced TF tree, so leaving it
-unset makes every recovery abort instantly with `No Transform available …
-"odom" does not exist` and turns the behavior tree's whole recovery branch
-into a no-op. That is not a subtle degradation: a wedged robot can then
-never physically free itself, and one exploration run failed 13 consecutive
-goals without moving. `configs/nav2_params.yaml` now sets
-`local_frame: robot_0/odom` (rewritten per robot by
-`sortbots_nav2.launch.py`). Same class of bug as the static layer's
-`map_topic` — an unqualified default that silently no-ops under namespacing.
-The explorer's startup spin (below) exists partly to surface a regression
-here on every single run.
-
-**Speed: the robot stops driving to places it has already seen.** The depth
-camera reveals a frontier from 4–5 m out (RTAB-Map `Grid/RangeMax 5.0`,
-costmap `raytrace_max_range 5.0`), but a standoff goal sits only 1.5 m from
-it — so the last several metres of every goal, plus a rotate-in-place to
-satisfy `yaw_goal_tolerance`, were spent arriving to look at mapped space.
-Now, once no frontier cell remains within `frontier_consumed_radius_m` of
-the point a goal was chosen to reveal, the goal counts as **satisfied**:
-cancelled and replaced immediately, with no blacklist entry and no failure
-count (log line: `frontier at (…) already revealed en route to (…) —
-retargeting (not a failure)`; counter `goals_consumed` in
-`explore_status`). Two guards stop it thrashing — `goal_min_age_s`, and an
-exact requirement that a new `/map` has arrived since the goal was sent,
-since on the grid that produced the candidate the check could only ever say
-"still there". If `goals_consumed / goals_sent` climbs above ~0.5 while the
-robot barely travels, `frontier_consumed_radius_m` is too large.
-
-### Steering exploration by hand
-
-The map's **steer** mode (the `nav goal | steer` buttons above the map) lets
-you direct exploration without stopping it. A click publishes
-`{"x": .., "y": ..}` on `<robot>/explore_hint`; shift-click adds `"append":
-true` to QUEUE an area instead of replacing the current one. Publish `{}` to
-clear the queue.
-
-While a hint is live the explorer heads for whichever frontier is **nearest
-your click**, ignoring `max_goal_distance_m`, and keeps working that region
-until it is mapped. It is still not a goal: the explorer picks real frontiers,
-so an unreachable click cannot strand it, and clearance/validity masks are
-hard filters applied before any of this.
-
-Three ways a region ends, all bounded:
-
-- the area is mapped — no unknown cells remain within `steer_radius_m` of the
-  click, so the queue advances (`explore_hint: ... is mapped`);
-- `steer_ttl_s` expires (the TTL runs from when a region becomes ACTIVE, not
-  when you clicked, so queued entries cannot expire while waiting);
-- the frontiers there prove unreachable and the sticky blacklist retires them.
-
-A click **preempts the goal in flight immediately** (~10 ms measured).
-Shift-click deliberately does not — queueing means "after this one".
-
-Four things this got wrong before, all of which are instructive:
-
-1. A pure score multiplier (`score *= 1 + steer_weight * exp(-d/steer_decay_m)`)
-   loses to the distance term for any far click: at `alpha 1.0` a frontier 2 m
-   away already beats an equal one 15 m away by 7.5x. It honoured a click for
-   one goal and then wandered off. `steer_weight`/`steer_decay_m` still exist
-   and still apply, but the region lock is what makes intent decisive.
-2. Restricting candidates to those within `steer_radius_m` of the click looks
-   right and is not: a frontier is a free cell ADJACENT TO unknown, so it sits
-   at the EDGE of unexplored space, never inside it. Clicking into an unmapped
-   area — the obvious gesture — found no frontier nearby and released
-   instantly. Hence "nearest to the hint", and a release test on UNKNOWN
-   cells rather than on frontiers.
-3. Escape mode bypasses the scored candidate list entirely, so it discarded
-   hints for as long as it was engaged — which, in a run where goals keep
-   failing, is most of the time. It now uses the same nearest-to-hint rule.
-4. Acting on a hint only at the next replan meant it queued behind the active
-   goal, which could hold the robot for up to `goal_timeout_s` (75 s observed).
-
-The queue draws on the map as dashed cyan rings — bright for the region being
-worked, dimmer and numbered for those waiting — mirrored from `explore_status`
-so they disappear as regions are finished or expire.
-
-**`nav goal` mode stops exploration.** `navigate_to_pose` is a single-goal
-server, so a manual goal and the explorer otherwise preempt each other every
-second or so — and each preemption returns to the explorer as ABORTED, which
-it scores as its own failure and blacklists, silently poisoning good frontiers
-and driving spurious escapes. Click-to-nav therefore publishes
-`explore_cmd=stop` first, exactly as `task_manager.py` does before dispatching.
-The map mode is remembered across reloads, because the two modes look
-identical to click and do opposite things.
-
-### Seeing why the explorer refuses an area
-
-The **blacklist** toggle next to `costmap` draws every blacklist entry at its
-real suppression radius: dashed orange for entries that will expire, solid red
-for permanent ones, with the strike count in the middle. Worth having because
-the escalating blacklist makes "2 strikes, expires in 6 minutes" and "3
-strikes, gone for good" otherwise indistinguishable. Off by default — it is a
-diagnostic, not demo chrome.
-
-**Corner/dead-end handling** (all tunable in `configs/explorer.yaml`):
-
-- *Startup spin* — one 2π rotation before the first frontier goal. At t=0 a
-  forward-only camera has seen a cone, so the first choice is close to a
-  guess, and frequently the *only* candidate. ~8 s of sim time buys a full
-  `Grid/RangeMax` disc. It doubles as a per-run check that recoveries work
-  at all (see `local_frame` above) — watch for `startup spin complete —
-  recoveries are functional`.
-- *Standoff goals* — the goal is pulled back from the frontier cell into
-  known free floor with clearance from walls **and** unknown space, posed
-  facing the frontier; the camera reveals it from the standoff instead of
-  the robot driving nose-first into an unmapped corner.
-- *Stuck watchdog* — less than 0.15 m of net motion over 15 s with a goal
-  active ⇒ blacklist + retarget immediately (log line: `stuck: moved
-  <0.15m …`) instead of waiting out `goal_timeout_s` or Nav2's
-  multi-minute recovery churn.
-- *Openness scoring* — frontier score is weighted by the fraction of free
-  floor around the goal, so open-floor frontiers beat tight corners at
-  similar size/distance.
-- *Backtracking* — when no frontier is within `max_goal_distance_m`
-  (typical after fully mapping a dead-end pocket), the explorer targets the
-  nearest remaining frontier anywhere on the map rather than declaring
-  exploration done. No DFS-style path memory needed: frontier selection is
-  global and Nav2 plans the route back out through known space.
-- *Escape mode* — after `escape_after_failures` (default 2) consecutive
-  failed goals (stuck/timeout/abort), the explorer stops nibbling at the
-  pocket it's wedged in — blacklisting removes failed spots one at a time,
-  so nearest-first scoring would otherwise keep picking the next frontier
-  in the same pocket — and jumps to the **farthest** valid frontier on the
-  explored boundary (log line: `escape: N consecutive failed goals …`),
-  ignoring the distance cap. Normal nearest-biased scoring resumes on the
-  next success. Escape also *pocket-blacklists* a
-  `escape_pocket_radius_m` disc around the robot, so the pocket dies in one
-  go rather than one 0.5 m spot per failure — applied only when the escape
-  target lies outside that disc, so it never blacklists its own destination.
-- *Hard escape* — at twice `escape_after_failures` (failed repeatedly **and**
-  failed to escape) the explorer spins in place before retargeting. That
-  combination almost always means a physical wedge with a stale local
-  costmap, and rotating is the highest-information action a forward-only
-  camera has. Rate-limited by `hard_escape_cooldown_s`, which is **not
-  optional**: the trigger is a level (the failure count stays high until a
-  goal succeeds), not an edge, so without a minimum gap the spin re-fires the
-  instant the previous one ends. That produced a live 8-second
-  spin/complete/spin loop that replaced exploration entirely.
-- *What counts as success* — early-abandoned goals reset the consecutive-
-  failure count **if the robot actually travelled** (`>
-  stuck_min_displacement_m`) to earn the reveal. This matters more than it
-  sounds: abandonment ends ~85% of goals in practice, so `STATUS_SUCCEEDED`
-  almost never fires, and a failure counter that only reset on it climbed
-  monotonically into permanent escape mode. Requiring real displacement is
-  what separates "revealed the frontier by driving there" from "sat still
-  while it evaporated", so a genuinely wedged robot still escalates.
-- *Sticky blacklist* — some frontiers are genuinely unreachable (behind a
-  rack, behind sim geometry, in a pocket the planner can't route into). With
-  a flat TTL they returned every `blacklist_ttl_s` forever, which both burned
-  goal cycles and made "exploration done" **structurally unreachable** —
-  there was always one more candidate, so the empty-cycle counter could never
-  run up. Re-blacklisting near an existing entry now bumps its *strike* count
-  instead of adding a neighbour; each strike multiplies its TTL
-  (`blacklist_ttl_growth`) and widens its radius, and at
-  `blacklist_permanent_strikes` it stops expiring. An unreachable frontier
-  costs three failure cycles and is then gone for good.
-- *Run-time budget* — `max_run_time_s` (default 2400 s wall) ends the run
-  regardless. Every other termination path depends on the frontier set going
-  empty, which a stalled perception stack can prevent indefinitely; this
-  guarantees the run finishes and the final map gets saved. A lost
-  `map → base_link` transform is logged as an error after 30 consecutive
-  ticks and force-finishes the run after 300, since that path otherwise
-  hangs silently in `exploring` forever.
-
-When exploration ends, the explorer logs a run summary — elapsed time, grid
-size, known/free/occupied m², coverage against the reference map, goal
-counters (`sent / reached / failed / consumed-early / rejected`) and the
-blacklist size, including how many entries went permanent.
-
-### Reacting to moved/moving obstacles
-
-D* Lite was considered for this and deliberately **not** implemented: the
-stock Nav2 behavior tree already replanned the global path from scratch at
-1 Hz unconditionally, and NavFn A* on this grid costs single-digit
-milliseconds — an incremental planner has nothing to save. The actual
-bottlenecks were perception latency and the lack of a blocked-path trigger,
-which is what these three changes fix (worst-case reaction to a
-newly-blocked path drops from ~2 s to ~0.5 s):
-
-- **Sensing ranges** (`configs/nav2_params.yaml`): both costmaps mark
-  obstacles out to 4 m and raytrace-clear out to 5 m (Nav2's unset defaults
-  were 2.5/3.0 m). Still forward-frustum-only — a stale mark behind the
-  robot persists until the camera sweeps over it again; that's a sensor
-  limitation, not a config choice.
-- **Global costmap rate**: 1 Hz → 4 Hz updates (2 Hz publish), so a new
-  obstacle reaches the global planner in ≤250 ms.
-- **Reactive behavior tree** (`configs/bt/navigate_to_pose_reactive.xml`,
-  injected by `sortbots_nav2.launch.py` as a bt_navigator parameter
-  override): checks the current path against the costmap at 4 Hz via
-  planner_server's `/is_path_valid` and replans **immediately** when a
-  lethal cell lands on it, refreshes every 3 s otherwise, replans on goal
-  change, and keeps the stock recovery ladder. Unknown cells don't
-  invalidate a path, so frontier goals through unmapped space don't cause
-  replan thrash during exploration.
-
-Quick test without touching the sim setup: while the robot is en route on a
-long goal, drop a cube (~0.5 m, center ~0.25 m high so it sits in the
-0.05–1.5 m marking band) onto the planned path 2–4 m ahead via the Isaac
-GUI. Expect the costmap to mark it within ~0.25 s and a new `/robot_0/plan`
-around it within ~0.5 s (log: "Passing new path to controller" with no goal
-change) — MPPI swerves without entering recovery. Delete the cube while
-it's still in view and the path straightens within ≤3 s. Teleopping robot_1
-across robot_0's path works too (and crossing *behind* robot_0 demonstrates
-the no-rear-sensing ghost caveat).
-
-**Requires the occupancy-grid tuning documented above** (`GRID_ARGS` /
-`Grid/RayTracing`) — frontier detection needs real free space in the map to
-find a boundary to chase at all.
-
-From the dashboard's **Dispatch & task queue** panel: **Start**/**Stop**
-control exploration directly (`<robot>/explore_cmd`), the status line shows
-state / current goal / % of the grid mapped / blacklisted-goal count
-(`<robot>/explore_status`), and frontier candidates appear as colored dots on
-the map view (brighter = the one currently being pursued). **Save map**
-triggers RTAB-Map's own `backup` service for a labeled snapshot — the
-database is already being written continuously as it maps (see above), this
-just gives you a specific point-in-time copy.
-
-`task_manager.py` and `explorer.py` both drive the single `navigate_to_pose`
-action server, so they arbitrate: `task_manager` won't pop a dispatched task
-off its queue while the explorer reports `state: "exploring"`, and dispatching
-one anyway sends `explore_cmd: stop` first. Manual click-to-nav on the
-dashboard still preempts everything unconditionally — that's a deliberate
-override, same as always.
-
-**Tuning** lives in `configs/explorer.yaml` (frontier size cutoff, goal
-scoring, blacklist/claim radii and TTLs, replan cadence, done-after-N-empty
-cycles). Both were widened from their original values after live testing —
-this was the pre-flagged "SimpleProgressChecker will abort frontier goals
-too aggressively" risk from the exploration-testbed plan, and it showed up
-exactly as predicted:
-
-- `configs/nav2_params.yaml`'s `goal_checker.xy_goal_tolerance` was the real
-  culprit, not the progress checker. A frontier goal sits right at the edge
-  of currently-known space by definition, which is a harder final-approach
-  target than an interior waypoint — measured live, the robot routinely
-  settled ~0.2-0.25 m short and then just sat there never satisfying the
-  original 0.15 m tolerance. Widened to 0.25 m; goals started succeeding
-  immediately (three in a row on the very next run). Still tight enough for
-  `task_manager`'s dispatched pick/place docking, which has its own 0.5 m
-  `dock_offset_m` standoff on top of this.
-- `movement_time_allowance` (10.0 → 20.0) — the base needs a brief
-  rotate-in-place before committing to a heading on a long traverse (even
-  more so now that it's driven diff-drive), which the original tight window
-  read as "no progress" and aborted early.
-- `explorer.yaml`'s own `goal_timeout_s` (45 → 75) is a backstop for
-  whatever the two Nav2-level settings above don't catch; with the tolerance
-  fix it should now fire rarely.
-
-**Fleet mesh radio + dynamic obstacles (not centralized MAPF):** coordination
-is intentional broadcast over shared ROS topics that stand in for a WiFi mesh
-(`nodes/fleet_radio.py`, `configs/fleet_radio.yaml`):
-
-| Topic | Role |
-|---|---|
-| `/fleet/status` | Self-reported pose/twist/mode at ~5 Hz (BEST_EFFORT). Peers must **not** look up `map → <other>/base_link` on shared `/tf` — that is an oracle. |
-| `/fleet/intent` | Goal + optional corridor polyline + priority (TRANSIENT_LOCAL). Replaces `/explore/claims`. |
-
-Explorers soft-exclude frontiers near peer intent goals, corridor vertices, and
-last-heard status poses; lower `priority` (robot_0 = 0) wins courtesy yield
-when corridors conflict. Each robot still owns its own RTAB-Map DB;
-`map_merge.py` fuses grids into `/map`.
-
-**Perception of movers:** `nodes/dynamic_obstacle_filter.py` publishes
-`/<id>/camera/depth_static` (movers → NaN) for RTAB-Map and
-`/<id>/dynamic_obstacles` for Nav2's ephemeral costmap source, so peers are
-not permanently painted into SLAM. Nav2 also runs `collision_monitor` as a
-last-resort stop on forward depth. Local avoidance is still per-robot MPPI +
-reactive BT — not joint trajectory optimization.
-
-**Fused 3D recon:** `nodes/recon_cloud_merge.py` transforms each
-`/<id>/recon_cloud` (`{id}/map` frame) into world `map` with the same spawn
-anchors as `map_merge`, concatenates, and re-budgets onto `/fleet/recon_cloud`.
-The dashboard 3D panel subscribes there (collaborative fusion, not
-collaborative SLAM). Per-robot `recon_cloud` topics remain for debugging.
-
-**Live check (aisle crossing):** teleop robot_B across robot_A's view — A's
-`/robot_A/map` free/occupied footprint should not grow a lasting peer-shaped
-blob; A's local costmap should show a moving mark that clears after B leaves;
-`/fleet/status` should keep updating for both.
-
-### The two action-server races this was built against
-
-Both bit real test runs before being fixed — worth knowing if you extend
-`explorer.py` or `task_manager.py`:
-
-1. **Don't explicitly cancel a goal you're about to replace.** Nav2's
-   `navigate_to_pose` is a single-goal action server: sending a new goal
-   already preempts whatever was running. An explicit `cancel_goal_async()`
-   on the OLD goal, fired right before sending the new one, is processed
-   asynchronously and reliably arrives *after* the new goal has already
-   preempted the old one — canceling the new goal instead. `explorer.py`
-   only cancels on an explicit `stop` (`nodes/explorer.py`'s
-   `_cancel_active_goal(cancel_on_server=...)`), never on its own
-   goal-timeout-and-replace path.
-2. **Goal-response/result callbacks must not read mutable instance state.**
-   A preempted goal's result future still completes later (as
-   ABORTED/CANCELED). If its callback reads `self._goal_target` instead of a
-   value captured at send time, it reads whatever the *current* goal is by
-   then — misattributing a stale failure to a goal that's still actively
-   navigating, and blacklisting a perfectly good target. `explorer.py` fixes
-   this with a generation counter: each goal's callbacks capture their own
-   generation number and no-op if a newer goal has since been sent.
-
-## Map lifecycle: build a map once, navigate on it later
-
-**Several robots on one saved map.** With 2+ robots and `--localize` / `--resume`,
-`run_demo.sh` copies the map to every robot (`~/.ros/sortbots_<rid>.db`) and passes
-`shared_map:=true`. Every robot's map frame is then the primary's (the map was built
-from robot_0's spawn), so all are anchored at robot_0's spawn and each RTAB-Map gets
-`initial_pose` = its spawn relative to robot_0's. They start read-only;
-`nodes/map_handoff.py` switches an extend session to mapping per robot, but only after
-a real visual match, because `set_mode_mapping` drops the seeded pose otherwise (robot_1
-jumped 8.6 m to the map origin when switched on the seed alone, 2026-10-21). A robot
-with no match yet still drives and explores read-only on its seed, which tracks truth to
-centimetres in sim. Caveats: each robot extends its OWN copy, and `maps.sh save` keeps
-robot_0's, so what robot_1 adds is visible in the fused `/map` during the run but not
-saved; and two copies of a 2.4 GB map cost two RTAB-Maps' worth of RAM (~18 GB together).
-
-By default every run builds a **fresh** map — RTAB-Map starts from an empty
-database, so a mapping run always means what it says. The map persists after
-shutdown, and `--localize` reopens it read-only instead of rebuilding:
-
-```bash
-scripts/run_demo.sh --teleop      # drive around; map builds from scratch
-scripts/run_demo.sh stop          # map persists on disk
-scripts/run_demo.sh --localize    # reopen it, localize, send nav goals
-```
-
-The database lives at `~/.ros/sortbots_<robot_id>.db` — **per robot**, so two
-robots can't clobber each other's map. Override with `--map PATH` to keep
-several warehouses around. `--localize` refuses up front if the file doesn't
-exist, rather than coming up and silently rejecting every goal.
-
-So there are four modes, not three:
-
-| mode | flags | pose graph |
-|---|---|---|
-| fresh mapping | *(default)* | wiped on start, rebuilt |
+| fresh | *(default)* | wiped and rebuilt |
 | resume | `--resume` | reopened and extended |
 | localize | `--localize` | reopened read-only (`Mem/IncrementalMemory=false`) |
-| **library** | `--map maps/<name>/map.db` + `--localize`/`--resume` | **copied** to the working DB; the library entry is never touched |
+| library | `--map maps/<name>/map.db` + `--resume`/`--localize` | **copied** to `~/.ros/sortbots_<id>.db`, and the copy is used |
 
-The fourth is the [saved map library](#saved-map-library) below.
+The working database is `~/.ros/sortbots_<robot_id>.db`, one per robot. RTAB-Map
+opens its sqlite file read-write even under `--localize`, which is why library maps
+are always copied. Otherwise every demo would dirty a tracked git-lfs object.
 
-In localization mode RTAB-Map sets `Mem/IncrementalMemory=false`, so the map is
-never modified — verified by checksum across a full run. `--delete_db_on_start`
-is forced off whenever `localization:=true`; deleting the map you are about to
-localize against is a footgun, not a preference.
-
-Nav2 needs no changes between any of these modes: its static layer consumes
-the same `map` topic regardless.
-
-### Saving a map off a run
-
-(A saved library map can also be turned into a photoreal Gaussian splat for
-the 3D panel's splat mode, trained on the workstation's GPU after the run:
-`scripts/sim_ctl.sh stop --save-map NAME --splat`. See `docs/splat.md`.)
-
-Two artifacts are worth keeping, and they have different lifetimes: the
-**occupancy grid** (`.pgm` + `.yaml`) can only be captured while the stack is
-up, since it comes off the live `/map` topic; the **RTAB-Map database**
-(`.db`) can only be copied safely once the stack is *down*, because copying a
-live sqlite file mid-write gives a torn database. `scripts/save_map.sh` does
-both (needs ROS 2 sourced, unlike `run_demo.sh`):
+**The library** (`maps/<name>/`: `map.json` manifest, `grid.pgm`/`grid.yaml`,
+`map.db`, plus `map_<rid>.db` per extra robot):
 
 ```bash
-scripts/save_map.sh --run nvidia_explore_20260802 --watch 3 &   # checkpoint every 3 min
-# ... explore until "exploration done" ...
-scripts/save_map.sh --run nvidia_explore_20260802 --label final
-scripts/save_map.sh --stop-watch
-scripts/run_demo.sh stop
-scripts/save_map.sh --run nvidia_explore_20260802 --db          # only now
+scripts/maps.sh list | show NAME | verify NAME | rm NAME
+scripts/sim_ctl.sh stop --save-map NAME            # save + stop in one step
+scripts/sim_ctl.sh start library_localize map=$PWD/maps/NAME/map.db
 ```
 
-Everything lands in `data/runs/<name>/map/`. The `--watch` loop exists for
-two reasons: `run_demo.sh stop` `pkill -9`s rtabmap only 2 s after SIGINT and
-can take the last minutes of mapping with it, and the checkpoint series
-doubles as a coverage-versus-time curve. It is deliberately *not* in
-`run_demo.sh`'s `PIPELINE_PATTERNS`, so teardown doesn't kill it before the
-final checkpoint lands; it ends itself once `/map` stops answering.
-`--occ`/`--free` are passed explicitly rather than left to `map_saver`'s
-defaults — unspecified thresholds are why this repo already has saved yamls
-disagreeing about `free_thresh` (0.25 vs 0.196).
+Saving has two halves. The grid has to come off the live `/map` while the stack is
+**up**. A safe copy of the database needs the stack **down**, or RTAB-Map's own
+backup service. So `maps.sh save` is idempotent: a mid-run save can land as
+`db_state: pending`, and a second save after teardown completes it (exit 5 means
+pending). Names match `^[a-z0-9][a-z0-9_-]{0,63}$`. Entries are 100+ MB, so prefer
+a new name over re-saving an old one.
 
-### Saved map library
+**Several robots on one saved map:** every robot gets a copy and an initial pose
+relative to robot_0. Each switches from localizing to mapping only after a real
+visual match. Only robot_0's database is saved back.
 
-`save_map.sh` above keeps a map *by run*, under `data/runs/<name>/map/`, which
-is gitignored and addressed by timestamp. The **library** at `maps/` keeps a
-map *by name*, committed, with a manifest tying the grid and the pose graph
-together — so a demo or test environment can start from an already-explored
-warehouse and you can click-to-move robots straight away. See
-[`maps/README.md`](../maps/README.md) for the layout and
-`scripts/maps_lib.py` for the manifest schema.
-
-```bash
-scripts/maps.sh list                    # what's saved (no ROS needed)
-scripts/maps.sh show warehouse_full     # one entry in detail
-scripts/maps.sh verify warehouse_full   # sha + sqlite integrity + lfs pointer check
-```
-
-**Saving.** `maps.sh save` is idempotent and stack-aware — the same command,
-run whenever — because the grid needs the stack UP and a safe pose-graph copy
-needs it DOWN. A mid-run save may land as `db_state: pending` (grid in, pose
-graph not yet) and a second save after teardown promotes it to `complete`. One
-gesture does both:
-
-```bash
-scripts/sim_ctl.sh stop --save-map warehouse_full
-```
-
-Mid-run it first tries RTAB-Map's own `/<rid>/rtabmap/backup` service, which
-closes the database before copying (so the copy isn't torn) and re-inits on the
-same path — at the cost of a multi-second stall while memory reloads. Pass
-`--no-live-db` to skip that and defer the pose graph to teardown. The dashboard's
-**Save to library** button in the explore bar does the same thing over
-`POST /api/map/save`.
-
-**Loading.** Two scenarios, mirroring `explore_fresh`/`explore_resume`:
-
-```bash
-scripts/sim_ctl.sh start library_localize map=$PWD/maps/warehouse_full/map.db
-scripts/sim_ctl.sh start library_resume   map=$PWD/maps/warehouse_full/map.db
-```
-
-or pick the entry from the **Map** dropdown in the Scenarios tab's launch form.
-
-**A run can't dirty a library entry.** RTAB-Map opens its sqlite file
-read-write even under `--localize` (`Mem/IncrementalMemory=false` stops it
-*learning*, not *writing*), so `run_demo.sh` copies any `--map` path under
-`maps/` to `~/.ros/sortbots_<robot_id>.db` and runs on the copy. `library_resume`
-therefore extends the copy; keeping that result is an explicit
-`maps.sh save`, ideally under a new name.
-
-**git-lfs.** `.db` files are tracked through git-lfs (root `.gitattributes`).
-Once per machine: `sudo apt-get install git-lfs && git lfs install`. A clone
-*without* it leaves a ~130-byte pointer file that looks present —
-`maps.sh list` flags those as `pointer`, the picker disables them, and
-`run_demo.sh` refuses to copy one. The fix in every case is `git lfs pull`.
-
-**Multi-robot** is save-many / load-one today: a fleet run saves one fused grid
-plus one `.db` per robot, but only the primary robot's is loadable, because
-`sortbots_bringup.launch.py` hardwires every non-primary robot's
-`database_path` to `~/.ros/sortbots_<rid>.db` to work around a launch-config
-leak (see the comment there).
-
-### How much of the warehouse is actually mapped
-
-```bash
-scripts/map_coverage.py data/runs/<name>/map/final.yaml \
-    --reference data/runs/nvidia_explore_20260801_145700/map/checkpoint_resume002.yaml
-scripts/map_coverage.py --live --watch 30      # against the running stack
-```
-
-Reports free / occupied / unknown / known in both cells and m². The file mode
-is ROS-free on purpose, so it still works after teardown.
-
-**`explored_pct` in the dashboard is not coverage.** It divides known cells
-by the *current* grid's own extent, and that extent grows as RTAB-Map
-explores — so it can fall while the robot is making progress. On the most
-complete map this repo has built it reads **43.8%**. Use `coverage_pct` /
-`free_area_m2` from `explore_status` instead, or this script. The denominator
-is `reference_free_area_m2` in `configs/explorer.yaml` (293.7 m², the free
-floor of that reference map). It is a ratio of scalar *areas*, deliberately
-not a cell-wise overlay — two RTAB-Map sessions have no common frame — and
-exceeding 100% just means this run mapped more than the reference did.
-
-One trap worth knowing if you write your own parser: in `mode: trinary`,
-classify by `map_saver`'s sentinel pixels (254 free / 205 unknown / 0
-occupied), *not* by the yaml thresholds. Unknown's implied occupancy is
-0.196078 and this repo's own saved yamls carry `free_thresh: 0.196` — 8e-5 of
-margin. A yaml written with `free_thresh: 0.2` would silently reclassify
-every unknown cell as free and report ~100% coverage on a half-explored map.
-
-### Resuming exploration into an existing map
-
-`--localize` is deliberately read-only (`Mem/IncrementalMemory=false`) — it
-will never reveal new territory, so autonomous exploration against a
-`--localize` session just re-walks whatever was already known. To actually
-**continue exploring** — extend a map from a prior session instead of either
-starting fresh or being stuck read-only — use `--resume`:
-
-```bash
-scripts/run_demo.sh --resume --explore --map data/runs/<name>/map/rtabmap.db
-```
-
-`--resume` is mapping mode (RTAB-Map keeps growing the pose graph, same as a
-plain fresh run) but with `delete_db_on_start:=false`, so it starts from the
-existing database instead of wiping it. `--localize` and `--resume` are
-mutually exclusive (read-only vs. keep-mapping). The explorer's blacklist is
-in-memory only and does not persist across restarts — a fresh `explorer.py`
-process re-evaluates every current frontier from a clean slate, which is
-usually desirable (a previously-blacklisted point that's since been driven
-past may well be reachable now).
-
-### Occupancy-grid tuning (why the map has usable free space)
-
-`launch/sortbots_rtabmap_robot.launch.py`'s `GRID_ARGS` passes RTAB-Map
-`--Grid/3D true --Grid/RayTracing true --Grid/RangeMax 5.0
---Grid/MaxObstacleHeight 1.5`. Ray tracing is the load-bearing one: without it
-the only cells marked free are ones where a depth point happened to land on the
-floor, so `/map` stays overwhelmingly unknown even in rooms the robot drove
-through.
-
-`Grid/3D` used to be `false` here, and this section used to claim that was
-"what lets ray tracing work at all". That was wrong, and it cost the dashboard
-its 3D panel — with 2D local grids, `cloud_map` is just the occupancy grid
-re-emitted as points, a ~0.15 m-tall pancake, and every `octomap_*` topic
-publishes empty because `OctoMap` skips any node whose local grid isn't 3D.
-The misreading was of `Grid/RayTracing`'s doc string: *"if `Grid/3D=true`,
-RTAB-Map should be **built with** OctoMap support, otherwise 3D ray tracing is
-ignored"* is a **build precondition**, not a prohibition — and this build
-satisfies it. In fact `Grid/3D` defaults to `true` on an OctoMap-enabled build
-(`Parameters.h:860-864` picks the default under `#ifdef RTABMAP_OCTOMAP`), so
-`false` was overriding the build's own default. The 2D `/map` is unaffected —
-`Grid/3D`'s own doc string says "a 2D map can be still generated if checked",
-and `OccupancyGrid::assemble()` transforms each cell with its real z and then
-keeps only x/y.
-
-What `Grid/3D=true` does cost is memory and time: empty cells go from O(area)
-to O(volume) per node. `Grid/RangeMax` is what bounds that volume, so it is the
-first lever to reach for if RTAB-Map starts eating RAM (then
-`Grid/DepthDecimation`, and only last `Grid/CellSize`, which changes `/map`'s
-resolution and so also Nav2's static layer and the explorer's
-`min_frontier_cells`).
-
-Measured on the primitive scene after ~80 s of driving: **52.9 m² free / 54.8%
-of the grid**, versus a near-empty map before. That matters because frontier
-exploration is literally "a free cell adjacent to an unknown cell" — with no
-believable free space there is nothing real to explore toward.
-
-Override with `rtabmap_args:=...`, but note it replaces the tuning wholesale.
-
-## Remote access from a phone / remote Claude session (Tailscale)
-
-The web dashboard (`launch/sortbots_webui.launch.py` → `webui/serve.py` on 8081,
-`rosbridge_websocket` on 9090, `web_video_server` on 8080) all bind `0.0.0.0`, so
-any device on the Tailscale tailnet can drive it — a phone for remote testing, or
-a remote Claude session that brings the UI up on this workstation.
-
-**Prerequisites**
-
-- `tailscale up` on both the workstation and the phone, on the same tailnet.
-- No firewall change needed on the default desktop (`ufw` is disabled here). If
-  you enable `ufw`, add `sudo ufw allow in on tailscale0`.
-
-**Bring it up** (from a shell with system ROS 2 Jazzy sourced — *not* the Isaac
-venv or conda; `which python3` **must** print `/usr/bin/python3`, or
-`rosbridge_websocket`'s `#!/usr/bin/env python3` shebang grabs conda's Python and
-crashes with `No module named 'rclpy._rclpy_pybind11'` — see the launch file's
-docstring):
-
-```bash
-source /opt/ros/jazzy/setup.bash
-which python3   # must be /usr/bin/python3
-ros2 launch ./launch/sortbots_webui.launch.py
-```
-
-On startup it prints the phone URL (and a QR if `pip install qrcode` is present):
-
-```
-http://andre-ubuntu.tail0d28f9.ts.net:8081/     (IP fallback http://100.74.199.76:8081/)
-```
-
-Open that on the phone. The page is served over plain HTTP on purpose:
-`webui/operator.js` derives the rosbridge (`ws://…:9090`) and video (`http://…:8080`)
-hosts from `window.location.hostname`, so an HTTP origin lets them auto-wire to
-the same host. An HTTPS origin (e.g. Tailscale Serve) would make those
-mixed-content and the browser would block them — plain HTTP on the private
-tailnet avoids that with no code changes. `roslib` is vendored at
-`webui/vendor/roslib.min.js`, so the page needs no public internet to load.
-
-Print the URL again any time without relaunching:
-
-```bash
-python3 scripts/webui_url.py
-```
-
-**Troubleshooting** (from the workstation)
-
-```bash
-ss -tlnp | grep -E ':8080|:8081|:9090'   # all three listening on 0.0.0.0?
-tailscale status                          # phone + workstation both online?
-ufw status                                # inactive, or tailscale0 allowed?
-curl -s -o /dev/null -w '%{http_code}\n' http://<tailnet-ip>:8081/   # expect 200
-```
-
-## The operator view (the default page, `/`)
-
-`http://<host>:8081/` serves the operator view (`webui/operator.html`), the only GUI. The old
-per-robot dashboard (`index.html` + `app.js`, with its drive pad, head aim, SLAM internals, arm
-pad, fleet-radio tab and splat viewer) was removed 2026-10-23; recover it from git history
-(`git show fa02632:webui/index.html`) if a panel needs porting.
-
-- **Header.** Map / 3D cloud picks what the stage shows. The mode tile only reports how the
-  session was started (Mapping, or Premapped plus the map name): changing it restarts the stack
-  (RTAB-Map cannot go from extend to read-only mid-run), so that lives in **Session**, which
-  opens the launch form (`scenarios.js` unchanged). **Stop all** stops exploring, cancels every
-  navigation goal (including task_manager's) and zeroes cmd_vel on every robot.
-- **Robots (left).** Any number of cards can be open. Each shows a camera tile with a
-  Camera / Depth toggle (`/snapshot` polls of `camera/rgb` / `camera/depth_color`), a task tile
-  coloured by activity (blue moving, amber picking/placing, purple exploring, red failed), and
-  position, heading, speed / turn rate (from `/<id>/odom`) and distance left on the Nav2 plan.
-  The card opened or clicked into last has control: map sends and waypoint chips go to it.
-- **Stage (centre).** 2D: the fused `/map`, robot poses (composed from `/tf`), Nav2 plans, and a
-  select / waypoint / send-robot toolbar (drag on a click to set the heading). 3D:
-  `/fleet/recon_cloud` as points with a cone per robot, subscribed only while showing and
-  throttled to one cloud per 8 s (each is ~4 MB of base64 through rosbridge).
-- **Tasks (right).** task_manager keeps one FIFO per robot and reports the running task plus
-  the waiting ones on every change, so the list shows tasks queued from anywhere, and any
-  unfinished one can be cancelled (×, `/<id>/cancel_task`). Waypoints rename in place (the
-  pencil on a chip); queued tasks are unaffected, since task_manager resolves names to poses at
-  dispatch. **Queue tasks**: *Moves* builds an ordered list of stops and queues one `goto` task
-  per stop on one robot; *Pick & drop* queues a pickup -> dropoff task.
-- **Run demo** runs `configs/demo_tasks.yaml` in phases: each phase is queued only once every
-  task of the previous one has finished, so it shows each robot moving alone and then both in
-  parallel. The sequencing lives in the browser tab; Stop demo cancels what it queued.
-- Offline test: `node webui/tests/operator_test.mjs [--screenshot DIR]`.
-
-### Fleet auction (nodes/fleet_tasks.py)
-
-With `task_manager:=true` (the default), every robot runs `nodes/fleet_tasks.py`, and the sim
-bringup adds one `fleet_tasks.py --gateway`. There is no central dispatcher. Each robot runs
-commsim's allocator (`commsim/core/protocol.py`) on the same messages, so they all reach the
-same winner. The gateway announces a task. Robots within range bid their drive time, plus what
-they already hold, plus a battery penalty. After a 1 s window the cheapest robot claims it, and
-its own task_manager works it as `fleet-<id>`. Leases (1 Hz beacons, 10 s) move a task off a
-robot that went silent. Once the load is on board it never moves; the others raise
-`owner_missing` instead. A majority quorum keeps a network split from putting two robots on
-one task. Tuning: `configs/fleet_tasks.yaml`. Design and failure testing: `commsim/README.md`.
-
-- **"Any robot" in Pick & drop** goes to the auction whenever the gateway's board is arriving
-  (the option reads "Any robot (fleet auction)"). Picking a robot by name still dispatches
-  directly. Moves always go to the first free robot, because the allocator only models
-  pickup -> dropoff. With no board (the real robot has no gateway yet, or `task_manager:=false`),
-  everything behaves as before.
-- **The board** (`/fleet/task_board`, latched, 1 Hz) is what the robot cards and the task list
-  read. A robot the fleet hasn't heard for `status_timeout_s` (6 s) reads **silent**, by the
-  same rule the robots apply to each other. Battery shows when known, red below the 20 %
-  reserve, where a robot stops bidding. Fleet tasks show "bidding" and "Fleet" until claimed,
-  and "loaded" once committed. × withdraws one fleet-wide (`/fleet/task_cancel`). Cancelling on
-  the robot instead (Clear tasks, Stop demo) withdraws it fleet-wide too, rather than handing it
-  to the next robot.
-- **Alarms** (robot_silent, owner_missing, lease_expired, task_stalled) latch at the gateway. The
-  header chip counts them and opens a list with **Acknowledge** (`/fleet/alarm_ack`). An alarm
-  leaves once it is both acknowledged and cleared. While a session runs, a board that stops
-  arriving shows as "Fleet gateway silent".
-- From a shell: `ros2 topic pub --once /fleet/task_request std_msgs/String '{data: "{\"pickup\": \"A\", \"dropoff\": \"B\"}"}'`
-  and `ros2 topic echo /fleet/task_board`.
-
-### Sim view (Isaac's own render)
-
-On the sim, **Map · 3D cloud · Sim** in the header. **Sim** shows what Isaac actually renders:
-one camera on the floor (`/sim/view/rgb`, 640×360, pose per scene in `configs/sim_view.yaml`).
-Every rendered camera slows the sim, so Isaac builds this one disabled and renders it only
-while a page has the view open. The page sends `{"on": true}` on `/sim/view_cmd` every 2 s, and
-Isaac switches the camera off 6 s after the last heartbeat, so a closed tab or a sleeping phone
-stops costing on its own. Measured 2026-10-24, 2 robots on the warehouse map, full stack:
-0.333× real time with it closed, 0.324× while watched (about 3%), back to 0.334× after.
-The camera can be steered from the page, the same gestures as the 3D cloud: drag to orbit,
-right-drag or Shift-drag (two fingers on a phone) to pan, scroll or pinch to zoom. Each move is
-sent to Isaac (`/sim/view_cmd` with `eye`/`target`, at most 10/s) and comes back as the next
-frame, about 0.2 s later, plus the page's 0.25 s snapshot poll. **Follow** rides above and just
-behind a robot, steep enough to see down into its aisle. The racks have no colliders, so a
-low chase-cam would sit inside them. **Reset view** returns to the default pose: edit `eye` and
-`target` (world == map frame, metres) to change it, and restart the run.
-`--no-sim-view` on `spawn_warehouse.py` skips building it at all.
-
-### Comms overlay (the commsim model on the map)
-
-**Comms** in the header (2D only) overlays commsim's discrete-event model of the fleet radio
-(`commsim/viz/demo.py`, served by `serve.py` on `/api/commsim/*`). It shows predicted links,
-each robot's mesh route to the gateway, and every message hop. Its inputs are real: the robots'
-live poses, the explored map's obstacles (each blob of occupied cells costs one rack's
-attenuation), and the **gateway pin** (map tool ▲ or `R`, saved to `data/comms_gateway.json`;
-the map centre until placed). Everything it draws is dashed, and it never changes the robot
-cards or alarms: those are the real fleet's. What-ifs act on the model only: **Pull a link**,
-**Switch off**, **Send A→B**, and the **Range** slider. The model steps only while a page has
-the overlay on. Details: `commsim/viz/README.md`.
-
-## Testing the operator view without the sim
-
-Checking a UI change shouldn't need Isaac Sim, a GPU and a display:
-
-```bash
-node webui/tests/operator_test.mjs                   # add --screenshot DIR for PNGs
-```
-
-No ROS, no sim, no display, no npm install. It serves the real page against `serve.py` with a
-fake ROSLIB and drives the operator view in headless Chrome. It never POSTs
-`/api/session/start`, so it cannot launch a sim.
-
-To eyeball a recorded bag in a real browser, with real rosbridge and real MJPEG:
-
-```bash
-scripts/replay_dashboard_bag.sh <bag-dir>
-# then open http://localhost:8081/
-```
+Other tools: `scripts/save_map.sh` (per-run checkpoints under `data/runs/`) and
+`scripts/map_coverage.py [--live]` (how much of the warehouse is mapped).

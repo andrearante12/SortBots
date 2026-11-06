@@ -23,7 +23,7 @@
 #
 # --slam-role robot keeps only odometry, the live obstacle cloud and a ~2 Hz
 # compressed keyframe stream here; RTAB-Map mapping runs on the workstation
-# (launch/sortbots_slam_workstation.launch.py, tasks/slam_offload.md). The
+# (launch/sortbots_slam_workstation.launch.py, tasks/slam_offload.md@6501799). The
 # default `all` maps on the Jetson as before, at lower CPU priority.
 #
 # Not started, on purpose: Nav2, task_manager, magnet_pick and the explorer.
@@ -153,7 +153,7 @@ ROS_ENV="source '$ROS_SETUP'; \
   export FASTRTPS_DEFAULT_PROFILES_FILE='$REPO_ROOT/configs/dds/fastdds_large_shm.xml'"
 # ^ Fast DDS's default 512 KB shared-memory segment is smaller than one D435
 #   frame (1.2 MB), so every image fell back to fragmented UDP. On the bench
-#   (tasks/slam_offload.md) that delivered 1.6 Hz of 11.7 Hz published, and
+#   (tasks/slam_offload.md@6501799) that delivered 1.6 Hz of 11.7 Hz published, and
 #   odometry processed 23 of 832 frames. Unset it to compare.
 
 echo "[run_robot] launching RTAB-Map + RealSense D435 for $ROBOT_ID..."

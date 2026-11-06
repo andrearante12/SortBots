@@ -5,9 +5,9 @@ What is in front of the camera NOW, at camera rate, in base_link — for the
 Nav2 local costmap and the dashboard's live layer. It reads raw
 `camera/depth` and needs only the static camera mount, so it keeps working
 when odometry is lost, when SLAM is busy, and when SLAM runs on another
-machine (tasks/slam_offload.md). RTAB-Map's map is "where things were when
+machine (tasks/slam_offload.md@6501799). RTAB-Map's map is "where things were when
 we passed by" and adds a node only every 5-10 cm of motion
-(tasks/real_perception_plan.md L4); this is the other half.
+(tasks/real_perception_plan.md@6501799 L4); this is the other half.
 
 Cheap on purpose (Orin Nano CPU budget): every `--stride`-th pixel, one
 matrix multiply, two masks. 848x480 at stride 4 is ~25k points per frame.

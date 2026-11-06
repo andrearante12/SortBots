@@ -2,7 +2,7 @@
 
 Standard 802.11 timing (OFDM / HT-mixed, 20 MHz, long GI) is physics, not a
 placeholder. Everything tagged PLACEHOLDER below is a parameter the lab
-testbed replaces (docs/plan.md §4): path-loss exponent, rack and shelving
+testbed replaces (commsim/docs/plan.md@6501799 §4): path-loss exponent, rack and shelving
 attenuation, tx power, SNR thresholds, protocol overhead bytes.
 """
 from __future__ import annotations

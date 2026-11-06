@@ -1,6 +1,6 @@
 # Offline SLAM bench (x86 workstation): the Jetson image's perception
 # packages, without the camera/web stack, for replaying recorded RGB-D
-# sequences through RTAB-Map under a CPU budget. See tasks/slam_offload.md.
+# sequences through RTAB-Map under a CPU budget. See tasks/slam_offload.md@6501799.
 FROM ros:jazzy-ros-base
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -343,7 +343,7 @@ REAL_RUN_FLAGS = {
     "resume": RUN_FLAGS["resume"],
     "map": RUN_FLAGS["map"],
     # all = map on the Jetson; robot = map on the workstation from the robot's
-    # keyframe stream (tasks/slam_offload.md). Real-only: sim has no Jetson.
+    # keyframe stream (tasks/slam_offload.md@6501799). Real-only: sim has no Jetson.
     "slam_role": _choice("--slam-role", {"all", "robot"}),
 }
 
