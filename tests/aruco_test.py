@@ -65,7 +65,9 @@ def view(size, face, marker, dist=0.7, skew_deg=0.0):
 @pytest.mark.parametrize("marker", sorted(aruco.DATA))
 def test_the_table_is_opencvs(marker):
     d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-    m = cv2.aruco.drawMarker(d, marker, 6)
+    # drawMarker was renamed generateImageMarker in OpenCV 4.7; Ubuntu 24.04's apt cv2 is 4.6.
+    draw = getattr(cv2.aruco, "generateImageMarker", None) or cv2.aruco.drawMarker
+    m = draw(d, marker, 6)
     assert tuple("".join("1" if v > 127 else "0" for v in row) for row in m[1:5, 1:5]) == aruco.DATA[marker]
 
 

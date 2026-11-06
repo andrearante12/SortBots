@@ -20,7 +20,7 @@ CELLS_PROUD_M = 0.001       # above the plate, and so above the backing, so neit
 CELLS_PER_SIDE = 6
 
 # Data cells of DICT_4X4_50, row by row from the top, "1" white. tests/aruco_test.py holds this
-# against cv2.aruco.drawMarker.
+# against cv2.aruco.generateImageMarker (drawMarker before OpenCV 4.7).
 DATA = {
     0: ("1011", "0101", "0011", "0010"),
     1: ("0000", "1111", "1001", "1010"),
