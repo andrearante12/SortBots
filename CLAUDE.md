@@ -24,7 +24,7 @@ container** (`docker/jetson/`) because JetPack 6 is Ubuntu 22.04/Humble. Never
 source the Jetson host's `/opt/ros/humble` for SortBots. `scripts/jetson.sh
 console` starts `run_console.sh --platform real` in the container, and `platform:
 real` scenarios run `scripts/run_robot.sh` → `sortbots_bringup.launch.py
-platform:=real`. Runbook: `docs/jetson.md`.
+platform:=real`. Runbook: `README.md §7`.
 
 - The real stack uses `use_sim_time:=false`, RTAB-Map visual odometry, and no IMU
   (a plain D435 has none, so `wait_imu_to_init` must be false). Nav2 is off until
@@ -46,13 +46,13 @@ This is **not a colcon workspace** — there is no `src/`, no `package.xml`, no
 | `webui/` | dashboard (vanilla JS, no build step) + `serve.py` + `session.py` |
 | `scripts/` | Isaac Sim entry points, `run_demo.sh`, `run_console.sh`, `sim_ctl.sh` |
 | `configs/` | tuning YAML, `scenarios/` presets |
-| `simtest/` | scored-test layer: `configs/worlds/` (props + scripted movers + graspable packages), `configs/tests/` (goals + metrics), probe, versioned metrics — `docs/testing.md`. `simtest/magnet.py` is the magnet's capture rule, shared by Isaac, the pick controller and the tests |
+| `simtest/` | scored-test layer: `configs/worlds/` (props + scripted movers + graspable packages), `configs/tests/` (goals + metrics), probe, versioned metrics — `README.md §9`. `simtest/magnet.py` is the magnet's capture rule, shared by Isaac, the pick controller and the tests |
 | `hardware/` | the real magnet end effector's CAD (`magnet_effector/`, CadQuery in its own `hardware/.venv`, never the sim/ROS/lerobot envs); `params.py` is the source of truth for the TCP offset `simtest/magnet.py` uses |
-| pick and place | `nodes/{package_detector,package_vision,box_geometry,magnet_pick,pick_planner,arm_kin}.py`: camera → plate pose → dock → IK, numpy only (no torch in the stack). The `pick_*` tests, `--perception oracle`, the envelope numbers and what is not yet verified live: `docs/manipulation.md` |
+| pick and place | `nodes/{package_detector,package_vision,box_geometry,magnet_pick,pick_planner,arm_kin}.py`: camera → plate pose → dock → IK, numpy only (no torch in the stack). The `pick_*` tests, `--perception oracle`, the envelope numbers and what is not yet verified live: `README.md §13` |
 | `maps/` | saved map library — named, committed snapshots of explored maps |
-| `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `docs/splat.md`) |
-| `commsim/` | fleet comms simulation (mesh, Zenoh, task auction), system python3 only; `core/protocol.py` is the allocator `nodes/fleet_tasks.py` runs, `viz/demo.py` the model behind the operator's Comms overlay (`commsim/README.md`) |
-| `docs/running.md` | the full runbook |
+| `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `README.md §8`) |
+| `commsim/` | fleet comms simulation (mesh, Zenoh, task auction), system python3 only; `core/protocol.py` is the allocator `nodes/fleet_tasks.py` runs, `viz/demo.py` the model behind the operator's Comms overlay (`README.md §10`) |
+| `README.md` | the project docs (setup, running, architecture, testing, real robot) |
 
 No custom `.msg`/`.srv`: inter-node protocol is `std_msgs/String` carrying JSON.
 Node tuning is plain YAML loaded by the node itself, not ROS params. Nodes take
@@ -128,7 +128,7 @@ scripts/simtest.py validate           # scored test cases (configs/tests/) resol
 Scored live tests — a world of props and scripted movers
 (`configs/worlds/`), a scenario, goals and pass criteria — run with
 `scripts/simtest.py run NAME`; metrics are versioned and re-scorable from
-recorded events without a sim. See `docs/testing.md`.
+recorded events without a sim. See `README.md §9`.
 
 `tests/*_test.py` needs the SYSTEM python3 (`/usr/bin/python3 -m pytest`), not
 conda's — conda's base env doesn't have pytest, and this is the same

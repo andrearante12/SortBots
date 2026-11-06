@@ -1,5 +1,5 @@
 # nodes/obstacle_detector.py tuning. Every key overrides the node's DEFAULTS;
-# docs/obstacle_detection.md explains the pipeline these feed.
+# README.md §5 explains the pipeline these feed.
 
 # Frames processed per second, on the steady clock. The camera runs at 30;
 # 10 is plenty to track walking speed (~1.4 m/s = 14 cm a frame) and keeps

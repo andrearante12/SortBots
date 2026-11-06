@@ -7,7 +7,7 @@
 # the BASE has to come round to the plate's side: the robot docks from the north,
 # the east, the west and the south in turn. Each dock pose (nodes/pick_planner.py)
 # and the straight transits between them were checked against the grid and the
-# props with the layout helper described in docs/manipulation.md.
+# props with the layout helper described in README.md §13.
 
 name: pick_orientations
 title: Four packages, plates facing four ways

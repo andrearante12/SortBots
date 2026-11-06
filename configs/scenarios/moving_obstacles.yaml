@@ -15,7 +15,7 @@ description: >
 
   This is also the scenario the test cases in configs/tests/ build on: they
   pick the world, reset the actors at their own t=0 and score the run
-  (scripts/simtest.py, docs/testing.md).
+  (scripts/simtest.py, README.md §9).
 
 status: ready
 

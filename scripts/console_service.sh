@@ -53,7 +53,7 @@ write_unit() {
   cat >"$UNIT_DIR/$UNIT" <<EOF
 [Unit]
 Description=SortBots dashboard console (operator view on :$PORT, rosbridge, web_video_server)
-Documentation=file://$REPO_ROOT/docs/running.md
+Documentation=file://$REPO_ROOT/README.md
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300

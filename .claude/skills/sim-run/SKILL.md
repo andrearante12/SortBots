@@ -143,7 +143,7 @@ scripts/simtest.py run crossing_yield          # verdict + data/simtests/<dir>/r
 scripts/simtest.py rescore data/simtests/<dir> # re-score recorded events, no sim
 ```
 
-Pick and place (the magnet effector, `docs/manipulation.md`): `pick_block` and `place_block`
+Pick and place (the magnet effector, `README.md §13`): `pick_block` and `place_block`
 are the two on the Tests tab, a block on a table in front of the robot. The other `pick_*`
 tests are parked (`parked: true`): off the tab, still runnable here, on the `pick_bench`
 scenario. `scripts/simtest.py run pick_place_smoke` is the one to diagnose with: its
@@ -155,7 +155,7 @@ arm is tucked upright while it drives: that is the planner, not a fault.
 Exit codes: 0 pass, 1 fail, 2 invalid test, 3 no run produced a score, 130
 interrupted. **On a shared network, export a private `ROS_DOMAIN_ID` before
 `console start`** — another machine's stack on domain 0 freezes Isaac at sim
-t=1 s and shares your `/robot_0` namespace. Full guide: `docs/testing.md`.
+t=1 s and shares your `/robot_0` namespace. Full guide: `README.md` §9.
 
 ## When something goes wrong
 
@@ -237,13 +237,12 @@ scripts/simtest.py validate             # every test case resolves
 ```
 
 Never point a browser at a live sim to test the dashboard — record a bag, build
-a fixture, test offline (`docs/running.md`, "Testing the dashboard without the
-sim").
+a fixture, test offline (`README.md` §4).
 
 ## Reference
 
-- `docs/running.md` — the full runbook this summarises
-- `docs/testing.md` — worlds, test cases, metrics, rescoring
+- `README.md` §3 — the full runbook this summarises
+- `README.md` §9 — worlds, test cases, metrics, rescoring
 - `webui/session.py` — scenario schema, `RUN_FLAGS`, phase table
 - `scripts/run_demo.sh` — what actually launches; its progress lines are parsed
   by `PHASE_PATTERNS` in `session.py`, so reword them only in the same commit

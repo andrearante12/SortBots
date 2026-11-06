@@ -8,7 +8,7 @@
 # instead and the host keeps NVIDIA's supported 22.04. The host's own
 # ros-humble-* packages are never used by SortBots.
 #
-# Built and run by scripts/jetson.sh — see docs/jetson.md.
+# Built and run by scripts/jetson.sh — see README.md §7.
 FROM ros:jazzy-ros-base
 
 ARG DEBIAN_FRONTEND=noninteractive

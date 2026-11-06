@@ -28,7 +28,7 @@ What this does not do: see a plate that faces away from the camera, tell two box
 the same colour apart, or cope with a plate so far off-axis that its depth pixels are
 mostly the box's edge. The pick controller scans (turns in place) for the first, takes
 the work order's location for the second, and docks close enough that the third
-goes away: docs/manipulation.md.
+goes away: README.md §13.
 
 Optical frame: x right, y down, z forward (what the camera publishes).
 """

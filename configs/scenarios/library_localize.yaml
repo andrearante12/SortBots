@@ -6,7 +6,7 @@ name: library_localize
 
 title: Saved map — localize only (read-only)
 description: >
-  Loads a committed map from the library (maps/, see maps/README.md) and runs
+  Loads a committed map from the library (maps/, see README.md §6) and runs
   read-only: run_demo.sh --localize sets Mem/IncrementalMemory=false, so Nav2
   plans on the map and task_manager dispatches against it, but nothing is ever
   added to the pose graph. This is the mode for demos and test environments —

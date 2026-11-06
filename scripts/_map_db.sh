@@ -15,7 +15,7 @@ prepare_map_db() {
   # Default matches launch/sortbots_rtabmap_robot.launch.py's database_path.
   [[ -z "$MAP_DB" ]] && MAP_DB="$HOME/.ros/sortbots_${ROBOT_ID}.db"
 
-  # COPY-ON-USE for the saved-map library (maps/, see maps/README.md).
+  # COPY-ON-USE for the saved-map library (maps/, see README.md §6).
   #
   # A library entry is a COMMITTED artifact. RTAB-Map opens its sqlite file
   # read-write even under --localize (Mem/IncrementalMemory=false stops it

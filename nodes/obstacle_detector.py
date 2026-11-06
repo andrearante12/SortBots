@@ -9,7 +9,7 @@ pixel change at once. Here every frame stands on its own geometry, and motion
 comes from tracking cluster centroids in the odom frame, where the robot's own
 motion has been taken out.
 
-Pipeline (docs/obstacle_detection.md has the rationale and the tuning notes):
+Pipeline (README.md §5 has the rationale and the tuning notes):
 
     camera/depth --back-project (strided)--> camera-frame points
       --TF--> base_link --range crop--> floor estimate --height band-->
@@ -320,7 +320,7 @@ def can_move(o: dict, cfg: dict | None = None) -> bool:
 class Tracker:
     """Nearest-neighbour tracks on obstacle centroids in a world-fixed frame.
 
-    v2 in docs/obstacle_detection.md is a Kalman filter; this is the
+    v2 in README.md §5 is a Kalman filter; this is the
     smallest thing that gives a usable `moving` flag. Positions MUST be in a
     frame that doesn't move with the robot (odom), or turning in place would
     make every shelf "move". Times are message stamps, so sim time works.

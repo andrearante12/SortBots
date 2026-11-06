@@ -1,4 +1,4 @@
-# A test case (simtest/spec.py has the schema; docs/testing.md the how-to).
+# A test case (simtest/spec.py has the schema; README.md §9 the how-to).
 
 name: fleet_traffic
 title: Fleet exploration under foot traffic

@@ -20,7 +20,7 @@ camera, and stands where its own localization (TF map -> base_link) says it stan
 `--perception oracle` aims at the simulator's ground truth for the requested package
 instead, with no camera in the loop: it exists so that a failed pick can be told apart,
 "the camera missed it" from "it saw it and the dock or the arm got it wrong", by running
-the same test both ways (scenario run key `perception`, docs/manipulation.md). Oracle mode
+the same test both ways (scenario run key `perception`, README.md §13). Oracle mode
 is a sim-only diagnostic and says so in /pick_status. Both modes take the one bit of
 "is the magnet holding something" from the simulator's ground truth; on the real arm that
 is the microswitch behind the plunger.

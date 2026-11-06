@@ -70,7 +70,7 @@ MAX_PACKAGES = 16
 # package's own frame (+x is the way yaw 0 points), or the top.
 FACES = ("+x", "-x", "+y", "-y", "top")
 # A "very light amazon box", small enough that the SO-101's ~0.33 m horizontal
-# reach (docs/manipulation.md) still has room for the box's own depth.
+# reach (README.md §13) still has room for the box's own depth.
 DEFAULT_PACKAGE_SIZE = (0.24, 0.18, 0.12)
 DEFAULT_PACKAGE_COLOR = (0.76, 0.60, 0.42)   # cardboard
 DEFAULT_MARK_COLOR = (0.16, 0.65, 0.35)

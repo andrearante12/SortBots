@@ -217,7 +217,7 @@ def _make_per_robot_actions(
 
         # Obstacles in front of the robot, from geometry rather than frame
         # differencing: clusters in base_link plus a `moving` flag from odom
-        # tracks (docs/obstacle_detection.md). Every platform — it reads raw
+        # tracks (README.md §5). Every platform — it reads raw
         # camera/depth, so it doesn't depend on the depth filter below, and the
         # sensors view draws its boxes over the head camera.
         actions.append(ExecuteProcess(
@@ -445,7 +445,7 @@ def _make_per_robot_actions(
     # /fleet/task_board. Once per bringup, like the operator's laptop it stands
     # in for. Sim only: a real robot's bringup is one of several on the mesh,
     # and each starting a gateway would put several wire-id-0 senders on
-    # /fleet/tasks. The real gateway is the laptop (commsim/hw/README.md).
+    # /fleet/tasks. The real gateway is the laptop (README.md §10).
     if platform != "real":
         actions.append(ExecuteProcess(
             cmd=["python3", os.path.join(REPO_ROOT, "nodes", "fleet_tasks.py"), "--gateway",
@@ -665,7 +665,7 @@ def generate_launch_description():
                 "only): odometry, live obstacles and a compressed keyframe "
                 "stream; mapping runs on a workstation via "
                 "launch/sortbots_slam_workstation.launch.py. See "
-                "tasks/slam_offload.md."
+                "tasks/slam_offload.md@6501799."
             ),
         ),
         DeclareLaunchArgument(

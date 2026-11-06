@@ -60,7 +60,7 @@ def _actions(context):
             # serves both — exactly the sim's single-camera_info layout.
             "align_depth.enable": True,
             # Plain D435 (8086:0b07) has no IMU; a D435i would, but RTAB-Map
-            # would want it fused with a filter first — see docs/jetson.md.
+            # would want it fused with a filter first — see README.md §7.
             "enable_gyro": False,
             "enable_accel": False,
             "enable_infra1": False,

@@ -7,7 +7,7 @@
 #   scripts/slam_bench/run.sh --seq ~/datasets/tum/rgbd_dataset_freiburg2_pioneer_360 \
 #       --variant current --out /tmp/bench/current
 #
-# Variants (what runs where — tasks/slam_offload.md explains each):
+# Variants (what runs where — tasks/slam_offload.md@6501799 explains each):
 #   launch_offload  the real launch files in slam_role robot / workstation
 #   launch     the real-robot launch file as shipped (sortbots_rtabmap_robot,
 #              camera_odometry:=true): odometry + full RTAB-Map on the "Jetson"
@@ -19,7 +19,7 @@
 # ODOM_EXTRA="Key=value ..." / SLAM_EXTRA="--Key value ..." override RTAB-Map parameters.
 #
 # CPU budget: the "Jetson" containers get --cpuset-cpus $JETSON_CPUSET with a
-# --cpus $JETSON_CPUS quota (calibrated in tasks/slam_offload.md so that the
+# --cpus $JETSON_CPUS quota (calibrated in tasks/slam_offload.md@6501799 so that the
 # shipped odometry runs at the Orin Nano's measured speed). The player,
 # logger and "workstation" run on other cores, unconstrained.
 set -euo pipefail

@@ -10,7 +10,7 @@
 # reachable-adjacent to a control API that serve.py exposes on 0.0.0.0, so
 # "config key" must never mean "arbitrary shell argument".
 #
-# See docs/running.md ("Scenarios tab") for the full schema and for how to
+# See README.md §3 ("Scenarios") for the full schema and for how to
 # add a new scenario.
 
 # Must equal the filename stem — the UI addresses scenarios by this name.

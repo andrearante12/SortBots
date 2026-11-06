@@ -45,7 +45,7 @@ face is snapped to it and rides the arm until the magnet is turned off.
 pick_cmd/head_cmd are plain rclpy subscribers, not OmniGraph — see
 `_start_extra_ros_subscribers`. `<robot>` ∈ {robot_0, robot_1}. From a
 separate shell with ROS 2 Jazzy
-in scope (or the bundled-lib env-var recipe in docs/isaac_sim_phase3.md),
+in scope (or the bundled-lib env-var recipe in docs/isaac_sim_phase3.md@6501799),
 `ros2 topic list` and `ros2 topic echo /robot_0/odom` confirm liveness.
 
 Use `--no-headless` for the GUI viewport (slow on hybrid graphics; the

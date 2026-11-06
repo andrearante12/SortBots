@@ -5,7 +5,7 @@
 # graph already holds every keyframe and its optimized pose — into a splat the
 # dashboard's 3D panel shows in "splat" mode. Same pipeline for sim and real;
 # only where the pose graph comes from differs. Never run this on the Jetson.
-# See docs/splat.md.
+# See README.md §8.
 #
 # Usage:
 #   scripts/splat.sh serve                 # start the worker, detached (:8082)
