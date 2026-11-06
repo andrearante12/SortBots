@@ -353,3 +353,10 @@ world runtime or the runner, before trusting a long test's verdict.
   anything that matters.
 - `peer_crossing` holds robot_0 back by a fixed 25 s to meet robot_1 on the
   apron; a slower or faster Nav2 start moves the meeting.
+- First live results (2026-11-06, `crossing_yield` person): `pipeline_smoke`
+  passes with a usd actor; `crossing_yield` FAILS on contacts with prediction
+  off and on (5 and 4), while prediction halves the goal time and the
+  encounters. The robot sees the person 5 s before it brakes onto their line,
+  so the next work is in Nav2's response, not in perception
+  (`docs/obstacle_detection.md`, Verification status). The other tests have
+  not been run live yet.

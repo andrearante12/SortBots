@@ -219,11 +219,21 @@ and `webui/tests/operator_test.mjs` covers the drawing.
 - **Live in sim.** Live sim runs (2026-10-22) covered sim 32FC1 depth, TF from
   `robot_0/camera_optical`, the floor estimate (≈0 m), odom tracking, and the
   false-positive table above.
-- **Not yet live with the Kalman tracker or the large-mover rule.** The
-  false-"moving" table above was measured with the v1 tracker; the first
-  live run of the person and forklift worlds re-measures it. If a person is
-  missed, `moving_speed_mps` and `track_min_hits` are the knobs; if racking
-  starts to "move", `large_mover_min_z_m` and `max_large_mover_extent_m`.
+- **Live in sim with the Kalman tracker (2026-11-06).** `crossing_yield`
+  (person variant) on the RTX 4070 laptop, prediction off and on: the
+  T-posed character is tracked at 5.1 m and called moving at 4.2 m (~6.5 s
+  into the run, through the large-mover rule), association recall 1.0,
+  moving recall 0.67, position RMSE 0.13 m, ADE/FDE 0.50/0.66 m at 1.5 s
+  against a 0.15–0.40 m constant-velocity floor, no false-moving frames.
+  With the predicted cloud in the local costmap the goal took 34.5 s instead
+  of 57.3 s, detour 1.04 instead of 1.30, 2 encounters instead of 7 — but
+  both runs still made contact: the robot had the person in the costmap for
+  5+ s and still braked onto the crossing line (1.26 m of braking from
+  0.43 m/s, stopped 3.0 s after the threat opened). That is a planner /
+  controller response problem, not perception; the test fails on it by
+  design. The false-"moving" table has not been re-measured with the
+  large-mover rule; if racking starts to "move", `large_mover_min_z_m` and
+  `max_large_mover_extent_m` are the knobs.
 - **Not on hardware.** The node hasn't run on the Jetson yet.
 
 ## Known limits and next steps
