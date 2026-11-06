@@ -70,33 +70,55 @@ MODES = ("once", "loop", "pingpong")
 # when the asset root is unreachable: the primitive of the same footprint,
 # so a run without the asset server still scores against the same shape.
 #
-# The refs were checked against the 5.1 asset root on 2026-11-04. Characters
-# render in their bind pose (omni.anim.people is not in the pip install),
-# which is all a depth-based detector needs. Footprints/heights are the
-# declared values the METRICS use; keep them honest against the asset's
-# real bounding box (scripts/simtest.py assets prints the live bbox).
+# The refs were checked against the 5.1 asset root on 2026-11-04 and the
+# numbers measured with scripts/measure_assets.py on 2026-11-06 (headless
+# Isaac, UsdGeom.BBoxCache at identity):
+#
+#   person    bbox 1.76 x 0.44 x 1.73, feet 0.12 below the origin, facing -y
+#   worker    bbox 2.09 x 0.57 x 1.93, feet 0.15 below, facing -y
+#   forklift  bbox 1.21 x 3.49 x 2.15, long axis y
+#   amr       iw_hub 1.43 x 0.66 x 0.23, body centre 0.32 behind the origin,
+#             wheels 0.08 below
+#   amr_tall  nova_carter 0.73 x 0.90 x 0.69, centre 0.22 off, base 0.14 below
+#
+# Characters stand in their BIND POSE (omni.anim.people is not in the pip
+# install): a T, arms out — that 1.76 m is the arm span, at ~1.4 m above the
+# floor, over a 0.5 m tall robot. The footprint the metrics score is the
+# body (radius), the arms are what depth sees: a crossing person reads as a
+# ~1.8 m wide cluster, which the tracker's large-mover rule (tall AND long)
+# still calls moving. yaw_offset_deg turns each model to face +x, the
+# direction of travel; origin_offset moves the body centre onto the actor's
+# pose so the scored footprint sits on the visible body; z puts the feet or
+# wheels on the floor. Footprints/heights are the declared values the
+# METRICS use.
 PRESETS = {
     "person": {
         "shape": "usd", "ref": "Isaac/People/Characters/F_Business_02/F_Business_02.usd",
-        "radius": 0.30, "height": 1.75, "color": (0.95, 0.45, 0.10), "fallback": "cylinder",
+        "radius": 0.30, "height": 1.73, "z": 0.12, "yaw_offset_deg": 90.0,
+        "color": (0.95, 0.45, 0.10), "fallback": "cylinder",
     },
     "worker": {
         "shape": "usd",
         "ref": "Isaac/People/Characters/male_adult_construction_05_new/"
                "male_adult_construction_05_new.usd",
-        "radius": 0.32, "height": 1.80, "color": (0.95, 0.70, 0.10), "fallback": "cylinder",
+        "radius": 0.32, "height": 1.93, "z": 0.15, "yaw_offset_deg": 90.0,
+        "color": (0.95, 0.70, 0.10), "fallback": "cylinder",
     },
     "forklift": {
         "shape": "usd", "ref": "Isaac/Props/Forklift/forklift.usd",
-        "footprint": (2.6, 1.2), "height": 2.2, "color": (0.90, 0.60, 0.05), "fallback": "box",
+        "footprint": (3.5, 1.2), "height": 2.15, "yaw_offset_deg": 90.0,
+        "color": (0.90, 0.60, 0.05), "fallback": "box",
     },
     "amr": {
         "shape": "usd", "ref": "Isaac/Robots/Idealworks/iwhub/iw_hub.usd",
-        "footprint": (1.0, 0.65), "height": 0.35, "color": (0.25, 0.55, 0.85), "fallback": "box",
+        "footprint": (1.43, 0.66), "height": 0.23, "z": 0.08, "origin_offset": (0.315, 0.0),
+        "color": (0.25, 0.55, 0.85), "fallback": "box",
     },
     "amr_tall": {
         "shape": "usd", "ref": "Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd",
-        "footprint": (0.9, 0.55), "height": 0.9, "color": (0.25, 0.55, 0.85), "fallback": "box",
+        "footprint": (0.9, 0.73), "height": 0.69, "z": 0.14, "yaw_offset_deg": 90.0,
+        "origin_offset": (0.225, 0.0),
+        "color": (0.25, 0.55, 0.85), "fallback": "box",
     },
 }
 FALLBACKS = ("box", "cylinder")
@@ -192,6 +214,12 @@ def _shape(raw: dict, what: str, allowed) -> dict:
         out["yaw_offset_deg"] = _num(raw.get("yaw_offset_deg", 0.0), f"{what}.yaw_offset_deg",
                                      -360.0, 360.0)
         out["z"] = _num(raw.get("z", 0.0), f"{what}.z", -1.0, 1.0)
+        # Where the model's body centre is in its OWN frame: the model is
+        # moved by this (before yaw_offset) so that centre lands on the pose.
+        off = raw.get("origin_offset", (0.0, 0.0))
+        if not isinstance(off, (list, tuple)) or len(off) != 2:
+            raise WorldError(f"{what}.origin_offset: expected [dx, dy] metres")
+        out["origin_offset"] = tuple(_num(v, f"{what}.origin_offset", -5.0, 5.0) for v in off)
         fb = raw.get("fallback", "cylinder" if radius is not None else "box")
         if fb not in FALLBACKS:
             raise WorldError(f"{what}.fallback: expected one of {list(FALLBACKS)}, got {fb!r}")
@@ -232,7 +260,7 @@ def _validate_item(raw, what, *, actor: bool) -> dict:
     if not isinstance(raw, dict):
         raise WorldError(f"{what}: expected a mapping")
     allowed = {"id", "shape", "size", "radius", "height", "color", "label", "preset",
-               "ref", "scale", "footprint", "yaw_offset_deg", "z", "fallback"}
+               "ref", "scale", "footprint", "yaw_offset_deg", "z", "origin_offset", "fallback"}
     allowed |= {"path"} if actor else {"pose", "collider"}
     unknown = set(raw) - allowed
     if unknown:

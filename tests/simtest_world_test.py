@@ -70,6 +70,7 @@ def _as_usd(w, **kw):
     (lambda w: _as_usd(w, preset="forklift", fallback="sphere"), "fallback"),
     (lambda w: _as_usd(w, preset="person", z=5), "z"),
     (lambda w: _as_usd(w, preset="person", yaw_offset_deg=400), "yaw_offset_deg"),
+    (lambda w: _as_usd(w, preset="amr", origin_offset=[1]), "origin_offset"),
     (lambda w: w["actors"][0].update(radius=0), "radius"),
     (lambda w: w["actors"][0]["path"].update(waypoints=[[0, 0]]), "two"),
     (lambda w: w["actors"][0]["path"].update(waypoints=[[0, 0], [0, 0]]), "repeats"),
@@ -117,7 +118,8 @@ def test_preset_expands_and_world_keys_win():
     assert a["shape"] == "usd" and a["ref"] == world.PRESETS["person"]["ref"]
     assert a["radius"] == 0.4 and "footprint" not in a            # the world's radius won
     assert a["height"] == world.PRESETS["person"]["height"]
-    assert a["fallback"] == "cylinder" and a["yaw_offset_deg"] == 0.0 and a["z"] == 0.0
+    assert a["fallback"] == "cylinder" and a["yaw_offset_deg"] == 90.0 and a["z"] == 0.12
+    assert a["origin_offset"] == (0.0, 0.0)
     assert world.footprint(a, 1.0, 2.0, 0.3) == geometry.circle(1.0, 2.0, 0.4)
     assert world.half_extent(a) == 0.4
 
@@ -132,6 +134,9 @@ def test_forklift_preset_is_a_rectangle_along_its_heading():
     assert (xmax - xmin, ymax - ymin) == pytest.approx(f["footprint"])
     assert world.half_extent(f) == pytest.approx(math.hypot(*f["footprint"]) / 2)
     assert f["fallback"] == "box"
+    amr = world.validate({**_walker(), "actors": [{"id": "r", "preset": "amr",
+                                                   "path": _walker()["actors"][0]["path"]}]})
+    assert amr["actors"][0]["origin_offset"] == (0.315, 0.0)
 
 
 def test_preset_works_for_props_too():

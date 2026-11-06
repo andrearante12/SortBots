@@ -342,10 +342,12 @@ world runtime or the runner, before trusting a long test's verdict.
 - Every repeat restarts Isaac (robots back at spawn, fresh map). That is the
   price of identical starting conditions; a run is minutes.
 - Characters stand in their bind pose: `omni.anim.people` isn't in the pip
-  install, so a `person` walks without moving its legs. Depth sees a
-  person-shaped, person-sized body, which is what the geometric detector and
-  the frame-difference filter need; an RGB person detector would want the
-  animation.
+  install, so a `person` walks without moving its legs — arms out, a T. Depth
+  sees a person-tall body ~1.8 m wide at shoulder height (the arms pass over
+  a 0.5 m robot; the scored footprint is the body). The tracker's large-mover
+  rule is what lets such a wide cluster count as moving; an RGB person
+  detector would want the animation. `scripts/measure_assets.py` prints the
+  real bounding boxes the presets were set from.
 - Actors turn instantly at waypoints (the yaw follows the leg). A forklift
   pivots on the spot where a real one would swing; lay its corners clear of
   anything that matters.

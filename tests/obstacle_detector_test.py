@@ -236,7 +236,7 @@ def test_can_move_rules():
     body = {"clipped": False, "extent_m": 0.4, "min": [2, 0, 0.0], "max": [2.3, 0.4, 1.7]}
     assert od.can_move(body)
     assert not od.can_move({**body, "clipped": True})
-    assert not od.can_move({**body, "extent_m": 3.4})            # shelving: longer than any vehicle
+    assert not od.can_move({**body, "extent_m": 4.2})            # shelving: longer than any vehicle
     # 3 m long AND 1.7 m tall is a forklift-sized mover (large-mover rule,
     # test_large_mover_rule_admits_tall_long_clusters_only); flat and long is not.
     assert od.can_move({**body, "extent_m": 3.0})
@@ -340,7 +340,7 @@ def test_kf_non_movable_observation_zeroes_velocity_then_recovers():
 def test_large_mover_rule_admits_tall_long_clusters_only():
     forklift = {"clipped": False, "extent_m": 2.6, "min": [2, -0.6, 0.0], "max": [4.6, 0.6, 2.1]}
     deck = {"clipped": False, "extent_m": 2.6, "min": [2, -0.6, 0.9], "max": [4.6, 0.6, 1.3]}
-    rack = {"clipped": False, "extent_m": 3.4, "min": [2, -0.6, 0.0], "max": [5.4, 0.6, 2.4]}
+    rack = {"clipped": False, "extent_m": 4.2, "min": [2, -0.6, 0.0], "max": [6.2, 0.6, 2.4]}
     assert od.can_move(forklift)
     assert not od.can_move(deck)           # long and flat: a shelf deck
     assert not od.can_move(rack)           # longer than any vehicle

@@ -1289,11 +1289,16 @@ def _spawn_usd_actor(stage, path: str, actor: dict) -> bool:
         return False
     xf = UsdGeom.Xformable(stage.GetPrimAtPath(model))
     xf.ClearXformOpOrder()
+    # Ops compose right to left: lift, then face the heading, then (innermost,
+    # in the model's own frame) move its body centre onto the actor's pose.
     xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, float(actor["z"])))
     xf.AddRotateXYZOp().Set(Gf.Vec3f(0.0, 0.0, float(actor["yaw_offset_deg"])))
     if actor["scale"] != 1.0:
         s = float(actor["scale"])
         xf.AddScaleOp().Set(Gf.Vec3f(s, s, s))
+    ox, oy = actor["origin_offset"]
+    if ox or oy:
+        xf.AddTranslateOp(opSuffix="origin").Set(Gf.Vec3d(float(ox), float(oy), 0.0))
     n = _strip_physics(stage, model)
     emit(f"  world actor {actor['id']}: {actor['ref']} (physics stripped on {n} prim(s), "
          f"yaw offset {actor['yaw_offset_deg']:.0f} deg)")

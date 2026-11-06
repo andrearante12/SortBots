@@ -81,7 +81,7 @@ DEFAULTS = {
     "max_obstacle_speed_mps": 3.0,
     # Large movers (forklifts, pallet jacks): longer than max_moving_extent_m
     # but tall, so not a shelf deck or a wall seen edge-on.
-    "max_large_mover_extent_m": 3.0,
+    "max_large_mover_extent_m": 3.8,
     "large_mover_min_z_m": 1.2,
     # Kalman tracker (constant velocity) and its predictions.
     "kf_accel_sigma": 1.0,
