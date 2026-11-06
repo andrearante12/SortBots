@@ -138,7 +138,7 @@ first; it refuses if one is up):
 
 ```bash
 scripts/simtest.py list
-scripts/simtest.py run pipeline_smoke          # ~1 min: is the harness healthy?
+scripts/simtest.py run pick_block              # ~2 min: is the harness healthy?
 scripts/simtest.py run crossing_yield          # verdict + data/simtests/<dir>/report.md
 scripts/simtest.py rescore data/simtests/<dir> # re-score recorded events, no sim
 ```

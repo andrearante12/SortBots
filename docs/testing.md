@@ -28,12 +28,22 @@ scripts/simtest.py rescore data/simtests/<dir>     # re-score recorded events, n
 scripts/simtest.py report DIR_A DIR_B
 ```
 
-Test cases: `pipeline_smoke` (the cheapest harness check), `crossing_yield`,
-`head_on_pass`, `cluttered_route`, `fleet_traffic`, `fleet_scale_smoke`, and the pick and
-place tests in [Pick and place](manipulation.md#pick-and-place-sim). A test's `section:` is its heading on the
+Test cases: `crossing_yield`, `head_on_pass`, `cluttered_route`, and the pick and place
+tests in [Pick and place](manipulation.md#pick-and-place-sim). `pick_block` is the cheapest
+harness check: no saved map, no Nav2, about two minutes. A test's `section:` is its heading on the
 operator view's Tests tab. `parked: true` keeps a test off the tab, but `simtest.py` can
 still run it. The operator test serves on port 8201. If another session's console is
 already using that port, pass `--port N --cdp-port M`.
+
+**What a row on the Tests tab shows:**
+
+- `description:` is the overview: one plain sentence. Keep engineering detail in the
+  file's comments.
+- "Passes when" comes from the thresholds, through `simtest/plain.py`. Change a threshold
+  and a sentence that no longer holds falls back to the raw check.
+- The GIF is `webui/test_media/NAME.gif`. `scripts/simtest.py run NAME --clip` records the
+  Sim view and writes it only if the run passes. Re-record it when the test changes, and
+  commit it.
 
 **Other world keys:**
 

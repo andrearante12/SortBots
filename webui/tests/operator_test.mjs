@@ -252,16 +252,29 @@ async function main() {
     await sleep(1500);
 
     // -- nothing running --------------------------------------------------------
-    check(`${vp.label}: no session shows the empty state`, await visible('#empty') && (await $text('#empty-title')) === 'No session running');
-    check(`${vp.label}: header says no session`, (await $text('#s-label')) === 'No session', await $text('#s-label'));
+    check(`${vp.label}: no session shows the empty state`, await visible('#empty') && (await $text('#empty-title')) === 'Simulation not running');
+    check(`${vp.label}: header says the sim is off`, (await $text('#s-label')) === 'Sim not running', await $text('#s-label'));
     check(`${vp.label}: no mode on the session chip without a session`, (await page.eval(`document.getElementById('session-chip').dataset.mode || ''`)) === '');
     check(`${vp.label}: page does not scroll`, await page.eval(`document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight`));
+    check(`${vp.label}: every map control fits the top bar, Comms included`,
+      await page.eval(`document.getElementById('comms-toggle').getBoundingClientRect().right <= document.getElementById('mode-strip').getBoundingClientRect().right + 1`));
+    if (await visible('#view-more')) {
+      await click('#view-more');
+      check(`${vp.label}: the view options open from the top bar`, await page.eval(`getComputedStyle(document.getElementById('view-opts')).display === 'flex'`));
+      await click('#view-more');
+      check(`${vp.label}: ... and close again`, await page.eval(`getComputedStyle(document.getElementById('view-opts')).display === 'none'`));
+    }
     await shot(`${vp.label}-empty`);
 
     // -- session panel (scenarios.js, reused) ------------------------------------
+    await click('#empty-test');
+    await sleep(500);
+    check(`${vp.label}: Run a test opens the Tests tab`, await visible('#session') && await visible('#tests-pane') && !(await visible('#launch-form')));
+    await click('#sp-x');
+    await sleep(200);
     await click('#empty-go');
     await sleep(800);
-    check(`${vp.label}: Start a session opens the session panel`, await visible('#session') && await visible('#launch-form'));
+    check(`${vp.label}: Start simulation opens the session panel, on Launch whatever tab was last open`, await visible('#session') && await visible('#launch-form'));
     check(`${vp.label}: launch form is filled from the API`, await page.eval(`document.querySelectorAll('#lf-preset option').length > 1`));
     check(`${vp.label}: Start is wired (not disabled by a missing console)`, await page.eval(`!document.getElementById('lf-start').disabled`));
     check(`${vp.label}: with no session the panel is just the form`, await visible('#launch-form') && !(await visible('#session-pane')) && !(await visible('#lf-command')) && !(await visible('#lf-summary')));
@@ -447,38 +460,46 @@ async function main() {
     check(`${vp.label}: a parked test stays off the list`, !cards.includes('pick_orientations'), cards.join(','));
     const secOf = (name) => page.eval(`document.querySelector('#tp-list .tp-test[data-name="${name}"]').closest('.tp-sec').dataset.section`);
     check(`${vp.label}: tests sit under their sections`, (await secOf('pick_block')) === 'Pick and place' && (await secOf('crossing_yield')) === 'Obstacle avoidance', await secOf('pick_block'));
-    await click('#tp-list .tp-sec[data-section="Pick and place"] .tp-sec-h');
-    check(`${vp.label}: a section folds shut`, !(await visible('#tp-list .tp-test[data-name="pick_block"]')));
-    await sleep(1200);
-    check(`${vp.label}: a folded section stays folded through a refresh`, !(await visible('#tp-list .tp-test[data-name="pick_block"]')));
-    await click('#tp-list .tp-sec[data-section="Pick and place"] .tp-sec-h');
-    check(`${vp.label}: and opens again`, await visible('#tp-list .tp-test[data-name="pick_block"]'));
-    check(`${vp.label}: the smoke test is runnable here`,
-      await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"] [data-run]'); return !!c && !c.disabled; })()`));
-    const smokeTitle = await $text('#tp-list .tp-test[data-name="pipeline_smoke"] .t');
-    check(`${vp.label}: rows are numbered short names`, /^\d+Pipeline smoke$/.test(smokeTitle), smokeTitle);
+    check(`${vp.label}: only obstacle avoidance and pick and place are listed`,
+      (await page.eval(`[...document.querySelectorAll('#tp-list .tp-sec')].map((x) => x.dataset.section).join()`)) === 'Obstacle avoidance,Pick and place');
+    check(`${vp.label}: no triangle glyphs in the list`, !/[▶▼]/.test(await $text('#tp-list')));
+    check(`${vp.label}: a test is runnable here`,
+      await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pick_block"] [data-run]'); return !!c && !c.disabled; })()`));
+    const pickTitle = await $text('#tp-list .tp-test[data-name="pick_block"] .t');
+    check(`${vp.label}: rows are numbered short names`, /^\d+Pick block$/.test(pickTitle), pickTitle);
     check(`${vp.label}: no time/variant line under the names`, !(await page.eval(`!!document.querySelector('#tp-list .tp-row .m')`)));
-    const smokeName = 'Pipeline smoke';
-    check(`${vp.label}: rows start collapsed`, !(await visible('#tp-list .tp-test[data-name="pipeline_smoke"] .tp-more')));
+    const pickName = 'Pick block';
+    check(`${vp.label}: rows start collapsed`, !(await visible('#tp-list .tp-test[data-name="pick_block"] .tp-more')));
     await click('#tp-list .tp-test[data-name="crossing_yield"] .tp-row .t');
     await sleep(100);
     const more = await $text('#tp-list .tp-test[data-name="crossing_yield"] .tp-more');
     // crossing_yield localizes on the fleet_warehouse_test library map, which is local
     // to the machines that recorded it (not in git, docs/testing.md). Without it the
     // row must say why it can't run, not what it checks; both are the page working.
-    if (fs.existsSync(path.join(REPO_ROOT, 'maps', 'fleet_warehouse_test', 'map.json'))) {
-      check(`${vp.label}: clicking a row shows what it checks`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Passes when/.test(more) && /recall ≥ 0.3/.test(more), more.slice(0, 160));
+    if (fs.existsSync(path.join(process.env.SORTBOTS_MAPS_DIR || path.join(REPO_ROOT, 'maps'), 'fleet_warehouse_test', 'map.json'))) {
+      check(`${vp.label}: clicking a row shows what it checks`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Passes when/.test(more) && /Never touches a walker/.test(more) && /at least 30% of the frames/.test(more), more.slice(0, 160));
     } else {
       check(`${vp.label}: clicking a row whose map is missing says why it can't run`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Can't run here/.test(more) && /fleet_warehouse_test/.test(more), more.slice(0, 160));
     }
-    await click('#tp-list .tp-test[data-name="pipeline_smoke"] .tp-row .t');
-    await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"]'); c.querySelector('[data-repeats]').value = '2'; c.querySelector('[data-run]').click(); })()`);
+    await click('#tp-list .tp-test[data-name="pick_block"] .tp-disc');
+    await sleep(100);
+    const pickMore = await $text('#tp-list .tp-test[data-name="pick_block"] .tp-more');
+    check(`${vp.label}: the chevron opens a row and says so`, await visible('#tp-list .tp-test[data-name="pick_block"] .tp-more') &&
+      (await page.eval(`document.querySelector('#tp-list .tp-test[data-name="pick_block"] .tp-disc').getAttribute('aria-expanded')`)) === 'true');
+    check(`${vp.label}: a row opens on one sentence, then plain pass criteria`, /^\s*The robot finds the block/.test(pickMore) && /The magnet picks the block up/.test(pickMore), pickMore.slice(0, 160));
+    await shot(`${vp.label}-tests-open`);
+    check(`${vp.label}: no raw checks or file paths in it`, !/configs\/tests|≥|==|success rate/.test(pickMore), pickMore);
+    if (fs.existsSync(path.join(REPO_ROOT, 'webui', 'test_media', 'pick_block.gif'))) {
+      check(`${vp.label}: a recorded clip loads beside it`,
+        await page.eval(`(async () => { const i = document.querySelector('#tp-list .tp-test[data-name="pick_block"] .tp-clip img'); if (!i) return false; await i.decode().catch(() => {}); return i.naturalWidth > 0; })()`));
+    }
+    await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pick_block"]'); c.querySelector('[data-repeats]').value = '2'; c.querySelector('[data-run]').click(); })()`);
     await sleep(400);
     const posted = JSON.parse(await page.eval(`JSON.stringify(window.__testPosts)`));
-    check(`${vp.label}: Run starts that test with the chosen repeats`, posted.length === 1 && posted[0].name === 'pipeline_smoke' && posted[0].repeats === 2, JSON.stringify(posted));
+    check(`${vp.label}: Run starts that test with the chosen repeats`, posted.length === 1 && posted[0].name === 'pick_block' && posted[0].repeats === 2, JSON.stringify(posted));
     check(`${vp.label}: ... and closes the panel to watch it on the map`, !(await visible('#session')));
     check(`${vp.label}: a chip over the map names the running test and its clock`,
-      await visible('#test-chip') && (await $text('#tc-name')) === smokeName && (await $text('#tc-time')) === '1:15', `${await $text('#tc-name')} ${await $text('#tc-time')}`);
+      await visible('#test-chip') && (await $text('#tc-name')) === pickName && (await $text('#tc-time')) === '1:15', `${await $text('#tc-name')} ${await $text('#tc-time')}`);
     await shot(`${vp.label}-test-running`);
     await click('#tc-name');
     await sleep(500);
@@ -488,7 +509,7 @@ async function main() {
     check(`${vp.label}: while a test runs, the session's own Stop gives way to Stop test`,
       await page.eval(`document.querySelector('#session .card').classList.contains('testing')`) &&
       await page.eval(`getComputedStyle(document.getElementById('session-stop')).display === 'none' && getComputedStyle(document.getElementById('sp-test-note')).display !== 'none'`));
-    await page.eval(`window.__testResults = [{ dir: '20261022T190000Z_pipeline_smoke', name: 'pipeline_smoke', state: 'done', complete: true, verdict: 'FAIL', done: 1, planned: 1,
+    await page.eval(`window.__testResults = [{ dir: '20261022T190000Z_pick_block', name: 'pick_block', state: 'done', complete: true, verdict: 'FAIL', done: 1, planned: 1,
       runs: [{ ok: false, error: null, sim_s: 41.2, criteria: [{ label: 'clearance.contacts == 0', ok: false, actual: 3 }, { label: 'goals.success_rate >= 1', ok: true, actual: 1 }] }] }]`);
     await click('#sp-x');
     await click('#tc-cancel');
@@ -863,7 +884,7 @@ async function main() {
     // -- a premapped session in the header -------------------------------------------------------------------
     await page.eval(`window.__fakeSession = { state: 'running', phase: 'running', phase_label: 'running', session_id: 's1', scenario: 'library_localize', config: { map: 'warehouse', mode: 'readonly', robots: 2 } }`);
     await sleep(3400);
-    check(`${vp.label}: running session shows in the header`, (await $text('#s-label')) === 'Session running', await $text('#s-label'));
+    check(`${vp.label}: running session shows in the header`, (await $text('#s-label')) === 'Sim running', await $text('#s-label'));
     check(`${vp.label}: a read-only saved map reads as Premapped on the session chip`, (await page.eval(`document.getElementById('session-chip').title`)).startsWith('Premapped · warehouse'), await page.eval(`document.getElementById('session-chip').title`));
     check(`${vp.label}: no mode tile in the header any more`, !(await page.eval(`!!document.getElementById('mode-tile')`)));
     check(`${vp.label}: the view toggle sits in the header`, await page.eval(`!!document.querySelector('header #view')`));

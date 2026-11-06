@@ -6,14 +6,17 @@
 # Headless, so nothing needs a local display: follow it in the operator view (Split on the
 # robot's camera and the Sim tab), over Tailscale if you like.
 
+# In detail (the description above is what the Tests tab shows):
+#
+#   robot_0 starts in front of a table, facing the target block, with the block's magnet
+#   plate in the head camera's view from the first frame. All it has to do is pick the block
+#   up. Pass = the camera found the plate, the magnet took the block and still has it when
+#   the test ends. Scored from ground truth. The sim stays up 10 s afterwards.
+
 name: pick_block
 title: Pick up the target block
 section: Pick and place
-description: >
-  robot_0 starts in front of a table, facing the target block, with the block's magnet
-  plate in the head camera's view from the first frame. All it has to do is pick the block
-  up. Pass = the camera found the plate, the magnet took the block and still has it when
-  the test ends. Scored from ground truth. The sim stays up 10 s afterwards.
+description: The robot finds the block on the table in front of it and picks it up with its magnet.
 
 scenario: pick_bench
 overrides: {world: pick_table, headless: true}
@@ -34,9 +37,9 @@ stop:
 metrics:
   - metric: pick_place
     pass:
+      detected: {gte: 1}
       picked: {gte: 1}
       held_at_end: {gte: 1}
-      detected: {gte: 1}
       drops: {eq: 0}
       false_picks: {eq: 0}
   - metric: tasks

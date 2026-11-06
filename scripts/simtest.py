@@ -56,6 +56,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # file. (Run it as a script; don't import it.)
 sys.path.insert(0, str(REPO_ROOT))
 
+from simtest import clip as clip_lib  # noqa: E402
 from simtest import events as ev_lib  # noqa: E402
 from simtest import metrics as metrics_lib  # noqa: E402
 from simtest import report as report_lib  # noqa: E402
@@ -244,6 +245,8 @@ def run_once(label: str, resolved: dict, streams: set[str], run_dir: Path, a,
             return {"error": "console start failed (scripts/sim_ctl.sh console start)"}
     started = time.monotonic()
     probe_rc = None
+    clip = None
+    clip_dir = run_dir / "clip"
     try:
         args = ["start", resolved["scenario"], *_overrides_args(resolved)]
         log(f"  sim_ctl {' '.join(args)}")
@@ -264,6 +267,11 @@ def run_once(label: str, resolved: dict, streams: set[str], run_dir: Path, a,
                                      "streams": sorted(streams)}, indent=2))
         cmd = (f"exec python3 -m simtest.probe --variant {shlex.quote(str(vjson))} "
                f"--out {shlex.quote(str(run_dir))}")
+        if a.clip:
+            clip_dir.mkdir(exist_ok=True)
+            with open(run_dir / "clip.log", "w") as fh:
+                clip = subprocess.Popen(_ros_shell(clip_lib.capture_cmd(clip_dir, resolved)),
+                                        cwd=REPO_ROOT, stdout=fh, stderr=subprocess.STDOUT)
         with open(run_dir / "probe.log", "w") as fh:
             p = subprocess.Popen(_ros_shell(cmd), cwd=REPO_ROOT, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, text=True)
@@ -300,6 +308,8 @@ def run_once(label: str, resolved: dict, streams: set[str], run_dir: Path, a,
                     "meta": body["meta"]}
         return body
     finally:
+        if clip:
+            clip_lib.stop(clip_dir, clip)
         if not (a.keep and state.data.get("last")):
             log("  stopping the sim")
             _sim_ctl("stop", timeout=240)
@@ -379,6 +389,9 @@ def cmd_run(a) -> int:
                     line.update(ok=body["score"]["ok"], score=body["score"], meta=body["meta"])
                     verdict = "PASS" if body["score"]["ok"] else "FAIL"
                     log(f"[simtest] [{label}] repeat {rep}: {verdict}")
+                    if a.clip and body["score"]["ok"]:
+                        gif = clip_lib.encode(run_dir / "clip", clip_lib.media_path(t["name"]))
+                        log(f"[simtest] clip: {gif}")
                     for m in body["score"]["metrics"]:
                         for c in m["criteria"]:
                             if not c["ok"]:
@@ -522,6 +535,8 @@ def main(argv=None) -> int:
                    help="stop an already-running sim instead of refusing")
     r.add_argument("--keep", action="store_true",
                    help="leave the sim up after the LAST run, to look around")
+    r.add_argument("--clip", action="store_true",
+                   help="record the Sim view; a passing run writes webui/test_media/NAME.gif")
     r.add_argument("--out", help="results dir (default data/simtests/<UTC>_<name>)")
     r.set_defaults(fn=cmd_run)
     rs = sub.add_parser("rescore")

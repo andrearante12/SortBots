@@ -16,7 +16,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from simtest import report, spec, world  # noqa: E402
+from simtest import clip, plain, report, spec, world  # noqa: E402
 from simtest.probe import ProbeCore  # noqa: E402
 
 BASE = {
@@ -74,6 +74,39 @@ def test_committed_tests_validate(name):
 def test_every_test_case_names_its_section():
     missing = [t["name"] for t in spec.list_tests() if t["section"] == spec.DEFAULT_SECTION]
     assert missing == []
+
+
+def test_every_listed_test_reads_in_plain_words():
+    """The Tests tab shows these to whoever is at the console: one sentence on what it
+    tests, and every pass criterion as a sentence rather than the raw check."""
+    for t in spec.listed_tests():
+        if t["status"] != "ready":
+            continue                    # a saved map this machine doesn't have
+        assert t["description"].count(". ") == 0 and len(t["description"]) < 130, t["name"]
+        assert t["passes_when"], t["name"]
+        raw = [c for c in t["passes_when"] if any(op in c for op in ("==", ">=", "<=", "!="))]
+        assert not raw, (t["name"], raw)
+
+
+def test_a_sentence_only_claims_what_the_threshold_scores():
+    clearance = {"metric": "clearance", "params": {}}
+    assert plain.sentence(clearance, "contacts", "eq", 0) == "Never touches a walker"
+    assert plain.sentence(clearance, "contacts", "eq", 2) is None
+    assert plain.sentence({"metric": "clearance", "params": {"actors": [], "props": True}},
+                          "contacts", "eq", 0) == "Never touches a crate, barrel or pallet"
+    goals = {"metric": "goals", "params": {}}
+    assert plain.sentence(goals, "success_rate", "gte", 1.0) == "Reaches every goal"
+    assert plain.sentence(goals, "success_rate", "gte", 0.8) == "Reaches at least 80% of its goals"
+    assert plain.sentence(goals, "path_m", "lte", 9) is None
+
+
+def test_clips_cover_the_whole_run_and_follow_only_without_a_framed_world():
+    frames = list(range(1000))
+    picks = clip.pick_frames(frames, 80)
+    assert len(picks) == 80 and picks[0] == 0 and picks[-1] == 999
+    assert clip.pick_frames(frames[:5], 80) == frames[:5]
+    assert clip.follow_for({"robots": ["robot_0"], "world": None}) == "robot_0"
+    assert clip.follow_for({"robots": ["robot_0"], "world": {"view": {"eye": [0, 0, 1]}}}) is None
 
 
 def test_list_tests_reports_every_file():

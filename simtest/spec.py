@@ -55,8 +55,10 @@ from pathlib import Path
 
 import yaml
 
+from . import clip as clip_lib
 from . import magnet as magnet_lib
 from . import metrics as metrics_lib
+from . import plain
 from . import robots as robots_lib
 from . import world as world_lib
 
@@ -480,6 +482,19 @@ def _filing_of(path: Path) -> tuple[str, bool]:
         return DEFAULT_SECTION, False
 
 
+def _passes_when(entries: list[dict]) -> list[str]:
+    """Every pass criterion in words; one with no sentence yet shows as the raw check."""
+    return [plain.sentence(e, v, op, th)
+            or f"{e['id']} {v} {metrics_lib.OP_TEXT[op]} {th}".replace("_", " ")
+            for e in entries for v, op, th in e["pass"]]
+
+
+def _clip_of(name: str) -> str | None:
+    """Its success GIF's URL under webui/, if a passing run has recorded one (simtest/clip.py)."""
+    path = clip_lib.media_path(name)
+    return f"{path.parent.name}/{path.name}" if path.exists() else None
+
+
 def list_tests() -> list[dict]:
     """Every configs/tests/*.yaml; invalid ones kept and explained."""
     out = []
@@ -495,6 +510,8 @@ def list_tests() -> list[dict]:
                 "variants": [label for label, _ in t["variants"]],
                 "repeats": t["repeats"], "runs": len(t["variants"]) * t["repeats"],
                 "sim_s": base["stop"]["sim_s"],
+                "passes_when": _passes_when(base["metrics"]),
+                "clip": _clip_of(t["name"]),
                 "metrics": [{"id": e["id"], "metric": e["metric"],
                              "criteria": [f"{v} {metrics_lib.OP_TEXT[op]} {th}"
                                           for v, op, th in e["pass"]]}

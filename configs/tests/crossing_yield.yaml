@@ -6,15 +6,18 @@
 # Coordinates are the map frame (== Isaac world). Thresholds are a first cut:
 # tighten them once a few runs show where the stack actually sits.
 
+# In detail (the description above is what the Tests tab shows):
+#
+#   robot_0 drives from its spawn pose down its aisle and out onto the open
+#   floor while a walker paces back and forth across the aisle mouth. With the
+#   goal sent at t0 the robot reaches the walker's line ~13-15 sim-s in, while
+#   the walker crosses it at ~16 s — so on a typical run they meet. Pass = no
+#   contact, the goal reached, and the walker not left painted into the map.
+
 name: crossing_yield
 title: Walker crosses the aisle mouth — see it, yield, arrive
 section: Obstacle avoidance
-description: >
-  robot_0 drives from its spawn pose down its aisle and out onto the open
-  floor while a walker paces back and forth across the aisle mouth. With the
-  goal sent at t0 the robot reaches the walker's line ~13-15 sim-s in, while
-  the walker crosses it at ~16 s — so on a typical run they meet. Pass = no
-  contact, the goal reached, and the walker not left painted into the map.
+description: A walker crosses the end of the aisle as the robot drives out, and the robot has to give way and carry on.
 
 scenario: moving_obstacles_mapped
 overrides:
