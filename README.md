@@ -77,10 +77,6 @@ scripts/sim_ctl.sh stop
 | [docs/manipulation.md](docs/manipulation.md) | magnet pick and place in the sim, the magnet end effector CAD, the ManiSkill arm track |
 | [docs/commsim.md](docs/commsim.md) | fleet radio mesh and task-protocol simulation, real routers |
 
-Notes for coding agents are in `CLAUDE.md` and the `sim-run` skill (`.claude/skills/sim-run/`).
-Some code comments cite older design notes and run logs as `path@6501799`. Those files were
-folded into these docs, and the originals can be read with `git show 6501799:path`.
-
 ## License
 
 Project code: license to be added. The XLeRobot submodule is Apache 2.0
