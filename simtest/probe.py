@@ -49,6 +49,7 @@ from simtest import metrics as metrics_lib  # noqa: E402
 MAP_EVERY_S = 5.0       # sim seconds between recorded /map samples
 EXPLORE_EVERY_S = 1.0
 DYN_EVERY_S = 0.2       # 5 Hz per robot
+TRK_EVERY_S = 0.2       # 5 Hz per robot: obstacle_tracks publishes at 10
 DYN_VOXEL_M = 0.1
 DYN_MAX_POINTS = 300
 GOAL_TERMINAL = {"succeeded", "aborted", "rejected", "canceled", "timeout"}
@@ -339,8 +340,11 @@ def run(variant_path: Path, out_dir: Path, startup_timeout: float) -> int:
                     self.create_subscription(PointCloud2, f"/{rid}/dynamic_obstacles",
                                              functools.partial(self._on_dyn, rid),
                                              qos_profile_sensor_data)
+                if "trk" in streams:
+                    self.create_subscription(String, f"/{rid}/obstacle_tracks",
+                                             functools.partial(self._on_trk, rid), 10)
             self.tf = None
-            if "dyn" in streams:
+            if "dyn" in streams or "trk" in streams:
                 import tf2_ros
 
                 self.tf_buffer = tf2_ros.Buffer()
@@ -398,6 +402,69 @@ def run(variant_path: Path, out_dir: Path, startup_timeout: float) -> int:
                 world = pts.astype(np.float64) @ R.T + np.array([t.x, t.y, t.z])
                 xy = _voxel_xy(world, DYN_VOXEL_M, DYN_MAX_POINTS)
             core.emit({"s": "dyn", "rid": rid, "pts": xy})
+
+        def _tf2d(self, frame, stamp):
+            """map <- frame as a 2-D (R 2x2, t 2, yaw) at the stamp, else latest, else None."""
+            from rclpy.time import Time
+
+            for when in (Time.from_msg(stamp), Time()):
+                try:
+                    tr = self.tf_buffer.lookup_transform("map", frame, when)
+                    break
+                except Exception:  # noqa: BLE001 — extrapolation etc.
+                    tr = None
+            if tr is None:
+                return None
+            q, t = tr.transform.rotation, tr.transform.translation
+            yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+            c, s_ = math.cos(yaw), math.sin(yaw)
+            return np.array([[c, -s_], [s_, c]]), np.array([t.x, t.y]), yaw
+
+        def _on_trk(self, rid, m):
+            """Tracks into the map frame. Positions, predictions and velocities are
+            in the detector's world_frame (odom; base_link when it had no odom TF),
+            so one map <- world_frame transform places them all — through the
+            robot's own localization, like `dyn`, so SLAM error shows up here too."""
+            if core.t0 is None or core.throttled(f"trk:{rid}", TRK_EVERY_S):
+                return
+            try:
+                p = json.loads(m.data)
+            except ValueError:
+                return
+            frame = p.get("world_frame") or p.get("frame")
+            if not frame:
+                return
+            from builtin_interfaces.msg import Time as TimeMsg
+
+            st = p.get("stamp") or 0.0
+            stamp = TimeMsg(sec=int(st), nanosec=int((st - int(st)) * 1e9))
+            tf = self._tf2d(frame, stamp)
+            if tf is None:
+                return
+            Rm, tm, _yaw = tf
+
+            def pt(xy):
+                v = Rm @ np.array([xy[0], xy[1]]) + tm
+                return [round(float(v[0]), 3), round(float(v[1]), 3)]
+            tracks = []
+            for o in p.get("obstacles") or []:
+                pos = o.get("pos_w")
+                if pos is None:
+                    continue
+                vel = Rm @ np.array(o.get("vel") or [0.0, 0.0])
+                cov = o.get("cov")
+                if cov:
+                    C = np.array([[cov[0], cov[1]], [cov[1], cov[2]]])
+                    C = Rm @ C @ Rm.T
+                    cov = [round(float(C[0, 0]), 4), round(float(C[0, 1]), 4),
+                           round(float(C[1, 1]), 4)]
+                tracks.append({"id": o.get("track_id"), "moving": bool(o.get("moving")),
+                               "hits": o.get("hits", 0), "pos": pt(pos),
+                               "vel": [round(float(vel[0]), 3), round(float(vel[1]), 3)],
+                               "cov": cov,
+                               "pred": [[h, *pt((x, y))] for h, x, y in (o.get("pred") or [])],
+                               "extent_m": o.get("extent_m"), "height_m": o.get("height_m")})
+            core.emit({"s": "trk", "rid": rid, "stamp": st, "tracks": tracks})
 
         # -- goals ------------------------------------------------------------
         def send_goal(self, g):

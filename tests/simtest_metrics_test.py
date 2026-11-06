@@ -165,6 +165,126 @@ def test_goals_never_sent_count_as_unfinished():
     assert v["unfinished"] == 3 and v["success_rate"] == 0.0
 
 
+
+# -- reaction --------------------------------------------------------------------
+
+def _braking_robot(t, brake_from=2.0, brake_s=1.0, v=0.6):
+    """North along x=0 from y=-3 at v m/s, then a linear stop between brake_from
+    and brake_from + brake_s (None = never brakes)."""
+    if brake_from is None or t <= brake_from:
+        return (0.0, -3.0 + v * t, math.pi / 2)
+    tb = min(t - brake_from, brake_s)
+    y = -3.0 + v * brake_from + v * tb - 0.5 * (v / brake_s) * tb * tb
+    return (0.0, y, math.pi / 2)
+
+
+def _reaction(robot_fn, seconds=8.0, **params):
+    ms = metrics.MetricSet(metrics.validate_list(
+        [{"metric": "reaction", "params": params}]), ctx())
+    for i in range(int(seconds * 10) + 1):
+        ms.feed(gt(i / 10, robot=robot_fn(i / 10)))
+    m = ms.score()["metrics"][0]
+    return m["values"], m["detail"]
+
+
+def test_reaction_times_a_robot_that_brakes_for_the_walker():
+    """Walker reaches x=0 at t=4; the robot (0.6 m/s north) is on a collision
+    course from t~0.9 (range <= 4 m) and brakes 2 -> 3 s."""
+    v, d = _reaction(_braking_robot)
+    assert v["encounters"] == 1 and v["timed"] == 1 and v["reacted"] == 1
+    e = next(iter(d.values()))
+    assert e["onset_s"] == pytest.approx(0.9, abs=0.15)
+    assert e["v0"] == pytest.approx(0.6, abs=0.05)
+    # half speed at t=2.5, stopped at t~2.95: smoothing (0.5 s window) blurs each by < 0.3 s
+    assert v["max_time_to_slow_s"] == pytest.approx(1.6, abs=0.3)
+    assert v["max_time_to_stop_s"] == pytest.approx(2.05, abs=0.35)
+    assert v["stopped"] == 1
+    # driven from onset to standstill: 0.6 * (2 - 0.9) + 0.3 m of braking
+    assert v["max_brake_m"] == pytest.approx(0.96, abs=0.2)
+    assert 0.4 < v["max_decel_mps2"] < 0.75
+    assert v["min_ttc_s"] is not None and 0 < v["min_ttc_s"] < 4
+    assert v["yield_s"] > 0.2            # stopped ~2.95 s, released 1 s after the threat ends
+    assert v["min_gap_m"] > 0.5 and v["samples"] == 81
+
+
+def test_reaction_counts_a_robot_that_never_slows_as_unreacted():
+    v, _ = _reaction(lambda t: _braking_robot(t, brake_from=None))
+    assert v["encounters"] == 1 and v["reacted"] == 0 and v["unreacted"] == 1
+    assert v["max_time_to_slow_s"] is None and v["max_time_to_stop_s"] is None
+    assert v["min_ttc_s"] < 1.0
+
+
+def test_reaction_no_encounter_when_the_walker_is_behind_or_parallel():
+    # facing south (away from the walker's line): never a threat in front
+    v, _ = _reaction(lambda t: (0.0, -3.0 - 0.3 * t, -math.pi / 2))
+    assert v["encounters"] == 0 and v["max_time_to_slow_s"] is None
+    # parked 3 m off the line, facing it: the walker passes 2.75 m clear -> no collision course
+    v, _ = _reaction(lambda t: (0.0, -3.0, math.pi / 2))
+    assert v["encounters"] == 0
+
+
+def test_reaction_slow_robot_is_counted_but_not_timed():
+    v, _ = _reaction(lambda t: (0.0, -1.2 + 0.1 * t, math.pi / 2))
+    assert v["encounters"] >= 1 and v["timed"] == 0 and v["reacted"] == 0
+
+
+def test_reaction_check_context_needs_actors():
+    with pytest.raises(metrics.MetricError, match="no actors"):
+        metrics.MetricSet(metrics.validate_list([{"metric": "reaction"}]),
+                          ctx(world=world.validate({"name": "empty"})))
+    with pytest.raises(metrics.MetricError, match="no actor"):
+        metrics.MetricSet(metrics.validate_list(
+            [{"metric": "reaction", "params": {"actors": ["ghost"]}}]), ctx())
+
+
+# -- goals v2: detour and speed ----------------------------------------------------
+
+def test_goals_detour_ratio_and_mean_speed():
+    goals = [{"robot": "robot_0", "pose": [3.0, 0.0, 0.0]}]
+    ms = metrics.MetricSet(metrics.validate_list([{"metric": "goals"}]), ctx(goals=goals))
+    # L-shaped drive (0,0)->(0,2)->(3,2)->(3,0): 7 m for a 3 m leg, at 0.5 m/s
+    path = [(0.0, i * 0.05) for i in range(41)] + [(i * 0.05, 2.0) for i in range(1, 61)] \
+        + [(3.0, 2.0 - i * 0.05) for i in range(1, 41)]
+    ms.feed(gt(0.0, robot=(0.0, 0.0, 0.0)))
+    ms.feed({"s": "goal", "t": 0.0, "rid": "robot_0", "goal_id": "g0", "state": "sent",
+             "pose": [3.0, 0.0, 0.0]})
+    for i, (x, y) in enumerate(path):
+        ms.feed(gt((i + 1) / 10, robot=(x, y, 0.0)))
+    ms.feed({"s": "goal", "t": 14.0, "rid": "robot_0", "goal_id": "g0", "state": "succeeded",
+             "pose": [3.0, 0.0, 0.0]})
+    m = ms.score()["metrics"][0]
+    assert m["values"]["max_detour_ratio"] == pytest.approx(7.0 / 3.0, abs=0.02)
+    assert m["values"]["mean_speed_mps"] == pytest.approx(0.5, abs=0.01)
+    assert m["detail"]["g0"]["detour_ratio"] == m["values"]["max_detour_ratio"]
+    assert m["version"] == 2
+
+
+# -- clearance v2: peers -----------------------------------------------------------
+
+def _gt2(t, r0, r1):
+    ev = gt(t, robot=r0)
+    ev["robots"]["robot_1"] = dict(zip("xy", r1[:2]), yaw=r1[2])
+    return ev
+
+
+def test_clearance_peers_scores_robot_pairs():
+    ms = metrics.MetricSet(metrics.validate_list(
+        [{"metric": "clearance", "params": {"actors": [], "peers": True}}]),
+        ctx(robots=["robot_0", "robot_1"]))
+    ms.feed(_gt2(0.0, (0.0, -3.0, 0.0), (1.0, -3.0, 0.0)))   # 0.5 m apart nose to tail
+    ms.feed(_gt2(0.1, (0.0, -3.0, 0.0), (0.4, -3.0, 0.0)))   # overlapping
+    m = ms.score()["metrics"][0]
+    assert m["values"]["contacts"] == 1 and m["values"]["min_m"] == 0.0
+    assert list(m["detail"]) == ["robot_0~robot_1"]
+    assert m["version"] == 2
+
+
+def test_clearance_peers_needs_two_robots():
+    with pytest.raises(metrics.MetricError, match="two robots"):
+        metrics.MetricSet(metrics.validate_list(
+            [{"metric": "clearance", "params": {"peers": True}}]), ctx())
+
+
 # -- map contamination -------------------------------------------------------------
 
 def _grid(fill=0, size=200, res=0.05, origin=(-5.0, -5.0)):
@@ -244,6 +364,103 @@ def test_detection_ignores_actor_out_of_view():
     ms.feed(_dyn(0.0, []))
     v = ms.score()["metrics"][0]["values"]
     assert v["visible_frames"] == 0 and v["recall"] is None and v["frames"] == 1
+
+
+
+# -- prediction --------------------------------------------------------------------
+
+HORIZONS = (0.5, 1.0, 1.5)
+
+
+def _trk(t, tracks, rid="robot_0"):
+    return {"s": "trk", "t": t, "rid": rid, "stamp": t, "tracks": tracks}
+
+
+def _true_track(t, *, tid=7, off=(0.0, 0.0), pred_off=(0.0, 0.0), moving=True):
+    """A track that follows the walker exactly, with perfect constant-velocity
+    look-ahead (the walker is on a straight leg for the whole window)."""
+    a = world.pose_at(WORLD["actors"][0]["path"], t)
+    return {"id": tid, "moving": moving, "hits": 10,
+            "pos": [a["x"] + off[0], a["y"] + off[1]], "vel": [a["vx"], a["vy"]],
+            "cov": [0.01, 0.0, 0.01],
+            "pred": [[h, a["x"] + a["vx"] * h + pred_off[0], a["y"] + a["vy"] * h + pred_off[1]]
+                     for h in HORIZONS]}
+
+
+def _run_prediction(track_fn, t0=1.7, t1=3.0, robots=("robot_0",), peer=None, **params):
+    ms = metrics.MetricSet(metrics.validate_list(
+        [{"metric": "prediction", "params": params}]), ctx(robots=list(robots)))
+    n = 0
+    t = t0
+    while t <= t1 + 1e-9:
+        ev = gt(round(t, 2))
+        if peer is not None:
+            ev["robots"]["robot_1"] = {"x": peer[0], "y": peer[1], "yaw": 0.0}
+        ms.feed(ev)
+        ms.feed(_trk(round(t, 2), track_fn(round(t, 2))))
+        n += 1
+        t += 0.2
+    m = ms.score()["metrics"][0]
+    return m["values"], n
+
+
+def test_prediction_perfect_tracker_scores_zero_error():
+    """Walker at x = -4 + t on y = 0; the robot at (0, -3) faces north and has it in
+    view from t ~ 1.6 (x = -2.4, 38.5 deg off axis) on."""
+    v, n = _run_prediction(lambda t: [_true_track(t, off=(0.1, 0.0))])
+    assert v["frames"] == n and v["visible_frames"] == n and v["assoc_recall"] == 1.0
+    assert v["moving_recall"] == 1.0 and v["moving_visible_frames"] == n
+    assert v["pos_rmse_m"] == pytest.approx(0.1, abs=1e-3)
+    assert v["vel_rmse_mps"] == 0.0
+    assert v["ade_m"] == 0.0 and v["fde_m"] == 0.0 and v["horizon_s"] == 1.5
+    assert v["cv_fde_m"] == 0.0            # straight leg: constant velocity IS the truth
+    assert v["fragmentation"] == 0.0 and v["episodes"] == 1
+    assert v["false_moving_frames"] == 0 and v["false_moving_rate"] == 0.0
+
+
+def test_prediction_offset_lookahead_reads_as_ade_and_fde():
+    v, _ = _run_prediction(lambda t: [_true_track(t, pred_off=(0.0, 0.5))])
+    assert v["ade_m"] == pytest.approx(0.5, abs=1e-3) and v["fde_m"] == pytest.approx(0.5, abs=1e-3)
+    assert v["pos_rmse_m"] == 0.0
+
+
+def test_prediction_counts_missed_moving_and_false_moving():
+    # the tracker sees the walker but never calls it moving
+    v, n = _run_prediction(lambda t: [_true_track(t, moving=False)])
+    assert v["assoc_recall"] == 1.0 and v["moving_recall"] == 0.0
+    # a moving track off in empty floor every frame: all false, unless it sits on a peer robot
+    stray = {"id": 9, "moving": True, "hits": 10, "pos": [2.0, 2.0], "vel": [0.3, 0.0],
+             "cov": None, "pred": []}
+    v, n = _run_prediction(lambda t: [_true_track(t), stray])
+    assert v["false_moving_frames"] == n
+    v, n = _run_prediction(lambda t: [_true_track(t), stray], robots=("robot_0", "robot_1"),
+                           peer=(2.1, 2.0))
+    assert v["false_moving_frames"] == 0
+    # no tracks at all: visible but never associated, and the criterion has data
+    v, n = _run_prediction(lambda t: [])
+    assert v["visible_frames"] == n and v["assoc_recall"] == 0.0 and v["ade_m"] is None
+
+
+def test_prediction_fragmentation_counts_extra_ids_per_episode():
+    v, n = _run_prediction(lambda t: [_true_track(t, tid=1 + int(round(t * 5)) % 3)])
+    assert v["episodes"] == 1 and v["fragmentation"] == 2.0
+
+
+def test_prediction_ignores_actor_out_of_view():
+    # robot facing south: the walker is behind it the whole time
+    ms = metrics.MetricSet(metrics.validate_list([{"metric": "prediction"}]), ctx())
+    for i in range(10):
+        t = 2.0 + i * 0.2
+        ms.feed(gt(t, robot=(0.0, -3.0, -math.pi / 2)))
+        ms.feed(_trk(t, [_true_track(t)]))
+    v = ms.score()["metrics"][0]["values"]
+    assert v["frames"] == 10 and v["visible_frames"] == 0 and v["assoc_recall"] is None
+
+
+def test_prediction_check_context_needs_actors():
+    with pytest.raises(metrics.MetricError, match="no actors"):
+        metrics.MetricSet(metrics.validate_list([{"metric": "prediction"}]),
+                          ctx(world=world.validate({"name": "empty"})))
 
 
 # -- run_stats / coverage / tasks ----------------------------------------------------
