@@ -252,8 +252,8 @@ async function main() {
     await sleep(1500);
 
     // -- nothing running --------------------------------------------------------
-    check(`${vp.label}: no session shows the empty state`, await visible('#empty') && (await $text('#empty-title')) === 'No session running');
-    check(`${vp.label}: header says no session`, (await $text('#s-label')) === 'No session', await $text('#s-label'));
+    check(`${vp.label}: no session shows the empty state`, await visible('#empty') && (await $text('#empty-title')) === 'Simulation not running');
+    check(`${vp.label}: header says the sim is off`, (await $text('#s-label')) === 'Sim not running', await $text('#s-label'));
     check(`${vp.label}: no mode on the session chip without a session`, (await page.eval(`document.getElementById('session-chip').dataset.mode || ''`)) === '');
     check(`${vp.label}: page does not scroll`, await page.eval(`document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight`));
     await shot(`${vp.label}-empty`);
@@ -266,7 +266,7 @@ async function main() {
     await sleep(200);
     await click('#empty-go');
     await sleep(800);
-    check(`${vp.label}: Start a session opens the session panel, on Launch whatever tab was last open`, await visible('#session') && await visible('#launch-form'));
+    check(`${vp.label}: Start simulation opens the session panel, on Launch whatever tab was last open`, await visible('#session') && await visible('#launch-form'));
     check(`${vp.label}: launch form is filled from the API`, await page.eval(`document.querySelectorAll('#lf-preset option').length > 1`));
     check(`${vp.label}: Start is wired (not disabled by a missing console)`, await page.eval(`!document.getElementById('lf-start').disabled`));
     check(`${vp.label}: with no session the panel is just the form`, await visible('#launch-form') && !(await visible('#session-pane')) && !(await visible('#lf-command')) && !(await visible('#lf-summary')));
@@ -876,7 +876,7 @@ async function main() {
     // -- a premapped session in the header -------------------------------------------------------------------
     await page.eval(`window.__fakeSession = { state: 'running', phase: 'running', phase_label: 'running', session_id: 's1', scenario: 'library_localize', config: { map: 'warehouse', mode: 'readonly', robots: 2 } }`);
     await sleep(3400);
-    check(`${vp.label}: running session shows in the header`, (await $text('#s-label')) === 'Session running', await $text('#s-label'));
+    check(`${vp.label}: running session shows in the header`, (await $text('#s-label')) === 'Sim running', await $text('#s-label'));
     check(`${vp.label}: a read-only saved map reads as Premapped on the session chip`, (await page.eval(`document.getElementById('session-chip').title`)).startsWith('Premapped · warehouse'), await page.eval(`document.getElementById('session-chip').title`));
     check(`${vp.label}: no mode tile in the header any more`, !(await page.eval(`!!document.getElementById('mode-tile')`)));
     check(`${vp.label}: the view toggle sits in the header`, await page.eval(`!!document.querySelector('header #view')`));

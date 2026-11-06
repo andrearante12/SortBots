@@ -1709,7 +1709,10 @@
     // Premapped on a saved, read-only map. Changing it means a restart, from Session.
     const mapName = cfg && cfg.map && cfg.map !== "new" ? (cfg.map === "working" ? "last map" : cfg.map) : "";
     const mode = cfg ? (premapped ? "Premapped" : "Mapping") + (mapName ? ` · ${mapName}` : "") : "";
-    const label = !s ? "No session" : { starting: `Starting: ${s.phase_label || "…"}`, running: "Session running", stopping: "Stopping…", failed: "Session failed" }[s.state] || "No session";
+    // What the operator is actually starting and stopping: "session" meant nothing to anyone
+    // looking at an empty page.
+    const stack = platform === "real" ? "Robots" : "Sim";
+    const label = (s && { starting: `Starting: ${s.phase_label || "…"}`, running: `${stack} running`, stopping: "Stopping…", failed: `${stack} failed` }[s.state]) || `${stack} not running`;
     $("#s-label").textContent = controlAvailable ? label : "Session";
     $("#session-chip").dataset.mode = mode;
     $("#session-chip").title = mode ? `${mode}. Start, stop or save the session` : "Start, stop or save the session";
@@ -1775,12 +1778,15 @@
     $("#empty").hidden = !show;
     if (!show) return;
     const starting = !!boot || (session && session.state === "stopping");
+    const real = platform === "real", what = real ? "robot stack" : "simulation";
     $("#empty-title").textContent = boot ? "Starting up" : session && session.state === "stopping" ? "Stopping"
-      : controlAvailable ? "No session running" : "Waiting for the robots";
+      : controlAvailable ? `${real ? "Robot stack" : "Simulation"} not running` : "Waiting for the robots";
     $("#empty-sub").textContent = boot ? boot.text : starting ? "" : controlAvailable
-      ? "Start a session to see your robots and give them tasks."
+      ? `Start the ${what} to see your robots and give them tasks.`
       : "No robot is reporting yet. Check that the robot console is running.";
-    $("#empty-go").hidden = $("#empty-test").hidden = starting || !controlAvailable;
+    $("#empty-go").textContent = `Start ${what}`;
+    $("#empty-go").hidden = starting || !controlAvailable;
+    $("#empty-test").hidden = starting || !controlAvailable || real; // tests drive Isaac
   }
 
   // A session started with demo: true (the Fleet demo preset) runs the task demo by

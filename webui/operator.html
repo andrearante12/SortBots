@@ -571,7 +571,7 @@
   <button class="btn icon" id="hide-right" aria-label="Hide the task list" title="Hide the task list">&#x25E8;</button>
   <button class="btn icon" id="fullscreen" hidden aria-label="Full screen" title="Full screen">&#x26F6;</button>
   <button class="btn icon" id="theme" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
-  <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">No session</span></button>
+  <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">Sim not running</span></button>
   <!-- The fleet gateway's latched alarms (/fleet/task_board): red while a condition
        holds, quiet once it has cleared but nobody has acknowledged it. Hidden at none. -->
   <button class="btn" id="alarms" hidden aria-haspopup="true" title="Fleet alarms"><span class="dot"></span><span id="alarms-label"></span></button>
@@ -632,7 +632,7 @@
     <p id="rc-err" hidden></p>
   </div>
   <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
-  <div id="empty" hidden><b id="empty-title">No session running</b><span class="muted" id="empty-sub">Start a session to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><div class="empty-acts"><button class="btn primary" id="empty-go">Start a session</button><button class="btn" id="empty-test">Run a test</button></div></div>
+  <div id="empty" hidden><b id="empty-title">Simulation not running</b><span class="muted" id="empty-sub">Start the simulation to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><div class="empty-acts"><button class="btn primary" id="empty-go">Start simulation</button><button class="btn" id="empty-test">Run a test</button></div></div>
   <div id="toast" role="status"></div>
 </main>
 
