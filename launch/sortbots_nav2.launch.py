@@ -21,7 +21,7 @@ from a shell with system ROS 2 Jazzy sourced (NOT the Isaac venv):
     source /opt/ros/jazzy/setup.bash
     ros2 launch ./launch/sortbots_nav2.launch.py robot_id:=robot_0
 
-Requires (installed by the README.md §2 ROS 2 step):
+Requires (installed by the docs/setup.md ROS 2 step):
     sudo apt install ros-jazzy-navigation2 ros-jazzy-nav2-bringup \\
         ros-jazzy-depth-image-proc
 """

@@ -1,4 +1,4 @@
-# Gaussian-splat reconstruction (splat/, scripts/splat.sh, README.md §8).
+# Gaussian-splat reconstruction (splat/, scripts/splat.sh, docs/real-robot.md).
 # Read by splat/worker.py (and handed to splat/train.py) on the WORKSTATION, and
 # by webui/serve.py on whichever host serves the dashboard (only `worker_url`).
 

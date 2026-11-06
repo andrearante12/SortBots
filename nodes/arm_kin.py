@@ -223,7 +223,7 @@ class ArmKin:
 # downward). Each must still leave the capture rule satisfied once the azimuth error
 # is added, so the cap is CAPTURE_DEG minus ANGLE_MARGIN_DEG. A plate low in the
 # envelope needs the tilt: at nominal reach a horizontal approach cannot get below
-# ~0.70 m (base z), a -20 degree one reaches ~0.67 (README.md §13 has the map).
+# ~0.70 m (base z), a -20 degree one reaches ~0.67 (docs/manipulation.md has the map).
 ELEVATIONS_DEG = (0, -8, 8, -14, 14, -20, 20)
 ANGLE_MARGIN_DEG = 8.0
 

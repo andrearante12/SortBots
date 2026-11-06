@@ -1,5 +1,5 @@
 # A test case: one scored, repeatable question (simtest/spec.py has the full
-# schema; README.md §9 the how-to).
+# schema; docs/testing.md the how-to).
 #
 # Shelves are not all at one height. The arm's reach envelope is a band (TCP 0.65 to
 # 1.29 m above the floor), and the lowest plates only work with the magnet tilted down

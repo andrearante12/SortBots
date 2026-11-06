@@ -1,5 +1,5 @@
 # nodes/magnet_pick.py / nodes/pick_planner.py tuning. Every key overrides
-# pick_planner.DEFAULTS; README.md §13 explains the pick these numbers shape.
+# pick_planner.DEFAULTS; docs/manipulation.md explains the pick these numbers shape.
 
 # How often the planner is ticked and the arm/base commands refreshed, on the steady
 # clock. The planner's own deadlines are in SIM seconds and only move when ground truth

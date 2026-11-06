@@ -9,5 +9,5 @@
 
 Everything except simtest.probe is pure python + PyYAML (and numpy for grid
 metrics), so it is importable from Isaac's venv, from webui/session.py's
-ROS-free environment, and from the offline tests. See README.md §9.
+ROS-free environment, and from the offline tests. See docs/testing.md.
 """

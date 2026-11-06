@@ -217,7 +217,7 @@ def _make_per_robot_actions(
 
         # Obstacles in front of the robot, from geometry rather than frame
         # differencing: clusters in base_link plus a `moving` flag from odom
-        # tracks (README.md §5). Every platform — it reads raw
+        # tracks (docs/architecture.md). Every platform — it reads raw
         # camera/depth, so it doesn't depend on the depth filter below, and the
         # sensors view draws its boxes over the head camera.
         actions.append(ExecuteProcess(
@@ -445,7 +445,7 @@ def _make_per_robot_actions(
     # /fleet/task_board. Once per bringup, like the operator's laptop it stands
     # in for. Sim only: a real robot's bringup is one of several on the mesh,
     # and each starting a gateway would put several wire-id-0 senders on
-    # /fleet/tasks. The real gateway is the laptop (README.md §10).
+    # /fleet/tasks. The real gateway is the laptop (docs/commsim.md).
     if platform != "real":
         actions.append(ExecuteProcess(
             cmd=["python3", os.path.join(REPO_ROOT, "nodes", "fleet_tasks.py"), "--gateway",

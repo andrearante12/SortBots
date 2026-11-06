@@ -464,7 +464,7 @@ async function main() {
     await sleep(100);
     const more = await $text('#tp-list .tp-test[data-name="crossing_yield"] .tp-more');
     // crossing_yield localizes on the fleet_warehouse_test library map, which is local
-    // to the machines that recorded it (not in git, README.md §9). Without it the
+    // to the machines that recorded it (not in git, docs/testing.md). Without it the
     // row must say why it can't run, not what it checks; both are the page working.
     if (fs.existsSync(path.join(REPO_ROOT, 'maps', 'fleet_warehouse_test', 'map.json'))) {
       check(`${vp.label}: clicking a row shows what it checks`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Passes when/.test(more) && /recall ≥ 0.3/.test(more), more.slice(0, 160));

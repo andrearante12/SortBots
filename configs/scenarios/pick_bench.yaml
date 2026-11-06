@@ -14,7 +14,7 @@ description: >
 
   This is the scenario the pick tests in configs/tests/ build on. It starts on a
   fresh map and sends no Nav2 goals: the pick controller docks with its own
-  localization, so a pick needs nothing but the camera and the arm (README.md §13).
+  localization, so a pick needs nothing but the camera and the arm (docs/manipulation.md).
 
 status: ready
 

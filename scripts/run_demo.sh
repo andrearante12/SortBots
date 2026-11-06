@@ -42,7 +42,7 @@
 # --perception camera|oracle picks what the magnet pick controller (nodes/magnet_pick.py)
 # aims at: the head camera's plate detections (default), or the simulator's ground
 # truth. Oracle is a sim-only diagnostic: run a failing pick test both ways to tell a
-# perception failure from a dock or arm one (README.md §13).
+# perception failure from a dock or arm one (docs/manipulation.md).
 #
 # Default is --robots 2: SortBots is a fleet project, so the plain demo comes
 # up as a collaborative fleet. Pass --robots 1 for the single-robot case

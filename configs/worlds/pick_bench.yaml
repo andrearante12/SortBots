@@ -1,5 +1,5 @@
 # A world layout (simtest/world.py has the full schema). See aisle_crossing.yaml
-# for how these coordinates were chosen; README.md §13 for the pick model.
+# for how these coordinates were chosen; docs/manipulation.md for the pick model.
 #
 # Packages are graspable: nothing collides with them (the magnet SNAPS them,
 # simtest/magnet.py), they stand on the floor or on a prop whose top is exactly

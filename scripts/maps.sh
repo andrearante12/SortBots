@@ -3,7 +3,7 @@
 # saved, and check that an entry is still intact.
 #
 # A library map lets a demo or test run start from an already-explored
-# warehouse instead of re-exploring for twenty minutes. See README.md §6 for
+# warehouse instead of re-exploring for twenty minutes. See docs/running.md for
 # the layout and scripts/maps_lib.py for the manifest schema.
 #
 # Usage:

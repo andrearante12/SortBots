@@ -7,7 +7,7 @@ color, one camera_info) plus the static TF base_link -> optical frame, so the
 real-robot SLAM launch runs on it unchanged.
 
 Stamps are wall-clock "now" at publish time, as on the Jetson (the V4L2
-driver stamps with system time, README.md §7). Each published stamp is
+driver stamps with system time, docs/real-robot.md). Each published stamp is
 written next to its dataset timestamp in --stamps, so poses can be scored
 against the sequence's ground truth afterwards (score.py).
 

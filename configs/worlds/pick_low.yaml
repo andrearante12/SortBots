@@ -1,6 +1,6 @@
 # A world layout (simtest/world.py has the full schema; pick_bench.yaml explains
 # packages). A NEGATIVE case: the plate is below the arm's reach, so a pick must
-# fail cleanly (README.md §13).
+# fail cleanly (docs/manipulation.md).
 
 name: pick_low
 title: Package on a low deck (out of reach)

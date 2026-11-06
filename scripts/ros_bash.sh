@@ -27,7 +27,7 @@ fi
 
 if ! command -v distrobox >/dev/null 2>&1; then
   echo "ros_bash: $ROS_SETUP not found and distrobox isn't installed —" >&2
-  echo "          install ROS 2 Jazzy, or set up the '$BOX' box (README.md §2)." >&2
+  echo "          install ROS 2 Jazzy, or set up the '$BOX' box (docs/setup.md)." >&2
   exit 127
 fi
 

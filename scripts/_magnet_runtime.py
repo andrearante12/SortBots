@@ -10,7 +10,7 @@ The grasp is simtest.magnet.MagnetSim: energized (pick_cmd "attach") and within 
 range of a package's plate, the package is SNAPPED onto the magnet and rides the arm;
 de-energized ("detach"), it drops straight onto whatever is under it. No contact, no
 compliance, no slip, no mass: a model for writing and scoring pick tests, not for
-training a grasp (README.md §13).
+training a grasp (docs/manipulation.md).
 
 WHERE THE MAGNET IS. Computed, not read. Forward kinematics (nodes/arm_kin.py, the chain
 the pick controller solves against) from the SIMULATED JOINT POSITIONS, with the base

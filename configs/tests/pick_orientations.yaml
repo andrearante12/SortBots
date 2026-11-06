@@ -1,5 +1,5 @@
 # A test case: one scored, repeatable question (simtest/spec.py has the full
-# schema; README.md §9 the how-to).
+# schema; docs/testing.md the how-to).
 #
 # The requirement this exists for: pick a package reliably whichever way its magnet
 # plate faces. The arm approaches only along the line from its shoulder, so the base

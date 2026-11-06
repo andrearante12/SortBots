@@ -23,7 +23,7 @@ smoke:
 
 ci: test smoke
 
-# ---- CAD (hardware/) — its own venv; not part of `ci`, see README.md §12
+# ---- CAD (hardware/) — its own venv; not part of `ci`, see docs/manipulation.md
 CAD_PY := hardware/.venv/bin/python
 CAD_DIR := hardware/magnet_effector
 

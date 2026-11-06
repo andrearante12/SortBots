@@ -9,7 +9,7 @@ zenoh-bridge-ros2dds config that puts the robots' /fleet/* topics on the mesh.
 
 Same fleet list, timer check and isolation check as the emulation
 (core/fleet.py, core/timers.py), so the hardware runs the configuration the
-simulation measured, not a hand-copied one. Walkthrough: README.md §10.
+simulation measured, not a hand-copied one. Walkthrough: docs/commsim.md.
 
 Each router: 802.11s mesh point per band (mesh_fwding 0, SAE), batman-adv IV
 over them as bat0, bat0 bridged with the LAN port the host plugs into.
@@ -61,7 +61,7 @@ def check_addresses(fleet: list[F.Node], cfg: dict) -> None:
 def router_script(node: F.Node, fleet: list[F.Node], cfg: dict, key: str, sources: str) -> str:
     """POSIX sh (OpenWrt ash) run once on a freshly reset router. Pure uci:
     radios are found by band, the LAN bridge by name, so the same script works
-    on any router model that meets the minimum in README.md §10."""
+    on any router model that meets the minimum in docs/commsim.md."""
     net = ipaddress.ip_network(cfg["fleet"]["subnet"])
     hw, radio, bat = cfg["hardware"], cfg["radio"], cfg["batman"]
     q = shlex.quote
