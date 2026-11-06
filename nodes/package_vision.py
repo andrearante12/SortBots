@@ -243,13 +243,21 @@ def detect_markers(rgb: np.ndarray, depth_m: np.ndarray, K, cfg: dict | None = N
     # by default the detector calls that one marker and keeps the OUTER square, which then
     # decodes to nothing. A hard-edged image hides this; any antialiased one shows it.
     params.minMarkerDistanceRate = 0.01
-    params.cornerRefinementMethod = a.CORNER_REFINE_SUBPIX   # the no-depth fallback ranges off these
+    # The no-depth fallback ranges off these corners, so they are refined to sub-pixel HERE
+    # rather than by the detector's CORNER_REFINE_SUBPIX. In OpenCV >= 4.7 that setting left
+    # the corners exactly where the contour put them (2026-11-06, OpenCV 4.14 and 5.0): a
+    # 43 px marker measured 40.0 px, so the fallback ranged it 8% long, 5.7 cm at 0.7 m.
+    # cornerSubPix on the same raw corners gives 45.4 px, what 4.6's refinement gave.
+    params.cornerRefinementMethod = a.CORNER_REFINE_NONE
     if new_api:
         corners, ids, _ = a.ArucoDetector(table, params).detectMarkers(gray)
     else:
         corners, ids, _ = a.detectMarkers(gray, table, parameters=params)
     if ids is None:
         return []
+    subpix = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.01)
+    corners = [cv2.cornerSubPix(gray, np.ascontiguousarray(q.reshape(-1, 1, 2), dtype=np.float32),
+                                (5, 5), (-1, -1), subpix).reshape(1, 4, 2) for q in corners]
     fx, fy, cx, cy = K
     camera = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
     h = c["marker_m"] / 2
