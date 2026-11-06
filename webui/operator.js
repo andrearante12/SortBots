@@ -944,6 +944,15 @@
         <button class="btn small" data-ack="${esc(a.id)}" title="Acknowledge. The alarm leaves once its condition has also cleared">Acknowledge</button></li>`).join("");
   }
   $("#alarms").addEventListener("click", () => { $("#alarm-pop").hidden = !$("#alarm-pop").hidden; });
+  // The display buttons' popover, below 1600 px (operator.html). It stays open through a
+  // click on one of them, so hiding both side bars is one trip.
+  const setViewOpts = (open) => {
+    $("#view-opts").classList.toggle("open", open);
+    $("#view-more").setAttribute("aria-expanded", String(open));
+  };
+  $("#view-more").addEventListener("click", () => setViewOpts(!$("#view-opts").classList.contains("open")));
+  document.addEventListener("click", (e) => { if (!e.target.closest("#view-box")) setViewOpts(false); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") setViewOpts(false); });
   $("#alarm-pop").addEventListener("click", (e) => {
     const id = e.target.dataset.ack;
     if (id !== undefined) publishString("/fleet/alarm_ack", JSON.stringify({ id: Number(id) }));

@@ -91,6 +91,21 @@
   #mode-strip { overflow-x: auto; scrollbar-width: none; }
   #mode-strip::-webkit-scrollbar { display: none; }
   @media (max-width: 1480px) { h1 { width: auto; } #coverage { display: none !important; } }
+  /* The four display buttons are the least used things up here, so below 1600 px they fold
+     behind one: the strip scrolled instead, and Comms went off its end (2026-11-06). The
+     tools keep their words, see below. display: contents leaves them plain
+     header buttons where there's room. */
+  #view-box, #view-opts { display: contents; }
+  #view-more { display: none; }
+  #view-opts .btn { flex: none; }
+  @media (max-width: 1600px) {
+    header { gap: 12px; }
+    #view-box { display: block; position: relative; flex: none; }
+    #view-more { display: grid; place-items: center; height: 100%; }
+    #view-opts { display: none; position: absolute; top: calc(100% + 8px); right: 0; z-index: 6; gap: 6px; padding: 6px;
+                 background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 24px var(--shadow); }
+    #view-opts.open { display: flex; }
+  }
   /* Symbol plus word: the shapes alone (arrow, diamond, triangle) didn't say what they do. */
   #tools button { display: inline-flex; align-items: center; gap: 6px; }
   #tools button .ic { font-size: .9em; }
@@ -98,7 +113,7 @@
   header .spacer { flex: 1; }
   .btn.icon { width: 34px; padding: 6px 0; line-height: 1; font-size: 1rem; }
   #session-chip { display: inline-flex; align-items: center; gap: 8px; }
-  #build { flex: 0 1 auto; min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  #build { flex: 0 1000 auto; min-width: 72px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
            font: 500 .76rem ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
            padding: 3px 8px; border: 1px solid var(--line); border-radius: 99px; margin-left: -6px; cursor: default; }
   #build.stale { color: var(--warnink); background: var(--warnbg); border-color: var(--warnline); }
@@ -567,10 +582,15 @@
 <div id="test-chip" hidden title="A scored test is driving the sim"><span class="tp-dot"></span><span class="k">Test</span>
     <button type="button" class="name" id="tc-name" title="Open the Tests tab"></button><span id="tc-time" class="muted"></span>
     <button type="button" class="btn small stop" id="tc-cancel">Stop test</button></div>
-  <button class="btn icon" id="hide-left" aria-label="Hide the robot list" title="Hide the robot list">&#x25E7;</button>
-  <button class="btn icon" id="hide-right" aria-label="Hide the task list" title="Hide the task list">&#x25E8;</button>
-  <button class="btn icon" id="fullscreen" hidden aria-label="Full screen" title="Full screen">&#x26F6;</button>
-  <button class="btn icon" id="theme" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
+  <div id="view-box">
+    <button class="btn icon" id="view-more" aria-label="View options" aria-haspopup="true" aria-expanded="false" title="View options"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><g fill="currentColor"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></g></svg></button>
+    <div id="view-opts">
+      <button class="btn icon" id="hide-left" aria-label="Hide the robot list" title="Hide the robot list">&#x25E7;</button>
+      <button class="btn icon" id="hide-right" aria-label="Hide the task list" title="Hide the task list">&#x25E8;</button>
+      <button class="btn icon" id="fullscreen" hidden aria-label="Full screen" title="Full screen">&#x26F6;</button>
+      <button class="btn icon" id="theme" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
+    </div>
+  </div>
   <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">Sim not running</span></button>
   <!-- The fleet gateway's latched alarms (/fleet/task_board): red while a condition
        holds, quiet once it has cleared but nobody has acknowledged it. Hidden at none. -->

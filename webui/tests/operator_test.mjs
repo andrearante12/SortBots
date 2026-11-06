@@ -256,6 +256,14 @@ async function main() {
     check(`${vp.label}: header says the sim is off`, (await $text('#s-label')) === 'Sim not running', await $text('#s-label'));
     check(`${vp.label}: no mode on the session chip without a session`, (await page.eval(`document.getElementById('session-chip').dataset.mode || ''`)) === '');
     check(`${vp.label}: page does not scroll`, await page.eval(`document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight`));
+    check(`${vp.label}: every map control fits the top bar, Comms included`,
+      await page.eval(`document.getElementById('comms-toggle').getBoundingClientRect().right <= document.getElementById('mode-strip').getBoundingClientRect().right + 1`));
+    if (await visible('#view-more')) {
+      await click('#view-more');
+      check(`${vp.label}: the view options open from the top bar`, await page.eval(`getComputedStyle(document.getElementById('view-opts')).display === 'flex'`));
+      await click('#view-more');
+      check(`${vp.label}: ... and close again`, await page.eval(`getComputedStyle(document.getElementById('view-opts')).display === 'none'`));
+    }
     await shot(`${vp.label}-empty`);
 
     // -- session panel (scenarios.js, reused) ------------------------------------
