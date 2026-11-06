@@ -8,10 +8,11 @@ turn that into a repeatable, scored test. For launching the sim at all, see
 scripts/simtest.py list                     # the test cases and what they run
 scripts/simtest.py show crossing_yield      # the resolved plan, criteria, streams
 scripts/simtest.py run crossing_yield       # launch, drive, score, stop (minutes)
-scripts/simtest.py run crossing_yield --repeats 3 --set overrides.world=aisle_head_on
+scripts/simtest.py run crossing_yield --variant forklift --repeats 3
 scripts/simtest.py rescore data/simtests/<dir>   # re-score recorded runs, no sim
 scripts/simtest.py report DIR_A DIR_B       # compare two result dirs side by side
 scripts/simtest.py metrics                  # the metric catalog
+scripts/simtest.py assets                   # every usd asset the worlds name is on the asset root
 ```
 
 Or from the dashboard: the **tests** tab lists the test cases, runs one, and
@@ -38,28 +39,40 @@ venv, the dashboard and the offline tests) plus `scripts/simtest.py`.
 ## Worlds
 
 ```yaml
-name: aisle_crossing
+name: person_crossing
 scenes: [nvidia]            # which warehouse the coordinates were laid out for
 autostart: true             # actors walk from sim start (live demos); tests reset them
 props:                      # static colliders: a robot that drives into one stops
   - {id: crate_0, shape: box, size: [0.8, 0.6, 0.9], pose: [-9.0, 5.2, 0.0]}
   - {id: barrel_0, shape: cylinder, radius: 0.3, height: 0.9, pose: [-10.0, 1.2]}
   - {id: pallet, shape: usd, ref: Isaac/Props/Pallet/pallet.usd, pose: [-7, 0, 0],
-     footprint: [1.2, 1.0]}  # usd props: the metrics need the floor footprint
+     footprint: [1.2, 1.0]}  # usd items: the metrics need the floor footprint (or radius)
+  - {id: parked, preset: forklift, pose: [-13, 2, 1.57], collider: false}
 actors:                     # scripted movers: visual only, fixed paths
-  - id: walker_0
-    shape: cylinder         # or box with size: [x, y, z]
-    radius: 0.25
-    height: 1.75
+  - id: person_0
+    preset: person          # a real asset + its footprint; or shape: cylinder | box | usd
     path:
       waypoints: [[-11.0, 6.5], [-6.0, 6.5]]
-      speed_mps: 1.0
+      speed_mps: 1.2
       mode: pingpong        # once | loop | pingpong
       start_at_s: 0.0       # world-clock seconds
       dwell_s: 1.0          # pause at every waypoint
+  - id: forklift_0
+    preset: forklift
+    footprint: [2.8, 1.3]   # any preset key can be overridden
+    path: {waypoints: [[-13.5, 5.0], [-6.0, 5.0]], speed_mps: 2.0}
 ```
 
-Full schema and validation: `simtest/world.py`. Coordinates are the **map
+Full schema and validation: `simtest/world.py`. **Presets** (`PRESETS`
+there) are the obstacles a warehouse actually has — `person`, `worker`,
+`forklift`, `amr` (an iw_hub), `amr_tall` (a Nova Carter) — each an NVIDIA
+asset reference plus the floor footprint and height the metrics score
+against. The asset is what the cameras see; the footprint is what clearance
+and reaction measure. Without the asset server (`scripts/simtest.py assets`
+checks every reference in seconds) an item degrades to a primitive of the
+same footprint, so a run still scores the same geometry. `yaw_offset_deg`
+turns an asset whose model doesn't face +x, `z` lifts one whose origin isn't
+on the floor. Coordinates are the **map
 frame, which is Isaac's world frame** (every robot's `map -> <rid>/map` anchor
 is its `configs/robots.yaml` spawn), so a point in a world file, on the
 dashboard map and in `/sim/ground_truth` is the same point. The committed
@@ -67,10 +80,19 @@ worlds were laid out against a saved fleet grid of the NVIDIA warehouse;
 `tests/simtest_world_test.py` checks that no actor walks through its own
 world's props.
 
+The committed worlds: `person_crossing` (a person across the aisle mouth),
+`person_head_on` and `amr_head_on` (a person, or a scripted AMR, down the
+west half of robot_0's aisle), `person_step_out` (a person steps out from
+behind crates onto the route and stops), `forklift_crossing` (2 m/s across
+the apron) and `warehouse_mixed` (real props, two people and a forklift).
+
 **Actors are not colliders**, deliberately: a kinematic body shoving the
 robot's articulation around would make every run's trajectory depend on the
 contact solver. They still render in RGB and depth, which is all perception
 sees. Contact is scored from ground truth instead, by the `clearance` metric.
+A referenced asset's own physics (the forklift and the AMRs ship colliders,
+rigid bodies, joints, even sensors and graphs) is disabled when it is
+spawned as an actor, or as a prop with `collider: false`.
 
 **Actors never react.** That is what makes a run repeatable, and it means a
 robot that stops correctly can still be walked into. Lay paths out so a robot
@@ -115,7 +137,7 @@ ros2 topic pub --once /sim/world_cmd std_msgs/String '{data: "{\"cmd\": \"restar
 ```yaml
 name: crossing_yield
 scenario: moving_obstacles_mapped    # localizes on a saved map (see below)
-overrides: {world: aisle_crossing}   # only keys the scenario lists in overrides:
+overrides: {world: person_crossing}  # only keys the scenario lists in overrides:
 warmup_s: 5                          # sim-s after the stack is ready, before t0
 goals:                               # per robot, in order
   - robot: robot_0
@@ -134,12 +156,14 @@ metrics:
   - metric: clearance                # the same metric twice needs an id
     id: clearance_props
     params: {actors: [], props: true}
+  - metric: reaction                 # objective scores, not just pass/fail:
+    pass: {encounters: {gte: 1}, max_time_to_slow_s: {lte: 3.0}}
   - metric: run_stats                # no `pass:` = reported, not judged
 repeats: 3
 pass_rate: 1.0                       # fraction of repeats per variant that must pass
 variants:                            # the same question under other conditions
-  - {label: head_on, set: {overrides.world: aisle_head_on}}
-record: [dyn]                        # extra event streams to keep for rescoring
+  - {label: forklift, set: {overrides.world: forklift_crossing}}
+record: [dyn, trk]                   # extra event streams to keep for rescoring
 ```
 
 Full schema: `simtest/spec.py`. Validation is complete before anything
@@ -154,7 +178,8 @@ Once the render knobs (`render_every`, `lite_render` — on `local/integration`)
 are merged, add them to the moving_obstacles scenarios' `overrides:` and pass
 `--set overrides.render_every=2 --set overrides.lite_render=true` on a
 GPU-bound laptop: the live runs on 2026-10-21 went at ~0.9–1.1x real time
-that way, so `crossing_yield` takes ~2 minutes wall and `cluttered_route` ~4.
+that way, so `crossing_yield` takes ~2 minutes wall per variant and
+`mixed_route` ~4.
 
 ### Why avoidance tests run on a saved map
 
@@ -233,15 +258,28 @@ view didn't test what it says.
 
 | metric | reads | scores |
 |---|---|---|
-| `clearance` | gt | min footprint-to-footprint gap robot↔actor (or prop), contacts, near-miss time |
-| `goals` | goal, gt | Nav2 outcome, time to goal, TRUE final position error, distance driven |
+| `clearance` | gt | min footprint-to-footprint gap robot↔actor (or prop, or `peers: true` for robot↔robot), contacts, near-miss time |
+| `reaction` | gt | per robot–actor **encounter** (actor within 4 m, ahead, on a constant-velocity collision course): time to halve speed, time to stop, braking distance, hardest deceleration, min time-to-collision, time spent yielding, closest gap |
+| `goals` | goal, gt | Nav2 outcome, time to goal, TRUE final position error, distance driven, detour ratio (driven / straight line), mean speed |
 | `map_contamination` | map | occupied `/map` cells on floor only actors walk on — movers leaking into SLAM |
 | `detection` | dyn, gt | `dynamic_obstacles` recall vs ground truth, false-positive frames, latency to first detection |
+| `prediction` | trk, gt | the Kalman tracker: association and moving recall, position/velocity RMSE, look-ahead error at each horizon (ADE/FDE) against the analytic actor path, fragmentation, false-moving frames |
 | `coverage` | map, end | free / known area, mapping rate |
 | `tasks` | dispatch, task | task_manager delivery outcomes and durations |
 | `run_stats` | start, end, gt | sim/wall time, real-time factor, stop reason, ground-truth rate |
 
 `scripts/simtest.py metrics` prints every param and value with its meaning.
+
+`reaction` is the objective half of an avoidance test: `clearance` says
+whether anything touched, `reaction` says how the robot behaved — did it
+slow within 2 s of a person stepping out, how far did it travel braking, how
+close in time did the two come. Judge the values that are the point of the
+test and leave the rest reported: a clean head-on pass need not slow at all,
+so `head_on_pass` judges detour and gap, not reaction time. `prediction`
+scores look-ahead against *where the actor truly is h seconds later*, which
+the analytic paths make exact; `cv_fde_m` beside it is what perfect
+constant-velocity extrapolation of the true state scores, the floor a
+predictor on fixed paths approaches.
 
 ### Changing how a metric is calculated
 
@@ -269,7 +307,9 @@ their events, or rescoring stops meaning anything.
 
 Streams always recorded: `start end gt goal dispatch task explore map`
 (`map` every 5 sim-s plus the last). `dyn` (dynamic obstacle points in the map
-frame, ≤5 Hz, 0.1 m voxels) only when a metric needs it or `record: [dyn]`.
+frame, ≤5 Hz, 0.1 m voxels) and `trk` (obstacle tracks with velocity,
+covariance and look-ahead points, in the map frame, ≤5 Hz) only when a metric
+needs them or `record: [dyn, trk]`.
 
 ## Testing the test layer
 
@@ -279,7 +319,16 @@ All offline, seconds:
 /usr/bin/python3 -m pytest tests/simtest_world_test.py tests/simtest_metrics_test.py tests/simtest_spec_test.py
 node webui/tests/operator_test.mjs        # operator view: world overlay, tests tab, launch form
 scripts/simtest.py validate               # every committed test case resolves
+scripts/simtest.py assets                 # every usd asset the worlds name is on the asset root
 ```
+
+The suite: `pipeline_smoke` (harness), `crossing_yield` (person / forklift
+across the route), `head_on_pass` (person / AMR down the aisle),
+`step_out_stop` (braking), `mixed_route` (props + people + forklift, two
+legs), `peer_crossing` (two real Nav2 robots, plus the person),
+`fleet_traffic` (exploration under traffic), `fleet_scale_smoke`. Compare a
+run with and without prediction feeding Nav2 by flipping `predict_cloud` in
+`configs/obstacle_detector.yaml` and `scripts/simtest.py report A B`.
 
 `pipeline_smoke` is the cheapest live end-to-end check of the harness itself
 (one short goal, ground truth rate); run it after touching the probe, the
@@ -292,6 +341,13 @@ world runtime or the runner, before trusting a long test's verdict.
   bound when paths pass behind racks.
 - Every repeat restarts Isaac (robots back at spawn, fresh map). That is the
   price of identical starting conditions; a run is minutes.
-- Actors are cylinders and boxes. An animated character
-  (omni.anim.people) would matter for an RGB person detector, not for the
-  depth-based dynamic obstacle filter this was built to test.
+- Characters stand in their bind pose: `omni.anim.people` isn't in the pip
+  install, so a `person` walks without moving its legs. Depth sees a
+  person-shaped, person-sized body, which is what the geometric detector and
+  the frame-difference filter need; an RGB person detector would want the
+  animation.
+- Actors turn instantly at waypoints (the yaw follows the leg). A forklift
+  pivots on the spot where a real one would swing; lay its corners clear of
+  anything that matters.
+- `peer_crossing` holds robot_0 back by a fixed 25 s to meet robot_1 on the
+  apron; a slower or faster Nav2 start moves the meeting.

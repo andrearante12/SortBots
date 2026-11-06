@@ -76,13 +76,29 @@ flowchart LR
 6. **Stats.** Each cluster gets its centroid, axis-aligned bbox in base_link,
    height above the floor, range to its *nearest* point, bearing, and image box
    `uv = [u0, v0, u1, v1]`. Clusters are listed nearest first.
-7. **Tracking.** Greedy nearest-neighbour association on centroids in
-   `<id>/odom`, gated by `track_gate_m` around each track's predicted position.
-   Velocity is an EMA of frame-to-frame displacement. Times are message stamps,
-   so sim time works. A track is **`moving`** after `track_min_hits` frames at
-   ≥ `moving_speed_mps`, and only while its cluster passes `can_move`. If odom
-   TF is missing, tracking falls back to base_link and logs a warning once:
-   `moving` is then only meaningful while the robot stands still.
+7. **Tracking.** A constant-velocity Kalman filter per track (state
+   `x y vx vy`) on centroids in `<id>/odom`. A detection joins the track whose
+   predicted position it is closest to by Mahalanobis distance, inside
+   `kf_gate_chi2` *and* `track_gate_m`. Process noise is `kf_accel_sigma`
+   (how much a mover may change velocity per second), measurement noise
+   `kf_meas_sigma_m`. Times are message stamps, so sim time works. A track
+   is **`moving`** after `track_min_hits` frames at ≥ `moving_speed_mps`, and
+   only while its cluster passes `can_move`; a cluster that fails `can_move`
+   still updates the track's position but has its velocity zeroed and its
+   velocity uncertainty reset. If odom TF is missing, tracking falls back to
+   base_link and logs a warning once: `moving` is then only meaningful while
+   the robot stands still.
+8. **Prediction.** Each track's state extrapolated `pred_horizons_s` ahead
+   (`pred` in the JSON, with the position covariance `cov`), and — for moving
+   tracks — the cluster's footprint swept `pred_cloud_horizon_s` along its
+   velocity into `/<id>/predicted_obstacles`, a PointCloud2 in base_link that
+   the LOCAL costmap reads as a third observation source
+   (`configs/nav2_params.yaml`, `predicted_scan`). So the controller routes
+   behind a walker rather than through the floor they are about to occupy. It
+   is a 1–2 s claim, not a route: the marks are short, local-costmap only, and
+   the collision monitor on `depth_static` stays the safety floor. The cloud
+   is published every frame and is empty when nothing moves, which is what
+   retires the previous ribbon (the source keeps only the latest message).
 
 ### When centroid motion is trusted (`can_move`)
 
@@ -97,7 +113,7 @@ cluster that fails any of these rules gets its velocity zeroed instead of fed:
 | not `clipped` at the far end (farthest point within `range_margin_m` of `max_range_m`) | an upright the range crop cuts, revealed as the robot drives toward it | (2-robot run: 20 / 331 while driving) |
 | `max[z] - min[z] ≥ min_moving_z_extent_m` | a shelf deck near camera height, seen edge-on as a ~16 px line | 1 / 164 |
 | `track_min_hits` 3 → 5 | a thin upright blipping for one frame | **0 / 162** |
-| `extent_m ≤ max_moving_extent_m` | shelving and walls, along their length | (always on) |
+| `extent_m ≤ max_moving_extent_m`, or ≤ `max_large_mover_extent_m` when `max[z] - min[z] ≥ large_mover_min_z_m` | shelving and walls, along their length — but not a forklift, which is long *and* tall (large-mover rule, 2026-11-04; re-measure this table with it on) | (always on) |
 | raw speed > `max_obstacle_speed_mps` restarts the track | a cluster splitting or merging, so its centroid jumps | (2-robot run: 1 / 312 while turning) |
 
 These numbers come from sim on 2026-10-22. The first rows are from
@@ -132,6 +148,8 @@ and two message types on one topic break both.
   "floor_z": 0.01, "w": 848, "h": 480, "count": 2, "moving": 1,
   "obstacles": [{
     "track_id": 7, "moving": true, "speed_mps": 1.1, "vel": [0.0, -1.1], "hits": 9,
+    "pos_w": [3.1, 1.2], "cov": [0.004, 0.0, 0.004],
+    "pred": [[0.5, 3.1, 0.65], [1.0, 3.1, 0.1], [1.5, 3.1, -0.45]],
     "centroid": [2.2, 0.4, 0.8], "min": [2.1, 0.2, 0.1], "max": [2.3, 0.6, 1.7],
     "extent_m": 0.4, "height_m": 1.7, "range_m": 2.1, "bearing_deg": 10.3,
     "n": 900, "uv": [200, 100, 320, 460]
@@ -139,14 +157,22 @@ and two message types on one topic break both.
 }
 ```
 
-`vel` is in `world_frame`, and positions are in `frame`. `world_frame` is
-`null` when tracking fell back to base_link.
+`vel`, `pos_w` (the filter's position), `cov` (`[sxx, sxy, syy]`) and `pred`
+(`[horizon_s, x, y]` per entry of `pred_horizons_s`) are in `world_frame`;
+`centroid`, `min`, `max` are in `frame`. `world_frame` is `null` when tracking
+fell back to base_link.
+
+| Topic | Type | Frame | For |
+|---|---|---|---|
+| `/<id>/predicted_obstacles` | `sensor_msgs/PointCloud2` (BEST_EFFORT) | `<id>/base_link` | the local costmap's `predicted_scan` source: moving tracks' footprints swept `pred_cloud_horizon_s` ahead; empty when nothing moves |
 
 ## Seeing it
 
 - **Operator view** (`operator.html`, the default page):
   - **Map.** Every *moving* obstacle gets a red marker with a halo, an arrow
-    showing where it will be in one second, and a "moving · 1.2 m/s" label.
+    showing where it will be in one second, a dotted line through the
+    Kalman look-ahead points with a faint 2σ ellipse at the last one, and a
+    "moving · 1.2 m/s" label.
     Static clusters are left off, since they are mostly shelving the map
     already shows. Positions come in base_link and are placed in `map` with the
     robot's `/tf` pose when they arrive. A robot whose detector goes quiet for
@@ -182,15 +208,22 @@ and `webui/tests/operator_test.mjs` covers the drawing.
 
 ## Verification status
 
-- **Offline.** `tests/obstacle_detector_test.py` (18 tests), the obstacle checks
-  in `webui/tests/operator_test.mjs` (11 per viewport).
+- **Offline.** `tests/obstacle_detector_test.py` (25 tests: detection, the
+  `can_move` rules, the Kalman tracker's convergence, gating and prediction,
+  the predicted cloud), the obstacle checks in `webui/tests/operator_test.mjs`
+  (13 per viewport), and `simtest/metrics/prediction.py` against synthetic
+  tracks (`tests/simtest_metrics_test.py`).
+- **Scored in sim.** `configs/tests/` — `crossing_yield`, `head_on_pass`,
+  `step_out_stop` — record the `trk` stream and report the `prediction`
+  metric; `docs/testing.md`.
 - **Live in sim.** Live sim runs (2026-10-22) covered sim 32FC1 depth, TF from
   `robot_0/camera_optical`, the floor estimate (≈0 m), odom tracking, and the
   false-positive table above.
-- **Not yet live.** No actual moving obstacle has been run live: the scene has
-  no actor. True detections are covered offline by the ray-cast crossing test
-  only. The first person-crossing scene is the real check. If it misses,
-  `moving_speed_mps` and `track_min_hits` are the knobs.
+- **Not yet live with the Kalman tracker or the large-mover rule.** The
+  false-"moving" table above was measured with the v1 tracker; the first
+  live run of the person and forklift worlds re-measures it. If a person is
+  missed, `moving_speed_mps` and `track_min_hits` are the knobs; if racking
+  starts to "move", `large_mover_min_z_m` and `max_large_mover_extent_m`.
 - **Not on hardware.** The node hasn't run on the Jetson yet.
 
 ## Known limits and next steps
@@ -200,11 +233,18 @@ and `webui/tests/operator_test.mjs` covers the drawing.
 - **People near shelving.** A person within ~2 cells of shelving merges into
   the shelf's cluster. That cluster is then too long to be called moving, so it
   still counts as an obstacle but not a moving one.
-- **Not yet in Nav2.** Pointing an `ObstacleLayer` at `obstacle_points` needs
-  the Nav2 team's call on format (PointCloud2 vs `vision_msgs/Detection3DArray`
-  vs JSON). See the open question on #3.
-- **v2.** Kalman tracks with short-horizon (~1–2 s) prediction for directional
-  costmap inflation. Prediction only biases the plan, and current occupancy
-  stays the hard safety floor.
+- **Prediction marks are lethal.** The costmap has no soft layer, so the
+  1.5 s ribbon plus the 0.65 m inflation can close most of a 4 m aisle ahead
+  of a head-on walker. If `head_on_pass` stalls, shorten
+  `pred_cloud_horizon_s` to 1.0, or set `predict_cloud: false` (the source
+  then sees nothing). Constant velocity also means a person who stops or
+  turns is predicted a stride past where they are for a few frames; the
+  filter's `kf_accel_sigma` sets how fast it lets go of the old velocity.
+- **Current occupancy is not in Nav2 from this node.** `obstacle_points`
+  (what is in front of the robot now) still isn't an `ObstacleLayer` source —
+  Nav2's present-time picture comes from `dynamic_obstacle_filter`. See #3.
+- **v3.** A constant-turn-rate or two-model filter for forklifts cornering,
+  and a soft (non-lethal) prediction layer once a costmap plugin build is
+  worth having.
 - **Fleet.** Beyond-line-of-sight and shared obstacles depend on the comms
   subsystem.
