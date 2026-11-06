@@ -1042,6 +1042,25 @@ def _spawn_shelf(stage, prim_path: str, x: float, y: float, yaw_rad: float,
             _bind(leg_prim, materials["shelves"])
 
 
+def _set_op(xform, kind: str, value, suffix: str = ""):
+    """Author one xform op on a referenced prim at whatever precision the ASSET
+    already uses for it. ClearXformOpOrder() drops the order, not the
+    attributes: the NVIDIA characters ship `xformOp:rotateXYZ` as double3, and
+    AddRotateXYZOp()'s float default then raises "typeName 'double3' does not
+    match the requested precision" (first live run of a usd actor, 2026-11-06).
+    """
+    from pxr import Gf, UsdGeom
+
+    attr = xform.GetPrim().GetAttribute(f"xformOp:{kind}" + (f":{suffix}" if suffix else ""))
+    double = not (attr and attr.IsValid() and str(attr.GetTypeName()).startswith("float"))
+    prec = UsdGeom.XformOp.PrecisionDouble if double else UsdGeom.XformOp.PrecisionFloat
+    add = {"translate": xform.AddTranslateOp, "rotateXYZ": xform.AddRotateXYZOp,
+           "scale": xform.AddScaleOp}[kind]
+    op = add(prec, suffix) if suffix else add(prec)
+    op.Set((Gf.Vec3d if double else Gf.Vec3f)(*value))
+    return op
+
+
 def _spawn_usd_prop(stage, prim_path: str, x: float, y: float, yaw_rad: float,
                     ref: str, scale: float = 1.0, z: float = 0.0) -> bool:
     """Reference a real USD asset (an NVIDIA warehouse prop) at the station.
@@ -1093,10 +1112,10 @@ def _spawn_usd_prop(stage, prim_path: str, x: float, y: float, yaw_rad: float,
     add_reference_to_stage(usd_path=ref, prim_path=prim_path)
     xform = UsdGeom.Xformable(stage.GetPrimAtPath(prim_path))
     xform.ClearXformOpOrder()
-    xform.AddTranslateOp().Set(Gf.Vec3d(float(x), float(y), float(z)))
-    xform.AddRotateXYZOp().Set(Gf.Vec3f(0.0, 0.0, float(math.degrees(yaw_rad))))
+    _set_op(xform, "translate", (float(x), float(y), float(z)))
+    _set_op(xform, "rotateXYZ", (0.0, 0.0, float(math.degrees(yaw_rad))))
     if scale != 1.0:
-        xform.AddScaleOp().Set(Gf.Vec3f(float(scale), float(scale), float(scale)))
+        _set_op(xform, "scale", (float(scale),) * 3)
     return True
 
 
@@ -1282,7 +1301,7 @@ def _spawn_usd_actor(stage, path: str, actor: dict) -> bool:
     child with the asset's own yaw offset, floor offset and scale, so turning
     the asset to face its direction of travel never touches the kinematics.
     False when the asset root is unreachable (the caller falls back)."""
-    from pxr import Gf, UsdGeom
+    from pxr import UsdGeom
 
     model = f"{path}/model"
     if not _spawn_usd_prop(stage, model, 0.0, 0.0, 0.0, ref=actor["ref"], scale=1.0):
@@ -1291,14 +1310,13 @@ def _spawn_usd_actor(stage, path: str, actor: dict) -> bool:
     xf.ClearXformOpOrder()
     # Ops compose right to left: lift, then face the heading, then (innermost,
     # in the model's own frame) move its body centre onto the actor's pose.
-    xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, float(actor["z"])))
-    xf.AddRotateXYZOp().Set(Gf.Vec3f(0.0, 0.0, float(actor["yaw_offset_deg"])))
+    _set_op(xf, "translate", (0.0, 0.0, float(actor["z"])))
+    _set_op(xf, "rotateXYZ", (0.0, 0.0, float(actor["yaw_offset_deg"])))
     if actor["scale"] != 1.0:
-        s = float(actor["scale"])
-        xf.AddScaleOp().Set(Gf.Vec3f(s, s, s))
+        _set_op(xf, "scale", (float(actor["scale"]),) * 3)
     ox, oy = actor["origin_offset"]
     if ox or oy:
-        xf.AddTranslateOp(opSuffix="origin").Set(Gf.Vec3d(float(ox), float(oy), 0.0))
+        _set_op(xf, "translate", (float(ox), float(oy), 0.0), suffix="origin")
     n = _strip_physics(stage, model)
     emit(f"  world actor {actor['id']}: {actor['ref']} (physics stripped on {n} prim(s), "
          f"yaw offset {actor['yaw_offset_deg']:.0f} deg)")
