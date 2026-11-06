@@ -50,6 +50,7 @@ MAP_EVERY_S = 5.0       # sim seconds between recorded /map samples
 EXPLORE_EVERY_S = 1.0
 DYN_EVERY_S = 0.2       # 5 Hz per robot
 TRK_EVERY_S = 0.2       # 5 Hz per robot: obstacle_tracks publishes at 10
+DETECT_EVERY_S = 0.5    # 2 Hz per robot
 DYN_VOXEL_M = 0.1
 DYN_MAX_POINTS = 300
 GOAL_TERMINAL = {"succeeded", "aborted", "rejected", "canceled", "timeout"}
@@ -128,8 +129,23 @@ class ProbeCore:
             self.emit({"s": "start", "t": 0.0, "sim": round(self.t0, 4),
                        "wall": round(time.monotonic() - (self.wall0 or time.monotonic()), 2)})
         if self.t0 is not None:
-            self.emit({"s": "gt", "t": round(gt["t"] - self.t0, 4), "wt": gt["wt"],
-                       "robots": gt["robots"], "actors": gt["actors"]})
+            ev = {"s": "gt", "t": round(gt["t"] - self.t0, 4), "wt": gt["wt"],
+                  "robots": gt["robots"], "actors": gt["actors"]}
+            # Only worlds with packages carry these, so the events of every other
+            # test (and every run recorded before packages existed) stay as they were.
+            for key in ("packages", "magnet"):
+                if gt.get(key):
+                    ev[key] = gt[key]
+            self.emit(ev)
+
+    def on_packages(self, rid: str, obj: dict) -> None:
+        """/<rid>/packages from nodes/package_detector.py (or the oracle): the plates
+        it sees. Throttled to 2 Hz; the metric only needs to know it saw them."""
+        if self.t0 is None or self.throttled(f"detect:{rid}", DETECT_EVERY_S):
+            return
+        keep = ("x", "y", "z", "nx", "ny", "nz", "conf")
+        plates = [{k: p[k] for k in keep if k in p} for p in obj.get("plates", [])]
+        self.emit({"s": "detect", "rid": rid, "plates": plates})
 
     def on_map(self, grid) -> None:
         self.have["map"] = True
@@ -140,6 +156,13 @@ class ProbeCore:
 
     def on_task(self, rid: str, obj: dict) -> None:
         tid = obj.get("task_id")
+        rejected = obj.get("rejected")
+        if isinstance(rejected, dict):
+            # task_manager turned the dispatch away (unknown waypoint, bad leg). The
+            # status carries the REJECTED task's id under `rejected`, not at the top, so
+            # without this the task sat at "sent" and the run waited out its sim_s cap.
+            tid = rejected.get("task_id")
+            obj = {**obj, "task_id": tid, "state": "FAILED", "reason": rejected.get("reason")}
         for t in self.tasks.values():
             if t["robot"] == rid and t.get("task_id") == tid:
                 t["state"] = obj.get("state")
@@ -269,6 +292,21 @@ class ProbeCore:
         return self.ms.score()
 
 
+def dispatch_body(t: dict) -> dict:
+    """The /<rid>/dispatch_task JSON for one resolved task. A plain delivery is
+    exactly what it has always been; a package task adds the package id and where
+    it has to come to rest, and its legs may be pose dicts or null ("no Nav2 leg,
+    the pick controller docks on its own": nodes/task_manager.py)."""
+    body = {"pickup": t["pickup"], "dropoff": t["dropoff"], "task_id": t["task_id"]}
+    if t.get("package"):
+        body["package"] = t["package"]
+        body["place"] = t["place"] and {k: t["place"][k] for k in ("x", "y", "z", "yaw")}
+        body["size"], body["face"], body["at"] = t["size"], t["face"], t["at"]
+        if t.get("marker") is not None:
+            body["marker"] = t["marker"]
+    return body
+
+
 # ---------------------------------------------------------------------------
 # ROS wiring
 # ---------------------------------------------------------------------------
@@ -332,6 +370,9 @@ def run(variant_path: Path, out_dir: Path, startup_timeout: float) -> int:
                                          functools.partial(self._on_json, "task", rid), 10)
                 self.create_subscription(String, f"/{rid}/explore_status",
                                          functools.partial(self._on_json, "explore", rid), 10)
+                if "detect" in streams:
+                    self.create_subscription(String, f"/{rid}/packages",
+                                             functools.partial(self._on_json, "packages", rid), 10)
                 if any(g["robot"] == rid for g in resolved["goals"]):
                     self.nav[rid] = ActionClient(self, NavigateToPose, f"/{rid}/navigate_to_pose")
                 if any(t["robot"] == rid for t in resolved["tasks"]):
@@ -373,7 +414,8 @@ def run(variant_path: Path, out_dir: Path, startup_timeout: float) -> int:
                 return
             if not isinstance(obj, dict):
                 return
-            (core.on_task if kind == "task" else core.on_explore)(rid, obj)
+            {"task": core.on_task, "explore": core.on_explore,
+             "packages": core.on_packages}[kind](rid, obj)
 
         def _on_dyn(self, rid, m):
             if core.t0 is None or core.throttled(f"dyn:{rid}", DYN_EVERY_S):
@@ -516,10 +558,9 @@ def run(variant_path: Path, out_dir: Path, startup_timeout: float) -> int:
             for g in core.timed_out_goals():
                 self.timeout_goal(g)
             for t in core.due_tasks():
-                body = {"pickup": t["pickup"], "dropoff": t["dropoff"], "task_id": t["task_id"]}
+                body = dispatch_body(t)
                 self.dispatch[t["robot"]].publish(String(data=json.dumps(body)))
-                core.emit({"s": "dispatch", "rid": t["robot"], "task_id": t["task_id"],
-                           "pickup": t["pickup"], "dropoff": t["dropoff"]})
+                core.emit({"s": "dispatch", "rid": t["robot"], **body})
                 log(f"task {t['task_id']} -> {t['robot']}")
 
     rclpy.init()

@@ -2,11 +2,11 @@
 """Log /<id>/odom poses and rtabmap's per-frame OdomInfo to CSV.
 
 odom.csv: stamp, x y z qx qy qz qw, lost (covariance >= 9999 is RTAB-Map's
-"lost" marker, as tasks/real_perception_plan.md L2 found the hard way).
+"lost" marker, as tasks/real_perception_plan.md@6501799 L2 found the hard way).
 obstacles.csv: depth stamp, latency to here, point count.
 keyframes.csv: compressed RGB-D keyframe size (the offload link's load).
 odom_info.csv: stamp, lost, inliers, features, update time (s) — the
-Jetson's own numbers in docs/jetson.md come from the same fields.
+Jetson's own numbers in docs/real-robot.md come from the same fields.
 
     python3 odom_logger.py --out /out
 """

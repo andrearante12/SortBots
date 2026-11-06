@@ -59,7 +59,7 @@ class Params:
     reclaim_margin_s: float = 2.0
     # 6 s, not the spec's ~3 s: a measured reroute (1.95 s) plus TCP retry
     # backoff gaps Status for ~3.5-4 s, so 3 s declared healthy robots silent
-    # after a single link loss (commsim/docs/sim_log.md steps 9 and 14).
+    # after a single link loss (commsim/docs/sim_log.md@6501799 steps 9 and 14).
     status_timeout_s: float = 6.0
     hold_safe_timeout_s: float = 15.0
     # Tasks a robot may own at once; it works them in claim order. Above 1 a
@@ -88,7 +88,7 @@ class Params:
     # this default so spec_original.yaml reproduces it). Team decision
     # 2026-10-20: no duplicate ownership, even across a network split — the
     # accepted alternative let both halves work a task until the split healed
-    # (docs/plan.md question 11). Must match the real fleet: too small and a
+    # (commsim/docs/plan.md@6501799 question 11). Must match the real fleet: too small and a
     # minority can reclaim; too large and a healthy fleet cannot claim.
     quorum_nodes: int = 0
     # Battery. Only applies to robots given a battery_fn; without one a robot

@@ -138,10 +138,19 @@ first; it refuses if one is up):
 
 ```bash
 scripts/simtest.py list
-scripts/simtest.py run pipeline_smoke          # ~1 min: is the harness healthy?
+scripts/simtest.py run pick_block              # ~2 min: is the harness healthy?
 scripts/simtest.py run crossing_yield          # verdict + data/simtests/<dir>/report.md
 scripts/simtest.py rescore data/simtests/<dir> # re-score recorded events, no sim
 ```
+
+Pick and place (the magnet effector, `docs/manipulation.md`): `pick_block` and `place_block`
+are the two on the Tests tab, a block on a table in front of the robot. The other `pick_*`
+tests are parked (`parked: true`): off the tab, still runnable here, on the `pick_bench`
+scenario. `scripts/simtest.py run pick_place_smoke` is the one to diagnose with: its
+`oracle` variant (`perception=oracle`, ground truth instead of the camera) isolates the
+dock, arm and magnet; the `camera` variant adds perception. The sim log's `arm tcp link`
+and `magnet tcp: FK ... vs USD` lines say whether the arm's frames are right. The robot's
+arm is tucked upright while it drives: that is the planner, not a fault.
 
 Exit codes: 0 pass, 1 fail, 2 invalid test, 3 no run produced a score, 130
 interrupted. **On a shared network, export a private `ROS_DOMAIN_ID` before
@@ -228,8 +237,7 @@ scripts/simtest.py validate             # every test case resolves
 ```
 
 Never point a browser at a live sim to test the dashboard — record a bag, build
-a fixture, test offline (`docs/running.md`, "Testing the dashboard without the
-sim").
+a fixture, test offline (`docs/running.md`).
 
 ## Reference
 

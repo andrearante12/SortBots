@@ -74,7 +74,7 @@ def test_background_share_is_realized_on_an_idle_channel():
 def test_tiny_fleet_run_is_clean():
     cfg = load_config(BASE)
     # open floor: a 3-robot fleet in the racked warehouse is coverage-limited
-    # by design (see docs/sim_log.md), which is not what this test is about.
+    # by design (see commsim/docs/sim_log.md@6501799), which is not what this test is about.
     r = Sim(cfg, "V3", n=3, warmup_s=5, steady_s=20, layout="open_floor",
             lease_beacon_hz=1.0).run()
     assert r["failed"] == [] and r["ctl_samples"] > 100

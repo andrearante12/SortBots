@@ -1,0 +1,62 @@
+# nodes/package_detector.py tuning (the vision itself: nodes/package_vision.py).
+# Every key overrides package_vision.DEFAULTS; `sim:` / `real:` are laid over the top
+# for that platform, so the two never have to share a threshold.
+
+# Frames processed per second, on the steady clock. The camera runs at 30; a package
+# does not move, and the pick controller wants a stable pose more than a fast one.
+rate_hz: 10.0
+
+# How a plate is remembered once it leaves the camera's view, in sim seconds (the node
+# runs on image time): long enough for the pick controller to keep docking on it while
+# the robot turns, short enough that a package someone moved is not chased.
+track:
+  assoc_m: 0.15
+  ema: 0.4
+  drop_after_s: 2.0
+
+# Fit quality. A plate is a flat steel disc-ish thing 4 mm proud of a flat box face:
+# its depth pixels fit a plane to a couple of millimetres. 12 mm lets the real
+# D435's depth noise (about 1% of range, so ~1.5 cm at 1.5 m) through at close range
+# and rejects a curved or edge-mixed blob.
+plane_rms_m: 0.012
+min_points: 25
+min_range_m: 0.3
+max_range_m: 4.0
+plate_thickness_m: 0.004
+
+# What makes a dark blob a plate rather than a gap between cartons on a rack: cardboard
+# round most of it, lying in the plate's own plane, and plate-sized in metres. A default
+# package's plate is 11 x 7 cm to 14 x 11 cm depending on the face (60% of it, simtest/world.py).
+# The ring has to fit inside the box's margin round the plate: that margin is 3.6 cm, 8 px
+# at the 2.6 m the pick controller looks from.
+# ArUco markers on the plates (DICT_4X4_50): the print's size, and how far it stands off the
+# plate. Sim: simtest/aruco.py. Real: measure the printed square.
+marker_m: 0.05
+marker_proud_m: 0.001
+
+ring_px: 5
+ring_frac: 0.5
+ring_plane_m: 0.02
+min_plate_m: 0.03
+max_plate_m: 0.2
+min_plate_short_m: 0.02
+
+# nodes/box_geometry.py: boxes on a table from depth alone, run only in the manipulation state
+# (while a pick or place is under way), on /<id>/boxes. Any of its DEFAULTS may be set here.
+boxes:
+  max_range_m: 2.5      # further than this, a table's top is too grazing to fit
+
+sim:
+  # The colours simtest/world.py authors: cardboard (0.76, 0.60, 0.42) and a
+  # near-black plate (0.05, 0.05, 0.06), after Isaac's lighting. Loose on purpose; the
+  # ring and size checks above are what keep shadows and rack gaps out.
+  box: {h: [6, 26], s: [50, 230], v: [70, 255]}
+  plate: {v_max: 60, s_max: 140}
+
+real:
+  # UNMEASURED. These are the sim's numbers carried over so the node starts; tune them
+  # against a real brown box and a real steel plate under the warehouse's lights (the
+  # D435 colour stream auto-exposes, so the plate's V moves with the scene). Do not
+  # trust a real run until someone has looked at the segmentation masks.
+  box: {h: [6, 26], s: [50, 230], v: [70, 255]}
+  plate: {v_max: 70, s_max: 160}

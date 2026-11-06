@@ -34,7 +34,7 @@ run:
   world: person_crossing
 
 # robots: for peer_crossing — a second full stack localizing on the same map.
-overrides: [world, map, robots, headless, chase_cam, render_every, lite_render]
+overrides: [world, map, robots, perception, headless, chase_cam, render_every, lite_render]
 
 capture:
   bag: false

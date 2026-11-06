@@ -36,12 +36,14 @@ const SCREENSHOT_DIR = args.includes('--screenshot')
 const ROSLIB_STUB = `
 window.__topics = {}; window.__published = []; window.__ops = []; window.__services = [];
 window.__emit = (name, msg) => (window.__topics[name] || []).forEach((cb) => cb(msg));
+window.__noAutoOpen = true; // the card checks below open and close them by hand
 window.ROSLIB = {
   Ros: function () { this.on = () => {}; this.connect = () => {}; this.close = () => {};
                      this.callOnConnection = (op) => window.__ops.push(op); },
   Topic: function (o) { this.name = o.name;
-    this.subscribe = (cb) => { (window.__topics[o.name] = window.__topics[o.name] || []).push(cb); };
-    this.unsubscribe = () => {}; this.advertise = () => {};
+    let mine = null;
+    this.subscribe = (cb) => { mine = cb; (window.__topics[o.name] = window.__topics[o.name] || []).push(cb); };
+    this.unsubscribe = () => { if (mine && window.__topics[o.name]) window.__topics[o.name] = window.__topics[o.name].filter((x) => x !== mine); }; this.advertise = () => {};
     this.publish = (m) => window.__published.push({ topic: o.name, msg: m }); },
   Message: function (d) { Object.assign(this, d); },
   Service: function (o) { this.callService = (req) => window.__services.push({ name: o.name, req }); },
@@ -250,16 +252,29 @@ async function main() {
     await sleep(1500);
 
     // -- nothing running --------------------------------------------------------
-    check(`${vp.label}: no session shows the empty state`, await visible('#empty') && (await $text('#empty-title')) === 'No session running');
-    check(`${vp.label}: header says no session`, (await $text('#s-label')) === 'No session', await $text('#s-label'));
+    check(`${vp.label}: no session shows the empty state`, await visible('#empty') && (await $text('#empty-title')) === 'Simulation not running');
+    check(`${vp.label}: header says the sim is off`, (await $text('#s-label')) === 'Sim not running', await $text('#s-label'));
     check(`${vp.label}: no mode on the session chip without a session`, (await page.eval(`document.getElementById('session-chip').dataset.mode || ''`)) === '');
     check(`${vp.label}: page does not scroll`, await page.eval(`document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight`));
+    check(`${vp.label}: every map control fits the top bar, Comms included`,
+      await page.eval(`document.getElementById('comms-toggle').getBoundingClientRect().right <= document.getElementById('mode-strip').getBoundingClientRect().right + 1`));
+    if (await visible('#view-more')) {
+      await click('#view-more');
+      check(`${vp.label}: the view options open from the top bar`, await page.eval(`getComputedStyle(document.getElementById('view-opts')).display === 'flex'`));
+      await click('#view-more');
+      check(`${vp.label}: ... and close again`, await page.eval(`getComputedStyle(document.getElementById('view-opts')).display === 'none'`));
+    }
     await shot(`${vp.label}-empty`);
 
     // -- session panel (scenarios.js, reused) ------------------------------------
+    await click('#empty-test');
+    await sleep(500);
+    check(`${vp.label}: Run a test opens the Tests tab`, await visible('#session') && await visible('#tests-pane') && !(await visible('#launch-form')));
+    await click('#sp-x');
+    await sleep(200);
     await click('#empty-go');
     await sleep(800);
-    check(`${vp.label}: Start a session opens the session panel`, await visible('#session') && await visible('#launch-form'));
+    check(`${vp.label}: Start simulation opens the session panel, on Launch whatever tab was last open`, await visible('#session') && await visible('#launch-form'));
     check(`${vp.label}: launch form is filled from the API`, await page.eval(`document.querySelectorAll('#lf-preset option').length > 1`));
     check(`${vp.label}: Start is wired (not disabled by a missing console)`, await page.eval(`!document.getElementById('lf-start').disabled`));
     check(`${vp.label}: with no session the panel is just the form`, await visible('#launch-form') && !(await visible('#session-pane')) && !(await visible('#lf-command')) && !(await visible('#lf-summary')));
@@ -306,7 +321,50 @@ async function main() {
     await page.eval(`window.__operator.cams.get(${JSON.stringify(r0)}).mode = 'rgb'`); // the last pick is remembered across loads
     await click(`#fleet .robot[data-id="${r0}"] [data-cam-mode="depth"]`);
     check(`${vp.label}: the camera tile switches to depth`, await page.eval(`window.__operator.cams.get(${JSON.stringify(r0)}).mode === 'depth' && document.querySelector('#fleet .robot[data-id="${r0}"] [data-cam-mode="depth"]').classList.contains('on')`));
+    await click(`#fleet .robot[data-id="${r0}"] [data-cam-mode="split"]`);
+    await sleep(100);
+    const panes = JSON.parse(await page.eval(`JSON.stringify([...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')].map((p) => ({ w: p.offsetWidth, msg: p.textContent })))`));
+    check(`${vp.label}: split shows the camera and the depth`, panes.length === 2 && panes.every((p) => p.w > 0), JSON.stringify(panes));
+    check(`${vp.label}: split streams both feeds`, /camera/.test(panes[0].msg) && /depth/.test(panes[1].msg), JSON.stringify(panes));
+    check(`${vp.label}: split stacks them vertically`, await page.eval(`(() => { const p = [...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')]; return p[0].offsetLeft === p[1].offsetLeft && p[0].offsetTop < p[1].offsetTop; })()`));
+    await emit('/sim/world', { data: JSON.stringify({ world: 't', title: 't', props: [], actors: [], marks: [], packages: [{ id: 'pkg_0', label: 'b', size: [0.1, 0.1, 0.1], color: [0.7, 0.6, 0.4], magnet_face: '+x', z: 0, marker: 0 }] }) });
+    await emit(`/${r0}/pick_status`, { data: JSON.stringify({ phase: 'dock', target: [-6.5, 11.49, 1.0] }) });
+    await emit(`/${r0}/packages`, { data: JSON.stringify({ w: 848, h: 480, plates: [
+      { x: -6.501, y: 11.487, z: 1.0, nx: -1, ny: 0, nz: 0, conf: 0.97, px: [380, 300, 90, 60], uv: [425, 330], range_m: 0.742, age_s: 0, marker: 0 },
+      { x: -6.0, y: 12.3, z: 0.8, nx: -1, ny: 0, nz: 0, conf: 0.3, px: [100, 40, 30, 20], uv: [115, 50], range_m: 2.1, age_s: 0 }] }) });
+    await emit(`/${r0}/pick_status`, { data: JSON.stringify({ phase: 'dock', mode: 'manipulation', target: [-6.5, 11.49, 1.0] }) });
+    await emit(`/${r0}/boxes`, { data: JSON.stringify({ w: 848, h: 480, boxes: [{ x: -6.43, y: 11.487, z: 1.0, yaw: 0, size: [0.14, 0.14, 0.1], support_z: 0.95, conf: 1, px: [340, 250, 180, 150] }] }) });
+    await sleep(150);
+    const percSel = `#fleet .robot[data-id="${r0}"] .perc`;
+    check(`${vp.label}: the panel names the manipulation state and the box geometry found`, /Manipulation/.test(await $text(`${percSel} [data-p="mode"]`)) && /-6\.430/.test(await $text(`${percSel} [data-p="box"]`)), await $text(`${percSel} dl`));
+    check(`${vp.label}: the detection panel shows in a package world`, await visible(percSel));
+    check(`${vp.label}: it locks the marker the pick is aiming at, and drops the colour guess`, /On target/.test(await $text(`${percSel} .ph`)) && /1 seen/.test(await $text(`${percSel} .ph`)), await $text(`${percSel} .ph`));
+    check(`${vp.label}: it names the ArUco marker`, /ArUco 0/.test(await $text(`${percSel} [data-p="marker"]`)), await $text(`${percSel} [data-p="marker"]`));
+    check(`${vp.label}: it spells out pixel, depth and map`, /425, 330/.test(await $text(`${percSel} [data-p="img"]`)) && /0\.742 m/.test(await $text(`${percSel} [data-p="depth"]`)) && /-6\.501/.test(await $text(`${percSel} [data-p="map"]`)), await $text(`${percSel} dl`));
+    check(`${vp.label}: the plate is drawn on the camera tile in green`, await page.eval(`(() => { const c = window.__operator.cams.get(${JSON.stringify(r0)}).overlay, d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; for (let i = 0; i < d.length; i += 4) if (d[i + 1] > 150 && d[i] < 90 && d[i + 3] > 200) return true; return false; })()`));
+    await emit('/sim/world', { data: JSON.stringify({ world: null, props: [], actors: [], packages: [], marks: [] }) });
+    await emit('/sim/ground_truth', { data: JSON.stringify({ t: 1, wt: 1, robots: {}, actors: {}, head: { [r0]: { pan: 0.1, tilt: 0.5 } } }) });
+    await sleep(100);
+    const headSel = `#fleet .robot[data-id="${r0}"] .headctl`;
+    check(`${vp.label}: the head sliders appear once the sim reports the head`, await visible(headSel));
+    check(`${vp.label}: the head readout shows degrees and radians`, /^28\.6° · 0\.50 rad$/.test(await $text(`${headSel} [data-head-out="tilt"]`)), await $text(`${headSel} [data-head-out="tilt"]`));
+    await page.eval(`(() => { const s = document.querySelector('${headSel} [data-head="tilt"]'); s.value = '0.8'; s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    const headCmd = JSON.parse(await page.eval(`JSON.stringify(window.__published.filter((x) => x.topic === '/${r0}/head_cmd').at(-1) || null)`));
+    check(`${vp.label}: moving a slider commands the head`, !!headCmd && headCmd.msg.name[1] === 'head_tilt_joint' && headCmd.msg.position[1] === 0.8 && headCmd.msg.position[0] === 0.1, JSON.stringify(headCmd));
+    await click(`#fleet .robot[data-id="${r0}"] [data-cam-mode="depth"]`);
+    await sleep(100);
+    check(`${vp.label}: leaving split shows one picture again`, (await page.eval(`[...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')].filter((p) => p.offsetWidth).length`)) === 1);
     check(`${vp.label}: the other card keeps its own camera mode`, await page.eval(`window.__operator.cams.get(${JSON.stringify(r1)}).mode === ${JSON.stringify(r1Mode)}`));
+    // SLAM features: subscribed only while the tile's toggle is on, drawn on canvas.feat.
+    const featSubs = () => page.eval(`(window.__topics['/${r0}/odom_features'] || []).length`);
+    const featPx = () => page.eval(`(() => { const c = document.querySelector('#fleet .robot[data-id="${r0}"] canvas.feat'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++; return n; })()`);
+    check(`${vp.label}: no feature subscription until the toggle is on`, (await featSubs()) === 0);
+    await click(`#fleet .robot[data-id="${r0}"] [data-cam-features]`);
+    check(`${vp.label}: the Features toggle subscribes to odom_features`, (await featSubs()) === 1 && await page.eval(`document.querySelector('#fleet .robot[data-id="${r0}"] [data-cam-features]').classList.contains('on')`));
+    await emit(`/${r0}/odom_features`, { data: JSON.stringify({ w: 848, h: 480, lost: false, features: 3, matches: 2, inliers: 1, pts: [[100, 100, 12, 0], [200, 150, 12, 1], [400, 240, 12, 2]] }) });
+    check(`${vp.label}: tracked features are drawn on the camera tile`, (await featPx()) > 20);
+    await click(`#fleet .robot[data-id="${r0}"] [data-cam-features]`);
+    check(`${vp.label}: toggling off drops the subscription and clears the overlay`, (await featSubs()) === 0 && (await featPx()) === 0);
     check(`${vp.label}: a click inside a card leaves both open`, (await page.eval(`document.querySelectorAll('#fleet .robot.sel').length`)) === 2);
     await emit(`/${r0}/odom`, { twist: { twist: { linear: { x: 0.5, y: 0, z: 0 }, angular: { x: 0, y: 0, z: Math.PI / 4 } } } });
     await emit(`/${r0}/task_status`, { data: JSON.stringify({ task_id: 'tt1', state: 'NAV_TO_GOAL', queue_depth: 1, task: { task_id: 'tt1', kind: 'goto', goto: 'Dock' }, queue: [] }) });
@@ -397,40 +455,60 @@ async function main() {
     check(`${vp.label}: closing a card hands control back to the other open one`, (await page.eval(`window.__operator.selected`)) === r1 && (await page.eval(`document.querySelectorAll('#fleet .robot.sel').length`)) === 1);
 
     // -- scored tests: the Session panel's Tests tab, the map chip, the walkers ----------------
+    // Starting and ending a run wipes the page, and the checks after this one still want this
+    // fleet on screen: that wipe has its own section, 'new run'.
+    await page.eval(`window.sortbotsRunStarting = window.sortbotsRunEnded = () => {}`);
     await click('#session-chip');
     await sleep(300);
     await click('#sp-tabs [data-tab="tests"]');
     await sleep(900);
     check(`${vp.label}: the session panel has a Tests tab`, await visible('#tests-pane') && !(await visible('#launch-form')));
     const cards = await page.eval(`[...document.querySelectorAll('#tp-list .tp-test')].map((c) => c.dataset.name || 'invalid')`);
-    const onDisk = fs.readdirSync(path.join(REPO_ROOT, 'configs', 'tests')).filter((f) => f.endsWith('.yaml')).length;
-    check(`${vp.label}: it lists every test case in configs/tests/`, cards.length === onDisk, cards.join(','));
-    check(`${vp.label}: the smoke test is runnable here`,
-      await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"] [data-run]'); return !!c && !c.disabled; })()`));
-    const smokeTitle = await $text('#tp-list .tp-test[data-name="pipeline_smoke"] .t');
-    check(`${vp.label}: rows are numbered short names`, /^\d+Pipeline smoke$/.test(smokeTitle), smokeTitle);
+    const onDisk = fs.readdirSync(path.join(REPO_ROOT, 'configs', 'tests')).filter((f) => f.endsWith('.yaml') && !/^parked: true/m.test(fs.readFileSync(path.join(REPO_ROOT, 'configs', 'tests', f), 'utf8'))).length;
+    check(`${vp.label}: it lists every test case in configs/tests/ that isn't parked`, cards.length === onDisk, cards.join(','));
+    check(`${vp.label}: a parked test stays off the list`, !cards.includes('pick_orientations'), cards.join(','));
+    const secOf = (name) => page.eval(`document.querySelector('#tp-list .tp-test[data-name="${name}"]').closest('.tp-sec').dataset.section`);
+    check(`${vp.label}: tests sit under their sections`, (await secOf('pick_block')) === 'Pick and place' && (await secOf('crossing_yield')) === 'Obstacle avoidance', await secOf('pick_block'));
+    check(`${vp.label}: only obstacle avoidance and pick and place are listed`,
+      (await page.eval(`[...document.querySelectorAll('#tp-list .tp-sec')].map((x) => x.dataset.section).join()`)) === 'Obstacle avoidance,Pick and place');
+    check(`${vp.label}: no triangle glyphs in the list`, !/[▶▼]/.test(await $text('#tp-list')));
+    check(`${vp.label}: a test is runnable here`,
+      await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pick_block"] [data-run]'); return !!c && !c.disabled; })()`));
+    const pickTitle = await $text('#tp-list .tp-test[data-name="pick_block"] .t');
+    check(`${vp.label}: rows are numbered short names`, /^\d+Pick block$/.test(pickTitle), pickTitle);
     check(`${vp.label}: no time/variant line under the names`, !(await page.eval(`!!document.querySelector('#tp-list .tp-row .m')`)));
-    const smokeName = 'Pipeline smoke';
-    check(`${vp.label}: rows start collapsed`, !(await visible('#tp-list .tp-test[data-name="pipeline_smoke"] .tp-more')));
+    const pickName = 'Pick block';
+    check(`${vp.label}: rows start collapsed`, !(await visible('#tp-list .tp-test[data-name="pick_block"] .tp-more')));
     await click('#tp-list .tp-test[data-name="crossing_yield"] .tp-row .t');
     await sleep(100);
     const more = await $text('#tp-list .tp-test[data-name="crossing_yield"] .tp-more');
     // crossing_yield localizes on the fleet_warehouse_test library map, which is local
     // to the machines that recorded it (not in git, docs/testing.md). Without it the
     // row must say why it can't run, not what it checks; both are the page working.
-    if (fs.existsSync(path.join(REPO_ROOT, 'maps', 'fleet_warehouse_test', 'map.json'))) {
-      check(`${vp.label}: clicking a row shows what it checks`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Passes when/.test(more) && /recall ≥ 0.3/.test(more), more.slice(0, 160));
+    if (fs.existsSync(path.join(process.env.SORTBOTS_MAPS_DIR || path.join(REPO_ROOT, 'maps'), 'fleet_warehouse_test', 'map.json'))) {
+      check(`${vp.label}: clicking a row shows what it checks`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Passes when/.test(more) && /Never touches a walker/.test(more) && /at least 30% of the frames/.test(more), more.slice(0, 160));
     } else {
       check(`${vp.label}: clicking a row whose map is missing says why it can't run`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Can't run here/.test(more) && /fleet_warehouse_test/.test(more), more.slice(0, 160));
     }
-    await click('#tp-list .tp-test[data-name="pipeline_smoke"] .tp-row .t');
-    await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"]'); c.querySelector('[data-repeats]').value = '2'; c.querySelector('[data-run]').click(); })()`);
+    await click('#tp-list .tp-test[data-name="pick_block"] .tp-disc');
+    await sleep(100);
+    const pickMore = await $text('#tp-list .tp-test[data-name="pick_block"] .tp-more');
+    check(`${vp.label}: the chevron opens a row and says so`, await visible('#tp-list .tp-test[data-name="pick_block"] .tp-more') &&
+      (await page.eval(`document.querySelector('#tp-list .tp-test[data-name="pick_block"] .tp-disc').getAttribute('aria-expanded')`)) === 'true');
+    check(`${vp.label}: a row opens on one sentence, then plain pass criteria`, /^\s*The robot finds the block/.test(pickMore) && /The magnet picks the block up/.test(pickMore), pickMore.slice(0, 160));
+    await shot(`${vp.label}-tests-open`);
+    check(`${vp.label}: no raw checks or file paths in it`, !/configs\/tests|≥|==|success rate/.test(pickMore), pickMore);
+    if (fs.existsSync(path.join(REPO_ROOT, 'webui', 'test_media', 'pick_block.gif'))) {
+      check(`${vp.label}: a recorded clip loads beside it`,
+        await page.eval(`(async () => { const i = document.querySelector('#tp-list .tp-test[data-name="pick_block"] .tp-clip img'); if (!i) return false; await i.decode().catch(() => {}); return i.naturalWidth > 0; })()`));
+    }
+    await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pick_block"]'); c.querySelector('[data-repeats]').value = '2'; c.querySelector('[data-run]').click(); })()`);
     await sleep(400);
     const posted = JSON.parse(await page.eval(`JSON.stringify(window.__testPosts)`));
-    check(`${vp.label}: Run starts that test with the chosen repeats`, posted.length === 1 && posted[0].name === 'pipeline_smoke' && posted[0].repeats === 2, JSON.stringify(posted));
+    check(`${vp.label}: Run starts that test with the chosen repeats`, posted.length === 1 && posted[0].name === 'pick_block' && posted[0].repeats === 2, JSON.stringify(posted));
     check(`${vp.label}: ... and closes the panel to watch it on the map`, !(await visible('#session')));
     check(`${vp.label}: a chip over the map names the running test and its clock`,
-      await visible('#test-chip') && (await $text('#tc-name')) === smokeName && (await $text('#tc-time')) === '1:15', `${await $text('#tc-name')} ${await $text('#tc-time')}`);
+      await visible('#test-chip') && (await $text('#tc-name')) === pickName && (await $text('#tc-time')) === '1:15', `${await $text('#tc-name')} ${await $text('#tc-time')}`);
     await shot(`${vp.label}-test-running`);
     await click('#tc-name');
     await sleep(500);
@@ -440,7 +518,7 @@ async function main() {
     check(`${vp.label}: while a test runs, the session's own Stop gives way to Stop test`,
       await page.eval(`document.querySelector('#session .card').classList.contains('testing')`) &&
       await page.eval(`getComputedStyle(document.getElementById('session-stop')).display === 'none' && getComputedStyle(document.getElementById('sp-test-note')).display !== 'none'`));
-    await page.eval(`window.__testResults = [{ dir: '20261022T190000Z_pipeline_smoke', name: 'pipeline_smoke', state: 'done', complete: true, verdict: 'FAIL', done: 1, planned: 1,
+    await page.eval(`window.__testResults = [{ dir: '20261022T190000Z_pick_block', name: 'pick_block', state: 'done', complete: true, verdict: 'FAIL', done: 1, planned: 1,
       runs: [{ ok: false, error: null, sim_s: 41.2, criteria: [{ label: 'clearance.contacts == 0', ok: false, actual: 3 }, { label: 'goals.success_rate >= 1', ok: true, actual: 1 }] }] }]`);
     await click('#sp-x');
     await click('#tc-cancel');
@@ -484,6 +562,35 @@ async function main() {
     await shot(`${vp.label}-walker`);
     await sleep(3600); // > WORLD_TRUTH_TTL_MS with no ground truth
     check(`${vp.label}: walkers vanish when the sim stops sending ground truth`, (await greenNear(1, 1, 30)) === 0);
+
+    // Packages the magnet picks up: cardboard-coloured at their ground-truth pose, green
+    // while the magnet holds one (simtest/magnet.py; configs/worlds/pick_*.yaml).
+    const cardboardNear = (x, y, rad) => page.eval(`(() => {
+      const c = document.getElementById('map'), s = c.width / c.clientWidth, [cx, cy] = window.__operator.toPx(${x}, ${y});
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0;
+      for (let py = 0; py < c.height; py++) for (let px = 0; px < c.width; px++) {
+        if (Math.hypot(px / s - cx, py / s - cy) > ${rad}) continue;
+        const i = (py * c.width + px) * 4;
+        if (d[i] > 175 && d[i] < 210 && d[i + 1] > 135 && d[i + 1] < 170 && d[i + 2] > 92 && d[i + 2] < 130) n++;
+      }
+      return n; })()`);
+    const packageWorld = { world: 'pick_bench', title: 'Pick bench', props: [], actors: [],
+      packages: [{ id: 'pkg_0', label: 'box A', size: [0.8, 0.6, 0.12], color: [0.76, 0.6, 0.42], magnet_face: '+x', z: 0.8 }] };
+    const packageTruth = (heldBy) => ({ t: 9, wt: 4.2, running: true, robots: {}, actors: {},
+      packages: { pkg_0: { x: 2, y: 0, z: 0.8, yaw: 0.3, held_by: heldBy } } });
+    await emit('/sim/world', { data: JSON.stringify(packageWorld) });
+    await emit('/sim/ground_truth', { data: JSON.stringify(packageTruth(null)) });
+    await sleep(300);
+    check(`${vp.label}: a package is drawn at its ground-truth pose`, (await cardboardNear(2, 0, 16)) > 40, String(await cardboardNear(2, 0, 16)));
+    check(`${vp.label}: ... and is not green while nothing holds it`, (await greenNear(2, 0, 22)) === 0, String(await greenNear(2, 0, 22)));
+    await shot(`${vp.label}-package`);
+    await emit('/sim/ground_truth', { data: JSON.stringify(packageTruth('robot_0')) });
+    await sleep(300);
+    check(`${vp.label}: ... and turns green while the magnet holds it`, (await greenNear(2, 0, 22)) > 15, String(await greenNear(2, 0, 22)));
+    await emit('/sim/ground_truth', { data: JSON.stringify({ t: 10, wt: 4.3, running: true, robots: {}, actors: {} }) });
+    await sleep(200);
+    check(`${vp.label}: a package missing from ground truth is not drawn`, (await cardboardNear(2, 0, 30)) === 0 && (await greenNear(2, 0, 30)) === 0);
+    await sleep(3400); // let the stale package world lapse (WORLD_TRUTH_TTL_MS) before the checks below
     await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); // that wait outlasted ONLINE_TTL_MS
     await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
 
@@ -786,7 +893,7 @@ async function main() {
     // -- a premapped session in the header -------------------------------------------------------------------
     await page.eval(`window.__fakeSession = { state: 'running', phase: 'running', phase_label: 'running', session_id: 's1', scenario: 'library_localize', config: { map: 'warehouse', mode: 'readonly', robots: 2 } }`);
     await sleep(3400);
-    check(`${vp.label}: running session shows in the header`, (await $text('#s-label')) === 'Session running', await $text('#s-label'));
+    check(`${vp.label}: running session shows in the header`, (await $text('#s-label')) === 'Sim running', await $text('#s-label'));
     check(`${vp.label}: a read-only saved map reads as Premapped on the session chip`, (await page.eval(`document.getElementById('session-chip').title`)).startsWith('Premapped · warehouse'), await page.eval(`document.getElementById('session-chip').title`));
     check(`${vp.label}: no mode tile in the header any more`, !(await page.eval(`!!document.getElementById('mode-tile')`)));
     check(`${vp.label}: the view toggle sits in the header`, await page.eval(`!!document.querySelector('header #view')`));
@@ -844,6 +951,9 @@ async function main() {
     // A demo: true session (the Fleet demo preset) starts the task demo by itself, once.
     await page.eval(`window.__published.length = 0; window.__fakeSession = { ...window.__fakeSession, session_id: 's-demo', config: { ...window.__fakeSession.config, demo: true } }`);
     await sleep(3600);
+    // A new session wipes the last one's robots; this one's report in, as they would.
+    await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+    await sleep(600);
     check(`${vp.label}: a demo session runs the task demo by itself`, await page.eval(`localStorage.getItem('sortbots.autoDemo.s-demo') === '1'`));
     check(`${vp.label}: ...and only once per session`, await page.eval(`(() => { const n = document.getElementById('tk-demo').textContent; return n === 'Run demo' || n === 'Stop demo'; })()`));
     if ((await $text('#tk-demo')) === 'Stop demo') await click('#tk-demo');
@@ -1203,7 +1313,63 @@ async function main() {
         await page.eval(`(() => { const c = document.getElementById('map'), r = c.getBoundingClientRect(); return Math.abs(c.width / (window.devicePixelRatio || 1) - r.width) < 2 && Math.abs(c.height / (window.devicePixelRatio || 1) - r.height) < 2; })()`));
   await page.eval(`document.body.style.removeProperty('--left-w')`); await sleep(200);
   check('side bars: double-click resets both', Math.abs((await widths())[0] - l0) < 2 && Math.abs((await widths())[1] - r0w) < 2, JSON.stringify(await widths()));
+  const vw = await page.eval(`innerWidth`);
+  await dragX('#rz-left', 700); await sleep(200);
+  check('side bars: the robot list can grow well past its old limit', Math.abs((await widths())[0] - (l0 + 700)) < 4, JSON.stringify(await widths()));
+  await dragX('#rz-left', vw - (l0 + 700) - 8); await sleep(200);
+  check('side bars: dragged to the edge, the robot list fills the window', (await widths())[0] === vw, `${(await widths())[0]} of ${vw}`);
+  check('side bars: the map and task list give way', await page.eval(`document.body.classList.contains('map-gone') && getComputedStyle(document.getElementById('stage')).visibility === 'hidden' && getComputedStyle(document.getElementById('right')).display === 'none'`));
+  check('side bars: nothing scrolls sideways at full width', await page.eval(`document.documentElement.scrollWidth <= innerWidth`));
+  check('side bars: Stop all stays on screen at full width', await page.eval(`(() => { const r = document.getElementById('estop').getBoundingClientRect(); return r.width > 0 && r.right <= innerWidth; })()`));
+  check('side bars: its handle stays on screen', await page.eval(`(() => { const r = document.getElementById('rz-left').getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth; })()`));
+  await load();
+  check('side bars: full width survives a reload', (await widths())[0] === vw && await page.eval(`document.body.classList.contains('map-gone')`), JSON.stringify(await widths()));
+  await dragX('#rz-left', -(vw - l0)); await sleep(300);
+  check('side bars: dragging back brings the map and its size back', await page.eval(`(() => { const c = document.getElementById('map'), r = c.getBoundingClientRect(); return !document.body.classList.contains('map-gone') && r.width > 300 && Math.abs(c.width / (window.devicePixelRatio || 1) - r.width) < 2; })()`));
   await page.eval(`localStorage.clear()`);
+
+  // -- a new run on a page that is still showing the last one --------------------------------------
+  console.log('\n--- new run ---');
+  await page.eval(`localStorage.clear()`); await load();
+  await emit('/map', { info: { width: 4, height: 4, resolution: 0.5, origin: { position: { x: 0, y: 0, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } }, data: new Array(16).fill(0) });
+  await emit('/sim/world', { data: JSON.stringify({ world: 'old', title: 'old', props: [], actors: [], marks: [], packages: [] }) });
+  await sleep(500);
+  check('new run: the last run\'s map hides the empty screen', !(await visible('#empty')));
+  await page.eval(`window.sortbotsRunStarting()`);
+  await sleep(500);
+  check('new run: the starting screen shows at once', await visible('#empty') && /Starting up/.test(await $text('#empty-title')), await $text('#empty-title'));
+  check('new run: with a progress bar', await visible('#empty-boot'));
+  check('new run: the old map is gone', !(await visible('#coverage')));
+  check('new run: no robot still reads as online', await page.eval(`[...window.__operator.robots.values()].every((r) => !r.pose)`));
+  await page.eval(`localStorage.clear()`); await load();
+  await emit('/map', { info: { width: 4, height: 4, resolution: 0.5, origin: { position: { x: 0, y: 0, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } }, data: new Array(16).fill(0) });
+  await sleep(500);
+  await page.eval(`window.sortbotsRunEnded()`);
+  await sleep(500);
+  check('new run: a test ending goes back to the empty screen', await visible('#empty') && !/Starting/.test(await $text('#empty-title')) && !(await visible('#coverage')), await $text('#empty-title'));
+  await page.eval(`localStorage.clear()`); await load();
+
+  // -- cards open by themselves, and side bars can be put away -----------------------------------
+  console.log('\n--- panels ---');
+  const anyId = await page.eval(`[...window.__operator.robots.keys()][0]`);
+  await page.eval(`(() => { window.__noAutoOpen = false; const r = window.__operator.robots.get(${JSON.stringify(anyId)}); r.pose = { x: 0, y: 0, yaw: 0 }; r.linkAt = performance.now() + 60000; })()`);
+  await sleep(600);
+  check('panels: a robot coming online opens its details by itself', await page.eval(`!!document.querySelector('#fleet .robot.sel[data-id="${anyId}"] .cam')`));
+  await click(`#fleet .robot[data-id="${anyId}"] .l1`);
+  await sleep(600);
+  check('panels: closing them keeps them closed', !(await page.eval(`!!document.querySelector('#fleet .robot.sel[data-id="${anyId}"]')`)));
+  const stageW = () => page.eval(`document.getElementById('stage').getBoundingClientRect().width`);
+  const w0 = await stageW();
+  await click('#hide-right'); await sleep(200);
+  check('panels: the task list hides and the map takes its room', !(await visible('#right')) && (await stageW()) > w0 + 200, String(await stageW()));
+  check('panels: Stop all stays on screen', await page.eval(`document.getElementById('estop').getBoundingClientRect().right <= innerWidth`));
+  await click('#hide-left'); await sleep(200);
+  check('panels: the robot list hides too, leaving the map the window', !(await visible('#left')) && Math.abs((await stageW()) - (await page.eval(`innerWidth`))) < 2, String(await stageW()));
+  await load();
+  check('panels: hidden side bars stay hidden after a reload', !(await visible('#left')) && !(await visible('#right')));
+  await click('#hide-left'); await click('#hide-right'); await sleep(200);
+  check('panels: and come back', await visible('#left') && await visible('#right') && Math.abs((await stageW()) - w0) < 4, String(await stageW()));
+  await page.eval(`localStorage.clear()`); await load();
 
   // -- 2D map / 3D cloud -----------------------------------------------------------------------
   console.log('\n--- 3d view ---');

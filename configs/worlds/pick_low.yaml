@@ -1,0 +1,19 @@
+# A world layout (simtest/world.py has the full schema; pick_bench.yaml explains
+# packages). A NEGATIVE case: the plate is below the arm's reach, so a pick must
+# fail cleanly (docs/manipulation.md).
+
+name: pick_low
+title: Package on a low deck (out of reach)
+description: >
+  pick_bench with the bench cut down to 0.30 m. The plate centre is 0.36 m above
+  the floor and the arm's TCP never gets below 0.65 m, so there is no IK solution:
+  the pick has to be refused, the magnet left off and the task reported FAILED.
+
+scenes: [nvidia]
+autostart: true
+
+props:
+  - {id: bench_low, shape: box, size: [0.7, 0.4, 0.30], pose: [-7.9, 9.8, 0.0]}
+
+packages:
+  - {id: pkg_0, label: low box, pose: [-7.9, 9.9, 1.5708], z: 0.30, magnet_face: "+x"}

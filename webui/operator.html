@@ -57,7 +57,7 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.4 "IBM Plex Sans", system-ui, sans-serif;
-         font-variant-numeric: tabular-nums; display: grid; grid-template-columns: var(--left-w, 260px) 1fr var(--right-w, 296px); grid-template-rows: 50px 1fr; overflow: hidden; }
+         font-variant-numeric: tabular-nums; display: grid; grid-template-columns: min(var(--left-w, 260px), 100vw) minmax(0, 1fr) min(var(--right-w, 296px), max(0px, calc(100vw - var(--left-w, 260px)))); grid-template-rows: 50px 1fr; overflow: hidden; }
   button, select, input { font: inherit; color: inherit; }
   button { cursor: pointer; }
   button:disabled { cursor: not-allowed; opacity: .5; }
@@ -91,6 +91,21 @@
   #mode-strip { overflow-x: auto; scrollbar-width: none; }
   #mode-strip::-webkit-scrollbar { display: none; }
   @media (max-width: 1480px) { h1 { width: auto; } #coverage { display: none !important; } }
+  /* The four display buttons are the least used things up here, so below 1600 px they fold
+     behind one: the strip scrolled instead, and Comms went off its end (2026-11-06). The
+     tools keep their words, see below. display: contents leaves them plain
+     header buttons where there's room. */
+  #view-box, #view-opts { display: contents; }
+  #view-more { display: none; }
+  #view-opts .btn { flex: none; }
+  @media (max-width: 1600px) {
+    header { gap: 12px; }
+    #view-box { display: block; position: relative; flex: none; }
+    #view-more { display: grid; place-items: center; height: 100%; }
+    #view-opts { display: none; position: absolute; top: calc(100% + 8px); right: 0; z-index: 6; gap: 6px; padding: 6px;
+                 background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 24px var(--shadow); }
+    #view-opts.open { display: flex; }
+  }
   /* Symbol plus word: the shapes alone (arrow, diamond, triangle) didn't say what they do. */
   #tools button { display: inline-flex; align-items: center; gap: 6px; }
   #tools button .ic { font-size: .9em; }
@@ -98,7 +113,7 @@
   header .spacer { flex: 1; }
   .btn.icon { width: 34px; padding: 6px 0; line-height: 1; font-size: 1rem; }
   #session-chip { display: inline-flex; align-items: center; gap: 8px; }
-  #build { flex: 0 1 auto; min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  #build { flex: 0 1000 auto; min-width: 72px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
            font: 500 .76rem ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
            padding: 3px 8px; border: 1px solid var(--line); border-radius: 99px; margin-left: -6px; cursor: default; }
   #build.stale { color: var(--warnink); background: var(--warnbg); border-color: var(--warnline); }
@@ -121,14 +136,30 @@
   aside { background: var(--surface); display: flex; flex-direction: column; min-height: 0; overflow: auto; }
   #left { border-right: 1px solid var(--line); }
   #right { border-left: 1px solid var(--line); }
+  /* Placed, not auto-flowed: with a side bar hidden the rest must stay in their columns. */
+  #left { grid-column: 1; grid-row: 2; } #stage { grid-column: 2; grid-row: 2; } #right { grid-column: 3; grid-row: 2; }
+  @media (min-width: 761px) and (min-height: 521px) {
+    body.hide-left { --left-w: 0px !important; }
+    body.hide-right { --right-w: 0px !important; }
+    body.hide-left #left, body.hide-left #rz-left, body.hide-right #right, body.hide-right #rz-right { display: none; }
+  }
   /* Drag handles on the inner edge of each side bar (operator.js: drag to resize,
      double-click to reset). Outside the asides, which scroll. */
   .resizer { position: fixed; top: 50px; bottom: 0; width: 9px; z-index: 4; cursor: col-resize; touch-action: none; }
   .resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 4px; width: 1px; background: transparent; transition: background .1s; }
   .resizer:hover::after, .resizer.drag::after { background: var(--info); width: 2px; left: 3.5px; }
-  #rz-left { left: calc(var(--left-w, 260px) - 5px); }
+  #rz-left { left: min(calc(var(--left-w, 260px) - 5px), calc(100vw - 9px)); }
   #rz-right { right: calc(var(--right-w, 296px) - 4px); }
   body.resizing { cursor: col-resize; user-select: none; }
+  /* The left bar has taken the map's whole column: the task list is past the window's
+     edge, and what's left of the stage must not float over the bar. */
+  body.map-gone #stage { visibility: hidden; overflow: hidden; }
+  body.map-gone #rz-right { display: none; }
+  /* The columns always fit the window, because the header spans them and Stop all has to
+     stay on screen; so the task list keeps its width and slides out past its shrinking column. */
+  body.map-gone #right { min-width: var(--right-w, 296px); }
+  /* Off the window entirely: out of the layout too, or tabbing into it scrolls the page. */
+  body.left-full #right { display: none; }
   .head { display: flex; align-items: baseline; gap: 8px; padding: 14px 16px 8px; position: sticky; top: 0; background: var(--surface); z-index: 1; }
   .head h2 { margin: 0; font-size: .95rem; font-weight: 600; }
   .head .muted { font-size: .82rem; margin-left: auto; white-space: nowrap; }
@@ -150,7 +181,25 @@
   .more { margin: 10px 0 2px 18px; display: grid; gap: 10px; }
   .more { cursor: default; }
   .more .cam { width: 100%; aspect-ratio: 16/9; border-radius: 6px; background: #0b0d10; position: relative; overflow: hidden; }
-  .more .cam .pic { position: absolute; inset: 0; background: center / cover no-repeat; }
+  .more .cam .pics { position: absolute; inset: 0; display: grid; grid-auto-rows: minmax(0, 1fr); gap: 2px; }
+  .more .cam .pic { position: relative; min-width: 0; min-height: 0; background: center / cover no-repeat; }
+  .more .cam[data-view="rgb"] .pic:not([data-feed="rgb"]), .more .cam[data-view="depth"] .pic:not([data-feed="depth"]) { display: none; }
+  /* Split: the feeds stacked, each at the camera's own 16:9 so nothing is cropped. */
+  .more .cam[data-view="split"] { aspect-ratio: 16/18; }
+  /* What the plate detector made of the frame (operator.js syncPerception). */
+  .perc { display: grid; gap: 3px; padding: 8px 10px; border-radius: 6px; background: var(--ground); font-size: .8rem; }
+  .perc .ph { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; }
+  .perc .ph i { font-style: normal; font-weight: 500; color: var(--muted); }
+  .perc.locked .ph i { color: #16a34a; }
+  .perc dl { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 1px 8px; margin: 0; }
+  .perc dt { color: var(--muted); } .perc dd { margin: 0; }
+  /* Head sliders (operator.js camFor): shown once the sim reports the head's angles. */
+  .headctl { display: grid; gap: 4px; font-size: .8rem; color: var(--muted); }
+  .headctl label { display: grid; grid-template-columns: 30px minmax(0, 1fr) 118px; gap: 8px; align-items: center; }
+  .headctl input { width: 100%; margin: 0; accent-color: var(--info); }
+  .headctl output { color: var(--ink); text-align: right; white-space: nowrap; }
+  .more .cam[data-view="split"] .pic::before { content: attr(data-label); position: absolute; right: 6px; bottom: 6px; padding: 1px 6px; border-radius: 4px;
+                                               background: rgba(10,12,16,.6); color: #e6ebf0; font-size: .7rem; }
   .more .cam canvas.obst { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .more .cam .msg { position: absolute; inset: 0; display: grid; place-items: center; color: #8b95a0; font-size: .8rem; pointer-events: none; }
   .more .cam .msg:empty { display: none; }
@@ -166,6 +215,11 @@
   .cam .drive button.held { background: rgba(255,255,255,.9); color: #15191e; }
   .cam .drive [data-drive="stop"] { color: #ff8a80; }
   @media (pointer: coarse) { .cam .drive { grid-template-columns: repeat(3, 36px); } .cam .drive button { width: 36px; height: 32px; font-size: .9rem; } }
+  .more .cam canvas.feat { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .featbtn { position: absolute; top: 6px; left: 6px; background: rgba(10,12,16,.6); border: 1px solid transparent; color: #c3cad2; font-size: .72rem; padding: 3px 9px; border-radius: 6px; }
+  .featbtn.on { background: rgba(61,220,132,.9); color: #15191e; font-weight: 600; }
+  .featstat { position: absolute; top: 32px; left: 6px; font-size: .68rem; color: #e6eaee; background: rgba(10,12,16,.6); padding: 1px 6px; border-radius: 4px; pointer-events: none; }
+  .featstat:empty { display: none; }
   .camsel { position: absolute; top: 6px; right: 6px; display: flex; background: rgba(10,12,16,.6); border-radius: 6px; padding: 2px; }
   .camsel button { background: none; border: none; color: #c3cad2; font-size: .72rem; padding: 2px 8px; border-radius: 4px; }
   .camsel button.on { background: rgba(255,255,255,.9); color: #15191e; font-weight: 600; }
@@ -231,7 +285,8 @@
   #coverage b { font-weight: 600; color: var(--ink); }
   #coverage[hidden] { display: none; }
   #empty { position: absolute; inset: 0; background: var(--scrim); display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; z-index: 3; text-align: center; padding: 24px; }
-  #empty b { font-size: 1.15rem; font-weight: 600; } #empty .btn { margin-top: 8px; }
+  #empty b { font-size: 1.15rem; font-weight: 600; }
+  .empty-acts { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
   #toast { position: absolute; top: 16px; left: 50%; z-index: 3; transform: translateX(-50%); background: var(--ink); color: var(--on-ink); padding: 6px 14px; border-radius: 6px; font-size: .84rem; opacity: 0; transition: opacity .2s; pointer-events: none; }
   #toast.on { opacity: 1; }
   #link-down { position: absolute; top: 14px; right: 14px; background: var(--warnbg); border: 1px solid var(--warnline); color: var(--warnink); border-radius: 6px; padding: 5px 12px; font-size: .84rem; }
@@ -354,30 +409,40 @@
   #tp-run.done.pass .tp-dot { background: var(--go); } #tp-run.done.fail .tp-dot { background: var(--stop); }
   @keyframes tp-pulse { 50% { opacity: .3; } }
   #tp-log { flex-basis: 100%; margin: 4px 0 0; max-height: 220px; overflow: auto; font: .72rem/1.45 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; }
-  .tp-h { margin: 0 0 4px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
-  /* Test cases: a list, not cards. A row is title, one line of what it runs, Run;
-     click it for what it checks and how often. */
+  /* Test cases: a list, not cards. A row is its name, Run and a chevron; open it for what
+     the test is, what it takes to pass, and a clip of a pass. */
+  .tp-sec { margin-top: 18px; }
+  .tp-sec:first-child { margin-top: 0; }
+  .tp-sec-h { margin: 0; padding: 6px 4px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
   .tp-test { border-top: 1px solid var(--line); }
   .tp-test:last-child { border-bottom: 1px solid var(--line); }
-  .tp-row { display: grid; grid-template-columns: 14px 1fr auto; gap: 2px 10px; align-items: center; padding: 10px 4px; cursor: pointer; }
+  .tp-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 8px 4px; cursor: pointer; }
   .tp-row:hover { background: var(--hover); }
-  .tp-row .chev { color: var(--faint); font-size: .7rem; transition: transform .15s; }
-  .tp-test.open .chev { transform: rotate(90deg); }
   .tp-row .t { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .tp-row .btn { grid-column: 3; }
   .tp-row .num { display: inline-block; min-width: 1.6em; color: var(--faint); font-variant-numeric: tabular-nums; }
+  .tp-disc { grid-column: 3; display: grid; place-items: center; width: 32px; height: 32px; padding: 0; background: none; border: none; border-radius: 6px; color: var(--muted); }
+  .tp-disc svg { transition: transform .15s; }
+  .tp-row:hover .tp-disc { color: var(--ink); }
+  .tp-disc[aria-expanded="true"] svg { transform: rotate(180deg); }
+  @media (prefers-reduced-motion: reduce) { .tp-disc svg { transition: none; } }
   .tp-test.invalid .t { color: var(--muted); }
   .tp-more .err { color: var(--warnink); }
-  .tp-more { display: none; padding: 0 4px 14px 28px; font-size: .84rem; gap: 10px; }
+  /* Text and clip side by side where both fit, stacked where they don't: auto-fit, because
+     this panel's width isn't the window's. */
+  .tp-more { display: none; padding: 4px 4px 18px; font-size: .88rem; gap: 14px 24px; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); }
   .tp-test.open .tp-more { display: grid; }
-  .tp-more p { margin: 0; color: var(--muted); line-height: 1.45; }
-  .tp-more dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; }
-  .tp-more dt { color: var(--muted); } .tp-more dd { margin: 0; }
-  .tp-more ul { margin: 0; padding-left: 16px; } .tp-more li { margin: 1px 0; }
-  .tp-more .opts { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .tp-text { display: grid; gap: 10px; align-content: start; }
+  .tp-more p { margin: 0; line-height: 1.45; }
+  .tp-text h5 { margin: 0 0 -6px; font-size: inherit; font-weight: 600; }
+  .tp-more ul { margin: 0; padding-left: 18px; color: var(--muted); line-height: 1.45; }
+  .tp-more li { margin: 2px 0; }
+  .tp-more .opts { display: flex; gap: 6px 16px; align-items: center; flex-wrap: wrap; margin-top: 2px; }
   .tp-more .opts label { display: flex; gap: 6px; align-items: center; color: var(--muted); }
   .tp-more .opts input { width: 4em; }
-  .tp-more code { font-size: .76rem; color: var(--faint); }
+  .tp-more .runs { color: var(--faint); font-size: .8rem; }
+  .tp-clip { margin: 0; }
+  .tp-clip img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; background: var(--segbg); }
+  .tp-clip figcaption { margin-top: 5px; font-size: .76rem; color: var(--faint); }
   .tp-empty { color: var(--muted); font-size: .84rem; padding: 6px 4px; }
   /* A test owns the session it runs: its Stop would abort the run unscored. */
   #session .card.testing #session-finish, #session .card.testing #session-stop { display: none; }
@@ -430,6 +495,7 @@
     #mode-strip::-webkit-scrollbar { display: none; }
     #session-chip #s-label { max-width: 34vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #session-chip, #estop, #alarms, #theme { flex: none; }
+    #hide-left, #hide-right { display: none; }  /* phones show one pane at a time already */
     #left, #stage, #right { grid-row: 2; grid-column: 1; border: none; }
     body:not([data-pane="robots"]) #left, body:not([data-pane="tasks"]) #right { display: none; }
     body[data-pane="robots"] #stage, body[data-pane="tasks"] #stage { visibility: hidden; }
@@ -516,9 +582,16 @@
 <div id="test-chip" hidden title="A scored test is driving the sim"><span class="tp-dot"></span><span class="k">Test</span>
     <button type="button" class="name" id="tc-name" title="Open the Tests tab"></button><span id="tc-time" class="muted"></span>
     <button type="button" class="btn small stop" id="tc-cancel">Stop test</button></div>
-  <button class="btn icon" id="fullscreen" hidden aria-label="Full screen" title="Full screen">&#x26F6;</button>
-  <button class="btn icon" id="theme" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
-  <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">No session</span></button>
+  <div id="view-box">
+    <button class="btn icon" id="view-more" aria-label="View options" aria-haspopup="true" aria-expanded="false" title="View options"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><g fill="currentColor"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></g></svg></button>
+    <div id="view-opts">
+      <button class="btn icon" id="hide-left" aria-label="Hide the robot list" title="Hide the robot list">&#x25E7;</button>
+      <button class="btn icon" id="hide-right" aria-label="Hide the task list" title="Hide the task list">&#x25E8;</button>
+      <button class="btn icon" id="fullscreen" hidden aria-label="Full screen" title="Full screen">&#x26F6;</button>
+      <button class="btn icon" id="theme" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
+    </div>
+  </div>
+  <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">Sim not running</span></button>
   <!-- The fleet gateway's latched alarms (/fleet/task_board): red while a condition
        holds, quiet once it has cleared but nobody has acknowledged it. Hidden at none. -->
   <button class="btn" id="alarms" hidden aria-haspopup="true" title="Fleet alarms"><span class="dot"></span><span id="alarms-label"></span></button>
@@ -531,7 +604,7 @@
   <div id="fleet"></div>
 </aside>
 
-<div class="resizer" id="rz-left" role="separator" aria-orientation="vertical" aria-label="Resize the robot list" title="Drag to resize · double-click to reset"></div>
+<div class="resizer" id="rz-left" role="separator" aria-orientation="vertical" aria-label="Resize the robot list" title="Drag to resize, all the way to the window's edge to fill it · double-click to reset"></div>
 <div class="resizer" id="rz-right" role="separator" aria-orientation="vertical" aria-label="Resize the task list" title="Drag to resize · double-click to reset"></div>
 
 <!-- Phones: one pane at a time, switched here (operator.js setPane). Hidden on wide screens. -->
@@ -579,7 +652,7 @@
     <p id="rc-err" hidden></p>
   </div>
   <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
-  <div id="empty" hidden><b id="empty-title">No session running</b><span class="muted" id="empty-sub">Start a session to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><button class="btn primary" id="empty-go">Start a session</button></div>
+  <div id="empty" hidden><b id="empty-title">Simulation not running</b><span class="muted" id="empty-sub">Start the simulation to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><div class="empty-acts"><button class="btn primary" id="empty-go">Start simulation</button><button class="btn" id="empty-test">Run a test</button></div></div>
   <div id="toast" role="status"></div>
 </main>
 
@@ -717,7 +790,6 @@
         <pre id="tp-log" hidden></pre>
       </div>
       <section>
-        <h4 class="tp-h">Test cases <span class="muted" id="tp-count"></span></h4>
         <div id="tp-list"></div>
       </section>
     </div>

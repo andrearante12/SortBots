@@ -1,15 +1,19 @@
 # A test case (simtest/spec.py has the schema; docs/testing.md the how-to).
 
+# In detail (the description below is what the Tests tab shows):
+#
+#   robot_0 drives up its own aisle while something comes down the west half
+#   of it toward the robot and never yields: a person at 1 m/s (variant
+#   `person`) or a low warehouse AMR at 0.8 m/s (variant `amr`). The aisle is
+#   ~4 m wide, so passing on the east side is possible. Pass = no contact with
+#   a real margin, the goal reached, and the pass costing little: a detour of
+#   at most 1.6x the straight line. The reaction metric is reported, not
+#   judged — a clean pass need not slow down at all.
+
 name: head_on_pass
 title: Something comes down the aisle head-on — pass it, don't collide, don't crawl
-description: >
-  robot_0 drives up its own aisle while something comes down the west half
-  of it toward the robot and never yields: a person at 1 m/s (variant
-  `person`) or a low warehouse AMR at 0.8 m/s (variant `amr`). The aisle is
-  ~4 m wide, so passing on the east side is possible. Pass = no contact with
-  a real margin, the goal reached, and the pass costing little: a detour of
-  at most 1.6x the straight line. The reaction metric is reported, not
-  judged — a clean pass need not slow down at all.
+section: Obstacle avoidance
+description: A person, or a warehouse AMR, comes straight down the aisle at the robot, which has to get past without a long detour.
 
 scenario: moving_obstacles_mapped
 overrides:

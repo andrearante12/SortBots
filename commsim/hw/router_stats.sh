@@ -1,6 +1,6 @@
 #!/bin/sh
 # Snapshot of one mesh router's radio + batman-adv state, for the hardware
-# calibration runs (commsim/hw/README.md). Runs ON the router (OpenWrt ash),
+# calibration runs (docs/commsim.md). Runs ON the router (OpenWrt ash),
 # fed over ssh so nothing is installed there:
 #
 #   ssh root@10.42.0.253 'sh -s 10' < commsim/hw/router_stats.sh > r1_stats.txt

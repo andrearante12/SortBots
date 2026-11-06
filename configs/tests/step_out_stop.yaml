@@ -1,16 +1,20 @@
 # A test case (simtest/spec.py has the schema; docs/testing.md the how-to).
 
+# In detail (the description below is what the Tests tab shows):
+#
+#   robot_0 drives south out of its aisle. At t = 10.5 s a person steps out
+#   from behind a crate stack ~2 m ahead of it, onto its route, and stands
+#   there. No approach to see coming: the braking case. Pass = no contact,
+#   speed halved within 2 s of the person appearing, a gap kept, and the goal
+#   still reached by planning around someone standing still (whom the
+#   frame-difference filter no longer flags). Time to a full stop and braking
+#   distance are reported for the record — a robot that swerves cleanly need
+#   not stop.
+
 name: step_out_stop
 title: A person steps out from behind crates and stops — brake, then get past
-description: >
-  robot_0 drives south out of its aisle. At t = 10.5 s a person steps out
-  from behind a crate stack ~2 m ahead of it, onto its route, and stands
-  there. No approach to see coming: the braking case. Pass = no contact,
-  speed halved within 2 s of the person appearing, a gap kept, and the goal
-  still reached by planning around someone standing still (whom the
-  frame-difference filter no longer flags). Time to a full stop and braking
-  distance are reported for the record — a robot that swerves cleanly need
-  not stop.
+section: Obstacle avoidance
+description: A person steps out from behind a crate stack right in front of the robot and stands there; the robot has to brake and get past.
 
 scenario: moving_obstacles_mapped
 overrides:

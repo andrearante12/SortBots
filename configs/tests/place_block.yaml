@@ -1,0 +1,54 @@
+# A test case: one scored, repeatable question (simtest/spec.py has the full
+# schema; docs/testing.md the how-to). Run it from the operator view's Tests tab, or:
+#
+#   scripts/simtest.py run place_block
+#
+# pick_block with the second half: the same start, then the block goes down on the green
+# marked area further along the table. The place target is the area's centre as far as the
+# block can reach it: its plate stays at the table's front edge, where the arm can get at it.
+
+# In detail (the description above is what the Tests tab shows):
+#
+#   robot_0 picks up the target block as in Pick up the target block, then sets it down on
+#   the green marked area further along the same table. Pass = the block rests on the table
+#   with its centre inside the marked area (within 5 cm of the target), and was never
+#   dropped. Scored from ground truth. The sim stays up 10 s afterwards.
+
+name: place_block
+title: Place the target block in the marked area
+section: Pick and place
+description: The robot picks up the block and sets it down on the green area of the same table.
+
+scenario: pick_bench
+overrides: {world: pick_table, headless: true}
+
+warmup_s: 2
+
+tasks:
+  - robot: robot_0
+    package: pkg_0
+    find: geometry                 # no location in the work order: depth geometry finds the block
+    place: [-6.43, 11.12]
+
+stop:
+  sim_s: 240
+  until: [tasks_done]
+  settle_s: 10
+
+metrics:
+  - metric: pick_place
+    params: {place_tol_m: 0.05}
+    pass:
+      detected: {gte: 1}
+      placed: {gte: 1}
+      max_place_error_m: {lte: 0.05}
+      max_place_z_error_m: {lte: 0.05}
+      drops: {eq: 0}
+      false_picks: {eq: 0}
+  - metric: tasks
+    pass:
+      success_rate: {gte: 1.0}
+  - metric: run_stats
+
+repeats: 1
+pass_rate: 1.0

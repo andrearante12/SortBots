@@ -1,6 +1,6 @@
 # commsim base configuration. Layered: base -> variant -> layout -> scenario
 # -> sweep (+ seed). Every value tagged `placeholder` or `estimate` is a
-# parameter awaiting measurement, NOT a fact — see docs/plan.md §4 for which
+# parameter awaiting measurement, NOT a fact — see commsim/docs/plan.md@6501799 §4 for which
 # hardware test replaces it. Nothing here is shared with the Isaac track.
 
 # One fleet list generates every node's addresses, radio MACs, zenohd config

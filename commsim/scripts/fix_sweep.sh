@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Everything behind "after the fixes" in commsim/docs/sim_log.md (step 20):
+# Everything behind "after the fixes" in commsim/docs/sim_log.md@6501799 (step 20):
 # spec-as-written vs fixed, TCP vs UDP Status, batman OGM 500 vs 250 ms.
 # Every run PINS its OGM interval and Status transport explicitly — the first
 # version inherited them from base.yaml, whose defaults later changed (code

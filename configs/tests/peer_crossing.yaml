@@ -1,20 +1,20 @@
 # A test case (simtest/spec.py has the schema; docs/testing.md the how-to).
+
+# In detail (the description below is what the Tests tab shows):
 #
-# Two REAL robots, not a scripted mover: robot_1 is a full Nav2 stack on a
-# crossing goal, so both planners react to each other — the case amr_head_on
-# deliberately leaves out for repeatability. robot_1 needs ~45 sim-s to come
-# down its aisle and across the apron, so robot_0's goal is held until t=25
-# to put both on the apron at once. Tune the hold if the meeting drifts.
+#   Two REAL robots, not a scripted mover: robot_1 is a full Nav2 stack on a
+#   crossing goal, so both planners react to each other — the case amr_head_on
+#   deliberately leaves out for repeatability. robot_1 needs ~45 sim-s to come
+#   down its aisle and across the apron, so robot_0's goal is held until t=25
+#   to put both on the apron at once. Tune the hold if the meeting drifts.
+#   Pass = no contact between the robots (both at their Nav2 footprint) or
+#   with the person, and both goals reached. Also the live check that a second
+#   robot localizes on the library map.
 
 name: peer_crossing
 title: Two robots cross on the apron — neither hits the other
-description: >
-  robot_1 drives from its aisle west across the open floor while robot_0,
-  held back 25 s, comes south out of its own aisle across robot_1's track —
-  with the person still pacing the aisle mouth. Pass = no contact between
-  the robots (both at their Nav2 footprint) or with the person, and both
-  goals reached. Also the live check that a second robot localizes on the
-  library map.
+section: Obstacle avoidance
+description: Two robots on crossing routes, with a person about, have to get past each other without touching.
 
 scenario: moving_obstacles_mapped
 overrides:

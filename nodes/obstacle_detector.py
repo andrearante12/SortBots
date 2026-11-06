@@ -9,7 +9,7 @@ pixel change at once. Here every frame stands on its own geometry, and motion
 comes from tracking cluster centroids in the odom frame, where the robot's own
 motion has been taken out.
 
-Pipeline (docs/obstacle_detection.md has the rationale and the tuning notes):
+Pipeline (docs/architecture.md has the rationale and the tuning notes):
 
     camera/depth --back-project (strided)--> camera-frame points
       --TF--> base_link --range crop--> floor estimate --height band-->
@@ -375,7 +375,7 @@ class Tracker:
     `pred` extrapolates the state pred_horizons_s ahead: where the mover will
     be if it keeps its velocity. That is a 1-2 s claim, not a route: people
     stop and turn, so nothing downstream treats it as more than a bias
-    (nodes/obstacle_detector.py --help, docs/obstacle_detection.md).
+    (nodes/obstacle_detector.py --help, docs/architecture.md).
     """
 
     def __init__(self, cfg: dict | None = None):

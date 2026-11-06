@@ -31,10 +31,13 @@ STREAMS = {
     "start": "t0 marker: {wall, sim} — once, first event of every run",
     "end": "last event: {reason, sim_s, wall_s}",
     "gt": "/sim/ground_truth, 10 Hz: {wt, robots: {rid: {x,y,yaw}}, "
-          "actors: {id: {x,y,yaw,vx,vy,moving}}}",
+          "actors: {id: {x,y,yaw,vx,vy,moving}}, "
+          "packages: {id: {x,y,z(bottom),yaw,held_by: rid|null}}, "
+          "magnet: {rid: {energized, held, tcp, approach, nearest}}}",
     "goal": "probe-sent Nav2 goals: {rid, goal_id, state: sent|accepted|rejected|"
             "succeeded|aborted|canceled|timeout, pose: [x,y,yaw]}",
-    "dispatch": "probe-sent task_manager tasks: {rid, task_id, pickup, dropoff}",
+    "dispatch": "probe-sent task_manager tasks: {rid, task_id, pickup, dropoff, "
+                "package?, place?: {x,y,z,yaw}} (a leg is a name, a pose dict or null)",
     "task": "/<rid>/task_status JSON: {rid, task_id, state, ...}",
     "explore": "/<rid>/explore_status JSON (throttled to 1 Hz): {rid, state, ...}",
     "map": "/map OccupancyGrid, throttled (default every 5 sim-s, plus the last): "
@@ -44,13 +47,16 @@ STREAMS = {
     "trk": "/<rid>/obstacle_tracks in the map frame, <=5 Hz: {rid, stamp, tracks: "
            "[{id, moving, hits, pos: [x, y], vel: [vx, vy], cov: [sxx, sxy, syy], "
            "pred: [[h_s, x, y], ...], extent_m, height_m}]}",
+    "detect": "/<rid>/packages (nodes/package_detector.py), throttled to 2 Hz, map frame: "
+              "{rid, plates: [{x, y, z, nx, ny, nz, conf}]} — each plate's centre and "
+              "OUTWARD normal, what the pick controller aims at (no image data)",
 }
 
 # Recorded on every run whether or not a metric asks, so a NEW metric can be
 # scored against old runs. `dyn` and `trk` are opt-in (metric or `record:`) —
 # they are the streams whose size scales with the scene.
 ALWAYS_RECORDED = frozenset({"start", "end", "gt", "goal", "dispatch", "task",
-                             "explore", "map"})
+                             "explore", "map", "detect"})
 
 
 class MapGrid:

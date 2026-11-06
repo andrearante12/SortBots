@@ -1,5 +1,5 @@
 # nodes/obstacle_detector.py tuning. Every key overrides the node's DEFAULTS;
-# docs/obstacle_detection.md explains the pipeline these feed.
+# docs/architecture.md explains the pipeline these feed.
 
 # Frames processed per second, on the steady clock. The camera runs at 30;
 # 10 is plenty to track walking speed (~1.4 m/s = 14 cm a frame) and keeps
@@ -72,7 +72,7 @@ max_obstacle_speed_mps: 3.0
 # long and flat, and racking long enough to pass this extent is longer still,
 # or clipped. Added 2026-11-04 for the forklift test worlds (the forklift
 # asset is 3.5 m fork tip to counterweight, measured 2026-11-06); re-measure
-# the false-"moving" table in docs/obstacle_detection.md if either changes.
+# the false-"moving" table in docs/architecture.md if either changes.
 max_large_mover_extent_m: 3.8
 large_mover_min_z_m: 1.2
 

@@ -5,7 +5,7 @@
 #   scripts/jetson.sh build     # build the image (first time ~10-20 min)
 #   scripts/jetson.sh console   # start the dashboard console in the container
 #   scripts/jetson.sh shell     # a shell in the running container, ROS sourced
-#   scripts/jetson.sh bridge start BUNDLE   # fleet mesh bridge (commsim/hw/README.md step 7)
+#   scripts/jetson.sh bridge start BUNDLE   # fleet mesh bridge (docs/commsim.md step 7)
 #   scripts/jetson.sh logs      # follow the console's output
 #   scripts/jetson.sh stop      # stop the robot pipeline, the console, the container
 #   scripts/jetson.sh status    # container + camera + console at a glance
@@ -13,7 +13,7 @@
 # Then open http://<jetson>:8081/ (the console prints the tailnet URL when the
 # host has tailscale) and start a scenario from the Scenarios tab — on the
 # Jetson it lists only `platform: real` scenarios, which launch
-# scripts/run_robot.sh instead of Isaac. See docs/jetson.md.
+# scripts/run_robot.sh instead of Isaac. See docs/real-robot.md.
 #
 # Run it on the HOST, from a plain shell — it only needs docker. Never source
 # the host's /opt/ros/humble for SortBots: everything ROS runs in the container.
@@ -63,7 +63,7 @@ preflight() {
   if [[ ! -f /etc/udev/rules.d/99-realsense-libusb.rules && \
         ! -f /lib/udev/rules.d/99-realsense-libusb.rules ]]; then
     echo "WARNING: no 99-realsense-libusb.rules on the host — the camera may be"
-    echo "         unreadable from the container. See docs/jetson.md (host setup)."
+    echo "         unreadable from the container. See docs/real-robot.md (host setup)."
   fi
   # One process owns the camera. A host-side Humble realsense node (from
   # ros-humble-realsense2-camera) grabbing it first makes the container's

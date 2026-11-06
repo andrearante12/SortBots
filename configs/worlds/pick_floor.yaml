@@ -1,0 +1,14 @@
+# A world layout (simtest/world.py has the full schema; pick_bench.yaml explains
+# packages). A NEGATIVE case, like pick_low.yaml, one step lower.
+
+name: pick_floor
+title: Package on the floor (out of reach)
+description: >
+  One box on the floor where pick_bench's bench would be. Its plate is 0.06 m above
+  the floor; the arm cannot go below 0.65 m, so the pick must be refused.
+
+scenes: [nvidia]
+autostart: true
+
+packages:
+  - {id: pkg_0, label: floor box, pose: [-7.9, 9.9, 1.5708], z: 0.0, magnet_face: "+x"}

@@ -41,6 +41,8 @@
   let wasRunning = false;
   let lastListSig = "";
   const expanded = new Set();
+  const sectionOf = (t) => t.section || "Other";
+  const listSig = () => JSON.stringify([tests, control, isRunning(), [...expanded]]);
 
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
@@ -49,14 +51,15 @@
   const panelOpen = () => !$("#session").hidden;
   // Short names from the file name ("crossing_yield" -> "Crossing yield"): the
   // spec's titles are sentences, and a new test file gets a name without anyone
-  // having to pick one. The full title is in the row's details.
+  // having to pick one.
   const titleOf = (name) => { const w = String(name).replace(/_/g, " "); return w.charAt(0).toUpperCase() + w.slice(1); };
   const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
   const words = (s) => String(s || "").replace(/_/g, " ");
   // "2.5 min", "90 s": sim seconds, as the spec caps them.
   const simTime = (s) => (s >= 90 ? `${Math.round(s / 30) / 2} min` : `${Math.round(s)} s`);
-  // "clearance: contacts == 0" reads better as "clearance · contacts = 0".
-  const crit = (m, c) => `<b>${esc(words(m))}</b> ${esc(c.replace(/==/g, "=").replace(/>=/g, "≥").replace(/<=/g, "≤").replace(/_/g, " "))}`;
+  // A line drawn, not a glyph: ▶ and ▼ come from whatever font has them, at their own size.
+  const CHEVRON = `<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const disclosure = (t, open) => `<button type="button" class="tp-disc" aria-expanded="${open}" aria-label="Details of ${esc(titleOf(t.name))}">${CHEVRON}</button>`;
 
   async function api(url, payload) {
     const res = await fetch(url, payload === undefined ? { cache: "no-store" } : {
@@ -88,47 +91,59 @@
     setTab("tests");
   }
   function closePanel() { $("#sp-x").click(); }
+  // The empty map's two ways in. The panel remembers its last tab, so each names its own:
+  // operator.js has already opened the panel by the time the start button gets here.
+  $("#empty-test").addEventListener("click", openTests);
+  $("#empty-go").addEventListener("click", () => setTab("launch"));
 
   // -- test list --------------------------------------------------------------------
 
   function renderList() {
     const busy = isRunning();
-    const sig = JSON.stringify([tests, control, busy, [...expanded]]);
+    const sig = listSig();
     if (sig === lastListSig) return; // don't rebuild under the operator's cursor
     lastListSig = sig;
-    const ready = tests.filter((t) => t.status === "ready").length;
-    $("#tp-count").textContent = tests.length ? `· ${ready} ready` : "";
     const why = !control ? "This server can't launch the sim (it isn't the sim console)" : busy ? "A test is already running" : "Launch the sim, run this test and score it";
-    $("#tp-list").innerHTML = tests.length ? tests.map((t, i) => {
-      const open = expanded.has(t.name) ? " open" : "";
+    const row = (t, i) => {
+      const isOpen = expanded.has(t.name), open = isOpen ? " open" : "";
       const label = `<span class="t"><span class="num">${i + 1}</span>${esc(titleOf(t.name))}</span>`;
       if (t.status !== "ready") {
         return `<div class="tp-test invalid${open}" data-name="${esc(t.name)}">
-          <div class="tp-row"><span class="chev">&#9654;</span>${label}</div>
-          <div class="tp-more"><p class="err">Can't run here: ${esc(t.error || "invalid")}</p><code>configs/tests/${esc(t.name)}.yaml</code></div></div>`;
+          <div class="tp-row">${label}${disclosure(t, isOpen)}</div>
+          <div class="tp-more"><p class="err">Can't run here: ${esc(t.error || "invalid")}</p></div></div>`;
       }
-      const world = t.world ? ` · ${esc(words(t.world))}` : "";
-      const checks = t.metrics.flatMap((m) => m.criteria.map((c) => `<li>${crit(m.id, c)}</li>`));
-      const reported = t.metrics.filter((m) => !m.criteria.length).map((m) => words(m.id));
+      // Absent from a console still running older simtest code (serve.py caches the module,
+      // while this file is read from disk): the row loses its bullets, not the whole list.
+      const passes = t.passes_when || [];
       const variant = t.variants.length > 1
         ? `<label>Variant <select data-variant><option value="">all ${t.variants.length}</option>${t.variants.map((v) => `<option value="${esc(v)}">${esc(words(v))}</option>`).join("")}</select></label>` : "";
       return `<div class="tp-test${open}" data-name="${esc(t.name)}">
         <div class="tp-row" title="Show what this test checks">
-          <span class="chev">&#9654;</span>${label}
+          ${label}
           <button type="button" class="btn small" data-run ${!control || busy ? "disabled" : ""} title="${esc(why)}">Run</button>
+          ${disclosure(t, isOpen)}
         </div>
         <div class="tp-more">
-          <b>${esc(t.title)}</b>
-          ${t.description ? `<p>${esc(t.description)}</p>` : ""}
-          <dl>
-            ${checks.length ? `<dt>Passes when</dt><dd><ul>${checks.join("")}</ul></dd>` : ""}
-            ${reported.length ? `<dt>Also reports</dt><dd>${esc(reported.join(", "))}</dd>` : ""}
-            <dt>Runs</dt><dd>${esc(words(t.scenario))}${world} · ${plural(t.robots.length, "robot")} · up to ${simTime(t.sim_s)} sim${t.variants.length > 1 ? ` · ${t.variants.length} variants` : ""}</dd>
-          </dl>
-          <div class="opts">${variant}<label>Repeats <input type="number" min="1" max="50" value="${t.repeats}" data-repeats></label>
-            <code>configs/tests/${esc(t.name)}.yaml</code></div>
+          <div class="tp-text">
+            ${t.description ? `<p>${esc(t.description)}</p>` : ""}
+            ${passes.length ? `<h5>Passes when</h5><ul>${passes.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>` : ""}
+            <div class="opts">${variant}<label>Repeats <input type="number" min="1" max="50" value="${t.repeats}" data-repeats></label>
+              <span class="runs">${plural(t.robots.length, "robot")}, up to ${simTime(t.sim_s)} of sim time</span></div>
+          </div>
+          ${t.clip ? `<figure class="tp-clip"><img src="${esc(t.clip)}" loading="lazy" alt="${esc(titleOf(t.name))}, recorded from a passing run"><figcaption>A passing run, sped up</figcaption></figure>` : ""}
         </div>
       </div>`;
+    };
+    // A test names its section in its YAML; alphabetical, whatever has none last. Numbers
+    // run on across sections.
+    const sections = [...new Set(tests.map(sectionOf))]
+      .sort((a, b) => (a === "Other") - (b === "Other") || a.localeCompare(b));
+    let n = 0;
+    $("#tp-list").innerHTML = tests.length ? sections.map((s) => {
+      return `<section class="tp-sec" data-section="${esc(s)}">
+        <h5 class="tp-sec-h">${esc(s)}</h5>
+        ${tests.filter((t) => sectionOf(t) === s).map((t) => row(t, n++)).join("")}
+      </section>`;
     }).join("") : `<div class="tp-empty">No test cases in configs/tests/.</div>`;
   }
 
@@ -140,7 +155,8 @@
       if (!e.target.closest(".tp-row")) return; // a click inside the expanded options
       if (expanded.has(name)) expanded.delete(name); else expanded.add(name);
       item.classList.toggle("open", expanded.has(name));
-      lastListSig = JSON.stringify([tests, control, isRunning(), [...expanded]]);
+      item.querySelector(".tp-disc").setAttribute("aria-expanded", String(expanded.has(name)));
+      lastListSig = listSig();
       return;
     }
     // Options only exist once a row has been expanded; collapsed, the spec's defaults.
@@ -151,6 +167,7 @@
     btn.disabled = true;
     try {
       run = await api("/api/tests/run", payload);
+      if (window.sortbotsRunStarting) window.sortbotsRunStarting();
       $("#result-card").hidden = true; // the last score is gone once the next run starts
       warn(null);
       $("#tp-log").textContent = ""; logOffset = 0;
@@ -271,7 +288,10 @@
       run = await api(`/api/tests/run${q}`);
       if (logOffset == null) $("#tp-log").textContent = "";
       appendLog(run.log); logOffset = run.offset;
-      if (wasRunning && !run.running && run.name) showResult(run.name, run.exit);
+      if (wasRunning && !run.running && run.name) {
+        showResult(run.name, run.exit);
+        if (window.sortbotsRunEnded) window.sortbotsRunEnded();
+      }
       wasRunning = !!run.running;
     } catch (e) {
       if (visible) warn(`Tests unavailable: ${e.message}`);
