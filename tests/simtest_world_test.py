@@ -222,6 +222,10 @@ def test_distances():
     rot = geometry.rect(4, 0, math.pi / 4, 2, 2)  # corner points at the box
     assert geometry.distance(box, rot) == pytest.approx(4 - 1 - math.sqrt(2))
     assert geometry.distance(box, geometry.rect(1.5, 0, 0, 2, 2)) == 0.0
+    # Two boxes sharing an edge LINE (both tops at y = 1) but 2 m apart along
+    # it: collinear segments are not an intersection (2026-11-06).
+    assert geometry.distance(box, geometry.rect(4, 0, 0, 2, 2)) == pytest.approx(2.0)
+    assert geometry.distance(box, geometry.rect(2, 0, 0, 2, 2)) == 0.0   # touching
 
 
 def test_footprint_poly_is_ccw_and_rotated():
