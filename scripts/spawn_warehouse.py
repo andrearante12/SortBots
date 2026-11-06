@@ -1215,6 +1215,91 @@ def _author_world_shape(stage, path: str, item: dict, *, collider: bool):
                             (0.0, 0.0, item["height"] / 2.0), collider=collider)
 
 
+def _fallback_item(item: dict) -> dict:
+    """The primitive a usd item degrades to when its asset can't be referenced:
+    the SAME footprint the metrics score against (simtest/world.py PRESETS)."""
+    h = item["height"]
+    if item.get("fallback") == "cylinder" or ("radius" in item and item.get("fallback") != "box"):
+        from simtest import world as wl
+
+        return {**item, "shape": "cylinder", "radius": item.get("radius") or wl.half_extent(item)}
+    if "radius" in item:
+        r = item["radius"]
+        return {**item, "shape": "box", "size": (2 * r, 2 * r, h)}
+    fx, fy = item["footprint"]
+    return {**item, "shape": "box", "size": (fx, fy, h)}
+
+
+def _strip_physics(stage, root_path: str) -> int:
+    """Turn a referenced asset into a visual-only prop: no colliders, no rigid
+    bodies, no articulations, joints, cameras or graphs. Returns how many prims
+    were touched.
+
+    World actors must not be colliders (see _spawn_world), but the NVIDIA
+    characters, the forklift and the AMRs all ship physics — the robots even
+    ship sensors and OmniGraphs. Composing `*Enabled = false` overrides over
+    the reference is what PhysX honours; RemoveAPI on a referenced prim would
+    only remove the local opinion and leave the asset's. Instanceable
+    subtrees can't be authored on through their proxies, so they are made
+    un-instanceable first (visual cost: none, these are single copies).
+    """
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+    root = stage.GetPrimAtPath(root_path)
+    if not root.IsValid():
+        return 0
+    for prim in Usd.PrimRange(root):
+        if prim.IsInstanceable():
+            prim.SetInstanceable(False)
+    touched = 0
+    for prim in Usd.PrimRange(root):
+        tn = prim.GetTypeName()
+        if prim.HasAPI(UsdPhysics.CollisionAPI):
+            UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
+            touched += 1
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            UsdPhysics.RigidBodyAPI(prim).CreateRigidBodyEnabledAttr(False)
+            touched += 1
+        if prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+            UsdPhysics.ArticulationRootAPI(prim).CreateArticulationEnabledAttr(False)
+            touched += 1
+        if prim.IsA(UsdPhysics.Joint):
+            UsdPhysics.Joint(prim).CreateJointEnabledAttr(False)
+            touched += 1
+        # Sensors and graphs on a robot asset would publish, render or tick on
+        # their own; a scripted mover needs none of that. Deactivating keeps
+        # the asset's meshes (they are siblings, not children, of these).
+        if prim.IsA(UsdGeom.Camera) or tn.startswith("OmniGraph") or "Lidar" in tn \
+                or tn.startswith("Isaac") or tn.startswith("PhysxScene"):
+            prim.SetActive(False)
+            touched += 1
+    return touched
+
+
+def _spawn_usd_actor(stage, path: str, actor: dict) -> bool:
+    """Reference a usd actor's asset under its Xform. The parent Xform keeps
+    the translate/rotate ops _WorldRuntime.step drives; the model sits in a
+    child with the asset's own yaw offset, floor offset and scale, so turning
+    the asset to face its direction of travel never touches the kinematics.
+    False when the asset root is unreachable (the caller falls back)."""
+    from pxr import Gf, UsdGeom
+
+    model = f"{path}/model"
+    if not _spawn_usd_prop(stage, model, 0.0, 0.0, 0.0, ref=actor["ref"], scale=1.0):
+        return False
+    xf = UsdGeom.Xformable(stage.GetPrimAtPath(model))
+    xf.ClearXformOpOrder()
+    xf.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, float(actor["z"])))
+    xf.AddRotateXYZOp().Set(Gf.Vec3f(0.0, 0.0, float(actor["yaw_offset_deg"])))
+    if actor["scale"] != 1.0:
+        s = float(actor["scale"])
+        xf.AddScaleOp().Set(Gf.Vec3f(s, s, s))
+    n = _strip_physics(stage, model)
+    emit(f"  world actor {actor['id']}: {actor['ref']} (physics stripped on {n} prim(s), "
+         f"yaw offset {actor['yaw_offset_deg']:.0f} deg)")
+    return True
+
+
 def _spawn_world(stage, w: dict) -> dict:
     """Author a world's props and actors. Returns {actor_id: (translate_op, rotate_op)}.
 
@@ -1242,14 +1327,16 @@ def _spawn_world(stage, w: dict) -> dict:
         path = f"{WORLD_ROOT}/props/{prop['id']}"
         x, y, yaw = prop["pose"]
         if prop["shape"] == "usd":
-            ok = _spawn_usd_prop(stage, path, x, y, yaw, ref=prop["ref"], scale=prop["scale"])
+            ok = _spawn_usd_prop(stage, path, x, y, yaw + math.radians(prop["yaw_offset_deg"]),
+                                 ref=prop["ref"], scale=prop["scale"], z=prop["z"])
             if not ok:
                 # Asset root unreachable: keep the obstacle where the metrics
-                # think it is, as a plain box of the declared footprint.
-                emit(f"  world prop {prop['id']}: asset root unreachable, using a box")
-                fx, fy = prop["footprint"]
-                prop = {**prop, "shape": "box", "size": (fx, fy, prop["height"])}
+                # think it is, as a primitive of the declared footprint.
+                emit(f"  world prop {prop['id']}: asset root unreachable, using a primitive")
+                prop = _fallback_item(prop)
             else:
+                if not prop["collider"]:
+                    _strip_physics(stage, path)
                 emit(f"  world prop {prop['id']}: {prop['ref']} at ({x}, {y})")
                 continue
         xf = UsdGeom.Xform.Define(stage, path)
@@ -1267,10 +1354,15 @@ def _spawn_world(stage, w: dict) -> dict:
         xf.ClearXformOpOrder()
         t_op = xf.AddTranslateOp()
         r_op = xf.AddRotateXYZOp()
-        geom = _author_world_shape(stage, path, actor, collider=False)
-        _bind(geom, _world_color_material(stage, materials, actor["color"]))
+        shape = actor
+        if actor["shape"] == "usd" and not _spawn_usd_actor(stage, path, actor):
+            emit(f"  world actor {actor['id']}: asset root unreachable, using a primitive")
+            shape = _fallback_item(actor)
+        if shape["shape"] != "usd":
+            geom = _author_world_shape(stage, path, shape, collider=False)
+            _bind(geom, _world_color_material(stage, materials, actor["color"]))
         actors[actor["id"]] = (t_op, r_op)
-        emit(f"  world actor {actor['id']}: {actor['shape']}, {actor['path']['mode']} over "
+        emit(f"  world actor {actor['id']}: {shape['shape']}, {actor['path']['mode']} over "
              f"{len(actor['path']['waypoints'])} waypoints at {actor['path']['speed_mps']} m/s")
     return actors
 
@@ -1354,7 +1446,8 @@ class _WorldRuntime:
             "props": [{**common(p), "footprint": wl.prop_footprint(p)}
                       for p in self.world["props"]],
             "actors": [{**common(a), "radius": a.get("radius"),
-                        "size": a.get("size"), "path": list(a["path"]["waypoints"]),
+                        "size": a.get("size"), "footprint": a.get("footprint"),
+                        "path": list(a["path"]["waypoints"]),
                         "mode": a["path"]["mode"]} for a in self.world["actors"]],
         }
 

@@ -60,8 +60,46 @@ USD_REF_RX = re.compile(r"^Isaac/[A-Za-z0-9_][A-Za-z0-9_./-]*\.usdz?$")
 
 SCENES = ("nvidia", "primitive")
 SHAPES = ("box", "cylinder", "usd")
-ACTOR_SHAPES = ("box", "cylinder")
+ACTOR_SHAPES = ("box", "cylinder", "usd")
 MODES = ("once", "loop", "pingpong")
+
+# Named obstacles a world can ask for by `preset:` instead of spelling out a
+# USD reference, its floor footprint and its height every time. Every key is
+# an ordinary item key, so a world can override any of them (`{preset:
+# person, radius: 0.35}`), and `fallback` is what spawn_warehouse authors
+# when the asset root is unreachable: the primitive of the same footprint,
+# so a run without the asset server still scores against the same shape.
+#
+# The refs were checked against the 5.1 asset root on 2026-11-04. Characters
+# render in their bind pose (omni.anim.people is not in the pip install),
+# which is all a depth-based detector needs. Footprints/heights are the
+# declared values the METRICS use; keep them honest against the asset's
+# real bounding box (scripts/simtest.py assets prints the live bbox).
+PRESETS = {
+    "person": {
+        "shape": "usd", "ref": "Isaac/People/Characters/F_Business_02/F_Business_02.usd",
+        "radius": 0.30, "height": 1.75, "color": (0.95, 0.45, 0.10), "fallback": "cylinder",
+    },
+    "worker": {
+        "shape": "usd",
+        "ref": "Isaac/People/Characters/male_adult_construction_05_new/"
+               "male_adult_construction_05_new.usd",
+        "radius": 0.32, "height": 1.80, "color": (0.95, 0.70, 0.10), "fallback": "cylinder",
+    },
+    "forklift": {
+        "shape": "usd", "ref": "Isaac/Props/Forklift/forklift.usd",
+        "footprint": (2.6, 1.2), "height": 2.2, "color": (0.90, 0.60, 0.05), "fallback": "box",
+    },
+    "amr": {
+        "shape": "usd", "ref": "Isaac/Robots/Idealworks/iwhub/iw_hub.usd",
+        "footprint": (1.0, 0.65), "height": 0.35, "color": (0.25, 0.55, 0.85), "fallback": "box",
+    },
+    "amr_tall": {
+        "shape": "usd", "ref": "Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd",
+        "footprint": (0.9, 0.55), "height": 0.9, "color": (0.25, 0.55, 0.85), "fallback": "box",
+    },
+}
+FALLBACKS = ("box", "cylinder")
 MAX_SPEED = 3.0          # m/s — a brisk human is ~1.4; anything faster is a typo
 MAX_COORD = 200.0        # m — the NVIDIA warehouse is ~30 x 40
 MAX_ITEMS = 64
@@ -132,14 +170,32 @@ def _shape(raw: dict, what: str, allowed) -> dict:
         out["ref"] = ref
         out["scale"] = _num(raw.get("scale", 1.0), f"{what}.scale", 0.0, 100.0, strict_lo=True)
         # The asset's own geometry is opaque to everything but Isaac, so the
-        # metrics need to be told how much floor it covers.
-        fp = raw.get("footprint")
-        if not isinstance(fp, (list, tuple)) or len(fp) != 2:
-            raise WorldError(f"{what}.footprint: usd props need [x, y] metres for the metrics")
-        out["footprint"] = tuple(_num(s, f"{what}.footprint", 0.0, 20.0, strict_lo=True)
-                                 for s in fp)
+        # metrics need to be told how much floor it covers: a rectangle
+        # (`footprint: [x, y]`, along the asset's forward axis) or a disc
+        # (`radius`, a person).
+        fp, radius = raw.get("footprint"), raw.get("radius")
+        if (fp is None) == (radius is None):
+            raise WorldError(f"{what}: usd items need exactly one of footprint: [x, y] "
+                             "or radius, metres, for the metrics")
+        if fp is not None:
+            if not isinstance(fp, (list, tuple)) or len(fp) != 2:
+                raise WorldError(f"{what}.footprint: expected [x, y] metres")
+            out["footprint"] = tuple(_num(s, f"{what}.footprint", 0.0, 20.0, strict_lo=True)
+                                     for s in fp)
+        else:
+            out["radius"] = _num(radius, f"{what}.radius", 0.0, 5.0, strict_lo=True)
         out["height"] = _num(raw.get("height", 1.0), f"{what}.height", 0.0, 10.0,
                              strict_lo=True)
+        # Assets don't agree on which way is forward or where their origin
+        # sits: yaw_offset_deg turns the model so its front faces the path's
+        # direction of travel, z lifts one whose origin isn't on the floor.
+        out["yaw_offset_deg"] = _num(raw.get("yaw_offset_deg", 0.0), f"{what}.yaw_offset_deg",
+                                     -360.0, 360.0)
+        out["z"] = _num(raw.get("z", 0.0), f"{what}.z", -1.0, 1.0)
+        fb = raw.get("fallback", "cylinder" if radius is not None else "box")
+        if fb not in FALLBACKS:
+            raise WorldError(f"{what}.fallback: expected one of {list(FALLBACKS)}, got {fb!r}")
+        out["fallback"] = fb
     return out
 
 
@@ -175,11 +231,25 @@ def _validate_path(raw, what) -> dict:
 def _validate_item(raw, what, *, actor: bool) -> dict:
     if not isinstance(raw, dict):
         raise WorldError(f"{what}: expected a mapping")
-    allowed = {"id", "shape", "size", "radius", "height", "color", "label"}
-    allowed |= {"path"} if actor else {"pose", "ref", "scale", "footprint", "collider"}
+    allowed = {"id", "shape", "size", "radius", "height", "color", "label", "preset",
+               "ref", "scale", "footprint", "yaw_offset_deg", "z", "fallback"}
+    allowed |= {"path"} if actor else {"pose", "collider"}
     unknown = set(raw) - allowed
     if unknown:
         raise WorldError(f"{what}: unknown key(s) {sorted(unknown)}")
+    preset = raw.get("preset")
+    if preset is not None:
+        if preset not in PRESETS:
+            raise WorldError(f"{what}.preset: expected one of {sorted(PRESETS)}, got {preset!r}")
+        # The preset is the base; whatever the world wrote on top wins. A
+        # world that gives its own radius for a `person` drops the preset's
+        # footprint and vice versa, so the two never both reach _shape.
+        base = dict(PRESETS[preset])
+        if "radius" in raw:
+            base.pop("footprint", None)
+        if "footprint" in raw:
+            base.pop("radius", None)
+        raw = {**base, **{k: v for k, v in raw.items() if k != "preset"}}
     iid = raw.get("id")
     if not isinstance(iid, str) or not ID_RX.match(iid):
         raise WorldError(f"{what}.id: must match {ID_RX.pattern}")
@@ -250,6 +320,23 @@ def load(name: str) -> dict:
     except yaml.YAMLError as e:
         raise WorldError(f"{p.name}: {e}") from None
     return validate(raw, stem=p.stem)
+
+
+def usd_refs() -> dict[str, list[str]]:
+    """{asset ref: [where it is used]} across the presets and every committed
+    world — what `scripts/simtest.py assets` checks against the asset root."""
+    out: dict[str, list[str]] = {}
+    for name, p in PRESETS.items():
+        out.setdefault(p["ref"], []).append(f"preset {name}")
+    for p in sorted(WORLDS_DIR.glob("*.yaml")):
+        try:
+            w = load(p.stem)
+        except WorldError:
+            continue
+        for item in w["props"] + w["actors"]:
+            if item["shape"] == "usd":
+                out.setdefault(item["ref"], []).append(f"{w['name']}/{item['id']}")
+    return out
 
 
 def list_worlds() -> list[dict]:
@@ -340,7 +427,7 @@ def pose_at(path: dict, t: float) -> dict:
 
 def footprint(item: dict, x: float, y: float, yaw: float) -> tuple:
     """The floor-plane shape of a prop or actor at a pose (simtest.geometry)."""
-    if item["shape"] == "cylinder":
+    if item["shape"] == "cylinder" or (item["shape"] == "usd" and "radius" in item):
         return geometry.circle(x, y, item["radius"])
     if item["shape"] == "box":
         return geometry.rect(x, y, yaw, item["size"][0], item["size"][1])
@@ -359,7 +446,7 @@ def actor_footprint(actor: dict, t: float) -> tuple:
 
 def half_extent(item: dict) -> float:
     """Radius of the smallest circle around the item's footprint."""
-    if item["shape"] == "cylinder":
+    if "radius" in item:
         return item["radius"]
     sx, sy = item["size"][:2] if item["shape"] == "box" else item["footprint"]
     return math.hypot(sx, sy) / 2.0

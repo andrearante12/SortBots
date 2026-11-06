@@ -48,10 +48,28 @@ def test_committed_worlds_actors_clear_of_props():
 
 # -- validation ----------------------------------------------------------------
 
+def _as_usd(w, **kw):
+    """The fixture actor minus its primitive shape, so a preset/usd key is
+    what decides the shape (an explicit shape: or radius: in a world wins
+    over its preset, by design)."""
+    a = w["actors"][0]
+    a.pop("shape", None)
+    a.pop("radius", None)
+    a.pop("height", None)
+    a.update(kw)
+
+
 @pytest.mark.parametrize("mutate,err", [
     (lambda w: w.update(name="Bad Name"), "name"),
     (lambda w: w.update(bogus=1), "unknown key"),
-    (lambda w: w["actors"][0].update(shape="usd"), "shape"),
+    (lambda w: w["actors"][0].update(shape="usd"), "ref"),
+    (lambda w: _as_usd(w, shape="usd", ref="Isaac/People/x.usd"), "exactly one"),
+    (lambda w: w["actors"][0].update(shape="usd", ref="Isaac/People/x.usd",
+                                     footprint=[1, 1]), "exactly one"),
+    (lambda w: _as_usd(w, preset="ghost"), "preset"),
+    (lambda w: _as_usd(w, preset="forklift", fallback="sphere"), "fallback"),
+    (lambda w: _as_usd(w, preset="person", z=5), "z"),
+    (lambda w: _as_usd(w, preset="person", yaw_offset_deg=400), "yaw_offset_deg"),
     (lambda w: w["actors"][0].update(radius=0), "radius"),
     (lambda w: w["actors"][0]["path"].update(waypoints=[[0, 0]]), "two"),
     (lambda w: w["actors"][0]["path"].update(waypoints=[[0, 0], [0, 0]]), "repeats"),
@@ -87,6 +105,57 @@ def test_path_for_rejects_traversal():
     for bad in ("../x", "a/b", "x.yaml", ""):
         with pytest.raises(world.WorldError):
             world.path_for(bad)
+
+
+# -- presets / usd items ---------------------------------------------------------
+
+def test_preset_expands_and_world_keys_win():
+    raw = _walker()
+    raw["actors"][0] = {"id": "w", "preset": "person", "radius": 0.4,
+                        "path": raw["actors"][0]["path"]}
+    a = world.validate(raw)["actors"][0]
+    assert a["shape"] == "usd" and a["ref"] == world.PRESETS["person"]["ref"]
+    assert a["radius"] == 0.4 and "footprint" not in a            # the world's radius won
+    assert a["height"] == world.PRESETS["person"]["height"]
+    assert a["fallback"] == "cylinder" and a["yaw_offset_deg"] == 0.0 and a["z"] == 0.0
+    assert world.footprint(a, 1.0, 2.0, 0.3) == geometry.circle(1.0, 2.0, 0.4)
+    assert world.half_extent(a) == 0.4
+
+
+def test_forklift_preset_is_a_rectangle_along_its_heading():
+    raw = _walker()
+    raw["actors"][0] = {"id": "f", "preset": "forklift", "path": raw["actors"][0]["path"]}
+    f = world.validate(raw)["actors"][0]
+    assert f["footprint"] == world.PRESETS["forklift"]["footprint"] and "radius" not in f
+    shape = world.footprint(f, 0.0, 0.0, 0.0)
+    xmin, ymin, xmax, ymax = geometry.bounds(shape)
+    assert (xmax - xmin, ymax - ymin) == pytest.approx(f["footprint"])
+    assert world.half_extent(f) == pytest.approx(math.hypot(*f["footprint"]) / 2)
+    assert f["fallback"] == "box"
+
+
+def test_preset_works_for_props_too():
+    raw = _walker()
+    raw["props"] = [{"id": "parked", "preset": "forklift", "pose": [10, 10, 1.0],
+                     "collider": False}]
+    p = world.validate(raw)["props"][0]
+    assert p["shape"] == "usd" and p["collider"] is False
+    assert geometry.centre(world.prop_footprint(p)) == pytest.approx((10, 10))
+
+
+def test_every_preset_validates_as_an_actor():
+    for name in world.PRESETS:
+        raw = _walker()
+        raw["actors"][0] = {"id": "a", "preset": name, "path": raw["actors"][0]["path"]}
+        a = world.validate(raw)["actors"][0]
+        assert world.USD_REF_RX.match(a["ref"]) and a["height"] > 0
+        assert ("radius" in a) != ("footprint" in a)
+
+
+def test_usd_refs_lists_presets_and_worlds():
+    refs = world.usd_refs()
+    for name, p in world.PRESETS.items():
+        assert f"preset {name}" in refs[p["ref"]]
 
 
 # -- kinematics ----------------------------------------------------------------
