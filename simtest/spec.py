@@ -3,7 +3,7 @@
     name: crossing_yield
     title: Walker crosses the aisle mouth — yield and arrive
     scenario: moving_obstacles          # configs/scenarios/ — how the stack runs
-    overrides: {world: aisle_crossing}  # only keys that scenario lists under overrides:
+    overrides: {world: person_crossing}  # only keys that scenario lists under overrides:
     warmup_s: 5                         # sim-s between "stack ready" and t0
     goals:                              # Nav2 goals the probe sends, per robot in order
       - robot: robot_0
@@ -23,7 +23,7 @@
     repeats: 3
     pass_rate: 1.0                      # fraction of repeats (per variant) that must pass
     variants:                           # optional: the same test under other settings
-      - {label: head_on, set: {overrides.world: aisle_head_on}}
+      - {label: head_on, set: {overrides.world: person_head_on}}
     record: [dyn]                       # extra event streams to keep (simtest/events.py)
 
 The three layers stay separate on purpose: a world is WHAT is in the

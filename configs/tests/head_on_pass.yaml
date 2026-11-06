@@ -1,23 +1,25 @@
 # A test case (simtest/spec.py has the schema; docs/testing.md the how-to).
 
 name: head_on_pass
-title: Walker comes down the aisle head-on — pass or wait, don't collide
+title: Something comes down the aisle head-on — pass it, don't collide, don't crawl
 description: >
-  robot_0 drives up its own aisle while a walker comes down it toward the
-  robot. The aisle is ~4 m wide, so passing is possible — but the closing
-  speed is ~1.3 m/s and the walker never yields. Pass = no contact and the
-  goal reached. Variant `crossing` asks the same thing of the aisle-mouth
-  crossing world, for a side-by-side row in one report.
+  robot_0 drives up its own aisle while something comes down the west half
+  of it toward the robot and never yields: a person at 1 m/s (variant
+  `person`) or a low warehouse AMR at 0.8 m/s (variant `amr`). The aisle is
+  ~4 m wide, so passing on the east side is possible. Pass = no contact with
+  a real margin, the goal reached, and the pass costing little: a detour of
+  at most 1.6x the straight line. The reaction metric is reported, not
+  judged — a clean pass need not slow down at all.
 
 scenario: moving_obstacles_mapped
 overrides:
-  world: aisle_head_on
+  world: person_head_on
 
 warmup_s: 5
 
 goals:
   - robot: robot_0
-    pose: [-8.3, 15.0, 1.5708]   # up the aisle, beside the walker's turn point
+    pose: [-7.4, 15.0, 1.5708]   # up the aisle, east side, level with the mover's turn point
     timeout_s: 120
 
 stop:
@@ -29,17 +31,22 @@ metrics:
   - metric: clearance
     pass:
       contacts: {eq: 0}
+      min_m: {gt: 0.10}
   - metric: goals
     pass:
       success_rate: {gte: 1.0}
+      max_detour_ratio: {lte: 1.6}
+  - metric: reaction
   - metric: detection
+  - metric: prediction                # reported: the Kalman tracker's look-ahead error
   - metric: run_stats
 
 variants:
-  - label: head_on
-    set: {overrides.world: aisle_head_on}
-  - label: crossing
-    set: {overrides.world: aisle_crossing}
+  - label: person
+    set: {overrides.world: person_head_on}
+  - label: amr
+    set: {overrides.world: amr_head_on}
 
+record: [dyn, trk]
 repeats: 1
 pass_rate: 1.0

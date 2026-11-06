@@ -1,13 +1,15 @@
 # A test case (simtest/spec.py has the schema; docs/testing.md the how-to).
 
 name: fleet_traffic
-title: Fleet exploration under foot traffic
+title: Fleet exploration under foot and forklift traffic
 description: >
-  Both robots explore the warehouse from empty while two walkers cross the
-  open floor and crates clutter it. No goals: the explorers pick their own.
-  Scores what traffic costs exploration (coverage, unthresholded — compare
-  against an explore_fleet run) and whether the walkers stayed out of both
-  the robots and the fused map.
+  Both robots explore the warehouse from empty while two people and a
+  forklift work the open floor and real props clutter it (warehouse_mixed).
+  No goals: the explorers pick their own. Scores what traffic costs
+  exploration (coverage, unthresholded — compare against an explore_fleet
+  run) and whether the movers stayed out of both the robots and the fused
+  map. The most expensive case in the suite: run it after the goal-driven
+  ones pass.
 
 scenario: moving_obstacles_fleet
 
@@ -26,6 +28,7 @@ metrics:
       occupied_frac: {lte: 0.05}
   - metric: coverage
   - metric: detection
+  - metric: reaction
   - metric: run_stats
 
 repeats: 1

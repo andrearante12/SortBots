@@ -22,7 +22,7 @@ from simtest.probe import ProbeCore  # noqa: E402
 BASE = {
     "name": "unit",
     "scenario": "moving_obstacles",   # fresh map: no saved-map dependency in unit tests
-    "overrides": {"world": "aisle_crossing"},
+    "overrides": {"world": "person_crossing"},
     "warmup_s": 2,
     "goals": [{"robot": "robot_0", "pose": [-8.0, 3.0, 0.0], "timeout_s": 30},
               {"robot": "robot_0", "waypoint": "shelf_a", "at_s": 50}],
@@ -85,7 +85,7 @@ def test_resolves_waypoint_goal_and_robots():
     t = spec.validate(raw())
     label, r = t["variants"][0]
     assert label == "base" and r["robots"] == ["robot_0"]
-    assert r["world"]["name"] == "aisle_crossing"
+    assert r["world"]["name"] == "person_crossing"
     assert r["goals"][1]["pose"][:2] == [-4.5, 5.5] and r["goals"][1]["at_s"] == 50
 
 
@@ -129,11 +129,11 @@ def test_named_waypoints_need_a_saved_map():
 
 def test_variants_resolve_independently():
     t = spec.validate(raw(variants=[
-        {"label": "cross", "set": {"overrides.world": "aisle_crossing"}},
-        {"label": "head_on", "set": {"overrides.world": "aisle_head_on", "stop.sim_s": 40}}]))
+        {"label": "cross", "set": {"overrides.world": "person_crossing"}},
+        {"label": "head_on", "set": {"overrides.world": "person_head_on", "stop.sim_s": 40}}]))
     (l1, a), (l2, b) = t["variants"]
     assert (l1, l2) == ("cross", "head_on")
-    assert a["world"]["name"] == "aisle_crossing" and b["world"]["name"] == "aisle_head_on"
+    assert a["world"]["name"] == "person_crossing" and b["world"]["name"] == "person_head_on"
     assert b["stop"]["sim_s"] == 40 and a["stop"]["sim_s"] == 100
 
 
@@ -155,10 +155,10 @@ class FakeRecorder:
 
 
 def _gt(sim, wt, running=True, x=-7.15, y=11.62):
-    return {"t": sim, "wt": wt, "running": running, "world": "aisle_crossing",
+    return {"t": sim, "wt": wt, "running": running, "world": "person_crossing",
             "robots": {"robot_0": {"x": x, "y": y, "yaw": 0.0}},
             "actors": {"walker_0": world.pose_at(
-                world.load("aisle_crossing")["actors"][0]["path"], wt)}}
+                world.load("person_crossing")["actors"][0]["path"], wt)}}
 
 
 def _resolved_json(r):

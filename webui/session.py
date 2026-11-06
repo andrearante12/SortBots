@@ -35,6 +35,7 @@ what lets a session survive serve.py restarting — see SessionManager._adopt().
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -464,6 +465,14 @@ def _validate(path: Path, raw: dict) -> dict:
     }
 
 
+# Parsed scenarios keyed by every file's mtime. get_scenario() is called once
+# per test case (and per variant) by simtest/spec.py, and the dashboard's
+# /api/tests validates every test on each refresh: with eight tests that was
+# ~170 YAML parses and 0.8 s a poll (2026-11-04), long enough for the tests
+# tab to miss a run's state change. A touched file still reloads at once.
+_scenario_cache: tuple[tuple, list] | None = None
+
+
 def load_scenarios() -> list[dict]:
     """Parse configs/scenarios/*.yaml.
 
@@ -471,8 +480,19 @@ def load_scenarios() -> list[dict]:
     `error` string rather than being dropped — a silently missing scenario is
     much harder to debug than a card that says why it won't load.
     """
+    global _scenario_cache
+    paths = sorted(SCENARIO_DIR.glob("*.yaml"))
+
+    def stamp(path):
+        try:
+            return path.stat().st_mtime_ns
+        except OSError:
+            return None
+    key = tuple((str(path), stamp(path)) for path in paths)
+    if _scenario_cache is not None and _scenario_cache[0] == key:
+        return copy.deepcopy(_scenario_cache[1])
     out = []
-    for path in sorted(SCENARIO_DIR.glob("*.yaml")):
+    for path in paths:
         try:
             with open(path) as f:
                 out.append(_validate(path, yaml.safe_load(f)))
@@ -488,7 +508,8 @@ def load_scenarios() -> list[dict]:
                 "capture": {"bag": False},
                 "error": f"{path.name}: {exc}",
             })
-    return out
+    _scenario_cache = (key, out)
+    return copy.deepcopy(out)
 
 
 def get_scenario(name: str) -> dict:

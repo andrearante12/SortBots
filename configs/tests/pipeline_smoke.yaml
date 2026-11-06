@@ -8,13 +8,13 @@
 name: pipeline_smoke
 title: Harness smoke — one short goal, ground truth flowing
 description: >
-  robot_0 drives 1.6 m down its aisle in the aisle_crossing world. Pass =
+  robot_0 drives 1.6 m down its aisle in the person_crossing world. Pass =
   ground truth arriving at a sane rate and the goal reached. No avoidance is
   asked of it: the walker is never near this route.
 
 scenario: moving_obstacles
 overrides:
-  world: aisle_crossing
+  world: person_crossing
 
 warmup_s: 2
 

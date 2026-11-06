@@ -1,0 +1,45 @@
+# A world layout (simtest/world.py has the full schema). See person_crossing.yaml
+# for how these coordinates were chosen.
+#
+# The braking case. A stack of crates stands just west of robot_0's route out
+# of the aisle, tall enough to hide a person behind it. At start_at_s the
+# person steps out from behind it, walks onto the route and STOPS there
+# (mode: once holds the last waypoint). The robot gets no warning from the
+# person's approach — it has to react from the moment they appear, ~2 m
+# ahead — and then has to plan around someone standing still, whom the
+# frame-difference filter no longer sees as moving.
+#
+# start_at_s is tuned to the robot's progress on step_out_stop's goal: with
+# the goal sent at t0 the robot passes y ~ 8 at ~11-12 sim-s (crossing_yield
+# notes). Re-tune it here if Nav2's startup latency changes; variants can't
+# change actor timing (simtest/spec.py VARIANT_KEYS_RX).
+
+name: person_step_out
+title: Aisle mouth — a person steps out from behind crates and stops
+description: >
+  A crate stack at the aisle mouth hides a person who, at t = 10.5 s, steps
+  out and stops in the middle of robot_0's route south. Scores how fast the
+  robot slows and stops, how far it travels doing so, and whether it then
+  gets past someone standing still.
+
+scenes: [nvidia]
+autostart: true
+
+props:
+  - id: crate_stack
+    label: crates
+    shape: box
+    size: [1.2, 1.0, 1.6]   # tall enough to hide a standing person from the head camera
+    pose: [-9.2, 7.6, 0.0]
+    color: [0.62, 0.52, 0.36]
+
+actors:
+  - id: person_0
+    label: person
+    preset: person
+    path:
+      waypoints: [[-9.2, 6.6], [-7.4, 6.6]]   # from behind the crates onto the route
+      speed_mps: 1.4      # a brisk step out
+      mode: once          # ...and then stands there
+      start_at_s: 10.5
+      dwell_s: 0.0

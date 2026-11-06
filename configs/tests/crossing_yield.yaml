@@ -1,23 +1,27 @@
 # A test case: one scored, repeatable question (simtest/spec.py has the full
 # schema; docs/testing.md the how-to). Run it with:
 #
-#   scripts/simtest.py run crossing_yield
+#   scripts/simtest.py run crossing_yield                # both variants
+#   scripts/simtest.py run crossing_yield --variant person
 #
 # Coordinates are the map frame (== Isaac world). Thresholds are a first cut:
 # tighten them once a few runs show where the stack actually sits.
 
 name: crossing_yield
-title: Walker crosses the aisle mouth — see it, yield, arrive
+title: Something crosses the route — see it, yield, arrive
 description: >
   robot_0 drives from its spawn pose down its aisle and out onto the open
-  floor while a walker paces back and forth across the aisle mouth. With the
-  goal sent at t0 the robot reaches the walker's line ~13-15 sim-s in, while
-  the walker crosses it at ~16 s — so on a typical run they meet. Pass = no
-  contact, the goal reached, and the walker not left painted into the map.
+  floor while something crosses its route: a person pacing across the aisle
+  mouth (variant `person`), or a forklift working the apron at 2 m/s
+  (variant `forklift`). With the goal sent at t0 the robot reaches the
+  crossing line ~13-15 sim-s in, so on a typical run they meet. Pass = no
+  contact, the goal reached, the mover not painted into the map, and the
+  robot visibly reacting: at least one encounter in which it halves its
+  speed within 3 s of the mover becoming a threat.
 
 scenario: moving_obstacles_mapped
 overrides:
-  world: aisle_crossing
+  world: person_crossing
 
 warmup_s: 5
 
@@ -42,10 +46,20 @@ metrics:
   - metric: map_contamination
     pass:
       occupied_frac: {lte: 0.05}
-  - metric: detection
+  - metric: reaction
     pass:
-      recall: {gte: 0.3}
+      encounters: {gte: 1}
+      max_time_to_slow_s: {lte: 3.0}
+  - metric: detection                 # reported: the frame-difference filter's recall
+  - metric: prediction                # reported: the Kalman tracker's look-ahead error
   - metric: run_stats
 
+variants:
+  - label: person
+    set: {overrides.world: person_crossing}
+  - label: forklift
+    set: {overrides.world: forklift_crossing}
+
+record: [dyn, trk]
 repeats: 1
 pass_rate: 1.0

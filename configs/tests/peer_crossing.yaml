@@ -1,0 +1,57 @@
+# A test case (simtest/spec.py has the schema; docs/testing.md the how-to).
+#
+# Two REAL robots, not a scripted mover: robot_1 is a full Nav2 stack on a
+# crossing goal, so both planners react to each other — the case amr_head_on
+# deliberately leaves out for repeatability. robot_1 needs ~45 sim-s to come
+# down its aisle and across the apron, so robot_0's goal is held until t=25
+# to put both on the apron at once. Tune the hold if the meeting drifts.
+
+name: peer_crossing
+title: Two robots cross on the apron — neither hits the other
+description: >
+  robot_1 drives from its aisle west across the open floor while robot_0,
+  held back 25 s, comes south out of its own aisle across robot_1's track —
+  with the person still pacing the aisle mouth. Pass = no contact between
+  the robots (both at their Nav2 footprint) or with the person, and both
+  goals reached. Also the live check that a second robot localizes on the
+  library map.
+
+scenario: moving_obstacles_mapped
+overrides:
+  world: person_crossing
+  robots: 2
+
+warmup_s: 5
+
+goals:
+  - robot: robot_1
+    pose: [-12.0, 4.0, 3.1416]   # west across the apron, past robot_0's route
+    timeout_s: 150
+  - robot: robot_0
+    pose: [-8.0, 3.0, -1.5708]
+    at_s: 25
+    timeout_s: 120
+
+stop:
+  sim_s: 220
+  until: [goals_done]
+  settle_s: 3
+
+metrics:
+  - metric: clearance
+    id: clearance_peers
+    params: {actors: [], peers: true}
+    pass:
+      contacts: {eq: 0}
+      min_m: {gt: 0.05}
+  - metric: clearance
+    pass:
+      contacts: {eq: 0}
+  - metric: goals
+    pass:
+      success_rate: {gte: 1.0}
+  - metric: reaction
+  - metric: run_stats
+
+repeats: 1
+pass_rate: 1.0
