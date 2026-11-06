@@ -91,6 +91,10 @@
     setTab("tests");
   }
   function closePanel() { $("#sp-x").click(); }
+  // The empty map's two ways in. The panel remembers its last tab, so each names its own:
+  // operator.js has already opened the panel by the time Start a session gets here.
+  $("#empty-test").addEventListener("click", openTests);
+  $("#empty-go").addEventListener("click", () => setTab("launch"));
 
   // -- test list --------------------------------------------------------------------
 

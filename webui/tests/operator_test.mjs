@@ -259,9 +259,14 @@ async function main() {
     await shot(`${vp.label}-empty`);
 
     // -- session panel (scenarios.js, reused) ------------------------------------
+    await click('#empty-test');
+    await sleep(500);
+    check(`${vp.label}: Run a test opens the Tests tab`, await visible('#session') && await visible('#tests-pane') && !(await visible('#launch-form')));
+    await click('#sp-x');
+    await sleep(200);
     await click('#empty-go');
     await sleep(800);
-    check(`${vp.label}: Start a session opens the session panel`, await visible('#session') && await visible('#launch-form'));
+    check(`${vp.label}: Start a session opens the session panel, on Launch whatever tab was last open`, await visible('#session') && await visible('#launch-form'));
     check(`${vp.label}: launch form is filled from the API`, await page.eval(`document.querySelectorAll('#lf-preset option').length > 1`));
     check(`${vp.label}: Start is wired (not disabled by a missing console)`, await page.eval(`!document.getElementById('lf-start').disabled`));
     check(`${vp.label}: with no session the panel is just the form`, await visible('#launch-form') && !(await visible('#session-pane')) && !(await visible('#lf-command')) && !(await visible('#lf-summary')));

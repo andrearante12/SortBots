@@ -1780,7 +1780,7 @@
     $("#empty-sub").textContent = boot ? boot.text : starting ? "" : controlAvailable
       ? "Start a session to see your robots and give them tasks."
       : "No robot is reporting yet. Check that the robot console is running.";
-    $("#empty-go").hidden = starting || !controlAvailable;
+    $("#empty-go").hidden = $("#empty-test").hidden = starting || !controlAvailable;
   }
 
   // A session started with demo: true (the Fleet demo preset) runs the task demo by
