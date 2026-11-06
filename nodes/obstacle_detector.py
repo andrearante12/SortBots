@@ -15,13 +15,20 @@ Pipeline (docs/obstacle_detection.md has the rationale and the tuning notes):
       --TF--> base_link --range crop--> floor estimate --height band-->
       2-D cell grid --8-connected components--> clusters
       --> per-cluster stats (centroid, bbox, image box)
-      --TF odom--> nearest-neighbour tracks --> velocity, `moving`
+      --TF odom--> constant-velocity Kalman tracks --> velocity, `moving`,
+      where each mover will be 0.5-1.5 s from now
 
 Outputs, all stamped with the source depth image's time:
 
-    /<id>/obstacle_tracks  std_msgs/String JSON  (dashboard overlay, tests)
-    /<id>/obstacle_points  sensor_msgs/PointCloud2 in <id>/base_link (Nav2-ready)
-    /<id>/obstacles_viz    visualization_msgs/MarkerArray (RViz)
+    /<id>/obstacle_tracks       std_msgs/String JSON  (dashboard overlay, tests)
+    /<id>/obstacle_points       sensor_msgs/PointCloud2 in <id>/base_link (Nav2-ready)
+    /<id>/predicted_obstacles   PointCloud2 in <id>/base_link: the swept footprints of
+                                moving tracks over the next pred_cloud_horizon_s, a
+                                local-costmap source (configs/nav2_params.yaml) — so
+                                Nav2 plans behind a walker, not through where they are
+                                about to be. Prediction biases the plan; current
+                                occupancy and the collision monitor stay the safety floor.
+    /<id>/obstacles_viz         visualization_msgs/MarkerArray (RViz)
 
 No class labels on purpose: Nav2 needs to know where something is and whether
 it moves, not what it is, and geometry can't miss a class it wasn't trained on.
@@ -72,6 +79,22 @@ DEFAULTS = {
     "min_moving_z_extent_m": 0.3,
     "range_margin_m": 0.3,
     "max_obstacle_speed_mps": 3.0,
+    # Large movers (forklifts, pallet jacks): longer than max_moving_extent_m
+    # but tall, so not a shelf deck or a wall seen edge-on.
+    "max_large_mover_extent_m": 3.0,
+    "large_mover_min_z_m": 1.2,
+    # Kalman tracker (constant velocity) and its predictions.
+    "kf_accel_sigma": 1.0,
+    "kf_meas_sigma_m": 0.1,
+    "kf_init_vel_sigma": 1.5,
+    "kf_gate_chi2": 9.21,
+    "pred_horizons_s": [0.5, 1.0, 1.5],
+    "predict_cloud": True,
+    "pred_cloud_horizon_s": 1.5,
+    "pred_cloud_step_s": 0.1,
+    "pred_cloud_cell_m": 0.1,
+    "pred_cloud_z_m": 0.5,
+    "pred_cloud_min_radius_m": 0.25,
 }
 
 
@@ -312,50 +335,120 @@ def can_move(o: dict, cfg: dict | None = None) -> bool:
       the remaining 11 of 171. A body is tall top to bottom; a deck isn't.
     """
     c = {**DEFAULTS, **(cfg or {})}
+    z_extent = o["max"][2] - o["min"][2]
+    # Large-mover rule (2026-11-04): a forklift is ~2.5 m long, past the
+    # extent limit that keeps shelving static, but it is also TALL. A shelf
+    # deck or a wall seen edge-on is long and flat; racking long enough to
+    # exceed this extent is longer still, or clipped. So a long cluster may
+    # move only when it is at least large_mover_min_z_m top to bottom.
+    long_ok = (o["extent_m"] <= c["max_moving_extent_m"]
+               or (o["extent_m"] <= c["max_large_mover_extent_m"]
+                   and z_extent >= c["large_mover_min_z_m"]))
     return (not o.get("clipped", False)
-            and o["extent_m"] <= c["max_moving_extent_m"]
-            and o["max"][2] - o["min"][2] >= c["min_moving_z_extent_m"])
+            and long_ok
+            and z_extent >= c["min_moving_z_extent_m"])
 
 
 class Tracker:
-    """Nearest-neighbour tracks on obstacle centroids in a world-fixed frame.
+    """Constant-velocity Kalman tracks on obstacle centroids in a world-fixed frame.
 
-    v2 in docs/obstacle_detection.md is a Kalman filter; this is the
-    smallest thing that gives a usable `moving` flag. Positions MUST be in a
-    frame that doesn't move with the robot (odom), or turning in place would
-    make every shelf "move". Times are message stamps, so sim time works.
+    One filter per track, state [x, y, vx, vy] in `world_frame` (odom):
+    positions MUST be in a frame that doesn't move with the robot, or turning
+    in place would make every shelf "move". Times are message stamps, so sim
+    time works.
+
+    v1 was nearest-neighbour association with an EMA velocity. The filter
+    replaces both: association gates on the Mahalanobis distance of the
+    innovation (kf_gate_chi2, 99% for 2 dof) AND on track_gate_m, so a track
+    that has only just started (huge velocity uncertainty) can't claim a
+    detection a metre away; velocity comes from the state, which converges to
+    the least-squares line through noiseless samples within a few frames and
+    averages real centroid jitter instead of trusting one frame.
+
+    The rules from v1 that the live false-positive table was built on stay:
+    an observation that isn't `movable` (see can_move) updates the position
+    and zeroes the velocity (with its uncertainty reset, so the next movable
+    frames can rebuild it), a centroid jump faster than max_obstacle_speed_mps
+    restarts the track, and `moving` needs track_min_hits frames at
+    moving_speed_mps or more.
+
+    `pred` extrapolates the state pred_horizons_s ahead: where the mover will
+    be if it keeps its velocity. That is a 1-2 s claim, not a route: people
+    stop and turn, so nothing downstream treats it as more than a bias
+    (nodes/obstacle_detector.py --help, docs/obstacle_detection.md).
     """
 
     def __init__(self, cfg: dict | None = None):
         self.cfg = {**DEFAULTS, **(cfg or {})}
         self.tracks: dict[int, dict] = {}
         self._next_id = 1
+        c = self.cfg
+        self._R = np.eye(2) * float(c["kf_meas_sigma_m"]) ** 2
+        self._H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], dtype=float)
+
+    def _init_P(self) -> np.ndarray:
+        c = self.cfg
+        return np.diag([c["kf_meas_sigma_m"] ** 2, c["kf_meas_sigma_m"] ** 2,
+                        c["kf_init_vel_sigma"] ** 2, c["kf_init_vel_sigma"] ** 2]).astype(float)
+
+    def _new(self, x: float, y: float, t: float) -> dict:
+        return {"x": np.array([x, y, 0.0, 0.0]), "P": self._init_P(), "t": t,
+                "hits": 1, "last": (x, y)}
+
+    def _predict(self, tr: dict, dt: float) -> tuple[np.ndarray, np.ndarray]:
+        """(x, P) propagated dt ahead under constant velocity with white
+        acceleration noise of kf_accel_sigma."""
+        F = np.eye(4)
+        F[0, 2] = F[1, 3] = dt
+        q = float(self.cfg["kf_accel_sigma"]) ** 2
+        d4, d3, d2 = dt ** 4 / 4.0, dt ** 3 / 2.0, dt ** 2
+        Q = q * np.array([[d4, 0, d3, 0], [0, d4, 0, d3], [d3, 0, d2, 0], [0, d3, 0, d2]])
+        return F @ tr["x"], F @ tr["P"] @ F.T + Q
+
+    def _state(self, tid: int, tr: dict, movable: bool) -> dict:
+        c = self.cfg
+        x = tr["x"]
+        speed = float(math.hypot(x[2], x[3]))
+        moving = (movable and tr["hits"] >= c["track_min_hits"]
+                  and speed >= c["moving_speed_mps"])
+        P = tr["P"]
+        return {"track_id": tid,
+                "pos_w": [round(float(x[0]), 3), round(float(x[1]), 3)],
+                "vel": [round(float(x[2]), 3), round(float(x[3]), 3)],
+                "speed_mps": round(speed, 3),
+                "cov": [round(float(P[0, 0]), 4), round(float(P[0, 1]), 4),
+                        round(float(P[1, 1]), 4)],
+                "pred": [[h, round(float(x[0] + x[2] * h), 3), round(float(x[1] + x[3] * h), 3)]
+                         for h in c["pred_horizons_s"]],
+                "moving": bool(moving),
+                "hits": tr["hits"]}
 
     def update(self, positions: list[tuple[float, float]], t: float,
                movable: list[bool] | None = None) -> list[dict]:
-        """Associate this frame's centroids; returns one track state per input.
-
-        An observation that isn't `movable` (see can_move) still moves the
-        track, but its velocity is zeroed rather than fed a centroid slide. So
-        a person walking into view is called moving a couple of frames after
-        they're fully in it, not while they're clipped by the edge.
-        """
+        """Associate this frame's centroids; returns one track state per input."""
         movable = movable if movable is not None else [True] * len(positions)
         c = self.cfg
         for tid in [k for k, tr in self.tracks.items()
                     if t - tr["t"] > c["track_max_age_s"]]:
             del self.tracks[tid]
 
-        # Greedy by distance: pair the closest (track, detection) first.
-        pairs = []
+        # Predict every track to this stamp once, then pair greedily by
+        # Mahalanobis distance within both gates.
+        pred = {}
         for tid, tr in self.tracks.items():
             dt = max(t - tr["t"], 0.0)
-            px = tr["pos"][0] + tr["vel"][0] * dt
-            py = tr["pos"][1] + tr["vel"][1] * dt
+            xp, Pp = self._predict(tr, dt)
+            S = self._H @ Pp @ self._H.T + self._R
+            pred[tid] = (xp, Pp, np.linalg.inv(S))
+        pairs = []
+        for tid, (xp, _Pp, Si) in pred.items():
             for i, (x, y) in enumerate(positions):
-                d = math.hypot(x - px, y - py)
-                if d <= c["track_gate_m"]:
-                    pairs.append((d, tid, i))
+                dz = np.array([x - xp[0], y - xp[1]])
+                if math.hypot(*dz) > c["track_gate_m"]:
+                    continue
+                d2 = float(dz @ Si @ dz)
+                if d2 <= c["kf_gate_chi2"]:
+                    pairs.append((d2, tid, i))
         pairs.sort()
         taken_t, assigned = set(), {}
         for _, tid, i in pairs:
@@ -365,47 +458,81 @@ class Tracker:
             assigned[i] = tid
 
         out = []
-        a = c["velocity_smoothing"]
         for i, (x, y) in enumerate(positions):
             tid = assigned.get(i)
             if tid is None:
                 tid = self._next_id
                 self._next_id += 1
-                self.tracks[tid] = {"pos": (x, y), "vel": (0.0, 0.0), "t": t,
-                                    "hits": 1}
-            else:
-                tr = self.tracks[tid]
-                dt = t - tr["t"]
-                vx = vy = 0.0
-                if dt > 1e-3:
-                    vx = (x - tr["pos"][0]) / dt
-                    vy = (y - tr["pos"][1]) / dt
-                if math.hypot(vx, vy) > c["max_obstacle_speed_mps"]:
-                    # Faster than anything on a warehouse floor: the cluster
-                    # split or merged and its centroid jumped (live, 2026-10-22:
-                    # a shelf track 24 frames old read 1.2 m/s for a frame while
-                    # turning). Sim frames are ~0.03 s apart, so even a 0.1 m
-                    # jump inside the gate is 3 m/s. Start the track over: it
-                    # has to earn track_min_hits again before it can move.
-                    tr["vel"], tr["hits"] = (0.0, 0.0), 0
-                elif not movable[i]:
-                    tr["vel"] = (0.0, 0.0)
-                elif dt > 1e-3:
-                    tr["vel"] = (a * vx + (1 - a) * tr["vel"][0],
-                                 a * vy + (1 - a) * tr["vel"][1])
-                tr["pos"], tr["t"] = (x, y), t
-                tr["hits"] += 1
+                self.tracks[tid] = self._new(x, y, t)
+                out.append(self._state(tid, self.tracks[tid], movable[i]))
+                continue
             tr = self.tracks[tid]
-            speed = math.hypot(*tr["vel"])
-            moving = (movable[i]
-                      and tr["hits"] >= c["track_min_hits"]
-                      and speed >= c["moving_speed_mps"])
-            out.append({"track_id": tid,
-                        "vel": [round(tr["vel"][0], 3), round(tr["vel"][1], 3)],
-                        "speed_mps": round(speed, 3),
-                        "moving": bool(moving),
-                        "hits": tr["hits"]})
+            dt = t - tr["t"]
+            raw = math.hypot(x - tr["last"][0], y - tr["last"][1]) / dt if dt > 1e-3 else 0.0
+            if raw > c["max_obstacle_speed_mps"]:
+                # Faster than anything on a warehouse floor: the cluster split
+                # or merged and its centroid jumped (live, 2026-10-22: a shelf
+                # track 24 frames old read 1.2 m/s for a frame while turning).
+                # Start the track over under the same id: it has to earn
+                # track_min_hits again before it can move.
+                self.tracks[tid] = {**self._new(x, y, t), "hits": 1}
+                out.append(self._state(tid, self.tracks[tid], movable[i]))
+                continue
+            xp, Pp, _ = pred[tid]
+            z = np.array([x, y])
+            S = self._H @ Pp @ self._H.T + self._R
+            K = Pp @ self._H.T @ np.linalg.inv(S)
+            xn = xp + K @ (z - self._H @ xp)
+            Pn = (np.eye(4) - K @ self._H) @ Pp
+            if not movable[i]:
+                # A centroid that may be sliding (clipped, long, flat): keep
+                # the position, don't believe the motion, and forget what the
+                # filter thought it knew about the velocity.
+                xn[2:] = 0.0
+                Pn[2:, :] = 0.0
+                Pn[:, 2:] = 0.0
+                Pn[2, 2] = Pn[3, 3] = c["kf_init_vel_sigma"] ** 2
+            tr["x"], tr["P"], tr["t"], tr["last"] = xn, Pn, t, (x, y)
+            tr["hits"] += 1
+            out.append(self._state(tid, tr, movable[i]))
         return out
+
+
+def predicted_cloud_points(states: list[dict], obstacles: list[dict], cfg: dict | None = None
+                           ) -> np.ndarray:
+    """Where the moving tracks will be over the next pred_cloud_horizon_s, as
+    an (N, 2) array of world-frame points on a pred_cloud_cell_m grid.
+
+    For each moving track with enough hits, a disc of the cluster's half
+    extent (at least pred_cloud_min_radius_m) is swept along pos + v * s for
+    s in (0, horizon] — the ribbon Nav2's local costmap marks ahead of the
+    mover so the planner routes behind it rather than through where it is
+    about to be. Empty when nothing is moving: the costmap source keeps only
+    the latest cloud (observation_persistence 0), so an empty one is what
+    clears the previous ribbon.
+    """
+    c = {**DEFAULTS, **(cfg or {})}
+    cell = float(c["pred_cloud_cell_m"])
+    cells: set[tuple[int, int]] = set()
+    n_steps = max(1, int(round(c["pred_cloud_horizon_s"] / c["pred_cloud_step_s"])))
+    for st, o in zip(states, obstacles):
+        if not st.get("moving") or st["hits"] < c["track_min_hits"]:
+            continue
+        r = max(float(o.get("extent_m", 0.0)) / 2.0, float(c["pred_cloud_min_radius_m"]))
+        px, py = st["pos_w"]
+        vx, vy = st["vel"]
+        k = int(math.ceil(r / cell))
+        offs = [(i, j) for i in range(-k, k + 1) for j in range(-k, k + 1)
+                if (i * cell) ** 2 + (j * cell) ** 2 <= r * r]
+        for n in range(1, n_steps + 1):
+            s_ = n * c["pred_cloud_step_s"]
+            ci, cj = int(math.floor((px + vx * s_) / cell)), int(math.floor((py + vy * s_) / cell))
+            for i, j in offs:
+                cells.add((ci + i, cj + j))
+    if not cells:
+        return np.zeros((0, 2), dtype=np.float32)
+    return np.array([[(i + 0.5) * cell, (j + 0.5) * cell] for i, j in sorted(cells)],
+                    dtype=np.float32)
 
 
 def build_payload(obstacles: list[dict], *, stamp: float, frame: str,
@@ -471,11 +598,20 @@ def main(argv=None):
             self.json_pub = self.create_publisher(String, f"/{robot_id}/obstacle_tracks", 1)
             self.cloud_pub = self.create_publisher(
                 PointCloud2, f"/{robot_id}/obstacle_points", qos)
+            # The swept footprints of moving tracks over the next
+            # pred_cloud_horizon_s, in base_link (nav2's ObstacleLayer measures
+            # obstacle_max_range from the cloud frame's origin, so an odom-frame
+            # cloud would be dropped once the robot is 4 m from where it
+            # started). Published EVERY frame, empty when nothing moves: the
+            # costmap source keeps only the latest message.
+            self.pred_pub = self.create_publisher(
+                PointCloud2, f"/{robot_id}/predicted_obstacles", qos) if cfg["predict_cloud"] else None
             self.viz_pub = self.create_publisher(
                 MarkerArray, f"/{robot_id}/obstacles_viz", 1)
             self._warned: set[str] = set()
             self.get_logger().info(
-                f"obstacle detector: camera/depth -> obstacles, obstacle_points, "
+                f"obstacle detector: camera/depth -> obstacle_tracks, obstacle_points, "
+                f"{'predicted_obstacles, ' if cfg['predict_cloud'] else ''}"
                 f"obstacles_viz for {robot_id} (config {args.config})")
 
         def _warn_once(self, key: str, text: str):
@@ -546,6 +682,17 @@ def main(argv=None):
                                     height=msg.height, world_frame=world)
             self.json_pub.publish(String(data=json.dumps(payload)))
             self.cloud_pub.publish(self._cloud(msg.header.stamp, pts))
+            if self.pred_pub is not None:
+                ahead = predicted_cloud_points(states, obstacles, cfg)
+                if len(ahead):
+                    # world (odom) -> base_link: the inverse of the odom TF
+                    # looked up above (identity when tracking fell back).
+                    w = np.column_stack([ahead, np.full(len(ahead), cfg["pred_cloud_z_m"],
+                                                        dtype=np.float32)])
+                    ahead = (w - to) @ Ro
+                else:
+                    ahead = np.zeros((0, 3), dtype=np.float32)
+                self.pred_pub.publish(self._cloud(msg.header.stamp, ahead))
             self.viz_pub.publish(self._markers(msg.header.stamp, obstacles))
 
         def _cloud(self, stamp, pts):

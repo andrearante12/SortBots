@@ -65,3 +65,41 @@ min_moving_z_extent_m: 0.3
 # frame-to-frame jump is a cluster splitting or merging, so the track restarts.
 range_margin_m: 0.3
 max_obstacle_speed_mps: 3.0
+
+# Large movers. A forklift or pallet jack is ~2.5 m long, past
+# max_moving_extent_m, but a long cluster may still move when it is TALL
+# (large_mover_min_z_m top to bottom): shelf decks and walls seen edge-on are
+# long and flat, and racking long enough to pass this extent is longer still,
+# or clipped. Added 2026-11-04 for the forklift test worlds; re-measure the
+# false-"moving" table in docs/obstacle_detection.md if either changes.
+max_large_mover_extent_m: 3.0
+large_mover_min_z_m: 1.2
+
+# Kalman tracker (constant velocity, state x y vx vy in odom). kf_accel_sigma
+# is how much a mover may change velocity per second (1 m/s^2: a person
+# stopping in a stride, a forklift braking); kf_meas_sigma_m the centroid
+# jitter of one frame; kf_init_vel_sigma how fast a new track might be
+# moving (a brisk walk); kf_gate_chi2 the association gate on the
+# innovation's Mahalanobis distance (9.21 = 99 % for 2 dof), applied with
+# track_gate_m above. velocity_smoothing is no longer used: the filter
+# averages frames itself.
+kf_accel_sigma: 1.0
+kf_meas_sigma_m: 0.1
+kf_init_vel_sigma: 1.5
+kf_gate_chi2: 9.21
+
+# Prediction. pred_horizons_s are the look-ahead points in /<id>/obstacle_tracks
+# (`pred`), drawn by the operator view and scored by the simtest `prediction`
+# metric. predict_cloud publishes /<id>/predicted_obstacles: each moving
+# track's footprint swept pred_cloud_horizon_s along its velocity, a
+# local-costmap source (configs/nav2_params.yaml predicted_scan). 1.5 s is
+# a ribbon of one stride for a walker and ~3 m for a forklift; longer and
+# the marks (lethal, like any costmap obstacle) start to wall off aisles in
+# head-on cases. Set predict_cloud: false to compare Nav2 without it.
+pred_horizons_s: [0.5, 1.0, 1.5]
+predict_cloud: true
+pred_cloud_horizon_s: 1.5
+pred_cloud_step_s: 0.1
+pred_cloud_cell_m: 0.1
+pred_cloud_z_m: 0.5          # inside the costmap's obstacle height band
+pred_cloud_min_radius_m: 0.25
