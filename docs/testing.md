@@ -1,391 +1,75 @@
-# Scored sim tests: worlds, scenarios, test cases, metrics
+# Testing
 
-How to put things in the warehouse, watch the robots deal with them live, and
-turn that into a repeatable, scored test. For launching the sim at all, see
-[`running.md`](running.md) and `scripts/sim_ctl.sh`; this builds on both.
+## Offline (seconds; no GPU, ROS or display). This is what CI runs.
 
 ```bash
-scripts/simtest.py list                     # the test cases and what they run
-scripts/simtest.py show crossing_yield      # the resolved plan, criteria, streams
-scripts/simtest.py run crossing_yield       # launch, drive, score, stop (minutes)
-scripts/simtest.py run crossing_yield --repeats 3 --set overrides.world=aisle_head_on
-scripts/simtest.py rescore data/simtests/<dir>   # re-score recorded runs, no sim
-scripts/simtest.py report DIR_A DIR_B       # compare two result dirs side by side
-scripts/simtest.py metrics                  # the metric catalog
+make ci                                   # pytest + scenario smoke, system python3
+/usr/bin/python3 -m pytest tests/         # node logic (NOT conda's python: no pytest there)
+node webui/tests/operator_test.mjs        # operator view
+python3 webui/session.py --list           # scenario validation
+scripts/simtest.py validate               # scored test cases resolve
+/usr/bin/python3 -m pytest commsim/tests
 ```
 
-Or from the dashboard: the **tests** tab lists the test cases, runs one, and
-shows verdicts and reports; switch to **live** while it runs to watch it.
+## Scored live tests (`simtest/`)
 
-## Three layers
+There are three layers, kept separate on purpose:
 
-| layer | file | answers | used by |
-|---|---|---|---|
-| **world** | `configs/worlds/NAME.yaml` | what's in the warehouse: props + scripted movers | scenarios, tests |
-| **scenario** | `configs/scenarios/NAME.yaml` | how the stack runs: robots, map mode, explore, world, render knobs | the dashboard's launch form, `sim_ctl.sh`, tests |
-| **test case** | `configs/tests/NAME.yaml` | what's asked (goals, tasks, stop), how it's scored (metrics + pass criteria), how often (repeats, variants) | `scripts/simtest.py`, the tests tab |
-
-They stay separate on purpose. A world on its own is a **live demo**: pick it
-in the launch form (or `moving_obstacles`) and click goals. A test only adds
-the asking and the scoring on top, and can only change what its scenario
-already lets the dashboard change (`overrides:`), so nothing in a test widens
-what can reach a shell. `webui/session.py`'s `RUN_FLAGS` allowlist stays the
-single gate.
-
-The code is `simtest/` (pure python + PyYAML/numpy, importable from Isaac's
-venv, the dashboard and the offline tests) plus `scripts/simtest.py`.
-
-## Worlds
-
-```yaml
-name: aisle_crossing
-scenes: [nvidia]            # which warehouse the coordinates were laid out for
-autostart: true             # actors walk from sim start (live demos); tests reset them
-props:                      # static colliders: a robot that drives into one stops
-  - {id: crate_0, shape: box, size: [0.8, 0.6, 0.9], pose: [-9.0, 5.2, 0.0]}
-  - {id: barrel_0, shape: cylinder, radius: 0.3, height: 0.9, pose: [-10.0, 1.2]}
-  - {id: pallet, shape: usd, ref: Isaac/Props/Pallet/pallet.usd, pose: [-7, 0, 0],
-     footprint: [1.2, 1.0]}  # usd props: the metrics need the floor footprint
-actors:                     # scripted movers: visual only, fixed paths
-  - id: walker_0
-    shape: cylinder         # or box with size: [x, y, z]
-    radius: 0.25
-    height: 1.75
-    path:
-      waypoints: [[-11.0, 6.5], [-6.0, 6.5]]
-      speed_mps: 1.0
-      mode: pingpong        # once | loop | pingpong
-      start_at_s: 0.0       # world-clock seconds
-      dwell_s: 1.0          # pause at every waypoint
-```
-
-Full schema and validation: `simtest/world.py`. Coordinates are the **map
-frame, which is Isaac's world frame** (every robot's `map -> <rid>/map` anchor
-is its `configs/robots.yaml` spawn), so a point in a world file, on the
-dashboard map and in `/sim/ground_truth` is the same point. The committed
-worlds were laid out against a saved fleet grid of the NVIDIA warehouse;
-`tests/simtest_world_test.py` checks that no actor walks through its own
-world's props.
-
-**Actors are not colliders**, deliberately: a kinematic body shoving the
-robot's articulation around would make every run's trajectory depend on the
-contact solver. They still render in RGB and depth, which is all perception
-sees. Contact is scored from ground truth instead, by the `clearance` metric.
-
-**Actors never react.** That is what makes a run repeatable, and it means a
-robot that stops correctly can still be walked into. Lay paths out so a robot
-that yields has somewhere to be; the clearance metric counts contact whoever
-moved.
-
-### Packages
-
-A world may also carry boxes the robot's magnet effector can pick up
-([`manipulation.md`](manipulation.md) has the model and the pipeline):
-
-```yaml
-props:
-  - {id: bench_a, shape: box, size: [0.7, 0.4, 0.80], pose: [-7.9, 9.8, 0.0]}
-packages:                   # up to 16; ids are shared with props and actors
-  - id: pkg_0
-    size: [0.24, 0.18, 0.12]  # the default: a light amazon box
-    pose: [-7.9, 9.9, 1.5708] # centre x, y, yaw
-    z: 0.80                   # height of the BOTTOM: 0 = the floor, else a prop's exact top
-    magnet_face: "+x"         # +x -x +y -y top; yaw turns it (1.5708 faces +y)
-    color: [0.76, 0.60, 0.42] # cardboard; the plate itself is always near-black
-```
-
-A package has to stand on the floor or on a prop whose top is exactly its `z` and that
-holds its centre and corners (it may overhang the edge by 3 cm); anything else is rejected
-when the world loads ("floating", "inside prop"). Packages are visual only: nothing collides
-with them, the magnet snaps them (`simtest/magnet.py`). `scripts/pick_layout.py` computes a
-package's pose on a deck and the robot's dock for it.
-
-`/sim/world` lists them (size, colour, face), and `/sim/ground_truth` carries where they are
-and what the magnet holds:
-
-```
-"packages": {"pkg_0": {"x", "y", "z" (bottom), "yaw", "held_by": "robot_0" | null}},
-"magnet":   {"robot_0": {"energized", "held", "tcp": [x,y,z], "approach": [x,y,z],
-                          "nearest": {"id", "dist_m", "angle_deg"} | null}}
-```
-
-Both are only present in a world with packages, so every other test's recorded events are
-exactly what they were. The operator view draws them: cardboard-coloured, a thick dark edge
-on the plate's face, green while held.
-
-### Markers
-
-A package may carry `marker: N` (0-9), an ArUco id (DICT_4X4_50) printed on its magnet plate:
-5 cm with a 5 mm white border, built from flat squares (`simtest/aruco.py`), so the plate's short
-side has to be at least 6 cm. A task on such a package goes by the id: it needs no location,
-and it can't take another plate for its own.
-
-### Marks, head and view
-
-A box prop can say `style: table`: it looks like a top on four legs, in the prop's colour, and
-collides as the same solid box. Three more world keys, all optional. `marks:` are flat painted rectangles
-(`{id, size: [x, y], pose: [x, y, yaw], z, color, label}`), on a surface, with nothing to
-collide with: they show where a place test wants a package. `head: {pan, tilt}` is where
-the head starts, in radians, tilt > 0 looking down; it is per world because a tilted camera
-sees less of what is ahead, so exploration and Nav2 stay level. `view: {eye, target}` aims the
-Sim view's camera for this world. `/sim/ground_truth` carries the head's real angles as
-`head: {robot_0: {pan, tilt}}`, and the robot card's Tilt and Pan sliders command it.
-
-### The world clock and ground truth
-
-`spawn_warehouse.py --world NAME` authors the props and moves the actors every
-physics step. Always (with or without a world) it publishes:
-
-| topic | type | what |
+| Layer | File | Answers |
 |---|---|---|
-| `/sim/ground_truth` | `std_msgs/String` JSON, 10 Hz sim | `{t, wt, running, world, robots: {rid: {x, y, yaw}}, actors: {id: {x, y, yaw, vx, vy, moving}}}` — TRUE poses |
-| `/sim/world` | `std_msgs/String` JSON, latched | the layout: props with footprints, actors with shapes and paths |
-| `/sim/world_cmd` (sub) | `std_msgs/String` JSON | `{"cmd": "restart" \| "reset" \| "start" \| "pause"}` |
-
-Actors run on a **world clock** (`wt`), not raw sim time: Isaac is publishing
-for tens of sim-seconds before the ROS stack is up, and that lead varies with
-the real-time factor, so anchoring actors to sim t=0 would give a different
-robot/actor phase every run. A test restarts the world clock at its own t0;
-the dashboard's map tracker has **restart / pause** buttons that do the same
-by hand.
+| world | `configs/worlds/NAME.yaml` | what's on the floor: static props, scripted walkers (fixed paths, never react, not colliders), and packages the magnet can pick |
+| scenario | `configs/scenarios/NAME.yaml` | how the stack runs |
+| test case | `configs/tests/NAME.yaml` | goals/tasks, stop condition, metrics + pass criteria, repeats, variants |
 
 ```bash
-# from a ROS shell (scripts/ros_bash.sh -c "source /opt/ros/jazzy/setup.bash; ..." on 26.04)
-ros2 topic echo /sim/ground_truth --once
-ros2 topic pub --once /sim/world_cmd std_msgs/String '{data: "{\"cmd\": \"restart\"}"}'
+scripts/simtest.py list | show NAME | metrics
+scripts/simtest.py run crossing_yield [--repeats 3] [--set overrides.world=aisle_head_on]
+scripts/simtest.py rescore data/simtests/<dir>     # re-score recorded events, no sim
+scripts/simtest.py report DIR_A DIR_B
 ```
 
-### Watching a world live
+Test cases: `pipeline_smoke` (the cheapest harness check), `crossing_yield`,
+`head_on_pass`, `cluttered_route`, `fleet_traffic`, `fleet_scale_smoke`, and the pick and
+place tests in [Pick and place](manipulation.md#pick-and-place-sim). A test's `section:` is its heading on the
+operator view's Tests tab. `parked: true` keeps a test off the tab, but `simtest.py` can
+still run it. The operator test serves on port 8201. If another session's console is
+already using that port, pass `--port N --cdp-port M`.
 
-1. Scenarios tab → Quick start **Moving obstacles — single robot** (or pick a
-   **World** in the form), Start.
-2. Live → map. Actors and props are drawn at their true positions over the
-   costmap (toggle: **world**). The tracker shows the actor clock.
-3. Drag a goal on the far side of a walker's path; watch the costmap pick the
-   walker up (or not), and the plan bend around it.
+**Other world keys:**
 
-## Test cases
+- `packages:`: up to 16 boxes, each with `size`, `pose` [x, y, yaw], `z` (the height of
+  its bottom: 0 for the floor, or exactly a prop's top), `magnet_face` (`+x -x +y -y top`)
+  and `color`. A package that floats or sits inside a prop is rejected at load. Packages
+  are visual only, and the magnet snaps them.
+- `marker: N` (0–9): an ArUco id (DICT_4X4_50) on a package's plate. A task on that
+  package then needs no location.
+- `style: table`: makes a box prop look like a table. It still collides as a solid box.
+- `marks:`: painted target rectangles.
+- `head: {pan, tilt}`: the head's starting angle.
+- `view: {eye, target}`: aims the Sim view's camera.
 
-```yaml
-name: crossing_yield
-section: Obstacle avoidance          # its heading in the Tests tab; none = Other
-parked: true                         # off the Tests tab; still valid, and simtest.py still runs it
-scenario: moving_obstacles_mapped    # localizes on a saved map (see below)
-overrides: {world: aisle_crossing}   # only keys the scenario lists in overrides:
-warmup_s: 5                          # sim-s after the stack is ready, before t0
-goals:                               # per robot, in order
-  - robot: robot_0
-    pose: [-8.0, 3.0, -1.5708]       # or waypoint: NAME (the saved map's own waypoints)
-    at_s: 0                          # NO EARLIER than this; default: when the robot's previous goal ends
-    timeout_s: 120                   # cancelled and scored `timeout` after this
-tasks:                               # optional task_manager deliveries
-  - {robot: robot_0, pickup: shelf_a, dropoff: zone_a, at_s: 10}
-  - robot: robot_0                   # a PACKAGE task: really picked and placed by the magnet
-    package: pkg_0                   # must be in the world's packages:
-    pickup: dock                     # dock/here: no Nav2 leg, the pick controller drives itself;
-    dropoff: dock                    #   or a waypoint NAME, or a pose [x, y, yaw] to drive to first
-    find: geometry                   # optional: the work order gives no location, depth finds the box
-    place: {shift: [-0.12, 0]}       # where it comes to rest: shifted from where it started, `hold` (stays on the magnet: the task ends at the pick), or
-                                     #   [x, y] / [x, y, yaw]; z is whatever is under that spot
-stop:
-  sim_s: 150                         # hard cap after t0
-  until: [goals_done]                # goals_done | tasks_done | explorer_done
-  settle_s: 3                        # keep scoring this long after `until` holds
-metrics:
-  - metric: clearance
-    pass: {contacts: {eq: 0}, min_m: {gt: 0.05}}
-  - metric: clearance                # the same metric twice needs an id
-    id: clearance_props
-    params: {actors: [], props: true}
-  - metric: run_stats                # no `pass:` = reported, not judged
-repeats: 3
-pass_rate: 1.0                       # fraction of repeats per variant that must pass
-variants:                            # the same question under other conditions
-  - {label: head_on, set: {overrides.world: aisle_head_on}}
-record: [dyn]                        # extra event streams to keep for rescoring
-```
+In a world with packages, ground truth also carries `packages` (pose, `held_by`),
+`magnet` (energized, held, tcp, nearest plate) and `head`.
 
-Full schema: `simtest/spec.py`. Validation is complete before anything
-launches — scenario and overrides through `session.py`'s allowlist, every
-variant resolved, every metric's params and criteria checked, and each metric
-asked whether it can be computed at all (a clearance metric on a world with no
-actors fails here, not after a 5-minute run). A package task is checked against
-its world too: the package must exist, and its `place` has to be somewhere the
-box can actually rest (a place that overhangs its deck is "floating", at load).
+How a run works:
 
-### Pick and place tests
+1. A probe waits for the stack to be ready, then restarts the **world clock**, so
+   walkers and goals share t=0.
+2. Goals are sent on schedule.
+3. Topics are recorded as events to `events.jsonl.gz`.
+4. The run is scored when it stops.
 
-The scenario is `pick_bench` (fresh map, no Nav2 goals: the pick controller finds
-the package, docks and picks on its own localization) unless the test sends Nav2
-somewhere first (`pick_route` uses `moving_obstacles_mapped`). Both offer a
-`perception` override: `camera` (default) or `oracle` (ground truth, sim only), which
-is how a failure is split into "didn't see it" and "saw it and couldn't do it".
+Ground truth is on `/sim/ground_truth` (10 Hz JSON). The world layout is
+`/sim/world`, and `/sim/world_cmd` restarts or pauses it. World coordinates are the
+map frame.
 
-| test | asks | passes when |
-|---|---|---|
-| `pick_place_smoke` | one box on a bench, picked and set down 12 cm over; variants `camera` and `oracle` | placed within 15 cm, on the bench, not dropped |
-| `pick_block` | the robot starts in front of a table and only has to pick up the target block (`place: hold`), from the Tests tab | the magnet has it at the end, plate seen by the camera, no drops |
-| `place_block` | the same, then set the block down on the marked area further along the table | block's centre within 5 cm of the target, on the table, no drops |
-| `pick_orientations` | four boxes whose plates face N, E, W and S, so the base docks from each side | all four placed, all four plates seen, no drops |
-| `pick_heights` | three decks, 0.70, 0.78 and 0.90 m | all three placed |
-| `pick_unreachable` | a box on a 0.30 m deck, and on the floor (variants); oracle perception, since the camera cannot see a plate that low from anywhere near | the task FAILS inside the timeout, nothing picked, nothing unfinished |
-| `pick_detect_sweep` | no tasks: drive past four boxes, score the detector alone | all four plates found within 5 cm, normals within 15 degrees, no false plates |
-| `pick_route` | Nav2 to the aisle deck, pick, Nav2 across the floor, place (saved map) | placed within 15 cm on the second deck |
+- **Metrics** (`simtest/metrics/`): `clearance`, `goals`, `map_contamination`,
+  `detection`, `coverage`, `tasks`, `pick_place`, `run_stats`. They are pure functions of recorded
+  events. To change one, edit it, bump its `version`, then `rescore`.
+- **Verdicts:** a criterion with no data FAILS.
+- **Exit codes:** 0 pass, 1 fail, 2 invalid, 3 no score.
+- **Results:** `data/simtests/<UTC>_<name>/`.
 
-`docs/manipulation.md` has what each world is laid out to test and why the decks are
-the heights they are.
-
-### Render cost
-
-Once the render knobs (`render_every`, `lite_render` — on `local/integration`)
-are merged, add them to the moving_obstacles scenarios' `overrides:` and pass
-`--set overrides.render_every=2 --set overrides.lite_render=true` on a
-GPU-bound laptop: the live runs on 2026-10-21 went at ~0.9–1.1x real time
-that way, so `crossing_yield` takes ~2 minutes wall and `cluttered_route` ~4.
-
-### Why avoidance tests run on a saved map
-
-Nav2's global costmap is only as large as `/map`. On a fresh map, a goal
-across floor the robot hasn't seen yet is `"Goal Coordinates ... outside
-bounds"` and aborts before the robot ever meets a walker — that was
-crossing_yield's first live run. So the avoidance tests use
-`moving_obstacles_mapped`: localize read-only on a library map (copied
-before use, never written), which also gives every run the same starting
-picture. It defaults to `fleet_warehouse_test` (git-lfs, on
-`origin/sim/infrastructure`); validation fails up front with
-`map 'fleet_warehouse_test': no map named ...` or `... run git lfs pull`
-where it isn't present, and the offline tests skip those cases rather than
-fail. Any library map recorded from the same spawn poses works
-(`--set overrides.map=NAME`).
-
-### Shared networks: run on your own ROS domain
-
-On a shared network, another machine's SortBots stack on domain 0 is the same
-`/robot_0/...` graph as yours. On 2026-10-21 a teammate's full stack was
-visible from this laptop's Wi-Fi: discovery traffic froze Isaac at sim
-t=1 s (the main thread blocked in DDS sends), and a probe on domain 0 would
-have scored — and sent Nav2 goals to — their robot. `scripts/simtest.py`
-probes on the caller's `ROS_DOMAIN_ID`; give the whole pipeline a private
-one:
-
-```bash
-export ROS_DOMAIN_ID=73          # anything 1-232 nobody else on the LAN uses
-scripts/sim_ctl.sh console stop; scripts/sim_ctl.sh console start
-scripts/simtest.py run crossing_yield
-```
-
-`run_demo.sh`, `run_console.sh` and `session.py` pass the caller's domain
-through (default 0) rather than hard-coding it, so Isaac, the bringup, the
-console and the probe all land on the same one. Restart the console after
-changing it: rosbridge keeps the domain it started on.
-
-### What a run does
-
-`scripts/simtest.py run NAME`, per variant × repeat:
-
-1. `sim_ctl.sh start SCENARIO k=v...` and `wait running` — an ordinary
-   dashboard session, so **live** shows it.
-2. Starts the probe (`simtest/probe.py`) in a ROS subshell
-   (`scripts/ros_bash.sh` when present). It waits until `/clock`,
-   `/sim/ground_truth`, the first `/map` and every needed `navigate_to_pose`
-   server are up, waits `warmup_s` more, then **restarts the world clock**.
-   t0 is read back from ground truth (`t - wt`), so actors and goals share t=0
-   to within one ground-truth tick.
-3. Sends goals/tasks on schedule, turns topics into events, feeds the metrics
-   and records every event to `events.jsonl.gz`.
-4. Stops at `sim_s`, or `settle_s` after `until` holds; scores; `sim_ctl.sh stop`.
-
-Exit codes: 0 every variant passed, 1 a verdict failed, 2 invalid test, 3 the
-sim/probe never produced a score, 130 interrupted (Ctrl-C or the tests tab's
-Cancel stops the sim and still reports the finished runs).
-
-### Results
-
-`data/simtests/<UTC>_<name>/` (gitignored):
-
-```
-test.json         the test exactly as it ran, every variant resolved
-results.jsonl     one line per run: variant, repeat, ok, score | error, meta
-report.md         verdicts, every criterion per run, every value (mean [min–max])
-runs/<v>_<r>/     events.jsonl.gz, score.json, probe.log, sim.log, bringup.log
-```
-
-Verdicts: a **run** passes when every criterion holds; a **variant** when
-passed runs / runs ≥ `pass_rate` (a run that never got scored counts against
-it — "couldn't tell" is not a pass); the **test** when every variant does. A
-criterion with no data FAILS: a detection metric that never had the actor in
-view didn't test what it says.
-
-## Metrics
-
-| metric | reads | scores |
-|---|---|---|
-| `clearance` | gt | min footprint-to-footprint gap robot↔actor (or prop), contacts, near-miss time |
-| `goals` | goal, gt | Nav2 outcome, time to goal, TRUE final position error, distance driven |
-| `map_contamination` | map | occupied `/map` cells on floor only actors walk on — movers leaking into SLAM |
-| `detection` | dyn, gt | `dynamic_obstacles` recall vs ground truth, false-positive frames, latency to first detection |
-| `coverage` | map, end | free / known area, mapping rate |
-| `tasks` | dispatch, task | task_manager delivery outcomes and durations |
-| `pick_place` | gt, dispatch, task, detect | per package task: picked (the MAGNET held it, from ground truth), placed (at rest, not held, within tolerance of the asked spot and height), drops, false picks, time to pick; and the plate detector against the true plates (found, error, normal error, false detections) |
-| `run_stats` | start, end, gt | sim/wall time, real-time factor, stop reason, ground-truth rate |
-
-`scripts/simtest.py metrics` prints every param and value with its meaning.
-
-### Changing how a metric is calculated
-
-Metrics never touch ROS. The probe turns topics into plain events
-(`simtest/events.py`), and the same events are recorded with every run. So a
-metric is a pure function of recorded data, and its definition can change
-after the fact:
-
-1. Edit the metric in `simtest/metrics/<name>.py` and **bump its `version`**.
-2. `scripts/simtest.py rescore data/simtests/<dir>` — replays the recorded
-   events through the new code (keeps the old `results.jsonl` alongside).
-   `--current-spec` also re-reads the test's YAML for the metric list and
-   thresholds.
-3. Every result records the version it was scored with; a report that mixes
-   versions says so above the table.
-
-A new metric: subclass `Metric` in a new module under `simtest/metrics/`, set
-`name`, `version`, `streams`, `params`, `values` (every value documented),
-implement `on_event` and `result`, and add the module to the import line at
-the bottom of `simtest/metrics/__init__.py`. If it needs a stream the probe
-doesn't produce yet, add it to `simtest/events.py`'s `STREAMS` and to the
-probe — QoS for every topic is chosen there, centrally, never per metric (no
-image topic, ever: CLAUDE.md). Metrics must be deterministic functions of
-their events, or rescoring stops meaning anything.
-
-Streams always recorded: `start end gt goal dispatch task explore map detect`
-(`map` every 5 sim-s plus the last; `detect` is the pick controller's plate
-detections, ≤2 Hz, map-frame centre + normal only, and silent in a test with no
-packages). `dyn` (dynamic obstacle points in the map frame, ≤5 Hz, 0.1 m voxels)
-only when a metric needs it or `record: [dyn]`.
-
-## Testing the test layer
-
-All offline, seconds:
-
-```bash
-/usr/bin/python3 -m pytest tests/simtest_world_test.py tests/simtest_metrics_test.py tests/simtest_spec_test.py
-/usr/bin/python3 -m pytest tests/simtest_pick_test.py tests/pick_planner_test.py   # the pick tests' scoring + the controller in a closed loop
-node webui/tests/operator_test.mjs        # operator view: world overlay, tests tab, launch form
-scripts/simtest.py validate               # every committed test case resolves
-```
-
-(`operator_test.mjs` serves on port 8201 by default; if another session's console is
-already there the Tests-tab checks fail against ITS configs, so pass `--port N --cdp-port M`.)
-
-`pipeline_smoke` is the cheapest live end-to-end check of the harness itself
-(one short goal, ground truth rate); run it after touching the probe, the
-world runtime or the runner, before trusting a long test's verdict.
-
-## Known limits
-
-- `detection` treats an actor as visible by range and field of view only —
-  no occlusion — and assumes the head looks straight ahead. Recall is a lower
-  bound when paths pass behind racks.
-- Every repeat restarts Isaac (robots back at spawn, fresh map). That is the
-  price of identical starting conditions; a run is minutes.
-- Actors are cylinders and boxes. An animated character
-  (omni.anim.people) would matter for an RGB person detector, not for the
-  depth-based dynamic obstacle filter this was built to test.
+Avoidance tests run on a saved map (`moving_obstacles_mapped`): Nav2 rejects goals
+outside the known map. On a shared network, set a private `ROS_DOMAIN_ID` and
+restart the console. A teammate's stack on domain 0 is the same `/robot_0` graph.

@@ -237,8 +237,7 @@ scripts/simtest.py validate             # every test case resolves
 ```
 
 Never point a browser at a live sim to test the dashboard — record a bag, build
-a fixture, test offline (`docs/running.md`, "Testing the dashboard without the
-sim").
+a fixture, test offline (`docs/running.md`).
 
 ## Reference
 

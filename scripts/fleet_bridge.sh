@@ -6,7 +6,7 @@
 #   scripts/fleet_bridge.sh start BUNDLE     # background, log in /tmp/sortbots_fleet_bridge.log
 #   scripts/fleet_bridge.sh stop | status
 #
-# BUNDLE is one node's folder from commsim.hw.deploy (commsim/hw/README.md):
+# BUNDLE is one node's folder from commsim.hw.deploy (docs/commsim.md):
 # its bridge.json5 forwards /fleet/status, /fleet/intent and /fleet/tasks and
 # nothing else, over the zenoh endpoints and lease the emulation measured.
 # fleet.env says which ROS domain the local stack is on and which

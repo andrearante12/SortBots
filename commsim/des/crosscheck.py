@@ -13,7 +13,7 @@ from commsim.des.run import BASE
 # The emulation runs being matched used the spec settings (both ends dial, 2 s lease)
 SPEC = BASE.parent / "spec_original.yaml"
 
-# Emulation reference (M1 depth 10, 90 s, 2026-10-03) — see docs/sim_log.md
+# Emulation reference (M1 depth 10, 90 s, 2026-10-03) — see commsim/docs/sim_log.md@6501799
 EMU = {"p50_1hop_ms": 3.89, "p95_1hop_ms": 5.67, "p50_2hop_ms": 4.89, "p95_2hop_ms": 7.21,
        "delivery": 1.0, "pure_ack_per_data_seg": 0.91}
 

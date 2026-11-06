@@ -6,7 +6,7 @@ name: library_resume
 
 title: Saved map — resume and keep exploring
 description: >
-  Loads a committed map from the library (maps/, see maps/README.md) and keeps
+  Loads a committed map from the library (maps/, see docs/running.md) and keeps
   MAPPING: run_demo.sh --resume leaves the pose graph incremental, and the
   explorer heads for whatever frontiers the saved map still has. This is the
   mode for finishing an incomplete map across several sessions.
