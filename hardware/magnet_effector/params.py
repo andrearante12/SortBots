@@ -44,24 +44,26 @@ class Horn:
 
 @dataclass(frozen=True)
 class Magnet:
-    # Adafruit 3873: 5 V DC, 0.3 A, 5 kg holding force, P25/20 body, $9.95.
-    # https://www.adafruit.com/product/3873  (also DigiKey 1528-3873-ND, The Pi
-    # Hut, Core Electronics). Body dims, pole and mass are Adafruit's published
-    # numbers. Thread and lead position are NOT published: they're from
-    # Adafruit's product photos plus the same-body JF-XP2520 spec (M4, 12 deep).
-    # VERIFY those with calipers when it arrives.
-    # Usable lift is roughly holding force / 5..10, so ~0.5-1 kg on a flat
-    # mild-steel plate.
+    # uxcell round holding electromagnet (Amazon), 5 V DC, 50 N peak, "5 kg"
+    # suction, pure-iron body, fully enclosed. This is the magnet actually in
+    # use; the design started on the Adafruit 3873 (P25/20, 20 mm tall) and the
+    # numbers below were changed to the uxcell listing on 2026-11-06.
+    # From the listing: dia 25 x 11 mm, thread M4 x 6, leads 24 cm, 5 V.
+    # NOT in the listing, so still the Adafruit 3873 values: coil current,
+    # weight, pole and potting diameters, where the leads leave the body.
+    # VERIFY those with the meter / calipers / scale. Usable lift is roughly
+    # holding force / 5..10, so ~0.5-1 kg on a flat mild-steel plate.
     d: float = 25.0
-    h: float = 20.0
+    h: float = 11.0               # uxcell listing (the Adafruit 3873 was 20)
     pole_d: float = 12.0          # centre pole on the face ("center diameter")
     potting_od: float = 21.5      # cosmetic: dark ring around the pole (product photo 4)
-    tap: str = "M4"               # VERIFY
-    thread_depth: float = 12.0    # VERIFY
+    tap: str = "M4"               # uxcell listing: M4 x 6
+    thread_depth: float = 6.0     # uxcell listing; VERIFY with a depth gauge
     bolt_clear_d: float = 4.5     # M4 clearance through the plunger
-    # The included screw is a pan head with a split lock washer AND a flat
-    # washer (product photo 2), so the counterbore is sized to the flat
-    # washer (M4 OD 9.0), not the head.
+    # The uxcell ships WITHOUT a screw. These head and washer sizes are from the
+    # Adafruit kit (pan head + split lock washer + flat washer); keep them if you
+    # buy the same stack, else correct them. The counterbore is sized to the flat
+    # washer (M4 OD 9.0), not the head, so the counterbore is sized to the flat
     bolt_head_d: float = 9.5
     bolt_head_h: float = 5.0      # pan head ~2.7 + split ~1.3 + flat 0.8, rounded up
     washer_stack: float = 2.1     # split + flat washer: eats into the screw's usable length
@@ -77,8 +79,8 @@ class Magnet:
     keeper_wall: float = 1.6
     keeper_span: float = 50.0     # deg of arc; must stay clear of the guide-screw heads
     locate_depth: float = 1.0     # shallow recess in the plunger that centres the magnet
-    mass_g: float = 55.3          # Adafruit's published weight
-    current_a: float = 0.3
+    mass_g: float = 55.3          # VERIFY: Adafruit 3873's weight, a placeholder; the uxcell is shorter, so lighter
+    current_a: float = 0.3        # VERIFY: not in the listing; measure the coil (5 V / ohms)
     voltage: float = 5.0
 
 

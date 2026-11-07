@@ -61,7 +61,7 @@ def main() -> int:
     model.assembly(p, with_reference=True).export(str(OUT / "fitcheck.step"))
 
     m = p.magnet
-    print(f"magnet: Adafruit 3873, {m.voltage:.0f} V {m.current_a:.1f} A ({m.voltage * m.current_a:.1f} W), "
+    print(f"magnet: uxcell 5 V holding magnet, {m.voltage:.0f} V {m.current_a:.1f} A ({m.voltage * m.current_a:.1f} W), "
           f"leads exit its side at {m.lead_angle:.0f} deg into the keeper slot")
     added = sum(_mass_g(w) for w in parts.values()) + p.magnet.mass_g
     stock = _mass_g(model.reference_wrist()) + _mass_g(cq.importers.importStep(

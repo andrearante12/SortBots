@@ -184,5 +184,5 @@ def test_hardware_fits_the_printed_parts(body):
 
 def test_assembly_tree_groups():
     eff = model.effector_assembly(DEFAULT)
-    assert [c.name for c in eff.children] == ["printed_parts", "magnet_Adafruit_3873", "hardware"]
+    assert [c.name for c in eff.children] == ["printed_parts", "magnet_uxcell_5kg", "hardware"]
     assert [c.name for c in eff.children[0].children] == ["adapter_body", "plunger"]

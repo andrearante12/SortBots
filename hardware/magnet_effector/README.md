@@ -4,27 +4,32 @@ This replaces the follower arm's gripper with a 25 mm holding electromagnet on a
 spring-compliant plunger. The stock gripper is the fixed jaw, the moving jaw and
 motor 6. A microswitch confirms the magnet has seated flat on the package.
 
-## The magnet: Adafruit 3873
+## The magnet: uxcell 5 V holding electromagnet
 
-**[Adafruit 3873](https://www.adafruit.com/product/3873)** is a 5 V
-electromagnet with 5 kg holding force, in the P25/20 body size (Ø25 × 20 mm).
-It costs $9.95, and it's also stocked by DigiKey, The Pi Hut and Core
-Electronics.
+The magnet in use is a **uxcell round holding electromagnet** (Amazon, about
+$7). The design started on the Adafruit 3873 (Ø25 × 20 mm), and the numbers
+here were changed to the uxcell listing on 2026-11-06.
 
 | | |
 |---|---|
-| Supply | 5 V DC, 0.3 A (1.5 W). Any 5 V or USB rail can power it, so no 12 V boost converter is needed. |
-| Size and weight | Ø25 × 20 mm, Ø12 centre pole, 55.3 g, 280 mm leads |
-| Mounting | one tapped hole in the centre of the back. The screw, split washer and flat washer are included. |
-| Usable lift | about 0.5–1 kg on a flat mild-steel plate (holding force ÷ 5–10, per Adafruit) |
+| Supply | 5 V DC. The coil current isn't in the listing, so measure it: 5 V ÷ the resistance on the meter's Ω range. Any 5 V rail can power it, so no 12 V boost converter is needed. |
+| Size | Ø25 × 11 mm, 24 cm leads |
+| Mounting | one tapped hole in the centre of the back, **M4 × 6 mm deep**. **No screw is supplied**, so buy an M4 screw, plus washers if you want them. |
+| Force | 50 N peak, "5 kg" suction (listing) |
+| Body | pure iron, fully enclosed, rated to 155 °C |
+| Usable lift | about 0.5–1 kg on a flat mild-steel plate (holding force ÷ 5–10) |
 
-**Not published, so these numbers are estimates:**
-- The thread is M4 and 12 mm deep. That's the spec of the JF-XP2520, which has
-  the same body.
-- The lead stub sits about 4 mm from the back face and is Ø3.5. I read that
-  off Adafruit's product photos.
+**Not in the listing, so these values are still the Adafruit 3873's and
+unverified:**
+- the coil current and the weight (`mass_g` is 55.3 g, the 3873's; the uxcell
+  is shorter, so it should weigh less),
+- the pole and potting diameters,
+- where the leads leave the body. The CAD still assumes they exit through the
+  **side**, near the back, in a stiff stub at 4 mm up from the back face, Ø3.5.
+  Look at the real magnet and correct `lead_z_from_back` and `lead_stub_d`, or
+  the keeper slot won't fit.
 
-Measure all three with calipers when the part arrives, and correct them in
+Measure them with calipers, a scale and the meter, and correct them in
 `params.py`.
 
 **How it attaches.** The leads leave through the magnet's **side**, near the
@@ -33,9 +38,11 @@ back, inside a stiff heat-shrink stub. They don't come out of the back face.
   the bottom. The stub slides into that slot as you push the magnet up into
   the plunger. A single centre screw can't stop the magnet turning, so the
   keeper is what fixes its orientation. It also takes the strain off the stub.
-- **Bolt:** the counterbore is sized for the included screw *with* both
-  washers. The build prints the allowed screw length, which is currently
-  9.6–16.6 mm under the head.
+- **Bolt:** the counterbore is sized for an M4 pan-head screw *with* a split
+  and a flat washer (`bolt_head_*` and `washer_stack` in `params.py`). The
+  uxcell doesn't ship one, so match what you buy. The build prints the allowed screw length. The old 9.6–16.6 mm
+  was for the Adafruit's 12 mm thread, so rebuild to get the new figure for
+  the 6 mm thread.
 - **Rim notch:** at full compression the stub rises into a notch in the cup
   rim. From there the leads run up the *outside* of the cup to the zip-tie
   lug, so they never enter the cup.
@@ -129,7 +136,7 @@ Every output uses the same tree, built so you can move whole groups at once:
 ```
 magnet_effector              origin = centre of motor 5's horn, W axis = out along the wrist
  |- printed_parts            what you 3D print: adapter_body, plunger
- |- magnet_Adafruit_3873     what you buy: body, potting, lead_stub, leads
+ |- magnet_uxcell_5kg        what you buy: body, potting, lead_stub, leads
  |- hardware                 guide screws, springs, M4 magnet screw, microswitch, horn screws
 ```
 
@@ -138,7 +145,7 @@ arm. To pull it apart:
 1. Right-click a group, choose **Transform**, set Coordinate system to
    **Local**, and type a value into **W**.
 2. A suggested exploded view: `hardware` at +20, `printed_parts` at +45 and
-   `magnet_Adafruit_3873` at +90.
+   `magnet_uxcell_5kg` at +90.
 3. Moving `magnet_effector` itself takes the whole effector off the arm.
 
 **One-click exploded view.** `explode.FCMacro` animates the parts apart along
@@ -172,9 +179,9 @@ Ctrl+Z undoes a toggle. Setup:
 Everything marked **VERIFY** in `params.py` is a datasheet guess. Check these
 against the actual parts in hand:
 
-- **Magnet (Adafruit 3873):** the thread size and depth, and the lead stub's
-  height from the back face and its diameter. Adafruit doesn't publish these;
-  see above.
+- **Magnet (uxcell):** the thread depth (listing: M4 × 6), the coil current
+  and weight, and where the leads exit: their height from the back face and
+  diameter. The listing doesn't give these; see above.
 - **Switch:** body dims, hole pitch, **OP** (actuator height at the operating
   point) and **OT** (overtravel). The plunger hard-stops at full stroke, so
   the switch must tolerate `travel - trip` of overtravel. That's why it trips
@@ -203,7 +210,7 @@ Assembly order:
 2. Fit the switch: M2 screws from outside through the wall slots, nuts on the
    inside. Slide it to set the trip point.
 3. Push the magnet up into the plunger with its lead stub in the keeper slot.
-   Bolt it from the top with the included M4 screw and both washers.
+   Bolt it from the top with an M4 screw (not supplied) and the washers.
 4. Put the springs in the standoff pockets. Fit the plunger, then the 3× M3
    guide screws from below.
 5. Run the magnet leads up the outside of the cup from the rim notch. Bring
