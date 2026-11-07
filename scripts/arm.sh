@@ -5,7 +5,10 @@
 #   scripts/arm.sh fk         torque OFF, move the arm by hand, prints hand xyz (check the model)
 #   scripts/arm.sh dry        prints the IK targets, sends nothing
 #   scripts/arm.sh joint      joint-space teleop (scripts/arm_gamepad.py)
-#   scripts/arm.sh -- ARGS    any extra args go straight to the python script (e.g. --flip wrist_flex)
+#   scripts/arm.sh keys       joint-space keyboard teleop (scripts/arm_keys.py), no gamepad needed
+#   scripts/arm.sh pad        XInput gamepad (Flydigi) joint teleop + magnet (scripts/arm_xpad.py);
+#                             `pad --no-arm` tests just the controller and magnet
+#   scripts/arm.sh -- ARGS   any extra args go straight to the python script (e.g. --flip wrist_flex)
 #
 # Runs in the `lerobot` conda env's python directly (no activate), and refuses to run in a
 # shell with ROS sourced: same separation rule as run_demo.sh. Override the interpreter
@@ -14,6 +17,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="${LEROBOT_PYTHON:-$HOME/miniconda3/envs/lerobot/bin/python}"
+# this Jetson has miniforge, not miniconda
+[[ -x "$PY" ]] || PY="$HOME/miniforge3/envs/lerobot/bin/python"
 PORT="${ARM_PORT:-/dev/ttyACM0}"
 
 if [[ -n "${AMENT_PREFIX_PATH:-}" ]]; then
@@ -28,6 +33,8 @@ case "${1:-}" in
   fk)    shift; extra=(--fk) ;;
   dry)   shift; extra=(--dry-run) ;;
   joint) shift; script=arm_gamepad.py ;;
+  keys)  shift; script=arm_keys.py ;;
+  pad)   shift; script=arm_xpad.py ;;
   --)    shift ;;
 esac
 

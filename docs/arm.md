@@ -15,6 +15,20 @@ Hold **ZR** (deadman) for everything. Left stick = hand radial/swing, right stic
 right stick X = wrist roll, L/ZL = tool tilt, X/B = wrist_flex joint, d-pad up/down = speed
 level (1-4), A = slow (x0.25), + = quit. Details: header of `scripts/arm_cartesian.py`.
 
+## XInput gamepad (Flydigi Vader 5 Pro) + magnet
+
+`scripts/arm.sh pad` drives the arm with an XInput pad and the electromagnet (`docs/magnet.md`).
+Default is hand-space (same IK as `arm_cartesian.py`): left stick = hand on a horizontal plane
+(forward/back, swing), right stick Y = up/down, hold **RT** to move, **B** toggles the magnet,
+**Y/A** move the `wrist_flex` joint directly (LB/LT tilt the tool in hand space), d-pad up/down = speed level (1-4, starts at 4 = the fastest the 3 A supply handled; `--max-level 6` unlocks faster ones once the supply is 5 A or more), hold **L3** (left stick click) = slow, START quits. One status line rewrites in place: hand x/y/z,
+magnet state, servo bus voltage and hottest servo.
+`pad --joint` is joint space; `pad --no-arm` tests the controller and magnet with a virtual arm.
+`wrist_roll` is locked by default (`--lock`).
+
+The Jetson kernel has no `xpad`, so `scripts/xinput_pad.py` reads the pad over raw USB (pyusb).
+After every plug the USB node is `root:root`: `sudo chmod 666 /dev/bus/usb/BUS/DEV` (the script
+prints the exact path when it gets permission denied).
+
 ## One-time setup
 
 ```bash
