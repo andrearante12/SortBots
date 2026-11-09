@@ -1002,6 +1002,22 @@ def _set_op(xform, kind: str, value, suffix: str = ""):
     return op
 
 
+def _asset_url(ref: str):
+    """A ref relative to the Isaac asset root -> its full URL; an absolute
+    URL/filesystem path passes through. None when the root can't be resolved."""
+    if "://" in ref or ref.startswith("/"):
+        return ref
+    try:
+        from isaacsim.storage.native import get_assets_root_path
+
+        root = get_assets_root_path()
+    except Exception:
+        root = None
+    if not root:
+        return None
+    return f"{root.rstrip('/')}/{ref.lstrip('/')}"
+
+
 def _spawn_usd_prop(stage, prim_path: str, x: float, y: float, yaw_rad: float,
                     ref: str, scale: float = 1.0, z: float = 0.0) -> bool:
     """Reference a real USD asset (an NVIDIA warehouse prop) at the station.
@@ -1039,16 +1055,9 @@ def _spawn_usd_prop(stage, prim_path: str, x: float, y: float, yaw_rad: float,
     from isaacsim.core.utils.stage import add_reference_to_stage
     from pxr import Gf, UsdGeom
 
-    if "://" not in ref and not ref.startswith("/"):
-        try:
-            from isaacsim.storage.native import get_assets_root_path
-
-            root = get_assets_root_path()
-        except Exception:
-            root = None
-        if not root:
-            return False
-        ref = f"{root.rstrip('/')}/{ref.lstrip('/')}"
+    ref = _asset_url(ref)
+    if ref is None:
+        return False
 
     add_reference_to_stage(usd_path=ref, prim_path=prim_path)
     xform = UsdGeom.Xformable(stage.GetPrimAtPath(prim_path))
@@ -1154,6 +1163,235 @@ def _strip_physics(stage, root_path: str) -> int:
     return touched
 
 
+# Isaac/People/Characters/Biped_Setup.usd: the one character on the asset
+# server whose skeleton the walk-cycle library (Isaac/People/Animations/) was
+# actually authored against — confirmed live 2026-11-09, exact 81/81
+# joint-name match. The dressed characters (F_Business_02 etc.) use a
+# different, incompatible rig (101 CC3-style joints, zero name overlap) and
+# can't be retargeted onto this library without omni.anim.people's own
+# joint-mapping data, which isn't in this pip install.
+BIPED_BODY_SRC = "/World/biped_demo_meters"   # the SkelRoot subtree: mesh + skeleton, no AnimationGraph
+BIPED_ANIM_SCOPE = "/World/CharacterAnimation/Animation"
+# Every stand_walk_N clip is a long motion-matching CAPTURE, not an authored
+# walk loop: the character wanders a ~3 m circle, turning, stopping and
+# changing pace (stand_walk_7: 50 s, root yaw sweeping through 360 deg).
+# Looping "the first few seconds" therefore looped a TURN, which read live as
+# walking backwards (2026-11-09). Each entry is a single straight stride —
+# (start_s, end_s, speed_mps) in the clip's own seconds — found offline by
+# searching every clip for the window of 0.8-2.6 s whose end pose best
+# matches its start (summed per-joint quaternion distance, root excluded),
+# with root speed >= 0.9 m/s and root yaw steady within 12 deg. All of them
+# walk along the root joint's +Z (motion vs facing within 5 deg), which is
+# what the person/worker presets' yaw_offset_deg is measured against.
+# stand_walk_5 has no clean stride (best seam 30x worse, 12 deg of wobble)
+# and stand_walk_6 doesn't exist.
+WALK_CLIPS = {
+    "stand_walk_1": (24.33, 25.67, 1.00),
+    "stand_walk_2": (49.13, 50.47, 1.01),
+    "stand_walk_3": (28.00, 29.27, 1.16),
+    "stand_walk_4": (26.00, 27.37, 1.03),
+    "stand_walk_7": (0.20, 1.53, 1.04),
+}
+WALK_CLIP_NAMES = tuple(WALK_CLIPS)
+# How long the baked, looped stride covers before it holds its last pose: well
+# past every scored test's stop.sim_s (longest today: mixed_route, 360 s)
+# with margin, while keeping per-actor authoring cost (one Usd.Attribute.Set
+# call per sample) bounded — ~320 loops * ~40 samples, well under a second.
+# A live demo session left running longer than this freezes the walk; that's
+# a known limit of baking rather than using Usd Value Clips.
+WALK_LOOP_S = 420.0
+
+
+def _find_skeleton(stage, under_path: str):
+    from pxr import Usd, UsdSkel
+
+    prim = stage.GetPrimAtPath(under_path)
+    if not prim.IsValid():
+        return None
+    for q in Usd.PrimRange(prim):
+        if q.IsA(UsdSkel.Skeleton):
+            return q
+    return None
+
+
+def _quat_dist2(a, b) -> float:
+    """Distance between two same-length QuatfArrays (per-joint pose vectors),
+    summed over joints, sign-invariant (q and -q are the same rotation): how
+    different two poses are."""
+    total = 0.0
+    for qa, qb in zip(a, b):
+        ia, ib = qa.GetImaginary(), qb.GetImaginary()
+        dot = qa.GetReal() * qb.GetReal() + ia[0] * ib[0] + ia[1] * ib[1] + ia[2] * ib[2]
+        total += 1.0 - min(1.0, abs(dot))
+    return total
+
+
+def _bake_walk_cycle(stage, anim_path: str, source_clip_prim, window, rate: float = 1.0):
+    """A local SkelAnimation at anim_path: one straight stride of
+    `source_clip_prim` (window = WALK_CLIPS entry), looped for WALK_LOOP_S
+    and played `rate` times as fast, so the feet keep pace with the actor's
+    own speed instead of sliding.
+
+    The ROOT joint is pinned at identity. In the capture it carries the
+    character's wandering across its own floor: a ~2 m offset from the origin
+    at frame 0 (the body rendered beside the footprint the metrics score) and
+    a yaw that turns through the whole clip. The actor's kinematic Xform,
+    which simtest/world.py's pose_at() drives along the world's waypoints, is
+    the only thing that should move or turn it. Every other joint plays its
+    rotations AND translations (the pelvis bob lives in its translation).
+
+    Why baked rather than referenced live: the clip would otherwise play
+    once through its whole wandering capture — nothing in this pip install
+    (no omni.anim.people / omni.anim.graph.core) loops or blends at runtime.
+    Time codes are read through the reference arc, so Usd has already applied
+    the 30 fps clip -> stage time-code scaling; clip seconds map to time codes
+    by the stage's own timeCodesPerSecond.
+    """
+    import math
+
+    from pxr import Gf, UsdSkel, Vt
+
+    src = UsdSkel.Animation(source_clip_prim)
+    joints = list(src.GetJointsAttr().Get())
+    rot_src, trans_src = src.GetRotationsAttr(), src.GetTranslationsAttr()
+    times = sorted(rot_src.GetTimeSamples())
+    if not times or not joints:
+        return None
+    tcps = stage.GetTimeCodesPerSecond()
+    clip_start = times[0]
+    a_tc, b_tc = (clip_start + s * tcps for s in window[:2])
+    frames = [t for t in times if a_tc <= t < b_tc]
+    if len(frames) < 4:
+        return None
+    seam = _quat_dist2(rot_src.Get(frames[0])[1:], rot_src.Get(b_tc)[1:])
+    period = (b_tc - a_tc) / rate                 # output time codes per stride
+    root = [i for i, j in enumerate(joints) if "/" not in j]
+    n_loops = max(1, math.ceil(WALK_LOOP_S * tcps / period) + 1)
+    samples = []
+    for t in frames:
+        rot = Vt.QuatfArray(rot_src.Get(t))
+        trans = Vt.Vec3fArray(trans_src.Get(t)) if trans_src.HasValue() else None
+        for i in root:
+            rot[i] = Gf.Quatf(1.0)
+            if trans is not None:
+                trans[i] = Gf.Vec3f(0.0)
+        samples.append(((t - a_tc) / rate, rot, trans))
+    anim = UsdSkel.Animation.Define(stage, anim_path)
+    anim.CreateJointsAttr(src.GetJointsAttr().Get())
+    rot_attr = anim.CreateRotationsAttr()
+    trans_attr = anim.CreateTranslationsAttr() if trans_src.HasValue() else None
+    for k in range(n_loops):
+        base = k * period
+        for dt, rot, trans in samples:
+            rot_attr.Set(rot, base + dt)
+            if trans_attr is not None:
+                trans_attr.Set(trans, base + dt)
+    scale_src = src.GetScalesAttr()
+    if scale_src.HasValue():
+        anim.CreateScalesAttr().Set(scale_src.Get(frames[0]))
+    return anim.GetPrim(), n_loops, period / tcps, seam
+
+
+def _spawn_walk_actor(stage, model: str, actor: dict) -> bool:
+    """A person/worker actor: Biped_Setup.usd's shared low-poly mannequin,
+    walking for real (see BIPED_BODY_SRC above for why this asset and not
+    the dressed characters). False when the asset root is unreachable or the
+    asset's own structure doesn't match what we expect (caller falls back to
+    a primitive)."""
+    # zlib.crc32, not hash(): PYTHONHASHSEED randomizes str hash() per
+    # process, so the same actor id would pick a different clip on every
+    # sim restart — a repeat of the same test shouldn't change which walk
+    # cycle an actor plays.
+    import zlib
+
+    from pxr import Gf, Sdf, UsdGeom, UsdShade, UsdSkel
+
+    clip_name = WALK_CLIP_NAMES[zlib.crc32(actor["id"].encode()) % len(WALK_CLIP_NAMES)]
+    ref = _asset_url(actor["ref"])
+    if ref is None:
+        return False
+    # The WHOLE file at its default prim (/World), referenced DIRECTLY — not
+    # through isaacsim's add_reference_to_stage like every other usd prop.
+    # Biped_Setup.usd is Y-up with metersPerUnit 0.99999998, so that helper
+    # routes it through omni.metrics.assembler's AddReference command, which
+    # registers the prim with a change listener that re-adds its own
+    # Y-up -> Z-up "unitsResolve" xform op on every resync — after our
+    # ClearXformOpOrder(), on top of our own rotateX below. Two quarter turns:
+    # the mannequin rendered upside down, lying flat at ~1.4 m (live
+    # 2026-11-09). A plain reference composes exactly what we author.
+    # `model` must be DEFINED as an Xform, not left as the typeless ancestor
+    # Define(whole_path) would create: the renderer ignores xform ops on an
+    # untyped prim, so yaw_offset_deg and z silently never applied (live
+    # 2026-11-09 the walker faced 90 deg off its path; plain usd actors get
+    # their typed model prim from add_reference_to_stage).
+    UsdGeom.Xform.Define(stage, model)
+    whole_path = f"{model}/biped"
+    UsdGeom.Xform.Define(stage, whole_path).GetPrim().GetReferences().AddReference(ref)
+    # BIPED_BODY_SRC/BIPED_ANIM_SCOPE are absolute paths IN THE SOURCE FILE
+    # (rooted at its own /World), which IS whole_path here — strip the
+    # leading "/World" or it gets counted twice.
+    body_path = whole_path + BIPED_BODY_SRC.removeprefix("/World")
+    clip_prim_path = (whole_path + BIPED_ANIM_SCOPE.removeprefix("/World")
+                      + f"/{clip_name}_skelanim")
+    anim_path = f"{model}/WalkAnim"
+    body_prim = stage.GetPrimAtPath(body_path)
+    if not body_prim.IsValid():
+        emit(f"  world actor {actor['id']}: no {BIPED_BODY_SRC} under {actor['ref']} — "
+             f"asset structure changed? falling back")
+        return False
+    # Y-up -> Z-up: rotateX +90 maps skeleton (x,y,z) -> (x,-z,y). Height
+    # lands on +Z with the soles at the origin (presets' z = 0), and the
+    # stride's forward axis (+Z, see WALK_CLIPS) on -Y.
+    # ClearXformOpOrder() first: the payload already carries an identity
+    # translate/rotateXYZ/scale, and AddXformOp refuses a second op of the
+    # same name (Tf.ErrorException, hit live 2026-11-09).
+    body_xf = UsdGeom.Xformable(body_prim)
+    body_xf.ClearXformOpOrder()
+    _set_op(body_xf, "rotateXYZ", (90.0, 0.0, 0.0))
+    skel_prim = _find_skeleton(stage, body_path)
+    if skel_prim is None:
+        emit(f"  world actor {actor['id']}: no Skeleton under {BIPED_BODY_SRC} — "
+             f"asset structure changed? falling back")
+        return False
+    clip_prim = stage.GetPrimAtPath(clip_prim_path)
+    if not clip_prim.IsValid():
+        emit(f"  world actor {actor['id']}: no clip {clip_name} under {actor['ref']} — falling back")
+        return False
+    window = WALK_CLIPS[clip_name]
+    speed = float((actor.get("path") or {}).get("speed_mps") or 0.0)
+    rate = min(2.0, max(0.5, speed / window[2])) if speed > 0 else 1.0
+    baked = _bake_walk_cycle(stage, anim_path, clip_prim, window, rate)
+    if baked is None:
+        emit(f"  world actor {actor['id']}: {clip_name} has no usable stride — falling back")
+        return False
+    _anim_prim, n_loops, stride_s, seam = baked
+    UsdSkel.BindingAPI.Apply(skel_prim)
+    UsdSkel.BindingAPI(skel_prim).CreateAnimationSourceRel().SetTargets([Sdf.Path(anim_path)])
+    # The suit texture is a near-uniform light grey (an NVIDIA logo on the
+    # chest is its only colour) — the mannequin is untextured-looking by
+    # design. Tint it with the actor's colour so a person reads as a
+    # hi-vis-clad figure, not a grey ghost, and person/worker are told apart.
+    shader = UsdShade.Shader(stage.GetPrimAtPath(body_path + "/Looks/suit/Shader"))
+    if shader:
+        shader.CreateInput("diffuse_tint", Sdf.ValueTypeNames.Color3f).Set(
+            Gf.Vec3f(*(float(c) for c in actor["color"])))
+
+    xf = UsdGeom.Xformable(stage.GetPrimAtPath(model))
+    xf.ClearXformOpOrder()
+    _set_op(xf, "translate", (0.0, 0.0, float(actor["z"])))
+    _set_op(xf, "rotateXYZ", (0.0, 0.0, float(actor["yaw_offset_deg"])))
+    if actor["scale"] != 1.0:
+        _set_op(xf, "scale", (float(actor["scale"]),) * 3)
+    ox, oy = actor["origin_offset"]
+    if ox or oy:
+        _set_op(xf, "translate", (float(ox), float(oy), 0.0), suffix="origin")
+    n = _strip_physics(stage, model)
+    emit(f"  world actor {actor['id']}: {actor['ref']} walk={clip_name} "
+         f"stride {stride_s:.2f}s x{n_loops} at rate {rate:.2f} (seam {seam:.4f}), "
+         f"physics stripped on {n} prim(s)")
+    return True
+
+
 def _spawn_usd_actor(stage, path: str, actor: dict) -> bool:
     """Reference a usd actor's asset under its Xform. The parent Xform keeps
     the translate/rotate ops _WorldRuntime.step drives; the model sits in a
@@ -1163,6 +1401,8 @@ def _spawn_usd_actor(stage, path: str, actor: dict) -> bool:
     from pxr import UsdGeom
 
     model = f"{path}/model"
+    if actor.get("anim") == "walk_cycle":
+        return _spawn_walk_actor(stage, model, actor)
     if not _spawn_usd_prop(stage, model, 0.0, 0.0, 0.0, ref=actor["ref"], scale=1.0):
         return False
     xf = UsdGeom.Xformable(stage.GetPrimAtPath(model))

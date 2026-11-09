@@ -60,10 +60,12 @@ PRESETS supplies the NVIDIA asset reference plus the floor footprint and height 
 metrics score against (measured with `scripts/measure_assets.py`). Any key can be
 overridden; `shape: usd` with `ref` + `footprint` or `radius` names an asset directly.
 Assets are spawned with their physics stripped, so actors stay non-colliders; without the
-asset server an item degrades to a primitive of the same footprint. Characters stand in
-their bind pose (a T, arms out at 1.4 m, over the robot) because `omni.anim.people`
-isn't in the pip install: depth sees a person-tall body ~1.8 m wide, which the tracker's
-large-mover rule still calls moving. `yaw_offset_deg` turns a model to face +x,
+asset server an item degrades to a primitive of the same footprint. `person` and
+`worker` really walk: `Isaac/People/Characters/Biped_Setup.usd`'s mannequin (the one
+character whose rig matches Isaac's walk-clip library; `omni.anim.people` isn't in the
+pip install) plays one straight stride of a `stand_walk_N` clip, looped in place at the
+actor's speed while the world moves it, tinted with the actor's `color`.
+`yaw_offset_deg` turns a model to face +x,
 `origin_offset` puts its body centre on the pose, `z` its feet on the floor.
 
 **Objective scores, not only pass/fail.** `reaction` (ground truth only) opens an

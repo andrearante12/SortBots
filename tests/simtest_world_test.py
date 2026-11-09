@@ -71,6 +71,11 @@ def _as_usd(w, **kw):
     (lambda w: _as_usd(w, preset="person", z=5), "z"),
     (lambda w: _as_usd(w, preset="person", yaw_offset_deg=400), "yaw_offset_deg"),
     (lambda w: _as_usd(w, preset="amr", origin_offset=[1]), "origin_offset"),
+    (lambda w: _as_usd(w, preset="person", anim="idle"), "anim"),
+    (lambda w: w.update(props=[{"id": "p", "shape": "box", "size": [1, 1, 1],
+                                "pose": [0, 0], "anim": "walk_cycle"}]), "unknown key"),
+    (lambda w: w["actors"][0].update(shape="cylinder", radius=0.3, anim="walk_cycle"),
+     "usd actor"),
     (lambda w: w["actors"][0].update(radius=0), "radius"),
     (lambda w: w["actors"][0]["path"].update(waypoints=[[0, 0]]), "two"),
     (lambda w: w["actors"][0]["path"].update(waypoints=[[0, 0], [0, 0]]), "repeats"),
@@ -118,7 +123,10 @@ def test_preset_expands_and_world_keys_win():
     assert a["shape"] == "usd" and a["ref"] == world.PRESETS["person"]["ref"]
     assert a["radius"] == 0.4 and "footprint" not in a            # the world's radius won
     assert a["height"] == world.PRESETS["person"]["height"]
-    assert a["fallback"] == "cylinder" and a["yaw_offset_deg"] == 90.0 and a["z"] == 0.12
+    assert a["fallback"] == "cylinder"
+    assert a["yaw_offset_deg"] == world.PRESETS["person"]["yaw_offset_deg"]
+    assert a["z"] == world.PRESETS["person"]["z"]
+    assert a["anim"] == "walk_cycle"
     assert a["origin_offset"] == (0.0, 0.0)
     assert world.footprint(a, 1.0, 2.0, 0.3) == geometry.circle(1.0, 2.0, 0.4)
     assert world.half_extent(a) == 0.4

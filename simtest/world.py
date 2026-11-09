@@ -74,34 +74,49 @@ MODES = ("once", "loop", "pingpong")
 # numbers measured with scripts/measure_assets.py on 2026-11-06 (headless
 # Isaac, UsdGeom.BBoxCache at identity):
 #
-#   person    bbox 1.76 x 0.44 x 1.73, feet 0.12 below the origin, facing -y
-#   worker    bbox 2.09 x 0.57 x 1.93, feet 0.15 below, facing -y
+#   person    bbox 0.58 x 1.97 x 0.86 (rest pose), facing -y
+#   worker    same asset as person, different walk clip for variety
 #   forklift  bbox 1.21 x 3.49 x 2.15, long axis y
 #   amr       iw_hub 1.43 x 0.66 x 0.23, body centre 0.32 behind the origin,
 #             wheels 0.08 below
 #   amr_tall  nova_carter 0.73 x 0.90 x 0.69, centre 0.22 off, base 0.14 below
 #
-# Characters stand in their BIND POSE (omni.anim.people is not in the pip
-# install): a T, arms out — that 1.76 m is the arm span, at ~1.4 m above the
-# floor, over a 0.5 m tall robot. The footprint the metrics score is the
-# body (radius), the arms are what depth sees: a crossing person reads as a
-# ~1.8 m wide cluster, which the tracker's large-mover rule (tall AND long)
-# still calls moving. yaw_offset_deg turns each model to face +x, the
-# direction of travel; origin_offset moves the body centre onto the actor's
-# pose so the scored footprint sits on the visible body; z puts the feet or
-# wheels on the floor. Footprints/heights are the declared values the
-# METRICS use.
+# `anim: walk_cycle` (person, worker) plays a REAL walk, not a bind pose:
+# spawn_warehouse.py's _spawn_walk_actor binds one of Isaac's
+# Isaac/People/Animations/stand_walk_N.skelanim.usd clips, baked and looped
+# locally (see WALK_LOOP_S there). It has to be bound to
+# Isaac/People/Characters/Biped_Setup.usd's own low-poly mannequin —
+# the dressed characters (F_Business_02 etc., used until 2026-11-09) use a
+# different, incompatible skeleton (101 CC3-style joints vs this one's 81
+# Mixamo-style joints; confirmed live, zero name overlap) and can't be
+# retargeted onto the walk library without the joint-mapping data
+# omni.anim.people ships, which isn't in this install. Biped_Setup.usd is
+# the one character on the asset server whose skeleton the library was
+# actually authored against (checked live: exact 81/81 joint-name match).
+# The footprint the metrics score is the body (radius); yaw_offset_deg turns
+# the model to face +x, the direction of travel; z puts the feet on the
+# floor. Footprints/heights are the declared values the METRICS use.
+#
+# Biped_Setup.usd is authored Y-up: spawn_warehouse._spawn_walk_actor
+# rotates the body rotateX(+90) (skeleton (x,y,z) -> (x,-z,y)); its soles sit
+# at the skeleton origin (rest mesh min y = -0.0005), so z = 0. The earlier
+# 0.17 lift was a misread bbox and floated the feet. The baked stride walks
+# along the skeleton's +Z (measured on every clip in WALK_CLIPS, within
+# 5 deg), which that rotation puts on -Y,
+# so yaw_offset_deg = +90 turns it to face +x like every other actor. The
+# earlier 180 came from the clip's net ROOT drift, which is the capture
+# wandering around its own floor, not the way the body faces (2026-11-09).
 PRESETS = {
     "person": {
-        "shape": "usd", "ref": "Isaac/People/Characters/F_Business_02/F_Business_02.usd",
-        "radius": 0.30, "height": 1.73, "z": 0.12, "yaw_offset_deg": 90.0,
+        "shape": "usd", "ref": "Isaac/People/Characters/Biped_Setup.usd",
+        "anim": "walk_cycle",
+        "radius": 0.30, "height": 1.75, "z": 0.0, "yaw_offset_deg": 90.0,
         "color": (0.95, 0.45, 0.10), "fallback": "cylinder",
     },
     "worker": {
-        "shape": "usd",
-        "ref": "Isaac/People/Characters/male_adult_construction_05_new/"
-               "male_adult_construction_05_new.usd",
-        "radius": 0.32, "height": 1.93, "z": 0.15, "yaw_offset_deg": 90.0,
+        "shape": "usd", "ref": "Isaac/People/Characters/Biped_Setup.usd",
+        "anim": "walk_cycle",
+        "radius": 0.32, "height": 1.75, "z": 0.0, "yaw_offset_deg": 90.0,
         "color": (0.95, 0.70, 0.10), "fallback": "cylinder",
     },
     "forklift": {
@@ -277,7 +292,7 @@ def _validate_item(raw, what, *, actor: bool) -> dict:
         raise WorldError(f"{what}: expected a mapping")
     allowed = {"id", "shape", "size", "radius", "height", "color", "label", "preset",
                "ref", "scale", "footprint", "yaw_offset_deg", "z", "origin_offset", "fallback"}
-    allowed |= {"path"} if actor else {"pose", "collider", "style"}
+    allowed |= {"path", "anim"} if actor else {"pose", "collider", "style"}
     unknown = set(raw) - allowed
     if unknown:
         raise WorldError(f"{what}: unknown key(s) {sorted(unknown)}")
@@ -303,6 +318,16 @@ def _validate_item(raw, what, *, actor: bool) -> dict:
                           DEFAULT_ACTOR_COLOR if actor else DEFAULT_PROP_COLOR)
     if actor:
         out["path"] = _validate_path(raw.get("path"), f"{what}.path")
+        # A real skeletal walk cycle (person/worker presets), not a bind
+        # pose: spawn_warehouse.py._spawn_walk_actor binds and loops one of
+        # Isaac's walk clips. Only meaningful on a usd actor.
+        anim = raw.get("anim")
+        if anim is not None:
+            if out["shape"] != "usd":
+                raise WorldError(f"{what}.anim: only a usd actor can have one")
+            if anim != "walk_cycle":
+                raise WorldError(f"{what}.anim: expected 'walk_cycle', got {anim!r}")
+        out["anim"] = anim
     else:
         out["pose"] = _pose(raw.get("pose"), f"{what}.pose")
         collider = raw.get("collider", True)
