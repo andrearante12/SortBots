@@ -74,49 +74,40 @@ MODES = ("once", "loop", "pingpong")
 # numbers measured with scripts/measure_assets.py on 2026-11-06 (headless
 # Isaac, UsdGeom.BBoxCache at identity):
 #
-#   person    bbox 0.58 x 1.97 x 0.86 (rest pose), facing -y
-#   worker    same asset as person, different walk clip for variety
+#   person    male_adult_construction_01_new, ~1.75 m, facing -y
+#   worker    male_adult_construction_05_new, ~1.72 m, facing -y
 #   forklift  bbox 1.21 x 3.49 x 2.15, long axis y
 #   amr       iw_hub 1.43 x 0.66 x 0.23, body centre 0.32 behind the origin,
 #             wheels 0.08 below
 #   amr_tall  nova_carter 0.73 x 0.90 x 0.69, centre 0.22 off, base 0.14 below
 #
 # `anim: walk_cycle` (person, worker) plays a REAL walk, not a bind pose:
-# spawn_warehouse.py's _spawn_walk_actor binds one of Isaac's
-# Isaac/People/Animations/stand_walk_N.skelanim.usd clips, one stride looped
-# off the world clock (see WALKERS there). It has to be bound to
-# Isaac/People/Characters/Biped_Setup.usd's own low-poly mannequin —
-# the dressed characters (F_Business_02 etc., used until 2026-11-09) use a
-# different, incompatible skeleton (101 CC3-style joints vs this one's 81
-# Mixamo-style joints; confirmed live, zero name overlap) and can't be
-# retargeted onto the walk library without the joint-mapping data
-# omni.anim.people ships, which isn't in this install. Biped_Setup.usd is
-# the one character on the asset server whose skeleton the library was
-# actually authored against (checked live: exact 81/81 joint-name match).
+# the characters are Isaac's dressed construction workers (hard hat, hi-vis
+# vest, work trousers, boots), and spawn_warehouse.py's _spawn_walk_actor
+# retargets one straight stride of Isaac's walk-clip library onto their
+# skeleton (scripts/walk_retarget.py — the library is authored for a
+# different 81-joint rig and omni.anim.people, which would map it, isn't in
+# this install), looped off the world clock (see WALKERS there). Any
+# *_new character on the same 101-joint rig works as a walking `ref`.
 # The footprint the metrics score is the body (radius); yaw_offset_deg turns
-# the model to face +x, the direction of travel; z puts the feet on the
-# floor. Footprints/heights are the declared values the METRICS use.
-#
-# Biped_Setup.usd is authored Y-up: spawn_warehouse._spawn_walk_actor
-# rotates the body rotateX(+90) (skeleton (x,y,z) -> (x,-z,y)); its soles sit
-# at the skeleton origin (rest mesh min y = -0.0005), so z = 0. The earlier
-# 0.17 lift was a misread bbox and floated the feet. The looped stride walks
-# along the skeleton's +Z (measured on every clip in WALK_CLIPS, within
-# 5 deg), which that rotation puts on -Y,
-# so yaw_offset_deg = +90 turns it to face +x like every other actor. The
-# earlier 180 came from the clip's net ROOT drift, which is the capture
-# wandering around its own floor, not the way the body faces (2026-11-09).
+# the model to face +x, the direction of travel (these characters face -y,
+# so 90); z puts the feet on the floor (soles at the origin, so 0).
+# Footprints/heights are the declared values the METRICS use.
 PRESETS = {
     "person": {
-        "shape": "usd", "ref": "Isaac/People/Characters/Biped_Setup.usd",
+        "shape": "usd",
+        "ref": "Isaac/People/Characters/male_adult_construction_01_new/"
+               "male_adult_construction_01_new.usd",
         "anim": "walk_cycle",
         "radius": 0.30, "height": 1.75, "z": 0.0, "yaw_offset_deg": 90.0,
         "color": (0.95, 0.45, 0.10), "fallback": "cylinder",
     },
     "worker": {
-        "shape": "usd", "ref": "Isaac/People/Characters/Biped_Setup.usd",
+        "shape": "usd",
+        "ref": "Isaac/People/Characters/male_adult_construction_05_new/"
+               "male_adult_construction_05_new.usd",
         "anim": "walk_cycle",
-        "radius": 0.32, "height": 1.75, "z": 0.0, "yaw_offset_deg": 90.0,
+        "radius": 0.32, "height": 1.72, "z": 0.0, "yaw_offset_deg": 90.0,
         "color": (0.95, 0.70, 0.10), "fallback": "cylinder",
     },
     "forklift": {

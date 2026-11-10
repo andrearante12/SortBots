@@ -61,10 +61,10 @@ metrics score against (measured with `scripts/measure_assets.py`). Any key can b
 overridden; `shape: usd` with `ref` + `footprint` or `radius` names an asset directly.
 Assets are spawned with their physics stripped, so actors stay non-colliders; without the
 asset server an item degrades to a primitive of the same footprint. `person` and
-`worker` really walk: `Isaac/People/Characters/Biped_Setup.usd`'s mannequin (the one
-character whose rig matches Isaac's walk-clip library; `omni.anim.people` isn't in the
-pip install) plays one straight stride of a `stand_walk_N` clip, looped in place at the
-actor's speed while the world moves it, tinted with the actor's `color`.
+`worker` are Isaac's dressed construction workers (`male_adult_construction_01_new`,
+`_05_new`) and really walk: one straight stride of Isaac's walk-clip library, retargeted
+onto their rig at spawn (`scripts/walk_retarget.py`; `omni.anim.people` isn't in the pip
+install), looped in place at the actor's speed while the world moves them.
 `yaw_offset_deg` turns a model to face +x,
 `origin_offset` puts its body centre on the pose, `z` its feet on the floor.
 
