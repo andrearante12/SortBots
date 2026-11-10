@@ -23,6 +23,13 @@ overrides:
 
 warmup_s: 5
 
+# The Tests-tab clip: over the open apron, looking north at where both routes
+# meet. Riding along with robot_0 never showed robot_1; (-3, -3, 9) put the
+# camera inside the building's overhead structure (2026-11-10).
+clip_view:
+  eye: [-8.5, 1.0, 6.5]
+  target: [-7.0, 7.0, 0.0]
+
 goals:
   - robot: robot_1
     pose: [-12.0, 4.0, 3.1416]   # west across the apron, past robot_0's route

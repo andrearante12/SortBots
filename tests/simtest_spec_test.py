@@ -330,3 +330,24 @@ def test_report_flags_mixed_metric_versions():
     a, b = _result("a", 0, True, 0), _result("a", 1, True, 0)
     b["score"]["metrics"][0]["version"] = 2
     assert report.version_notes([a, b])
+
+
+def test_a_passing_clip_wins_over_a_preview(tmp_path, monkeypatch):
+    monkeypatch.setattr(clip, "MEDIA_DIR", tmp_path)
+    assert spec._clip_of("t") == (None, None)
+    clip.preview_path("t").write_bytes(b"GIF89a")
+    assert spec._clip_of("t") == (f"{tmp_path.name}/t.preview.gif", "preview")
+    clip.media_path("t").write_bytes(b"GIF89a")
+    assert spec._clip_of("t") == (f"{tmp_path.name}/t.gif", "pass")
+
+
+def test_clip_view_fixes_the_clip_camera():
+    view = {"eye": [0.0, 0.0, 9.0], "target": [1.0, 2.0, 0.0]}
+    assert spec._clip_view(None) is None
+    assert spec._clip_view(view) == view
+    with pytest.raises(spec.SpecError, match="clip_view"):
+        spec._clip_view({"eye": [0, 0]})
+    resolved = {"robots": ["robot_0"], "world": None, "clip_view": view}
+    assert clip.follow_for(resolved) is None
+    cmd = clip.capture_cmd(Path("/x"), resolved)
+    assert "--eye=0.0,0.0,9.0 --target=1.0,2.0,0.0" in cmd and "--follow" not in cmd

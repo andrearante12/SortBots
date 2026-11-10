@@ -53,6 +53,14 @@
   // spec's titles are sentences, and a new test file gets a name without anyone
   // having to pick one.
   const titleOf = (name) => { const w = String(name).replace(/_/g, " "); return w.charAt(0).toUpperCase() + w.slice(1); };
+  // A "preview" clip (simtest.py run --preview) is kept whatever the verdict, so it is
+  // captioned as the task, never as a pass; only a "pass" clip claims one.
+  const clipFigure = (t) => {
+    const preview = t.clip_kind === "preview";
+    const alt = `${titleOf(t.name)}, ${preview ? "what the test sets up" : "recorded from a passing run"}`;
+    const caption = preview ? "What this test sets up, sped up" : "A passing run, sped up";
+    return `<figure class="tp-clip"><img src="${esc(t.clip)}" loading="lazy" alt="${esc(alt)}"><figcaption>${caption}</figcaption></figure>`;
+  };
   const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
   const words = (s) => String(s || "").replace(/_/g, " ");
   // "2.5 min", "90 s": sim seconds, as the spec caps them.
@@ -130,7 +138,7 @@
             <div class="opts">${variant}<label>Repeats <input type="number" min="1" max="50" value="${t.repeats}" data-repeats></label>
               <span class="runs">${plural(t.robots.length, "robot")}, up to ${simTime(t.sim_s)} of sim time</span></div>
           </div>
-          ${t.clip ? `<figure class="tp-clip"><img src="${esc(t.clip)}" loading="lazy" alt="${esc(titleOf(t.name))}, recorded from a passing run"><figcaption>A passing run, sped up</figcaption></figure>` : ""}
+          ${t.clip ? clipFigure(t) : ""}
         </div>
       </div>`;
     };

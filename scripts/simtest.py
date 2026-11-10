@@ -300,7 +300,7 @@ def run_once(label: str, resolved: dict, streams: set[str], run_dir: Path, a,
                                      "streams": sorted(streams)}, indent=2))
         cmd = (f"exec python3 -m simtest.probe --variant {shlex.quote(str(vjson))} "
                f"--out {shlex.quote(str(run_dir))}")
-        if a.clip:
+        if a.clip or a.preview:
             clip_dir.mkdir(exist_ok=True)
             with open(run_dir / "clip.log", "w") as fh:
                 clip = subprocess.Popen(_ros_shell(clip_lib.capture_cmd(clip_dir, resolved)),
@@ -425,6 +425,9 @@ def cmd_run(a) -> int:
                     if a.clip and body["score"]["ok"]:
                         gif = clip_lib.encode(run_dir / "clip", clip_lib.media_path(t["name"]))
                         log(f"[simtest] clip: {gif}")
+                    if a.preview:
+                        gif = clip_lib.encode(run_dir / "clip", clip_lib.preview_path(t["name"]))
+                        log(f"[simtest] preview clip: {gif}")
                     for m in body["score"]["metrics"]:
                         for c in m["criteria"]:
                             if not c["ok"]:
@@ -572,6 +575,9 @@ def main(argv=None) -> int:
                    help="leave the sim up after the LAST run, to look around")
     r.add_argument("--clip", action="store_true",
                    help="record the Sim view; a passing run writes webui/test_media/NAME.gif")
+    r.add_argument("--preview", action="store_true",
+                   help="record the Sim view and write webui/test_media/NAME.preview.gif "
+                        "whatever the verdict: a picture of what the test sets up")
     r.add_argument("--out", help="results dir (default data/simtests/<UTC>_<name>)")
     r.set_defaults(fn=cmd_run)
     rs = sub.add_parser("rescore")

@@ -2,14 +2,17 @@
 
 `scripts/simtest.py run NAME --clip` records Isaac's own Sim view (/sim/view/rgb) through
 the scored part of the run and, only if that run passes, encodes it to
-webui/test_media/NAME.gif. A failed run leaves no GIF behind, so the picture beside a test
-is always one that test really produced. Commit the file; nothing regenerates it.
+webui/test_media/NAME.gif. A failed run leaves no GIF behind, so a "passing run" picture
+beside a test is always one that test really passed. `--preview` instead keeps the clip
+whatever the verdict, as NAME.preview.gif, captioned as showing what the test sets up.
+Commit the file; nothing regenerates it.
 
 Two halves, because the runner is in two environments: `capture` is rclpy, so it runs in
 the ROS shell beside the probe (python3 -m simtest.clip capture), and encode() is ffmpeg
 on the host. Frames stay in the run's directory, so a clip can be recut without a sim:
 
     python3 -m simtest.clip encode data/simtests/<run>/runs/0_0/clip webui/test_media/NAME.gif
+    python3 -m simtest.clip encode ... --span 0,0.6     # keep only the first 60% of the run
 
 Watching costs what an operator on the Sim view costs: one more render product, so runs
 are slower in wall time, and scored in sim time as always.
@@ -40,15 +43,28 @@ def media_path(name: str) -> Path:
     return MEDIA_DIR / f"{name}.gif"
 
 
+def preview_path(name: str) -> Path:
+    """A clip that shows what a test SETS UP, kept whatever the run's verdict
+    (`simtest.py run NAME --preview`): for tests that don't pass yet but still
+    need a picture of the task. The Tests tab captions it as such, and a real
+    passing clip (media_path) wins when both exist."""
+    return MEDIA_DIR / f"{name}.preview.gif"
+
+
 def follow_for(resolved: dict) -> str | None:
-    """A world that aims the camera (`view:`) has already framed what it is about. Anything
-    else is a robot crossing the floor, so ride along with it."""
+    """A test with a `clip_view:`, or a world that aims the camera (`view:`), has already
+    framed what it is about. Anything else is a robot crossing the floor, so ride along."""
     world = resolved.get("world") or {}
-    return None if world.get("view") else resolved["robots"][0]
+    return None if resolved.get("clip_view") or world.get("view") else resolved["robots"][0]
 
 
 def capture_cmd(out_dir: Path, resolved: dict) -> str:
     cmd = f"exec python3 -m simtest.clip capture --out {shlex.quote(str(out_dir))}"
+    view = resolved.get("clip_view")
+    if view:
+        for key in ("eye", "target"):
+            # --key=value: a coordinate list that starts with "-" is otherwise read as a flag
+            cmd += f" --{key}={','.join(str(c) for c in view[key])}"
     follow = follow_for(resolved)
     return f"{cmd} --follow {shlex.quote(follow)}" if follow else cmd
 
@@ -70,8 +86,12 @@ def pick_frames(frames: list, n: int) -> list:
     return [frames[i * (len(frames) - 1) // (n - 1)] for i in range(n)]
 
 
-def encode(frames_dir: Path, out: Path) -> Path:
+def encode(frames_dir: Path, out: Path, span: tuple[float, float] = (0.0, 1.0)) -> Path:
+    """`span` keeps that fraction of the run (start, end in 0..1): a recut that drops a
+    stretch where nothing happens, e.g. the robot alone on bare floor after the encounter."""
     frames = sorted(Path(frames_dir).glob("*.jpg"))[SKIP_FRAMES:]
+    lo, hi = (round(f * len(frames)) for f in span)
+    frames = frames[lo:max(hi, lo + 1)]
     if not frames:
         raise ValueError(f"no frames in {frames_dir}")
     picks = pick_frames(frames, int(CLIP_S * CLIP_FPS))
@@ -93,7 +113,7 @@ def encode(frames_dir: Path, out: Path) -> Path:
     return out
 
 
-def capture(out_dir: Path, follow: str | None) -> None:
+def capture(out_dir: Path, follow: str | None, eye=None, target=None) -> None:
     import numpy as np
     import rclpy
     from PIL import Image as PilImage
@@ -120,6 +140,8 @@ def capture(out_dir: Path, follow: str | None) -> None:
     # sensor_data, always: a RELIABLE image subscriber kills Isaac's image writers.
     node.create_subscription(Image, "/sim/view/rgb", on_image, qos_profile_sensor_data)
     beat = {"on": True, **({"follow": follow} if follow else {})}
+    if eye and target:   # a test's clip_view: a fixed camera, resent every beat
+        beat.update(eye=eye, target=target)
     last_beat = 0.0
     while not (out_dir / STOP_FILE).exists():
         if time.monotonic() - last_beat >= BEAT_S:
@@ -137,14 +159,19 @@ def main() -> int:
     c = sub.add_parser("capture")
     c.add_argument("--out", type=Path, required=True)
     c.add_argument("--follow")
+    xyz = lambda s: [float(v) for v in s.split(",")]  # noqa: E731
+    c.add_argument("--eye", type=xyz)
+    c.add_argument("--target", type=xyz)
     e = sub.add_parser("encode")
     e.add_argument("frames", type=Path)
     e.add_argument("out", type=Path)
+    e.add_argument("--span", type=lambda s: tuple(float(v) for v in s.split(",")), default=(0.0, 1.0),
+                   metavar="START,END", help="keep this fraction of the run, e.g. 0,0.6")
     a = ap.parse_args()
     if a.cmd == "capture":
-        capture(a.out, a.follow)
+        capture(a.out, a.follow, a.eye, a.target)
     else:
-        print(encode(a.frames, a.out))
+        print(encode(a.frames, a.out, a.span))
     return 0
 
 
