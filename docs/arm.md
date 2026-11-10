@@ -53,6 +53,10 @@ scripts/arm.sh head keys         # a/d pan, w/s tilt, c center
 - One process owns `/dev/ttyACM0`: stop the arm teleop before running `head.py`, and vice versa.
   Driving both from one session (e.g. the pad) means one `SerialMotorsBus` with all 7 motors.
 - Wrong direction: `head calibrate --invert head_pan` (sign flipped in software).
+- **On the pad** (`arm.sh pad`): hold **RB** and the right stick pans/tilts the head (no RT
+  needed; the right stick leaves the arm alone while RB is held), **X** re-centers it. The head
+  joins the follower's own bus, so it is on whenever its calibration file exists; `--no-head`
+  for the arm alone, `--head-invert pan|tilt` to flip a stick, `--head-dps` for speed.
 
 ## One-time setup
 

@@ -25,8 +25,8 @@ import termios
 import time
 import tty
 
-from lerobot.motors import Motor, MotorCalibration, MotorNormMode, SerialMotorsBus
-from lerobot.utils.constants import HF_LEROBOT_CALIBRATION
+# lerobot is imported where it is used, so the pure helpers (head_limits, head_step) load under
+# the system python3 that runs the offline tests.
 
 HEAD = {"head_pan": 7, "head_tilt": 8}
 ARM = {"shoulder_pan": 1, "shoulder_lift": 2, "elbow_flex": 3, "wrist_flex": 4, "wrist_roll": 5}
@@ -36,22 +36,30 @@ KEYS = {"a": ("head_pan", 1), "d": ("head_pan", -1), "w": ("head_tilt", 1), "s":
 
 
 def calib_path(robot_id):
+    from lerobot.utils.constants import HF_LEROBOT_CALIBRATION
     return HF_LEROBOT_CALIBRATION / "robots" / "sortbots_head" / f"{robot_id}.json"
 
 
 def load_calibration(robot_id):
+    from lerobot.motors import MotorCalibration
     p = calib_path(robot_id)
     if not p.is_file():
         return None
     return {m: MotorCalibration(**c) for m, c in json.loads(p.read_text()).items()}
 
 
+def head_motors():
+    from lerobot.motors import Motor, MotorNormMode
+    return {m: Motor(i, "sts3215", MotorNormMode.DEGREES) for m, i in HEAD.items()}
+
+
 def make_bus(port, calibration=None):
-    return SerialMotorsBus(port=port, calibration=calibration,
-                           motors={m: Motor(i, "sts3215", MotorNormMode.DEGREES) for m, i in HEAD.items()})
+    from lerobot.motors import SerialMotorsBus
+    return SerialMotorsBus(port=port, calibration=calibration, motors=head_motors())
 
 
 def cmd_scan(a):
+    from lerobot.motors import Motor, MotorNormMode, SerialMotorsBus
     names = {**{i: m for m, i in ARM.items()}, **{i: m for m, i in HEAD.items()}}
     # A bus that knows every expected id, so registers can be read by name on whatever answers.
     bus = SerialMotorsBus(port=a.port, motors={m: Motor(i, "sts3215", MotorNormMode.DEGREES)
@@ -144,11 +152,22 @@ def connect_calibrated(a):
 
 
 def limits(cal):
-    """Calibrated range in degrees around the mid, 2 deg inside the stops (same as arm_keys)."""
+    """Calibrated range in degrees around the mid, 2 deg inside the stops (same as arm_keys).
+    `cal` values only need range_min / range_max."""
     out = {}
     for m, c in cal.items():
         mid = (c.range_min + c.range_max) / 2
         out[m] = ((c.range_min - mid) * 360 / MAX_RES + 2, (c.range_max - mid) * 360 / MAX_RES - 2)
+    return out
+
+
+def head_step(target, pan_in, tilt_in, dps, dt, lim):
+    """One teleop tick: integrate stick inputs (-1..1, already deadzoned) at `dps` and clamp to
+    `lim` (limits()). Returns a new target dict; pure, so the offline test covers it."""
+    out = dict(target)
+    for m, v in (("head_pan", pan_in), ("head_tilt", tilt_in)):
+        lo, hi = lim[m]
+        out[m] = min(hi, max(lo, out[m] + v * dps * dt))
     return out
 
 

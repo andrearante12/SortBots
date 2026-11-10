@@ -21,6 +21,9 @@ scripts/arm_cartesian.py, whose live-tuned behavior this copies; kinematics in s
     hold L3 (left stick click)  speed x0.25 on top of the level
     right stick X            wrist_roll (LOCKED by default: --lock)
     B                        magnet toggle: ON needs the deadman held; OFF always works
+    hold RB                  HEAD: right stick X / Y = pan / tilt (no RT needed; the right
+                             stick stops driving the arm while RB is held)
+    X                        head back to center (0 / 0)
     START                    quit: torque off, magnet off
 
 `--joint` switches to joint space: left stick X/Y = shoulder_pan/lift, right stick Y = elbow_flex
@@ -31,6 +34,9 @@ speed level, magnet state and time on, servo bus voltage and hottest servo, and 
 
 Releasing the deadman does NOT drop the magnet (a held package stays held); quitting, an
 unplugged pad or Ctrl-C does. The firmware caps one `on` at 30 s, so this re-arms it every 10 s while on.
+
+The head (scripts/head.py, ids 7/8 on the arm's bus) is on whenever its calibration file
+exists; --no-head runs the arm alone. --head-invert pan|tilt flips a stick direction.
 
     --no-arm      pad + magnet (+ a virtual arm in cartesian mode: prints the hand pose)
     --no-magnet   arm only          --dry-run   cartesian: print IK targets, send nothing
@@ -46,6 +52,7 @@ import time
 import numpy as np
 
 from arm_gamepad import JOINTS, MAX_RES
+from head import head_step
 from so101_kin import SO101Kin
 from status_line import status_line
 from xinput_pad import XPad, deadzone
@@ -124,6 +131,10 @@ def main():
     ap.add_argument("--no-arm", action="store_true")
     ap.add_argument("--no-magnet", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--no-head", action="store_true", help="arm only, even if the head is calibrated")
+    ap.add_argument("--head-id", default="sortbots_head")
+    ap.add_argument("--head-dps", type=float, default=90.0, help="head degrees/s at full stick")
+    ap.add_argument("--head-invert", nargs="*", default=[], choices=["pan", "tilt"])
     a = ap.parse_args()
     if a.max_step is None:
         a.max_step = 8.0 if a.joint else 20.0
@@ -144,15 +155,32 @@ def main():
     to_q = lambda deg: sign * np.radians([deg[j] for j in JOINTS])          # robot deg -> urdf rad
     to_deg = lambda q: dict(zip(JOINTS, np.degrees(q * sign)))               # urdf rad -> robot deg
 
-    robot = None
+    robot, head_lim = None, None
     if not a.no_arm:
         from lerobot.robots.so_follower import SOFollower, SOFollowerRobotConfig
         robot = SOFollower(SOFollowerRobotConfig(
             port=a.port, id=a.id, use_degrees=True, max_relative_target=a.max_step))
-        robot.connect(calibrate=False)
+        if not a.no_head:
+            import head as headmod
+            head_cal = headmod.load_calibration(a.head_id)
+            if head_cal is None:
+                print(f"no head calibration ({headmod.calib_path(a.head_id)}): arm only")
+            else:
+                # One port, one process: the head rides on the follower's own bus. send_action
+                # only writes the arm's keys, and configure()/disconnect() cover all seven, so
+                # the head gets the arm's gains and goes limp with it on quit.
+                from lerobot.motors import SerialMotorsBus
+                robot.bus = SerialMotorsBus(port=a.port, motors={**robot.bus.motors, **headmod.head_motors()},
+                                            calibration={**robot.calibration, **head_cal})
+                head_lim = headmod.limits(head_cal)
+        try:
+            robot.connect(calibrate=False)
+        except RuntimeError as err:  # the handshake wants every motor, head included
+            raise SystemExit(f"{err}\n(head unplugged? run with --no-head)")
         if not robot.is_calibrated:
             robot.disconnect()
-            raise SystemExit(f"arm not calibrated for id '{a.id}' - run lerobot-calibrate first")
+            raise SystemExit(f"arm or head not calibrated (ids '{a.id}', '{a.head_id}') - "
+                             "lerobot-calibrate / arm.sh head calibrate")
         lo_d, hi_d = {}, {}
         for j in JOINTS:  # calibrated range in degrees, same mapping lerobot's DEGREES norm uses
             c = robot.bus.calibration[j]
@@ -174,11 +202,17 @@ def main():
     # any pose outside [lo, hi]: clip what we read into range or every move is refused.
     q = np.clip(to_q(read_deg()), lo, hi) if robot else np.clip(np.zeros(5), lo, hi)
     target = kin.pose(q)  # start exactly where the arm is: connecting never jerks
+    head_sign = {m: -1.0 if m[5:] in a.head_invert else 1.0 for m in ("head_pan", "head_tilt")}
+    if head_lim:  # same no-jerk rule for the head: start from where it is
+        o = robot.get_observation()
+        head = {m: min(head_lim[m][1], max(head_lim[m][0], o[f"{m}.pos"])) for m in head_lim}
+    x_prev = False
     jtarget = to_deg(q)   # --joint mode targets, degrees
     level, dpad_prev = min(a.level or a.max_level, a.max_level) - 1, (False, False)
     mag_on, mag_armed_at, b_prev = False, 0.0, False
     mode = "joint" if a.joint else "cartesian"
     print(f"ready ({mode}): hold RT to move, B magnet, START quit",
+          "| RB+right stick head, X center" if head_lim else "",
           "(NO ARM)" if a.no_arm else "", "(DRY RUN)" if a.dry_run else "")
     ui = {"note": "", "until": 0.0, "bus": "", "bus_at": -9.0, "draw_at": 0.0, "mag_t0": 0.0}
     ok = True
@@ -228,6 +262,22 @@ def main():
                 magnet.on(MAGNET_ON_S)
                 mag_armed_at = now
 
+            # Head: RB is its own deadman. Stick left = +pan (as `head.py keys` a), up = +tilt.
+            head_held = bool(head_lim) and btn["RB"] and not a.dry_run
+            if head_held:
+                new = head_step(head, -deadzone(st["rx"]) * head_sign["head_pan"],
+                                deadzone(st["ry"]) * head_sign["head_tilt"], a.head_dps, dt, head_lim)
+                if new != head:
+                    head = new
+                    robot.bus.sync_write("Goal_Position", head)
+            if head_lim and not a.dry_run and btn["X"] and not x_prev:
+                head = {m: min(head_lim[m][1], max(head_lim[m][0], 0.0)) for m in head}
+                robot.bus.sync_write("Goal_Position", head)
+                note("head centered")
+            x_prev = btn["X"]
+            if head_held:  # the right stick belongs to the head while RB is held
+                st = {**st, "rx": 0.0, "ry": 0.0}
+
             if not a.joint:
                 du, dd = btn["DUP"], btn["DDOWN"]
                 if (du and not dpad_prev[0]) or (dd and not dpad_prev[1]):
@@ -271,6 +321,8 @@ def main():
                 else:
                     pose_txt = (f"x{target[0]*100:6.1f} y{target[1]*100:6.1f} z{target[2]*100:6.1f}cm "
                                 f"p{math.degrees(target[3]):4.0f}")
+                if head_lim:
+                    pose_txt += f" head{head['head_pan']:+4.0f}/{head['head_tilt']:+4.0f}"
                 label = ("JOINT" if a.joint else "CART") + (" DRY" if a.dry_run else "") + (" SIM" if not robot else "")
                 line = status_line(shutil.get_terminal_size().columns - 1, label, held, pose_txt,
                                    f"L{level + 1}/{a.max_level}" + (" slow" if btn["L3"] else ""),
