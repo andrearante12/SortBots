@@ -15,12 +15,14 @@ A run writes data/fleetsim/<UTC>_<name>/ (gitignored):
     score.json         metric values and pass/fail per criterion
 
 Exit codes: 0 every criterion passed (or none given), 1 a criterion failed,
-2 invalid scenario or arguments.
+2 invalid scenario or arguments, 130 stopped by SIGINT. A crash is also non-zero
+(an uncaught exception is 1), so "failed" needs score.json as well as the exit code.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,6 +92,10 @@ def print_score(sc: dict | None) -> None:
 def cmd_run(args) -> int:
     from fleetsim import sim as sim_lib
 
+    # The console's Stop button sends SIGINT. A process started in the background
+    # of a non-interactive shell has SIGINT ignored, so Stop would do nothing
+    # unless we put the normal handler back.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     scn = _resolve(args)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = Path(args.out) if args.out else RESULTS_DIR / f"{stamp}_{scn['name']}"
@@ -181,6 +187,9 @@ def main(argv=None) -> int:
             FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:  # cmd_run's finally closed the recording, so it can still be replayed
+        print("stopped: no score for a partial run", file=sys.stderr)
+        return 130
     return 2
 
 

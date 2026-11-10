@@ -33,8 +33,9 @@ MAX_LOG_CHUNK = 64 * 1024
 
 
 class SimtestRunner:
-    def __init__(self, env_fn):
+    def __init__(self, env_fn, log_path: Path = LOG):
         self._env_fn = env_fn  # session.clean_env — strips ROS from the env
+        self.log_path = log_path  # one log, replaced by each run
         self._lock = threading.Lock()
         self._proc: subprocess.Popen | None = None
         self._name: str | None = None
@@ -54,12 +55,12 @@ class SimtestRunner:
                    "elapsed_s": round(time.monotonic() - self._started, 1)
                    if self._started else None}
         try:
-            size = LOG.stat().st_size
+            size = self.log_path.stat().st_size
             if offset is None or offset < 0:
                 start = max(0, size - MAX_LOG_CHUNK)
             else:
                 start = 0 if offset > size else offset  # log replaced by a new run
-            with open(LOG, "rb") as f:
+            with open(self.log_path, "rb") as f:
                 f.seek(start)
                 chunk = f.read(MAX_LOG_CHUNK)
             out.update(log=chunk.decode(errors="replace"), offset=start + len(chunk))
@@ -84,11 +85,15 @@ class SimtestRunner:
             if variant not in labels:
                 raise spec.SpecError(f"variant must be one of {labels}")
             argv += ["--variant", variant]
+        self._launch(name, argv)
+        return self.status()
+
+    def _launch(self, name: str, argv: list[str]) -> None:
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
-                raise RuntimeError(f"test {self._name!r} is already running")
-            LOG.parent.mkdir(parents=True, exist_ok=True)
-            fh = open(LOG, "wb")
+                raise RuntimeError(f"{self._name!r} is already running")
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(self.log_path, "wb")
             try:
                 self._proc = subprocess.Popen(
                     argv, cwd=str(REPO_ROOT), env=self._env_fn(), stdout=fh,
@@ -97,7 +102,6 @@ class SimtestRunner:
             finally:
                 fh.close()
             self._name, self._started, self._exit = name, time.monotonic(), None
-        return self.status()
 
     def cancel(self) -> dict:
         with self._lock:

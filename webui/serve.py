@@ -16,7 +16,8 @@ launch/sortbots_webui.launch.py, which brings up all three together.
 
 FLEET REPLAY (fleetsim/replay.py): /api/fleetsim/runs lists data/fleetsim/ and
 /api/fleetsim/run?dir=NAME returns one run packed for the operator view's
-replay. Read-only, so no --control.
+replay. Read-only, so no --control. Launching one (/api/fleetsim/launch) does
+need --control, and goes through webui/fleetsim_runner.py's own allowlist.
 
 TESTS (configs/tests/, scripts/simtest.py): /api/tests, /api/worlds and
 /api/tests/results are readable without --control (the Tests view should show
@@ -68,8 +69,9 @@ from simtest import report as simtest_report
 from simtest import spec as simtest_spec
 from simtest import world as simtest_world
 from simtest_runner import SimtestRunner
+import fleetsim_runner
 # The fleet replay (Tests tab -> Fleet sim runs): fleetsim's recorded runs,
-# read-only. fleetsim/replay.py is stdlib + simtest; nothing here runs a sim.
+# read-only. fleetsim/replay.py is stdlib + simtest; launching is fleetsim_runner's.
 from fleetsim import replay as fleetsim_replay
 
 WEBUI_DIR = Path(__file__).resolve().parent
@@ -137,6 +139,9 @@ SESSIONS: session_mod.SessionManager | None = None
 # Scored test runs (scripts/simtest.py) — launched only in --control mode on
 # the sim platform, like sessions.
 TESTS: SimtestRunner | None = None
+# Headless fleetsim runs, under the same --control, sim-platform-only gate: on
+# the Jetson a fleet sim would take CPU from the robot it is running on.
+FLEET: fleetsim_runner.FleetsimRunner | None = None
 
 # sim | real — which platform's scenarios this console lists and can start.
 # Set by main() from --platform (default: session_mod.detect_platform()).
@@ -246,11 +251,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         elif route == "/api/tests/report":
             self._serve_test_report()
         elif route == "/api/tests/run":
-            self._with_tests(self._serve_test_run)
+            self._with_tests(lambda: self._serve_run_state(TESTS))
         elif route == "/api/fleetsim/runs":
             self._serve_json({"runs": fleetsim_replay.list_runs()})
         elif route == "/api/fleetsim/run":
             self._serve_fleetsim_run()
+        elif route == "/api/fleetsim/scenarios":
+            self._serve_json({**fleetsim_runner.catalog(), "control": FLEET is not None})
+        elif route == "/api/fleetsim/launch":
+            self._with_fleet(lambda: self._serve_run_state(FLEET))
         elif route == "/":
             # The operator view is the only GUI (the per-robot dashboard,
             # index.html + app.js, was removed 2026-10-23).
@@ -287,6 +296,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_tests(self._start_test)
         elif route == "/api/tests/cancel":
             self._with_tests(lambda: self._serve_json(TESTS.cancel()))
+        elif route == "/api/fleetsim/launch":
+            self._with_fleet(self._start_fleetsim)
+        elif route == "/api/fleetsim/cancel":
+            self._with_fleet(lambda: self._serve_json(FLEET.cancel()))
         else:
             self._serve_error(404, f"no such endpoint: {route}")
 
@@ -720,7 +733,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         self._serve_json({"dir": name, "markdown": path.read_text()})
 
-    def _serve_test_run(self):
+    def _serve_run_state(self, runner):
         query = parse_qs(urlsplit(self.path).query)
         raw = query.get("offset", [None])[0]
         try:
@@ -728,7 +741,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except ValueError:
             self._serve_error(400, "offset must be an integer")
             return
-        self._serve_json(TESTS.status(offset))
+        self._serve_json(runner.status(offset))
 
     def _start_test(self):
         body = self._read_json_body()
@@ -769,7 +782,31 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         # gzip takes a 50-robot run from ~4 MB to under 1 MB.
         self._serve_json(packed, gzip_ok=True)
 
+    def _start_fleetsim(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            self._serve_json(FLEET.start(body.get("name"), body.get("robots"), body.get("seed"),
+                                         body.get("duration"), body.get("sets")))
+        except fleetsim_runner.ScenarioError as exc:
+            self._serve_error(400, str(exc))
+        except RuntimeError as exc:
+            self._serve_error(409, str(exc))
+        except OSError as exc:
+            self._serve_error(500, f"failed to launch: {exc}")
+
     # -- plumbing ----------------------------------------------------------
+
+    def _with_fleet(self, fn):
+        if FLEET is None:
+            self._serve_error(
+                503,
+                "fleet sim runs need the sim dashboard console (scripts/run_console.sh) — "
+                "or run them from a terminal: python3 -m fleetsim run NAME",
+            )
+            return
+        fn()
 
     def _with_tests(self, fn):
         if TESTS is None:
@@ -832,7 +869,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
-    global SESSIONS, PLATFORM, TESTS
+    global SESSIONS, PLATFORM, TESTS, FLEET
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8081)
@@ -853,6 +890,7 @@ def main() -> None:
         SESSIONS = session_mod.SessionManager(PLATFORM)
         if PLATFORM == "sim":
             TESTS = SimtestRunner(session_mod.clean_env)
+            FLEET = fleetsim_runner.FleetsimRunner(session_mod.clean_env)
 
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     mode = "control" if args.control else "read-only"
