@@ -1193,13 +1193,15 @@ WALK_CLIPS = {
     "stand_walk_7": (0.20, 1.53, 1.04),
 }
 WALK_CLIP_NAMES = tuple(WALK_CLIPS)
-# How long the baked, looped stride covers before it holds its last pose: well
-# past every scored test's stop.sim_s (longest today: mixed_route, 360 s)
-# with margin, while keeping per-actor authoring cost (one Usd.Attribute.Set
-# call per sample) bounded — ~320 loops * ~40 samples, well under a second.
-# A live demo session left running longer than this freezes the walk; that's
-# a known limit of baking rather than using Usd Value Clips.
-WALK_LOOP_S = 420.0
+# actor id -> {"rot", "trans", "frames", "stride_s", "phase", "idx"}: the
+# walkers _WorldRuntime.step poses every physics step. The stride is driven
+# from the WORLD clock, not baked into time samples on the USD timeline: a
+# 420 s bake froze every walker on its last pose once a live demo outlived it
+# (seen 2026-11-09 at sim t=5563 s), and the timeline knows nothing about the
+# actor dwelling or the world clock being paused/reset — so the legs walked
+# on the spot at every waypoint. Here the phase only advances while the actor
+# is actually moving, and loops forever.
+WALKERS: dict = {}
 
 
 def _find_skeleton(stage, under_path: str):
@@ -1226,11 +1228,11 @@ def _quat_dist2(a, b) -> float:
     return total
 
 
-def _bake_walk_cycle(stage, anim_path: str, source_clip_prim, window, rate: float = 1.0):
-    """A local SkelAnimation at anim_path: one straight stride of
-    `source_clip_prim` (window = WALK_CLIPS entry), looped for WALK_LOOP_S
-    and played `rate` times as fast, so the feet keep pace with the actor's
-    own speed instead of sliding.
+def _walk_stride(stage, anim_path: str, source_clip_prim, window):
+    """One straight stride of `source_clip_prim` (window = WALK_CLIPS entry) as
+    a list of (rotations, translations) poses, plus a local SkelAnimation at
+    anim_path holding the first pose as its DEFAULT (untimed) value — the
+    runtime overwrites that default every step (see WALKERS).
 
     The ROOT joint is pinned at identity. In the capture it carries the
     character's wandering across its own floor: a ~2 m offset from the origin
@@ -1239,20 +1241,14 @@ def _bake_walk_cycle(stage, anim_path: str, source_clip_prim, window, rate: floa
     which simtest/world.py's pose_at() drives along the world's waypoints, is
     the only thing that should move or turn it. Every other joint plays its
     rotations AND translations (the pelvis bob lives in its translation).
-
-    Why baked rather than referenced live: the clip would otherwise play
-    once through its whole wandering capture — nothing in this pip install
-    (no omni.anim.people / omni.anim.graph.core) loops or blends at runtime.
     Time codes are read through the reference arc, so Usd has already applied
     the 30 fps clip -> stage time-code scaling; clip seconds map to time codes
     by the stage's own timeCodesPerSecond.
     """
-    import math
-
     from pxr import Gf, UsdSkel, Vt
 
     src = UsdSkel.Animation(source_clip_prim)
-    joints = list(src.GetJointsAttr().Get())
+    joints = list(src.GetJointsAttr().Get() or [])
     rot_src, trans_src = src.GetRotationsAttr(), src.GetTranslationsAttr()
     times = sorted(rot_src.GetTimeSamples())
     if not times or not joints:
@@ -1260,36 +1256,46 @@ def _bake_walk_cycle(stage, anim_path: str, source_clip_prim, window, rate: floa
     tcps = stage.GetTimeCodesPerSecond()
     clip_start = times[0]
     a_tc, b_tc = (clip_start + s * tcps for s in window[:2])
-    frames = [t for t in times if a_tc <= t < b_tc]
-    if len(frames) < 4:
+    picked = [t for t in times if a_tc <= t < b_tc]
+    if len(picked) < 4:
         return None
-    seam = _quat_dist2(rot_src.Get(frames[0])[1:], rot_src.Get(b_tc)[1:])
-    period = (b_tc - a_tc) / rate                 # output time codes per stride
+    seam = _quat_dist2(rot_src.Get(picked[0])[1:], rot_src.Get(b_tc)[1:])
     root = [i for i, j in enumerate(joints) if "/" not in j]
-    n_loops = max(1, math.ceil(WALK_LOOP_S * tcps / period) + 1)
-    samples = []
-    for t in frames:
+    has_trans = trans_src.HasValue()
+    frames = []
+    for t in picked:
         rot = Vt.QuatfArray(rot_src.Get(t))
-        trans = Vt.Vec3fArray(trans_src.Get(t)) if trans_src.HasValue() else None
+        trans = Vt.Vec3fArray(trans_src.Get(t)) if has_trans else None
         for i in root:
             rot[i] = Gf.Quatf(1.0)
             if trans is not None:
                 trans[i] = Gf.Vec3f(0.0)
-        samples.append(((t - a_tc) / rate, rot, trans))
+        frames.append((rot, trans))
     anim = UsdSkel.Animation.Define(stage, anim_path)
     anim.CreateJointsAttr(src.GetJointsAttr().Get())
-    rot_attr = anim.CreateRotationsAttr()
-    trans_attr = anim.CreateTranslationsAttr() if trans_src.HasValue() else None
-    for k in range(n_loops):
-        base = k * period
-        for dt, rot, trans in samples:
-            rot_attr.Set(rot, base + dt)
-            if trans_attr is not None:
-                trans_attr.Set(trans, base + dt)
+    rot_attr = anim.CreateRotationsAttr(frames[0][0])
+    trans_attr = anim.CreateTranslationsAttr(frames[0][1]) if has_trans else None
     scale_src = src.GetScalesAttr()
     if scale_src.HasValue():
-        anim.CreateScalesAttr().Set(scale_src.Get(frames[0]))
-    return anim.GetPrim(), n_loops, period / tcps, seam
+        anim.CreateScalesAttr().Set(scale_src.Get(picked[0]))
+    return {"rot": rot_attr, "trans": trans_attr, "frames": frames,
+            "clip_stride_s": (b_tc - a_tc) / tcps, "seam": seam}
+
+
+def _pose_walker(walker: dict, dt: float, moving: bool) -> None:
+    """Advance one walker's stride by dt seconds of world clock (only while it
+    moves) and author the matching pose if the frame changed."""
+    if moving and dt > 0.0:
+        walker["phase"] = (walker["phase"] + dt / walker["stride_s"]) % 1.0
+    frames = walker["frames"]
+    idx = int(walker["phase"] * len(frames)) % len(frames)
+    if idx == walker["idx"]:
+        return
+    walker["idx"] = idx
+    rot, trans = frames[idx]
+    walker["rot"].Set(rot)
+    if walker["trans"] is not None:
+        walker["trans"].Set(trans)
 
 
 def _spawn_walk_actor(stage, model: str, actor: dict) -> bool:
@@ -1359,12 +1365,15 @@ def _spawn_walk_actor(stage, model: str, actor: dict) -> bool:
         return False
     window = WALK_CLIPS[clip_name]
     speed = float((actor.get("path") or {}).get("speed_mps") or 0.0)
+    # Play the stride at the actor's own speed so the feet keep pace with the
+    # floor instead of sliding (clips walk 1.0-1.16 m/s).
     rate = min(2.0, max(0.5, speed / window[2])) if speed > 0 else 1.0
-    baked = _bake_walk_cycle(stage, anim_path, clip_prim, window, rate)
-    if baked is None:
+    walker = _walk_stride(stage, anim_path, clip_prim, window)
+    if walker is None:
         emit(f"  world actor {actor['id']}: {clip_name} has no usable stride — falling back")
         return False
-    _anim_prim, n_loops, stride_s, seam = baked
+    walker.update(stride_s=walker["clip_stride_s"] / rate, phase=0.0, idx=0)
+    WALKERS[actor["id"]] = walker
     UsdSkel.BindingAPI.Apply(skel_prim)
     UsdSkel.BindingAPI(skel_prim).CreateAnimationSourceRel().SetTargets([Sdf.Path(anim_path)])
     # The suit texture is a near-uniform light grey (an NVIDIA logo on the
@@ -1387,7 +1396,7 @@ def _spawn_walk_actor(stage, model: str, actor: dict) -> bool:
         _set_op(xf, "translate", (float(ox), float(oy), 0.0), suffix="origin")
     n = _strip_physics(stage, model)
     emit(f"  world actor {actor['id']}: {actor['ref']} walk={clip_name} "
-         f"stride {stride_s:.2f}s x{n_loops} at rate {rate:.2f} (seam {seam:.4f}), "
+         f"stride {walker['stride_s']:.2f}s at rate {rate:.2f} (seam {walker['seam']:.4f}), "
          f"physics stripped on {n} prim(s)")
     return True
 
@@ -1618,6 +1627,7 @@ class _WorldRuntime:
         self._String = String
         self.world = w
         self.actor_ops = actor_ops
+        self.walk_wt = 0.0   # world clock the walkers were last posed at (see WALKERS)
         self.spawn = spawn_positions
         self.running = bool(w and w["autostart"])
         self.wt = 0.0                 # world clock, seconds
@@ -1824,11 +1834,16 @@ class _WorldRuntime:
         from pxr import Gf
         from simtest import world as wl
 
+        walk_dt = max(0.0, self.wt - self.walk_wt)
+        self.walk_wt = self.wt
         for actor in self.world["actors"]:
             p = wl.pose_at(actor["path"], self.wt)
             t_op, r_op = self.actor_ops[actor["id"]]
             t_op.Set(Gf.Vec3d(p["x"], p["y"], 0.0))
             r_op.Set(Gf.Vec3f(0.0, 0.0, math.degrees(p["yaw"])))
+            walker = WALKERS.get(actor["id"])
+            if walker is not None:
+                _pose_walker(walker, walk_dt, p["moving"])
 
     def tick(self, sim_t: float, robots: dict) -> None:
         """Every GROUND_TRUTH_EVERY steps: take commands, publish ground truth."""

@@ -83,8 +83,8 @@ MODES = ("once", "loop", "pingpong")
 #
 # `anim: walk_cycle` (person, worker) plays a REAL walk, not a bind pose:
 # spawn_warehouse.py's _spawn_walk_actor binds one of Isaac's
-# Isaac/People/Animations/stand_walk_N.skelanim.usd clips, baked and looped
-# locally (see WALK_LOOP_S there). It has to be bound to
+# Isaac/People/Animations/stand_walk_N.skelanim.usd clips, one stride looped
+# off the world clock (see WALKERS there). It has to be bound to
 # Isaac/People/Characters/Biped_Setup.usd's own low-poly mannequin —
 # the dressed characters (F_Business_02 etc., used until 2026-11-09) use a
 # different, incompatible skeleton (101 CC3-style joints vs this one's 81
@@ -100,7 +100,7 @@ MODES = ("once", "loop", "pingpong")
 # Biped_Setup.usd is authored Y-up: spawn_warehouse._spawn_walk_actor
 # rotates the body rotateX(+90) (skeleton (x,y,z) -> (x,-z,y)); its soles sit
 # at the skeleton origin (rest mesh min y = -0.0005), so z = 0. The earlier
-# 0.17 lift was a misread bbox and floated the feet. The baked stride walks
+# 0.17 lift was a misread bbox and floated the feet. The looped stride walks
 # along the skeleton's +Z (measured on every clip in WALK_CLIPS, within
 # 5 deg), which that rotation puts on -Y,
 # so yaw_offset_deg = +90 turns it to face +x like every other actor. The
