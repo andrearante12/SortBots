@@ -60,6 +60,7 @@ class XPad:
         if self.dev is None:
             raise SystemExit(f"xinput_pad: no USB device {vid:04x}:{pid:04x} (pad plugged in?)")
         self.ep_in = None
+        self._detached = False
         try:
             # The kernel has already configured the device and holds the HID interfaces, so
             # set_configuration() fails with "Resource busy"; use what is active, claim only ours.
@@ -75,6 +76,11 @@ class XPad:
                         intf, custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN)
             if self.ep_in is None:
                 raise SystemExit("xinput_pad: no XInput interface (class ff/5d/01) on this device")
+            # A desktop kernel (unlike the Jetson's) has xpad, which binds this interface and makes
+            # the claim fail with "Resource busy". Borrow it for the session; close() hands it back.
+            if self.dev.is_kernel_driver_active(self.intf):
+                self.dev.detach_kernel_driver(self.intf)
+                self._detached = True
             usb.util.claim_interface(self.dev, self.intf)
         except usb.core.USBError as e:
             if e.errno == 13:
@@ -112,6 +118,8 @@ class XPad:
         try:
             self._usb.util.release_interface(self.dev, self.intf)
             self._usb.util.dispose_resources(self.dev)
+            if self._detached:
+                self.dev.attach_kernel_driver(self.intf)
         except Exception:
             pass
 

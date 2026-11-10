@@ -26,6 +26,9 @@ magnet state, servo bus voltage and hottest servo.
 `wrist_roll` is locked by default (`--lock`).
 
 The Jetson kernel has no `xpad`, so `scripts/xinput_pad.py` reads the pad over raw USB (pyusb).
+On a desktop kernel that does have `xpad` (the thinkpad), the reader detaches it from the pad's
+interface for the session and reattaches it on exit. `pyusb` must be in the `lerobot` env
+(`~/miniconda3/envs/lerobot/bin/pip install pyusb`).
 After every plug the USB node is `root:root`: `sudo chmod 666 /dev/bus/usb/BUS/DEV` (the script
 prints the exact path when it gets permission denied).
 
