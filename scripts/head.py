@@ -105,7 +105,9 @@ def cmd_setup(a):
     rate, found_id = seen[0]
     print(f"found id {found_id} @ {rate} baud")
     bus.setup_motor(motor, initial_baudrate=rate, initial_id=found_id)
-    bus.disconnect(disable_torque=True)
+    # setup_motor already leaves the servo's torque off; disable_torque here would also
+    # address the other head servo, which is not plugged in, and time out.
+    bus.disconnect(disable_torque=False)
     print(f"{motor}: id {HEAD[motor]} set. Label it, then do the other one or chain them back.")
 
 
