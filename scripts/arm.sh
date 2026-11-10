@@ -8,6 +8,8 @@
 #   scripts/arm.sh keys       joint-space keyboard teleop (scripts/arm_keys.py), no gamepad needed
 #   scripts/arm.sh pad        XInput gamepad (Flydigi) joint teleop + magnet (scripts/arm_xpad.py);
 #                             `pad --no-arm` tests just the controller and magnet
+#   scripts/arm.sh head CMD   pan/tilt head on the same bus (scripts/head.py): scan, setup pan|tilt,
+#                             calibrate, read, keys
 #   scripts/arm.sh -- ARGS   any extra args go straight to the python script (e.g. --flip wrist_flex)
 #
 # Runs in the `lerobot` conda env's python directly (no activate), and refuses to run in a
@@ -35,6 +37,7 @@ case "${1:-}" in
   joint) shift; script=arm_gamepad.py ;;
   keys)  shift; script=arm_keys.py ;;
   pad)   shift; script=arm_xpad.py ;;
+  head)  shift; script=head.py ;;
   --)    shift ;;
 esac
 

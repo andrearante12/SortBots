@@ -29,6 +29,31 @@ The Jetson kernel has no `xpad`, so `scripts/xinput_pad.py` reads the pad over r
 After every plug the USB node is `root:root`: `sudo chmod 666 /dev/bus/usb/BUS/DEV` (the script
 prints the exact path when it gets permission denied).
 
+## Pan/tilt head (same bus)
+
+Two STS3215 servos daisy-chained onto the arm's bus board: `head_pan` = id 7, `head_tilt` = id 8
+(XLeRobot's head ids; 6 stays free for a gripper). Calibration is its own file
+(`~/.cache/huggingface/lerobot/calibration/robots/sortbots_head/sortbots_head.json`), so
+`lerobot-calibrate` on the arm never touches it. Driven by `scripts/head.py` via `arm.sh head`:
+
+```bash
+scripts/arm.sh head setup pan    # pan servo ALONE on the board -> id 7
+scripts/arm.sh head setup tilt   # tilt servo ALONE on the board -> id 8
+scripts/arm.sh head scan         # chain everything back: expect ids 1-5, 7, 8
+scripts/arm.sh head calibrate    # center (straight ahead, camera level), then sweep each by hand
+scripts/arm.sh head read         # torque off: check 0/0 is centered and the signs
+scripts/arm.sh head keys         # a/d pan, w/s tilt, c center
+```
+
+- **Setup needs each servo alone**: new STS3215s ship as id 1, the same as `shoulder_pan`.
+  `head.py setup` counts servos across all baud rates and refuses unless exactly one answers
+  (lerobot's own `setup_motor` would renumber whichever it found first).
+- **Voltage**: the arm's board runs 12 V. Only chain 12 V STS3215s (the head servos must be
+  the same variant as the arm's); a 7.4 V one on this bus is cooked. `head scan` prints volts.
+- One process owns `/dev/ttyACM0`: stop the arm teleop before running `head.py`, and vice versa.
+  Driving both from one session (e.g. the pad) means one `SerialMotorsBus` with all 7 motors.
+- Wrong direction: `head calibrate --invert head_pan` (sign flipped in software).
+
 ## One-time setup
 
 ```bash
