@@ -380,20 +380,20 @@
   #session .card.tab-tests #launch-form, #session .card.tab-tests #session-pane,
   #session .card.tab-tests #console-warning, #session .card:not(.tab-tests) #tests-pane { display: none !important; }
   #tests-pane { display: grid; gap: 18px; }
-  #tp-warn { padding: 8px 12px; border-radius: 6px; background: var(--warnbg); border: 1px solid var(--warnline); color: var(--warnink); font-size: .86rem; }
-  #tp-warn[hidden], #tp-run[hidden], #tp-log[hidden], #sp-test-note { display: none; }
+  #tp-warn, #fr-warn { padding: 8px 12px; border-radius: 6px; background: var(--warnbg); border: 1px solid var(--warnline); color: var(--warnink); font-size: .86rem; }
+  #tp-warn[hidden], #fr-warn[hidden], #tp-run[hidden], #fr-status[hidden], #tp-log[hidden], #sp-test-note { display: none; }
   button.link { background: none; border: none; padding: 0; color: var(--muted); font-size: .84rem; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
   button.link:hover { color: var(--ink); }
   /* One line for the test that is running or ran last. */
-  #tp-run { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border-radius: 8px; background: var(--ground); }
+  #tp-run, #fr-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border-radius: 8px; background: var(--ground); }
   .tp-run-text { flex: 1 1 200px; min-width: 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-  #tp-run-state { color: var(--muted); font-size: .86rem; }
-  #tp-run.fail #tp-run-state { color: var(--stop); } #tp-run.pass #tp-run-state { color: var(--go); }
+  #tp-run-state, #fr-state { color: var(--muted); font-size: .86rem; }
+  #tp-run.fail #tp-run-state, #fr-status.fail #fr-state { color: var(--stop); } #tp-run.pass #tp-run-state, #fr-status.pass #fr-state { color: var(--go); }
   .tp-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--info); animation: tp-pulse 1.2s ease-in-out infinite; }
-  #tp-run.done .tp-dot { animation: none; background: var(--muted); }
-  #tp-run.done.pass .tp-dot { background: var(--go); } #tp-run.done.fail .tp-dot { background: var(--stop); }
+  #tp-run.done .tp-dot, #fr-status.done .tp-dot { animation: none; background: var(--muted); }
+  #tp-run.done.pass .tp-dot, #fr-status.done.pass .tp-dot { background: var(--go); } #tp-run.done.fail .tp-dot, #fr-status.done.fail .tp-dot { background: var(--stop); }
   @keyframes tp-pulse { 50% { opacity: .3; } }
-  #tp-log { flex-basis: 100%; margin: 4px 0 0; max-height: 220px; overflow: auto; font: .72rem/1.45 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; }
+  #tp-log, #fr-log { flex-basis: 100%; margin: 4px 0 0; max-height: 220px; overflow: auto; font: .72rem/1.45 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; }
   .tp-h { margin: 0 0 4px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
   /* Test cases: a list, not cards. A row is title, one line of what it runs, Run;
      click it for what it checks and how often. */
@@ -418,6 +418,19 @@
   .tp-more .opts label { display: flex; gap: 6px; align-items: center; color: var(--muted); }
   .tp-more .opts input { width: 4em; }
   .tp-more code { font-size: .76rem; color: var(--faint); }
+  /* Run a fleet sim form (operator_fleetsim.js) */
+  #fr-form { display: grid; gap: 10px; }
+  .fr-fields { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: flex-end; }
+  .fr-fields label { display: grid; gap: 3px; color: var(--muted); font-size: .8rem; min-width: 0; }
+  .fr-fields input { width: 6.5em; color: var(--ink); }
+  .fr-fields select { max-width: 100%; color: var(--ink); }
+  #fr-scenario { min-width: 12em; }
+  #fr-about, #fr-note { margin: 0; color: var(--muted); font-size: .84rem; line-height: 1.45; }
+  #fr-note[hidden] { display: none; }
+  #fr-more summary { cursor: pointer; color: var(--muted); font-size: .84rem; }
+  #fr-more[open] summary { margin-bottom: 8px; }
+  #fr-actions { display: flex; justify-content: flex-end; }
+  #fr-status { margin-top: 10px; }
   .tp-empty { color: var(--muted); font-size: .84rem; padding: 6px 4px; }
   /* A test owns the session it runs: its Stop would abort the run unscored. */
   #session .card.testing #session-finish, #session .card.testing #session-stop { display: none; }
@@ -795,6 +808,31 @@
         <h4 class="tp-h">Test cases <span class="muted" id="tp-count"></span></h4>
         <div id="tp-list"></div>
       </section>
+      <!-- Run a fleet sim form, see operator_fleetsim.js -->
+      <section>
+        <h4 class="tp-h">Run a fleet sim</h4>
+        <form id="fr-form">
+          <p id="fr-note" hidden>Read-only: this server isn't the sim console, so runs can't be started here. Use <code>python3 -m fleetsim run NAME</code> in a terminal.</p>
+          <div id="fr-warn" hidden></div>
+          <div class="fr-fields">
+            <label>Scenario<select id="fr-scenario"></select></label>
+            <label>Robots<input type="number" id="fr-robots" min="1" step="1" required></label>
+            <label>Duration (sim s)<input type="number" id="fr-duration" min="1" step="any" required></label>
+            <label>Seed<input type="number" id="fr-seed" min="0" step="1" required></label>
+          </div>
+          <p id="fr-about"></p>
+          <details id="fr-more"><summary>Overrides</summary><div class="fr-fields" id="fr-sets"></div></details>
+          <div id="fr-actions"><button type="submit" class="btn small" id="fr-run" disabled>Run</button></div>
+        </form>
+        <div id="fr-status" hidden>
+          <span class="tp-dot"></span>
+          <div class="tp-run-text"><b id="fr-name"></b><span id="fr-state"></span></div>
+          <span id="fr-verdict" class="rp-v" hidden></span>
+          <button type="button" class="btn small" id="fr-replay" hidden title="Replay this run on its floor">Replay</button>
+          <button type="button" class="btn small stop" id="fr-stop" hidden title="Stop the run. What it recorded so far can still be replayed, but it won't be scored">Stop</button>
+          <pre id="fr-log"></pre>
+        </div>
+      </section>
       <!-- Headless fleetsim runs (data/fleetsim/), replayed on the stage: operator_replay.js. -->
       <section>
         <h4 class="tp-h">Fleet sim runs <span class="muted" id="tp-fleet-count"></span></h4>
@@ -829,5 +867,6 @@
 <script src="scenarios.js"></script>
 <script src="operator_tests.js"></script>
 <script src="operator_replay.js"></script>
+<script src="operator_fleetsim.js"></script>
 </body>
 </html>

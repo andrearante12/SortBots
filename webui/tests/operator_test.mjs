@@ -52,6 +52,7 @@ window.ROSLIB = {
 window.__navWps = [];
 window.__testPosts = []; window.__testResults = []; window.__sessionPosts = [];
 window.__testRun = { running: false, name: null, exit: null, elapsed_s: null, log: '', offset: 0 };
+window.__fleetPosts = []; window.__fleetRun = { running: false, name: null, exit: null, verdict: null, dir: null, elapsed_s: null, log: '' };
 window.__fakeSession = null; window.__fakeRobots = null;
 const realFetch = window.fetch.bind(window);
 window.fetch = (url, opts) => {
@@ -81,6 +82,15 @@ window.fetch = (url, opts) => {
   if (u.startsWith('/api/tests/cancel')) { window.__testRun = { ...window.__testRun, running: false, exit: 130 }; return json(window.__testRun); }
   if (u.startsWith('/api/tests/results')) return json({ results: window.__testResults });
   if (u.startsWith('/api/tests/report')) return json({ markdown: '# crossing_yield\\nrecall 0.12' });
+  // Fleet sim launches: likewise never a real run. /api/fleetsim/scenarios is real.
+  if (u.startsWith('/api/fleetsim/launch')) {
+    if (opts && opts.method === 'POST') {
+      const body = JSON.parse(opts.body); window.__fleetPosts.push(body);
+      window.__fleetRun = { running: true, name: body.name, exit: null, verdict: null, dir: 'fixture_run', elapsed_s: 65, log: 'fleetsim started\\n' };
+    }
+    return json(window.__fleetRun);
+  }
+  if (u.startsWith('/api/fleetsim/cancel')) { window.__fleetRun = { ...window.__fleetRun, running: false, exit: 130, verdict: 'STOPPED' }; return json(window.__fleetRun); }
   return realFetch(url, opts);
 };
 window.confirm = () => true;
@@ -1228,6 +1238,46 @@ async function main() {
   check('3d: the chosen view survives a reload', await visible('#cloud'));
   await click('#view [data-v="2d"]'); await sleep(200);
   check('3d: back to 2D restores the map and tools', await visible('#map') && await visible('#tools') && !(await visible('#cloud')));
+
+  // -- running a fleet sim (operator_fleetsim.js) ------------------------------------------------
+  console.log('\n--- fleet sim launch ---');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+  await page.eval(`localStorage.clear()`); await load();
+  await page.eval(`window.sortbotsTests.openTests()`);
+  await waitFor(async () => (await page.eval(`!document.getElementById('fr-run').disabled`)), { what: 'the fleet sim form', tries: 40 });
+  const scnFiles = fs.readdirSync(path.join(REPO_ROOT, 'fleetsim', 'scenarios')).filter((f) => f.endsWith('.yaml')).length;
+  check('fleet launch: the form lists every scenario', (await page.eval(`document.querySelectorAll('#fr-scenario option').length`)) === scnFiles);
+  await page.eval(`(() => { const s = document.getElementById('fr-scenario'); s.value = 'fleet_scale'; s.dispatchEvent(new Event('change')); })()`);
+  check("fleet launch: picking a scenario fills in its own numbers",
+    (await page.eval(`[document.getElementById('fr-robots').value, document.getElementById('fr-duration').value, document.getElementById('fr-seed').value].join()`)) === '50,900,1');
+  check('fleet launch: an override says what the scenario would do', /scenario default \(robot_0\)/.test(await $text('#fr-sets [data-set="record.belief_maps"]')), await $text('#fr-sets [data-set="record.belief_maps"]'));
+  check('fleet launch: nothing shows a run before there is one', !(await visible('#fr-status')));
+  await page.eval(`(() => {
+    document.getElementById('fr-robots').value = '20'; document.getElementById('fr-duration').value = '600';
+    document.querySelector('[data-set="map_share.prior"]').value = 'none';
+    document.querySelector('[data-set="record.belief_maps"]').value = 'all';
+    document.getElementById('fr-form').requestSubmit();
+  })()`);
+  await waitFor(async () => (await page.eval(`/running/.test(document.getElementById('fr-state').textContent)`)), { what: 'the run line', tries: 20 });
+  const fleetPost = JSON.parse(await page.eval(`JSON.stringify(window.__fleetPosts)`));
+  check('fleet launch: Run posts the same settings as the terminal command',
+    JSON.stringify(fleetPost) === JSON.stringify([{ name: 'fleet_scale', robots: 20, duration: 600, seed: 1, sets: { 'map_share.prior': 'none', 'record.belief_maps': 'all' } }]), JSON.stringify(fleetPost));
+  check('fleet launch: it stays on the panel, with a clock and Stop', (await visible('#tests-pane')) && /running · 1:05/.test(await $text('#fr-state')) && (await visible('#fr-stop')) && !(await visible('#fr-replay')));
+  check('fleet launch: Run is off while one runs', await page.eval(`document.getElementById('fr-run').disabled`));
+  await sleep(1300);
+  check('fleet launch: the log follows the run', /fleetsim started/.test(await $text('#fr-log')), await $text('#fr-log'));
+  await shot('fleet-launch-running');
+  await page.eval(`window.__fleetRun = { ...window.__fleetRun, running: false, exit: 1, verdict: 'FAIL', log: 'verdict: FAIL\\n' }`);
+  await waitFor(async () => (await visible('#fr-verdict')), { what: 'the verdict', tries: 20 });
+  check('fleet launch: a finished run shows its verdict and score', (await $text('#fr-verdict')) === 'FAIL' && /verdict: FAIL/.test(await $text('#fr-log')) && !(await visible('#fr-stop')));
+  await shot('fleet-launch-finished');
+  await page.eval(`window.__fleetRun = { ...window.__fleetRun, running: false, exit: 1, verdict: 'CRASHED', log: '' }`);
+  await waitFor(async () => (await $text('#fr-verdict')) === 'CRASHED', { what: 'the crash verdict', tries: 20 });
+  check('fleet launch: a crash is not reported as a failed test', /crashed before it could be scored/.test(await $text('#fr-state')), await $text('#fr-state'));
+  check('fleet launch: Run comes back', !(await page.eval(`document.getElementById('fr-run').disabled`)));
+  await click('#fr-replay');
+  await waitFor(async () => (await page.eval(`window.sortbotsReplay.state().loaded`)), { what: 'the replay', tries: 40 });
+  check('fleet launch: Replay opens that run and closes the panel', (await visible('#replay')) && (await page.eval(`document.getElementById('session').hidden`)));
 
   // -- fleet replay (operator_replay.js) --------------------------------------------------------
   // The fixture run recorded at the top, through the real serve.py and fleetsim/replay.py.

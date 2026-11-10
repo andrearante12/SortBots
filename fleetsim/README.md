@@ -23,6 +23,12 @@ root. Results land in `data/fleetsim/<UTC>_<name>/` (gitignored):
 `score.json`. To watch a run, see [Watching a run](#watching-a-run). Exit code 0 = every pass criterion held, 1 = one failed,
 2 = invalid scenario.
 
+To run one without a terminal, use the operator view: Session panel, **Tests**
+tab, **Run a fleet sim**. It offers the scenario, robots, duration, seed and a
+fixed list of overrides (`webui/fleetsim_runner.py`, `SETTABLE`), needs the sim
+console (`--control`), and runs one at a time. Any other `--set` is terminal only,
+because the console is reachable from the internet and `world.map` takes a path.
+
 ## Where it sits
 
 | | Isaac + ROS 2 | commsim DES / emulation | **fleetsim** |
