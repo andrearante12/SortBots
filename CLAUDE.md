@@ -24,7 +24,7 @@ container** (`docker/jetson/`) because JetPack 6 is Ubuntu 22.04/Humble. Never
 source the Jetson host's `/opt/ros/humble` for SortBots. `scripts/jetson.sh
 console` starts `run_console.sh --platform real` in the container, and `platform:
 real` scenarios run `scripts/run_robot.sh` → `sortbots_bringup.launch.py
-platform:=real`. Runbook: `docs/jetson.md`.
+platform:=real`. Runbook: `docs/real-robot.md`.
 
 - The real stack uses `use_sim_time:=false`, RTAB-Map visual odometry, and no IMU
   (a plain D435 has none, so `wait_imu_to_init` must be false). Nav2 is off until
@@ -46,13 +46,28 @@ This is **not a colcon workspace** — there is no `src/`, no `package.xml`, no
 | `webui/` | dashboard (vanilla JS, no build step) + `serve.py` + `session.py` |
 | `scripts/` | Isaac Sim entry points, `run_demo.sh`, `run_console.sh`, `sim_ctl.sh` |
 | `configs/` | tuning YAML, `scenarios/` presets |
+| `simtest/` | scored-test layer: `configs/worlds/` (props + scripted movers + graspable packages), `configs/tests/` (goals + metrics), probe, versioned metrics — `docs/testing.md`. `simtest/magnet.py` is the magnet's capture rule, shared by Isaac, the pick controller and the tests |
+| `hardware/` | the real magnet end effector's CAD (`magnet_effector/`, CadQuery in its own `hardware/.venv`, never the sim/ROS/lerobot envs); `params.py` is the source of truth for the TCP offset `simtest/magnet.py` uses |
+| pick and place | `nodes/{package_detector,package_vision,box_geometry,magnet_pick,pick_planner,arm_kin}.py`: camera → plate pose → dock → IK, numpy only (no torch in the stack). The `pick_*` tests, `--perception oracle`, the envelope numbers and what is not yet verified live: `docs/manipulation.md` |
 | `maps/` | saved map library — named, committed snapshots of explored maps |
-| `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `docs/splat.md`) |
-| `docs/running.md` | the full runbook |
+| `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `docs/real-robot.md`) |
+| `commsim/` | fleet comms simulation (mesh, Zenoh, task auction), system python3 only; `core/protocol.py` is the allocator `nodes/fleet_tasks.py` runs, `viz/demo.py` the model behind the operator's Comms overlay (`docs/commsim.md`) |
+| `docs/` | the project docs, one page per topic; `README.md` indexes them |
 
 No custom `.msg`/`.srv`: inter-node protocol is `std_msgs/String` carrying JSON.
 Node tuning is plain YAML loaded by the node itself, not ROS params. Nodes take
 `--robot-id` and prefix topics by f-string, not `PushRosNamespace`.
+
+### One GUI: the operator view
+
+`webui/operator.html` (served by `webui/serve.py`) is the ONLY user-facing GUI.
+New UI is a view, panel or popover inside it, built on its CSS tokens, its
+light/dark theme and `webui/tests/operator_test.mjs`. Never a new standalone HTML
+page, a second HTTP server, or another port. A backend feature exposes `/api/...`
+routes on serve.py or ROS topics over rosbridge, and the operator view renders
+it. The old per-robot dashboard (`index.html` + `app.js`) was deleted 2026-10-23;
+don't bring a second page back. A tool that shipped its own page gets folded into the operator view, not kept
+beside it: commsim's live demo became the Comms overlay (2026-10-23).
 
 ## Invariants that cost the most time when violated
 
@@ -74,8 +89,12 @@ Node tuning is plain YAML loaded by the node itself, not ROS params. Nodes take
   real-time factor. It depends almost entirely on how many camera render
   products are in the scene: ~0.47× for a 2-robot run, ~0.33× once a chase cam
   is added, ~0.25× with the full ROS stack alongside. `scripts/bench_sim.sh`
-  measures it, and its header carries the table. Rendering is ~85% of the cost
-  but rendering LESS OFTEN doesn't help — only fewer render products do.
+  measures it, and its header carries the table. Rendering is ~85% of the cost,
+  and what helps depends on which wall the machine hits: CPU-bound (16-core
+  desktop) — only fewer render products help, rendering less often doesn't;
+  GPU-bound (RTX 4070 laptop) — `render_every=2` + `lite_render=true` took a
+  full `explore_fleet` 0.38× → 0.81×. Both are scenario overrides and launch
+  form Advanced settings; measure before assuming which machine you're on.
 - **A ROS timer follows `use_sim_time`.** `create_timer` runs off the node
   clock, so enabling sim time silently stretches every control period by the
   real-time factor — a 2 s explorer tick became 11 s of wall clock and looked
@@ -100,12 +119,16 @@ Node tuning is plain YAML loaded by the node itself, not ROS params. Nodes take
 Prefer offline. Seconds, no GPU, no display, no ROS:
 
 ```bash
-node webui/tests/scenarios_test.mjs   # scenarios tab (no fixture needed)
-node webui/tests/splat_test.mjs       # 3D panel splat mode, fake worker (no fixture needed)
-node webui/tests/dashboard_test.mjs   # dashboard (needs webui/testdata/)
+node webui/tests/operator_test.mjs    # operator view, fake ROSLIB (no fixture needed)
 python3 webui/session.py --list       # scenario validation
 python3 -m pytest tests/              # pure-python node logic (system python3 — see below)
+scripts/simtest.py validate           # scored test cases (configs/tests/) resolve
 ```
+
+Scored live tests — a world of props and scripted movers
+(`configs/worlds/`), a scenario, goals and pass criteria — run with
+`scripts/simtest.py run NAME`; metrics are versioned and re-scorable from
+recorded events without a sim. See `docs/testing.md`.
 
 `tests/*_test.py` needs the SYSTEM python3 (`/usr/bin/python3 -m pytest`), not
 conda's — conda's base env doesn't have pytest, and this is the same

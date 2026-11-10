@@ -11,6 +11,7 @@ See nodes/map_merge.py's module docstring for what this fusion is FOR.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -62,11 +63,14 @@ def _compute_output_info(
     sources: list[tuple[np.ndarray, GridInfo, Transform2D]],
     resolution: float,
     prev_info: GridInfo | None,
+    keep_in: Sequence[tuple[float, float]] = (),
+    margin: float = 0.0,
 ) -> GridInfo:
-    """Union bounding box of every source's transformed extent, grown (never
-    shrunk) against `prev_info` so the fused grid's origin/size don't jitter
-    from one publish tick to the next — a shifting origin would show up as
-    the costmap and dashboard map view jumping every publish_period_s.
+    """Union bounding box of every source's transformed extent and of each
+    `keep_in` point padded by `margin`, grown (never shrunk) against
+    `prev_info` so the fused grid's origin/size don't jitter from one publish
+    tick to the next — a shifting origin would show up as the costmap and
+    dashboard map view jumping every publish_period_s.
     """
     min_x = math.inf
     min_y = math.inf
@@ -76,6 +80,9 @@ def _compute_output_info(
         cx, cy = _world_corners(info, transform)
         min_x, max_x = min(min_x, cx.min()), max(max_x, cx.max())
         min_y, max_y = min(min_y, cy.min()), max(max_y, cy.max())
+    for px, py in keep_in:
+        min_x, max_x = min(min_x, px - margin), max(max_x, px + margin)
+        min_y, max_y = min(min_y, py - margin), max(max_y, py + margin)
 
     if prev_info is not None:
         min_x = min(min_x, prev_info.origin_x)
@@ -113,16 +120,21 @@ def fuse_grids(
     resolution: float,
     occupied_thresh: int = 50,
     prev_info: GridInfo | None = None,
+    keep_in: Sequence[tuple[float, float]] = (),
+    margin: float = 0.0,
 ) -> tuple[np.ndarray, GridInfo]:
     """Fuse `sources` (each a (data, info, transform_to_output_frame) tuple)
     into one grid at `resolution`. Priority where sources disagree about a
     cell: occupied > free > unknown; ties within a tier resolve toward the
     more confident reading (max value among occupied, min value among free).
+
+    `keep_in` points (output frame) are always inside the grid, `margin`
+    metres in from its edge, as unknown space if no source covers them.
     """
     if not sources:
         raise ValueError("fuse_grids needs at least one source")
 
-    out_info = _compute_output_info(sources, resolution, prev_info)
+    out_info = _compute_output_info(sources, resolution, prev_info, keep_in, margin)
     layers = np.stack(
         [_resample(data, info, transform, out_info) for data, info, transform in sources],
         axis=0,

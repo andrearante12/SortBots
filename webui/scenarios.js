@@ -1,4 +1,4 @@
-// SortBots dashboard — Scenarios tab. Starts and stops the simulation itself.
+// SortBots operator view — session/launch panel. Starts and stops the simulation itself.
 //
 // Talks ONLY to webui/serve.py's control API over plain HTTP:
 //   GET  /api/launch/options   everything the launch form draws: platform,
@@ -13,8 +13,8 @@
 //
 // Deliberately no rosbridge: the whole point of this tab is to work when
 // nothing is running, and rosbridge is one of the things that may not be.
-// Also deliberately separate from app.js — nothing here touches ROS state, and
-// app.js's ~15 topic subscriptions have nothing to say about a sim that hasn't
+// Also deliberately separate from operator.js — nothing here touches ROS state, and
+// operator.js's topic subscriptions have nothing to say about a sim that hasn't
 // started yet.
 //
 // The control API only exists when serve.py runs with --control, which only
@@ -22,18 +22,21 @@
 // and this tab explains that rather than showing dead buttons.
 
 (function () {
+  // .filter(Boolean): operator.html reuses this file for its session panel and
+  // has none of the live view's panes. A missing pane is simply not toggled.
   const viewLive = [
     document.getElementById("stage-panel"),
     document.getElementById("right-col"),
-  ];
+  ].filter(Boolean);
   const viewScenarios = document.getElementById("view-scenarios");
   const viewFleet = document.getElementById("view-fleet");
+  const viewTests = document.getElementById("view-tests"); // gone with the old dashboard; the guard below keeps it harmless
   // Live-only header chrome: the stage switcher and the SLAM badge are about
   // the robot, not about which sim to launch or the fleet radio monitor.
   const liveChrome = [
     document.getElementById("stage-mode"),
     document.getElementById("slam-badge"),
-  ];
+  ].filter(Boolean);
 
   const formEl = document.getElementById("launch-form");
   const warningEl = document.getElementById("console-warning");
@@ -75,6 +78,7 @@
     for (const el of liveChrome) el.hidden = view !== "live";
     if (viewScenarios) viewScenarios.hidden = view !== "scenarios";
     if (viewFleet) viewFleet.hidden = view !== "fleet";
+    if (viewTests) viewTests.hidden = view !== "tests";
     for (const btn of document.querySelectorAll("#view-mode button")) {
       btn.classList.toggle("active", btn.dataset.view === view);
     }
@@ -101,9 +105,14 @@
   const mapSel = $("lf-map");
   const robotsSel = $("lf-robots");
   const chaseCountSel = $("lf-chase_cam_robots");
+  const renderEveryIn = $("lf-render_every");
+  const worldSel = $("lf-world");
   const startBtn = $("lf-start");
   const SEGMENTS = { scene: $("lf-scene"), mode: $("lf-mode"), waypoints: $("lf-waypoints") };
-  const CHECKS = ["explore", "headless", "chase_cam", "teleop", "bag"];
+  // Only the checkboxes this page carries: operator.html has its own copy of
+  // this form, and a field it lacks must not take the whole form down.
+  const CHECKS = ["explore", "headless", "chase_cam", "teleop", "bag", "lite_render", "half_res_cams"]
+    .filter((k) => $(`lf-${k}`));
   const CFG_KEY = "sortbots.launchConfig";
 
   // Why a saved map can't be loaded, keyed by maps_lib.py's db_state. Shown in
@@ -153,6 +162,20 @@
       o.title = bits.join(" · ");
     }
 
+    // Worlds (configs/worlds/): props + scripted movers. An invalid one is
+    // listed disabled with its reason, like an unloadable map. operator.html
+    // has no world picker (see CHECKS), so every use is guarded.
+    if (worldSel) {
+      worldSel.textContent = "";
+      option(worldSel, "none", "None — the warehouse as is");
+      for (const w of options.worlds || []) {
+        const ok = w.status === "ready";
+        const o = option(worldSel, w.name, ok ? w.title : `${w.name} (invalid)`, !ok);
+        o.title = ok ? `${w.description} · ${w.props} prop(s), ${w.actors} actor(s) · ` +
+          `scenes: ${w.scenes.join(", ")}` : w.error;
+      }
+    }
+
     robotsSel.textContent = "";
     chaseCountSel.textContent = "";
     options.roster.forEach((_, i) => {
@@ -166,7 +189,9 @@
     for (const el of formEl.querySelectorAll("[data-field]")) {
       el.hidden = !fields.has(el.dataset.field);
     }
-    $("lf-advanced").hidden = !["headless", "chase_cam", "teleop", "bag", "waypoints"].some((f) => fields.has(f));
+    $("lf-advanced").hidden = !["headless", "chase_cam", "teleop", "bag", "waypoints", "render_every", "lite_render",
+                                "half_res_cams"]
+      .some((f) => fields.has(f));
   }
 
   // cfg -> controls (+ the dependent bits: mode only matters for a non-new
@@ -180,8 +205,13 @@
       for (const b of seg.querySelectorAll("button")) b.classList.toggle("active", b.dataset.v === cfg[key]);
     }
     mapSel.value = cfg.map;
+    if (worldSel) worldSel.value = cfg.world || "none";
     robotsSel.value = String(cfg.robots);
     chaseCountSel.value = String(cfg.chase_cam_robots);
+    if (renderEveryIn) {
+      renderEveryIn.value = String(cfg.render_every || 1);
+      $("lf-render_every-unit").textContent = cfg.render_every > 1 ? "frames" : "frame";
+    }
     for (const k of CHECKS) $(`lf-${k}`).checked = !!cfg[k];
 
     const fields = new Set(options.fields);
@@ -206,6 +236,11 @@
     if (cfg.map !== "new" && cfg.mode === "extend") {
       notes.push("Runs on a copy: keep what it maps with Save & finish.");
     }
+    const world = (options.worlds || []).find((w) => w.name === cfg.world);
+    if (world && cfg.explore && fields.has("explore")) {
+      notes.push(`${world.title}: with exploring on, the robots go wherever frontiers ` +
+        "are — leave it off and send goals to put them in the actors' way.");
+    }
     $("lf-map-note").textContent = notes.join(" ");
     updateStartButton();
   }
@@ -213,14 +248,25 @@
   // controls -> cfg, on any edit. An edit means "no longer exactly a preset".
   function readForm() {
     cfg.map = mapSel.value;
+    if (worldSel) cfg.world = worldSel.value || "none";
     cfg.robots = Number(robotsSel.value) || 1;
     cfg.chase_cam_robots = Number(chaseCountSel.value) || 1;
+    // Typed, so clamp to the input's own bounds (session.py rejects the rest);
+    // renderForm then writes the clamped value back into the box.
+    if (renderEveryIn) {
+      const n = Math.round(Number(renderEveryIn.value)) || 1;
+      cfg.render_every = Math.min(Number(renderEveryIn.max), Math.max(Number(renderEveryIn.min), n));
+    }
     for (const k of CHECKS) cfg[k] = $(`lf-${k}`).checked;
   }
 
   function onEdit() {
     presetSel.value = "";
     $("lf-preset-note").textContent = "";
+    // `demo` has no control of its own; it rides along only with the preset that
+    // set it. Kept across edits it would also stick in the saved form state and
+    // quietly turn every later custom run into a demo.
+    delete cfg.demo;
     readForm();
     saveCfg();
     renderForm();
@@ -235,7 +281,7 @@
       onEdit();
     });
   }
-  for (const el of [mapSel, robotsSel, chaseCountSel, ...CHECKS.map((k) => $(`lf-${k}`))]) {
+  for (const el of [mapSel, worldSel, robotsSel, chaseCountSel, renderEveryIn, ...CHECKS.map((k) => $(`lf-${k}`))].filter(Boolean)) {
     el.addEventListener("change", () => {
       // Picking a library map defaults its waypoints back to the map's own.
       if (el === mapSel && libraryMap(mapSel.value)) cfg.waypoints = "map";
@@ -273,6 +319,7 @@
     // must not leave the select pointing at nothing.
     const valid = [...mapSel.options].some((o) => o.value === cfg.map && !o.disabled);
     if (!valid) cfg.map = "new";
+    if (worldSel && ![...worldSel.options].some((o) => o.value === cfg.world && !o.disabled)) cfg.world = "none";
     if (cfg.robots > options.roster.length) cfg.robots = options.roster.length;
   }
 
@@ -469,7 +516,7 @@
         "platform: real. This dashboard stays up throughout.";
       stopBtn.title = "Tear down the camera and the ROS 2 stack. The dashboard console stays up.";
     }
-    // sim: index.html's own wording already describes Isaac Sim.
+    // sim: operator.html's own wording already describes Isaac Sim.
   }
 
   async function startSession() {
@@ -481,6 +528,7 @@
     logSessionId = null;
     try {
       session = await postJson("/api/session/start", { config: formConfig() });
+      if (window.sortbotsRunStarting) window.sortbotsRunStarting();
     } catch (e) {
       renderWarning(`Could not start: ${e.message}`);
     } finally {
@@ -602,4 +650,8 @@
 
   setView("live");
   loadOptions().then(() => schedulePoll(0));
+
+  // operator.html keeps the launch form in a panel it opens on demand: it asks
+  // for fast polling while the panel is open and the idle cadence when closed.
+  window.sortbotsScenarios = { setView, reload: () => loadOptions().then(() => schedulePoll(0)) };
 })();

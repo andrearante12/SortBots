@@ -1,0 +1,74 @@
+# A world layout (simtest/world.py has the full schema). See aisle_crossing.yaml
+# for how these coordinates were chosen.
+#
+# Static props are real colliders: a robot that drives into a crate stops
+# against it. Actors are NOT colliders (a scripted mover that shoved robots
+# around would make every run different) — touching one is caught by the
+# clearance metric instead.
+
+name: cluttered_floor
+title: Open floor — clutter and two walkers
+description: >
+  The open floor south of robot_0's aisle, dressed with crates, a barrel row
+  and a pallet stack, crossed by two walkers on different rhythms: one
+  ping-ponging east-west, one walking a loop around the clutter. For routes
+  that need both static and dynamic avoidance, and for demos.
+
+scenes: [nvidia]
+autostart: true
+
+props:
+  - id: crate_0
+    shape: box
+    size: [0.8, 0.6, 0.9]
+    pose: [-9.0, 5.2, 0.0]
+  - id: crate_1
+    shape: box
+    size: [0.6, 0.6, 0.6]
+    pose: [-6.8, 4.0, 0.4]
+  - id: crate_2
+    shape: box
+    size: [1.2, 0.8, 1.1]
+    pose: [-11.5, 3.0, 0.0]
+  - id: barrel_0
+    shape: cylinder
+    radius: 0.3
+    height: 0.9
+    pose: [-10.0, 1.2]
+    color: [0.20, 0.35, 0.65]
+  - id: barrel_1
+    shape: cylinder
+    radius: 0.3
+    height: 0.9
+    pose: [-9.2, 1.2]
+    color: [0.20, 0.35, 0.65]
+  - id: pallet_stack
+    shape: box
+    size: [1.2, 1.0, 0.5]   # low: under the head camera's line of sight at close range
+    pose: [-7.5, 0.5, 0.0]
+    color: [0.62, 0.52, 0.36]
+
+actors:
+  - id: walker_0
+    label: walker A
+    shape: cylinder
+    radius: 0.25
+    height: 1.75
+    color: [0.95, 0.45, 0.10]
+    path:
+      waypoints: [[-12.5, 6.8], [-6.0, 6.8]]
+      speed_mps: 1.1
+      mode: pingpong
+      dwell_s: 0.5
+  - id: walker_1
+    label: walker B
+    shape: cylinder
+    radius: 0.25
+    height: 1.65
+    color: [0.85, 0.15, 0.55]
+    path:
+      # A loop around the clutter, clockwise from the north-west corner.
+      waypoints: [[-12.5, 4.5], [-8.0, 4.5], [-8.0, 2.2], [-12.5, 2.2]]
+      speed_mps: 0.7
+      mode: loop
+      start_at_s: 3.0

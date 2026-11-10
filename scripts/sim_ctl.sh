@@ -25,9 +25,9 @@
 #   scripts/sim_ctl.sh stop --save-map NAME # ...saving the map into maps/ first
 #   scripts/sim_ctl.sh stop --save-map NAME --splat
 #                                         # ...then queue a Gaussian splat of it on
-#                                         # the splat worker (docs/splat.md)
+#                                         # the splat worker (docs/real-robot.md)
 #
-# Saved maps (the library at maps/, see maps/README.md) are managed by
+# Saved maps (the library at maps/, see docs/running.md) are managed by
 # scripts/maps.sh; `stop --save-map NAME` is the one-gesture wrapper, since a
 # complete entry needs the grid captured while the stack is up and the pose
 # graph copied once it's down. Load one back with:
@@ -35,7 +35,7 @@
 #
 # Typical unattended run:
 #   scripts/sim_ctl.sh console start
-#   scripts/sim_ctl.sh start explore_fresh headless=true
+#   scripts/sim_ctl.sh start explore_fresh
 #   scripts/sim_ctl.sh wait running --timeout 420   # first run streams NVIDIA assets
 #   ...
 #   scripts/sim_ctl.sh stop
@@ -226,7 +226,7 @@ cmd_wait() {
 # rather than contaminating ours, and prepend the system PATH so `ros2` and
 # map_saver_cli don't pick up conda's python3.
 run_maps_sh() {
-  bash -c "source /opt/ros/jazzy/setup.bash
+  "$REPO_ROOT/scripts/ros_bash.sh" -c "source /opt/ros/jazzy/setup.bash
            export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH
            exec '$REPO_ROOT/scripts/maps.sh' \"\$@\"" _ "$@"
 }

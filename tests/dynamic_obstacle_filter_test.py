@@ -68,3 +68,38 @@ def test_depth_to_points_optical_frame():
     assert pts[0, 2] == pytest.approx(2.0)
     assert pts[0, 0] == pytest.approx(0.0)
     assert pts[0, 1] == pytest.approx(0.0)
+
+
+# Optical (x right, y down, z fwd) -> map (x fwd, y left, z up), camera at the origin.
+R_MAP_OPT = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]], dtype=np.float32)
+
+
+def test_peer_mask_covers_a_reported_peer():
+    """A wall 2 m ahead with a peer reported dead ahead on it: the pixels within
+    peer_radius_m of the peer are masked, the rest of the wall is not."""
+    h, w = 48, 64
+    depth = _blank(h, w, z=2.0)
+    fx = fy = 32.0
+    m = dof.peer_mask(depth, fx, fy, w / 2, h / 2, R_MAP_OPT, np.zeros(3, np.float32),
+                      [(2.0, 0.0)], radius_m=0.5)
+    assert m[h // 2, w // 2]
+    # Lateral offset at 2 m: (u - cx) * 2 / 32 m. Columns 8 px either side
+    # (0.5 m) are the edge; 16 px (1 m) out must stay unmasked.
+    assert not m[h // 2, w // 2 + 16] and not m[h // 2, w // 2 - 16]
+    cols = np.nonzero(m[h // 2])[0]
+    assert (cols.max() - cols.min()) == pytest.approx(16, abs=1)
+
+
+def test_peer_mask_ignores_far_or_absent_peers():
+    depth = _blank(48, 64, z=2.0)
+    args = (32.0, 32.0, 32.0, 24.0, R_MAP_OPT, np.zeros(3, np.float32))
+    assert not dof.peer_mask(depth, *args, []).any()
+    assert not dof.peer_mask(depth, *args, [(2.0, 5.0)]).any()   # off to the side
+    assert not dof.peer_mask(depth, *args, [(-2.0, 0.0)]).any()  # behind
+
+
+def test_peer_mask_skips_invalid_depth():
+    depth = _blank(48, 64, z=2.0)
+    depth[:, :] = np.nan
+    assert not dof.peer_mask(depth, 32.0, 32.0, 32.0, 24.0, R_MAP_OPT,
+                             np.zeros(3, np.float32), [(2.0, 0.0)]).any()

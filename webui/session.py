@@ -6,7 +6,7 @@ Imported by `webui/serve.py` (which exposes it over HTTP when started with
 
     python3 webui/session.py --list
     python3 webui/session.py --print-argv explore_resume
-    python3 webui/session.py --print-argv explore_fresh --set headless=true
+    python3 webui/session.py --print-argv explore_fresh --set headless=false
 
 Pure stdlib + PyYAML, deliberately no rclpy: this module has to run in a
 ROS-free environment, because `scripts/run_demo.sh` hard-refuses to start when
@@ -55,9 +55,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # importing it here keeps this module runnable in the same bare environment.
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import maps_lib  # noqa: E402
+# World layouts (configs/worlds/) — pure python + PyYAML like maps_lib, so the
+# allowlist below can check a `world:` name against what actually parses.
+sys.path.insert(0, str(REPO_ROOT))
+from simtest import world as world_lib  # noqa: E402
 
 SCENARIO_DIR = REPO_ROOT / "configs" / "scenarios"
-# Overridable so scenarios_test.mjs can run against an empty dir instead of
+# Overridable so operator_test.mjs can run against an empty dir instead of
 # whatever a previous real console session left in the repo's own data/.
 SESSIONS_DIR = Path(os.environ["SORTBOTS_SESSIONS_DIR"]) if os.environ.get("SORTBOTS_SESSIONS_DIR") \
     else REPO_ROOT / "data" / "sessions"
@@ -67,6 +71,10 @@ RUN_ROBOT = REPO_ROOT / "scripts" / "run_robot.sh"
 RECORD_BAG = REPO_ROOT / "scripts" / "record_explore_bag.sh"
 MAPS_SH = REPO_ROOT / "scripts" / "maps.sh"
 ROS_SETUP = "/opt/ros/jazzy/setup.bash"
+# Stands in for `bash` wherever ROS gets sourced: plain bash with ROS on the
+# host, the same bash inside the jazzy distrobox without it (Ubuntu 26.04).
+# It relays SIGINT into the box, which _stop_bag's killpg depends on.
+ROS_BASH = str(REPO_ROOT / "scripts" / "ros_bash.sh")
 
 # Same prepend run_demo.sh and sortbots_webui.launch.py use: conda's init hook
 # puts its bin dirs at the front of PATH even after `conda deactivate`, and
@@ -139,6 +147,15 @@ def _int_range(flag: str, lo: int, hi: int):
     return build
 
 
+def _omit_at(default, build):
+    """Wrap a builder so the stock value emits no flag at all — keeps the
+    logged run_demo.sh argv of every pre-existing scenario unchanged."""
+    def wrapped(value):
+        argv = build(value)
+        return [] if argv[1:] == [str(default)] else argv
+    return wrapped
+
+
 def _pattern(flag: str, rx: re.Pattern):
     def build(value):
         if not isinstance(value, str) or not rx.match(value):
@@ -150,8 +167,8 @@ def _pattern(flag: str, rx: re.Pattern):
 def _switch(flag: str, when: bool):
     """Emit a bare flag when the value equals `when`, nothing otherwise.
 
-    Covers both polarities: headless=true -> --headless, but chase_cam=false ->
-    --no-chase-cam.
+    Covers both polarities: teleop=true -> --teleop, but chase_cam=false ->
+    --no-chase-cam (and headless=false -> --no-headless).
     """
     def build(value):
         if not isinstance(value, bool):
@@ -197,7 +214,7 @@ def _map_path(flag: str):
             value = str(library_db_path(value))
         resolved = Path(os.path.expanduser(value)).resolve()
         # maps_lib.MAPS_DIR by reference, not a literal `REPO_ROOT/"maps"`: it
-        # honours SORTBOTS_MAPS_DIR, which is how scenarios_test.mjs points the
+        # honours SORTBOTS_MAPS_DIR, which is how operator_test.mjs points the
         # whole chain at a temp dir outside the repo (and outside $HOME).
         allowed = (Path.home().resolve(), (REPO_ROOT / "data").resolve(),
                    maps_lib.MAPS_DIR.resolve())
@@ -208,6 +225,39 @@ def _map_path(flag: str):
             )
         return [flag, str(resolved)]
     return build
+
+
+def _world_name(flag: str):
+    """A configs/worlds/ layout, by name only. None/"" omits the flag.
+
+    Loaded (not just name-matched) here, so a scenario naming a world that
+    doesn't parse lists as `invalid` with the reason instead of failing after
+    Isaac's startup. NAME_RX has no `/` or `.`, so it can't traverse.
+    """
+    def build(value):
+        if value in (None, "", "none"):
+            return []
+        try:
+            world_lib.load(value)
+        except world_lib.WorldError as e:
+            raise ScenarioError(f"{flag}: {e}") from None
+        return [flag, value]
+    return build
+
+
+def _check_world_scene(run: dict) -> None:
+    """A world is laid out for specific scenes; the NVIDIA warehouse's aisles
+    don't exist in the primitive scene."""
+    name = run.get("world")
+    if name in (None, "", "none"):
+        return
+    try:
+        scenes = world_lib.load(name)["scenes"]
+    except world_lib.WorldError as e:
+        raise ScenarioError(f"world: {e}") from None
+    if run.get("scene", "nvidia") not in scenes:
+        raise ScenarioError(
+            f"world {name!r} is laid out for scene(s) {scenes}, not {run.get('scene')!r}")
 
 
 def _robot_ids(flag: str):
@@ -241,14 +291,25 @@ RUN_FLAGS = {
     "robots": _int_range("--robots", 1, _MAX_ROBOTS),
     "robot_id": _pattern("--robot-id", re.compile(r"^[A-Za-z0-9_]+$")),
     "robot_ids": _robot_ids("--robot-ids"),
-    "headless": _switch("--headless", when=True),
+    "headless": _switch("--no-headless", when=False),
     "chase_cam": _switch("--no-chase-cam", when=False),
     "chase_cam_robots": _chase_cam_robots("--chase-cam-robots"),
+    # Render-cost knobs (spawn_warehouse.py --help). Capped at 4: past that
+    # /clock, odom and TF drop below Nav2's 20 Hz controller in sim time.
+    "render_every": _omit_at(1, _int_range("--render-every", 1, 4)),
+    "lite_render": _switch("--lite-render", when=True),
+    "half_res_cams": _switch("--half-res-cams", when=True),
     "teleop": _switch("--teleop", when=True),
     "localize": _switch("--localize", when=True),
     "resume": _switch("--resume", when=True),
     "explore": _switch("--explore", when=True),
     "map": _map_path("--map"),
+    "world": _world_name("--world"),
+    # What the magnet pick controller aims at (nodes/magnet_pick.py): `camera` is the
+    # head camera's plate detections, `oracle` the simulator's ground truth (a sim-only
+    # diagnostic that separates perception failures from dock/arm ones). Stock value
+    # emits no flag, so every existing scenario's argv is unchanged.
+    "perception": _omit_at("camera", _choice("--perception", {"camera", "oracle"})),
 }
 
 RUN_DEFAULTS = {
@@ -256,14 +317,19 @@ RUN_DEFAULTS = {
     "robots": 1,
     "robot_id": "robot_0",
     "robot_ids": None,
-    "headless": False,
+    "headless": True,
     "chase_cam": True,
     "chase_cam_robots": None,
+    "render_every": 1,
+    "lite_render": False,
+    "half_res_cams": False,
     "teleop": False,
     "localize": False,
     "resume": False,
     "explore": False,
     "map": None,
+    "world": None,
+    "perception": "camera",
 }
 
 
@@ -276,9 +342,12 @@ REAL_RUN_FLAGS = {
     "localize": RUN_FLAGS["localize"],
     "resume": RUN_FLAGS["resume"],
     "map": RUN_FLAGS["map"],
+    # all = map on the Jetson; robot = map on the workstation from the robot's
+    # keyframe stream (tasks/slam_offload.md@6501799). Real-only: sim has no Jetson.
+    "slam_role": _choice("--slam-role", {"all", "robot"}),
 }
 
-REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS[key] for key in REAL_RUN_FLAGS}
+REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all"}
 
 PLATFORM_FLAGS = {"sim": RUN_FLAGS, "real": REAL_RUN_FLAGS}
 
@@ -288,8 +357,10 @@ PLATFORM_FLAGS = {"sim": RUN_FLAGS, "real": REAL_RUN_FLAGS}
 #   waypoints: map  = load the library map's own waypoints (if it has any)
 #              keep = leave the dashboard's working set as it is
 #              none = start with no waypoints
+#   demo: true      = once every robot is up, the operator view runs the task
+#                     demo (configs/demo_tasks.yaml) by itself
 WAYPOINT_POLICIES = ("map", "keep", "none")
-SESSION_KEYS = {"waypoints"}
+SESSION_KEYS = {"waypoints", "demo"}
 
 
 def library_db_path(name: str) -> Path:
@@ -300,6 +371,8 @@ def library_db_path(name: str) -> Path:
 
 
 def _check_session_keys(run: dict) -> None:
+    if not isinstance(run.get("demo", False), bool):
+        raise ScenarioError(f"demo: expected true or false, got {run['demo']!r}")
     if run.get("waypoints", "map") not in WAYPOINT_POLICIES:
         raise ScenarioError(
             f"waypoints: expected one of {list(WAYPOINT_POLICIES)}, got {run['waypoints']!r}")
@@ -369,6 +442,7 @@ def _validate(path: Path, raw: dict) -> dict:
     merged = {**PLATFORM_DEFAULTS[platform], **run}
     build_argv(merged, platform)  # type/range check now, not at launch time
     _check_session_keys(merged)
+    _check_world_scene(merged)
     if merged["localize"] and merged["resume"]:
         raise ScenarioError("run: localize and resume are mutually exclusive")
 
@@ -403,30 +477,37 @@ def load_scenarios() -> list[dict]:
     `error` string rather than being dropped — a silently missing scenario is
     much harder to debug than a card that says why it won't load.
     """
-    out = []
-    for path in sorted(SCENARIO_DIR.glob("*.yaml")):
-        try:
-            with open(path) as f:
-                out.append(_validate(path, yaml.safe_load(f)))
-        except (ScenarioError, yaml.YAMLError, OSError) as exc:
-            out.append({
-                "name": path.stem,
-                "title": path.stem,
-                "description": "",
-                "status": "invalid",
-                "platform": None,
-                "run": {},
-                "overrides": [],
-                "capture": {"bag": False},
-                "error": f"{path.name}: {exc}",
-            })
-    return out
+    return [_load_one(path) for path in sorted(SCENARIO_DIR.glob("*.yaml"))]
+
+
+def _load_one(path: Path) -> dict:
+    """One scenario file, validated: or the `invalid` card that says why not."""
+    try:
+        with open(path) as f:
+            return _validate(path, yaml.safe_load(f))
+    except (ScenarioError, yaml.YAMLError, OSError) as exc:
+        return {
+            "name": path.stem,
+            "title": path.stem,
+            "description": "",
+            "status": "invalid",
+            "platform": None,
+            "run": {},
+            "overrides": [],
+            "capture": {"bag": False},
+            "error": f"{path.name}: {exc}",
+        }
 
 
 def get_scenario(name: str) -> dict:
-    for scenario in load_scenarios():
-        if scenario["name"] == name:
-            return scenario
+    # A scenario's name must equal its file's stem (_validate enforces it), so the one
+    # wanted can be read directly. Scanning every file here made resolving a single
+    # test case cost a parse of ALL the scenarios, and listing the Tests tab quadratic
+    # in the number of tests (0.9 s for a dozen, pure-python YAML).
+    if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        path = SCENARIO_DIR / f"{name}.yaml"
+        if path.is_file():
+            return _load_one(path)
     raise ScenarioError(f"no such scenario: {name!r}")
 
 
@@ -458,6 +539,7 @@ def apply_overrides(scenario: dict, overrides: dict | None) -> dict:
         else:
             run[key] = value
     build_argv(run, scenario["platform"])  # re-validate the merged result
+    _check_world_scene(run)
     if run["localize"] and run["resume"]:
         raise ScenarioError("localize and resume are mutually exclusive")
     return run
@@ -480,13 +562,15 @@ def apply_overrides(scenario: dict, overrides: dict | None) -> dict:
 #         "readonly"-> --localize (Mem/IncrementalMemory=false)
 
 CONFIG_SIM_KEYS = {"scene", "robots", "map", "mode", "explore", "waypoints",
-                   "headless", "chase_cam", "chase_cam_robots", "teleop", "bag"}
-CONFIG_REAL_KEYS = {"map", "mode", "waypoints", "bag"}
+                   "headless", "chase_cam", "chase_cam_robots", "teleop", "bag", "demo",
+                   "render_every", "lite_render", "half_res_cams", "world"}
+CONFIG_REAL_KEYS = {"map", "mode", "waypoints", "bag", "demo"}
 CONFIG_KEYS = {"sim": CONFIG_SIM_KEYS, "real": CONFIG_REAL_KEYS}
 CONFIG_DEFAULTS = {
     "scene": "nvidia", "robots": 1, "map": "new", "mode": "extend",
-    "explore": True, "waypoints": "map", "headless": False, "chase_cam": False,
-    "chase_cam_robots": 1, "teleop": False, "bag": False,
+    "explore": True, "waypoints": "map", "headless": True, "chase_cam": False,
+    "chase_cam_robots": 1, "teleop": False, "bag": False, "demo": False,
+    "render_every": 1, "lite_render": False, "half_res_cams": False, "world": "none",
 }
 MODES = ("extend", "readonly")
 
@@ -548,9 +632,17 @@ def config_to_run(config: dict, platform: str = "sim") -> dict:
         run["headless"] = _as_bool(cfg["headless"])
         run["chase_cam"] = _as_bool(cfg["chase_cam"])
         run["teleop"] = _as_bool(cfg["teleop"])
+        # Range-checked by build_argv below (1..4), like every other key.
+        run["render_every"] = cfg["render_every"]
+        run["lite_render"] = _as_bool(cfg["lite_render"])
+        run["half_res_cams"] = _as_bool(cfg["half_res_cams"])
         if run["chase_cam"]:
             run["chase_cam_robots"] = int(cfg["chase_cam_robots"])
+        run["world"] = None if cfg["world"] in (None, "", "none") else str(cfg["world"])
+        _check_world_scene(run)
     run["waypoints"] = cfg["waypoints"]
+    if _as_bool(cfg["demo"]):
+        run["demo"] = True  # absent otherwise, like every preset that doesn't use it
     _check_session_keys(run)
     build_argv(run, platform)  # the allowlist: type, range, choice, path containment
     return run
@@ -577,12 +669,17 @@ def run_to_config(run: dict, platform: str = "sim", bag: bool = False) -> dict:
     cfg["mode"] = "readonly" if run.get("localize") else "extend"
     cfg["waypoints"] = run.get("waypoints", "map")
     cfg["bag"] = bool(bag)
+    if run.get("demo"):
+        cfg["demo"] = True
     if platform == "sim":
         cfg["scene"] = run.get("scene", "nvidia")
         cfg["robots"] = int(run.get("robots") or 1)
-        for key in ("explore", "headless", "chase_cam", "teleop"):
-            cfg[key] = bool(run.get(key))
+        for key in ("explore", "headless", "chase_cam", "teleop", "lite_render",
+                    "half_res_cams"):
+            cfg[key] = bool(run.get(key, RUN_DEFAULTS[key]))
+        cfg["render_every"] = int(run.get("render_every") or 1)
         cfg["chase_cam_robots"] = int(run.get("chase_cam_robots") or 1)
+        cfg["world"] = run.get("world") or "none"
     return {"config": cfg}
 
 
@@ -600,12 +697,24 @@ def describe_config(cfg: dict, platform: str = "sim") -> str:
                 else f"{where} ({'read-only' if full['mode'] == 'readonly' else 'extend'})")
     if platform == "sim":
         bits.append("exploring from start" if _as_bool(full["explore"]) else "explorer idle")
+        # Render-cost knobs change what the run costs, not what it does —
+        # only worth a word when they're off their stock values.
+        if int(full["render_every"]) != 1:
+            bits.append(f"render every {int(full['render_every'])}")
+        if _as_bool(full["lite_render"]):
+            bits.append("lite render")
+        if _as_bool(full["half_res_cams"]):
+            bits.append("half-res cameras")
+        if full.get("world") not in (None, "", "none"):
+            bits.append(f"world: {full['world']}")
     # Waypoints are an Advanced setting: only mention a non-default choice
     # (the default is the map's own set for a saved map, else keep current).
     default_wp = "keep" if full["map"] in ("new", "working") else "map"
     if full["waypoints"] != default_wp:
         bits.append({"map": "map's waypoints", "keep": "current waypoints",
                      "none": "no waypoints"}[full["waypoints"]])
+    if _as_bool(full["demo"]):
+        bits.append("runs the task demo")
     return " · ".join(bits)
 
 
@@ -676,6 +785,14 @@ _ROS_ENV_KEYS = (
 )
 
 
+def _domain() -> int:
+    """The caller's ROS_DOMAIN_ID (default 0), validated before it reaches a shell."""
+    try:
+        return max(0, min(232, int(os.environ.get("ROS_DOMAIN_ID", "0"))))
+    except ValueError:
+        return 0
+
+
 def clean_env() -> dict:
     """A ROS-free environment for spawning run_demo.sh.
 
@@ -728,13 +845,13 @@ def save_map_blocking(name: str, *, robot_id: str = "robot_0",
     cmd = (
         f"source {shlex.quote(ROS_SETUP)}; "
         f"export PATH={shlex.quote(SYSTEM_PATH)}:\"$PATH\"; "
-        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; "
+        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID={_domain()}; "
         f"exec {shlex.quote(str(MAPS_SH))} save {shlex.quote(name)} "
         f"--robot-id {shlex.quote(robot_id)}{extra}"
     )
     try:
         proc = subprocess.run(
-            ["bash", "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
+            [ROS_BASH, "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired as e:
@@ -764,13 +881,13 @@ def _ros_service_call(service: str, srv_type: str, request: str, *,
     cmd = (
         f"source {shlex.quote(ROS_SETUP)}; "
         f"export PATH={shlex.quote(SYSTEM_PATH)}:\"$PATH\"; "
-        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; "
+        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID={_domain()}; "
         f"exec ros2 service call {shlex.quote(service)} {shlex.quote(srv_type)} "
         f"{shlex.quote(request)}"
     )
     try:
         proc = subprocess.run(
-            ["bash", "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
+            [ROS_BASH, "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired as e:
@@ -793,12 +910,12 @@ def _publish_recon_reset(rid: str) -> None:
     cmd = (
         f"source {shlex.quote(ROS_SETUP)}; "
         f"export PATH={shlex.quote(SYSTEM_PATH)}:\"$PATH\"; "
-        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; "
+        f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID={_domain()}; "
         f"exec ros2 topic pub --once -w 1 /{rid}/recon_reset std_msgs/msg/String "
         f"{shlex.quote('{data: clear}')}"
     )
     try:
-        proc = subprocess.run(["bash", "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
+        proc = subprocess.run([ROS_BASH, "-c", cmd], cwd=str(REPO_ROOT), env=clean_env(),
                               capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired as e:
         raise maps_lib.MapError("recon_reset timed out (is recon_cloud_relay up?)") from e
@@ -864,6 +981,21 @@ def load_map_blocking(name: str, robot_id: str = "robot_0") -> dict:
 
 
 _PIPELINE_PATTERNS = ("spawn_warehouse.py", "sortbots_bringup.launch.py")
+
+
+MEM_GUARD_REPORT = Path("/tmp/sortbots_mem_guard.json")
+
+
+def mem_guard_reason(since: float) -> str | None:
+    """Why scripts/mem_guard.py stopped the run, if it did and since `since`."""
+    try:
+        report = json.loads(MEM_GUARD_REPORT.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(report, dict) or report.get("stopped_at", 0) < since:
+        return None
+    top = ", ".join(f"{k} {mb} MB" for k, mb in (report.get("top") or [])[:3])
+    return f"stopped by the memory guard: {report.get('reason')}" + (f" (largest: {top})" if top else "")
 
 
 def pipeline_alive() -> bool:
@@ -957,6 +1089,7 @@ class SessionManager:
             if session["state"] == "running" and not self._pipeline_alive_cached():
                 self._session["state"] = "exited"
                 self._session["error"] = self._session.get("error") or \
+                    mem_guard_reason(session["started_at"]) or \
                     "pipeline is no longer running (stopped outside the dashboard?)"
                 self._persist()
                 session = dict(self._session)
@@ -1282,7 +1415,7 @@ class SessionManager:
         cmd = (
             f"source {shlex.quote(ROS_SETUP)}; "
             f"export PATH={shlex.quote(SYSTEM_PATH)}:\"$PATH\"; "
-            f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID=0; "
+            f"export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_DOMAIN_ID={_domain()}; "
             f"exec {shlex.quote(str(RECORD_BAG))} --output {shlex.quote(session['bag_dir'])}"
         )
         env = clean_env()
@@ -1290,7 +1423,7 @@ class SessionManager:
         log_fh = open(Path(session["dir"]) / "bag.log", "wb")
         try:
             self._bag_proc = subprocess.Popen(
-                ["bash", "-c", cmd], cwd=str(REPO_ROOT), env=env,
+                [ROS_BASH, "-c", cmd], cwd=str(REPO_ROOT), env=env,
                 stdout=log_fh, stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL, start_new_session=True,
             )

@@ -1,4 +1,4 @@
-# Measured on the lab routers (commsim/hw/README.md step 8), layered last:
+# Measured on the lab routers (docs/commsim.md, real routers step 8), layered last:
 #   python3 -m commsim.hw.deploy commsim/configs/base.yaml commsim/configs/hw_lab.yaml \
 #       commsim/configs/hw_measured.yaml --mesh-key-file ~/.config/sortbots/mesh.key --out commsim/results/hw
 #   python3 -m commsim.des.run --variants V4 --configs commsim/configs/hw_lab.yaml \

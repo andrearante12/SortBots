@@ -26,9 +26,8 @@ Two things it does:
   2. Repacks point_step 32 -> 16. rtabmap emits pcl::PointXYZRGB, which pads
      xyz (offsets 0/4/8) and rgb (offset 16) out to 32 bytes — half the wire
      bytes are padding. This is safe because every consumer downstream is
-     offset-driven: webui/app.js reads msg.point_step and builds its own
-     offset table from msg.fields, and scripts/bag_to_fixture.py documents
-     itself as agnostic to the field layout.
+     offset-driven: webui/operator_cloud.js reads msg.point_step and builds its
+     own offset table from msg.fields.
 
 Unlike nodes/rtabmap_cloud_pump.py this must NOT wait for any service — a
 plain subscription tolerates rtabmap starting late, or restarting under it.

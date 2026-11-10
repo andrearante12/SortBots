@@ -155,8 +155,8 @@ def up(n: int, line: bool, layout: str, seed: int, orig_ms: int, band: str = "g2
 
 def set_link(state: dict, i: int, j: int, action: str, out: Path | None = None) -> None:
     """Block or reopen the 802.11s peer link i-j on BOTH ends (the spec's
-    injection: `plink_action block`); logs it to <out>/links.jsonl so a
-    replay knows when the link went and came back."""
+    injection: `plink_action block`); logs it to <out>/links.jsonl so the
+    run's analysis knows when the link went and came back."""
     a, b = state["nodes"][i], state["nodes"][j]
     act = "block" if action == "block" else "open"
     sh(f"iw dev {a['dev']} station set {b['mac']} plink_action {act}", a["ns"])
@@ -172,7 +172,7 @@ def poll_start(state: dict, out: Path, period_s: float = 0.5) -> list:
     `iw station dump` (per-peer tx/retries/failed, plink state) to
     <out>/poll_<i>.txt. Raw text on purpose: nothing is parsed while the
     run is hot, and if the format surprises us the data is still there
-    (commsim/viz/build_trace.py parses it). Station dump every other tick:
+    to parse afterwards. Station dump every other tick:
     at n=15 the two commands together are ~0.6 core-seconds per second."""
     procs = []
     for i, nd in enumerate(state["nodes"]):

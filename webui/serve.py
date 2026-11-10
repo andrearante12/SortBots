@@ -3,8 +3,8 @@
 
 Pure stdlib except PyYAML (already a dependency of `nodes/task_manager.py`).
 Not a ROS node — the dashboard talks to ROS 2 directly over rosbridge's
-WebSocket (see index.html); this process only serves index.html/app.js and
-translates configs/*.yaml to JSON so the browser doesn't need a YAML parser.
+WebSocket (see operator.js); this process only serves the static operator
+page and translates configs/*.yaml to JSON so the browser doesn't need a YAML parser.
 
 Run (system ROS 2 Jazzy sourced or not — no rclpy dependency here):
 
@@ -13,6 +13,12 @@ Run (system ROS 2 Jazzy sourced or not — no rclpy dependency here):
 Then open http://localhost:8081/. Requires rosbridge_websocket (port 9090)
 and web_video_server (port 8080) running separately — see
 launch/sortbots_webui.launch.py, which brings up all three together.
+
+TESTS (configs/tests/, scripts/simtest.py): /api/tests, /api/worlds and
+/api/tests/results are readable without --control (the Tests view should show
+what exists and what last happened even with the console down); running and
+cancelling a test needs --control, like starting a session, and goes through
+webui/simtest_runner.py's own allowlist.
 
 CONTROL MODE (--control) additionally exposes the Scenarios tab's API: list
 configs/scenarios/*.yaml, start a scenario, stop it, tail its log. That turns
@@ -26,13 +32,22 @@ SECURITY: this server binds 0.0.0.0 and is reachable from any tailnet device,
 so --control is a remote process launcher. Containment lives in
 webui/session.py — scenario names resolve by allowlist, every argv element
 comes from a fixed typed table, and Popen is always called with a list.
-Tailscale ACLs are the actual perimeter; there is no authentication here.
+There is no authentication here. Since 2026-10-28 the console is also published
+to the public internet via Tailscale Funnel (443 -> this, 8443 -> rosbridge,
+10000 -> web_video_server; docs/running.md), so the perimeter is the obscurity of
+the URL, not Tailscale ACLs. Turn it off with `tailscale funnel reset`.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
+import queue
+import re
 import shutil
+import sys
+import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -42,16 +57,78 @@ import yaml
 import session as session_mod
 # session.py puts scripts/ on sys.path for this; both are ROS-free by design.
 import maps_lib
+# The test layer (simtest/) — session.py already put the repo root on sys.path.
+from simtest import metrics as simtest_metrics
+from simtest import report as simtest_report
+from simtest import spec as simtest_spec
+from simtest import world as simtest_world
+from simtest_runner import SimtestRunner
 
 WEBUI_DIR = Path(__file__).resolve().parent
-WAYPOINTS_CONFIG = WEBUI_DIR.parent / "configs" / "waypoints.yaml"
+DEMO_TASKS_CONFIG = WEBUI_DIR.parent / "configs" / "demo_tasks.yaml"
 ROBOTS_CONFIG = WEBUI_DIR.parent / "configs" / "robots.yaml"
 SPLAT_CONFIG = WEBUI_DIR.parent / "configs" / "splat.yaml"
 
 MAX_BODY_BYTES = 64 * 1024
+# The comms overlay posts the explored map, downsampled to 0.5 m cells, one
+# character each: a 200 x 200 m floor is 160 k characters.
+MAX_COMMSIM_BODY_BYTES = 1024 * 1024
+
+# Where the operator dropped the fleet's gateway (the comms overlay's AP), per
+# platform. Its own file, not a waypoint: it is not a place to send a robot.
+COMMS_GATEWAY_FILE = Path(os.environ["SORTBOTS_COMMS_GATEWAY"]) \
+    if os.environ.get("SORTBOTS_COMMS_GATEWAY") else WEBUI_DIR.parent / "data" / "comms_gateway.json"
+
+# What the page may ask of the comms model (commsim/viz/demo.py Hub.apply).
+# "task" and "cancel" are left out on purpose: the overlay shows the radio
+# only, and the real fleet's auction lives on /fleet/task_board.
+COMMSIM_OPS = {"move", "obstacle", "link", "node", "send", "range", "layout", "gateway",
+               "speed", "pause", "reset"}
+_HUB = None
+_HUB_LOCK = threading.Lock()
+
+
+def _git(*args: str) -> str:
+    import subprocess
+    try:
+        return subprocess.run(["git", "-C", str(WEBUI_DIR.parent), *args], capture_output=True,
+                              text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _git_state() -> dict:
+    return {"branch": _git("rev-parse", "--abbrev-ref", "HEAD") or None,
+            "commit": _git("rev-parse", "--short", "HEAD") or None,
+            # Tracked files only: untracked local maps/ etc. aren't "changes to the code".
+            "dirty": bool(_git("status", "--porcelain", "--untracked-files=no"))}
+
+
+# What this process was started from. The page's HTML/JS are read from disk on every
+# request, but this file, session.py and the comms model were imported at startup, so
+# a branch switch since then is only half live until the console restarts.
+_STARTED = _git_state()
+
+
+def _commsim_hub():
+    """The comms model, started on first use. Lazy because importing commsim
+    (and its YAML config) is wasted on a dashboard nobody opens the overlay on."""
+    global _HUB
+    with _HUB_LOCK:
+        if _HUB is None:
+            repo = str(WEBUI_DIR.parent)
+            if repo not in sys.path:
+                sys.path.insert(0, repo)
+            from commsim.viz.demo import Hub
+            _HUB = Hub()
+        return _HUB
 
 # Set by main() when --control is given. None means "control endpoints off".
 SESSIONS: session_mod.SessionManager | None = None
+
+# Scored test runs (scripts/simtest.py) — launched only in --control mode on
+# the sim platform, like sessions.
+TESTS: SimtestRunner | None = None
 
 # sim | real — which platform's scenarios this console lists and can start.
 # Set by main() from --platform (default: session_mod.detect_platform()).
@@ -60,6 +137,32 @@ PLATFORM = "sim"
 
 def _load_nav_waypoints() -> dict:
     return {"platform": PLATFORM, "waypoints": maps_lib.read_working_waypoints(PLATFORM)}
+
+
+def _read_comms_gateways() -> dict:
+    try:
+        raw = json.loads(COMMS_GATEWAY_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _load_comms_gateway() -> dict:
+    return {"platform": PLATFORM, "gateway": _read_comms_gateways().get(PLATFORM)}
+
+
+def _validate_gateway(raw):
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("gateway must be {x, y} or null")
+    try:
+        x, y = float(raw["x"]), float(raw["y"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("gateway needs numeric x and y")
+    if not (math.isfinite(x) and math.isfinite(y)) or abs(x) > 1e4 or abs(y) > 1e4:
+        raise ValueError("gateway x/y out of range")
+    return {"x": round(x, 3), "y": round(y, 3)}
 
 
 def _session_robot_ids(roster: list[str]) -> list[str] | None:
@@ -83,7 +186,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def end_headers(self):
         # SimpleHTTPRequestHandler sends Last-Modified but no Cache-Control, so
         # browsers apply heuristic freshness (~10% of file age) and happily
-        # serve a days-old cached app.js on a "fresh" tab — every stale-page
+        # serve a days-old cached operator.js on a "fresh" tab — every stale-page
         # bug in this dashboard's history started that way. no-cache still
         # allows conditional requests (304s), it just forces revalidation.
         self.send_header("Cache-Control", "no-cache")
@@ -96,9 +199,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         route = urlsplit(self.path).path
-        if route == "/api/waypoints":
-            self._serve_waypoints()
-        elif route == "/api/nav_waypoints":
+        if route == "/api/nav_waypoints":
             self._serve_json(_load_nav_waypoints())
         elif route == "/api/launch/options":
             self._serve_launch_options()
@@ -110,12 +211,39 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_maps()
         elif route.startswith("/api/maps/") and route.endswith("/db"):
             self._serve_map_db(route[len("/api/maps/"):-len("/db")])
+        elif route == "/api/demo_tasks":
+            self._serve_demo_tasks()
         elif route == "/api/splat/config":
             self._serve_splat_config()
+        elif route == "/api/comms_gateway":
+            self._serve_json(_load_comms_gateway())
+        elif route == "/api/version":
+            now = _git_state()
+            self._serve_json({**now, "started": _STARTED,
+                              "restart_needed": now["commit"] != _STARTED["commit"]})
+        elif route == "/api/commsim/events":
+            self._serve_commsim_events()
         elif route == "/api/session":
             self._with_control(lambda: self._serve_json(SESSIONS.status()))
         elif route == "/api/session/log":
             self._with_control(self._serve_log)
+        elif route == "/api/worlds":
+            self._serve_json({"worlds": simtest_world.list_worlds()})
+        elif route == "/api/tests":
+            self._serve_json({"tests": simtest_spec.listed_tests(),
+                              "metrics": simtest_metrics.catalog(),
+                              "control": TESTS is not None})
+        elif route == "/api/tests/results":
+            self._serve_json({"results": simtest_report.recent(simtest_spec.RESULTS_DIR)})
+        elif route == "/api/tests/report":
+            self._serve_test_report()
+        elif route == "/api/tests/run":
+            self._with_tests(self._serve_test_run)
+        elif route == "/":
+            # The operator view is the only GUI (the per-robot dashboard,
+            # index.html + app.js, was removed 2026-10-23).
+            self.path = "/operator.html"
+            super().do_GET()
         else:
             super().do_GET()
 
@@ -129,6 +257,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_control(self._finish_session)
         elif route == "/api/nav_waypoints":
             self._save_nav_waypoints()
+        elif route == "/api/comms_gateway":
+            self._save_comms_gateway()
+        elif route == "/api/commsim/cmd":
+            self._commsim_cmd()
         elif route == "/api/launch/preview":
             self._preview_launch()
         elif route == "/api/presets":
@@ -139,15 +271,26 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_control(self._clear_map)
         elif route == "/api/map/load":
             self._with_control(self._load_map)
+        elif route == "/api/tests/run":
+            self._with_tests(self._start_test)
+        elif route == "/api/tests/cancel":
+            self._with_tests(lambda: self._serve_json(TESTS.cancel()))
         else:
             self._serve_error(404, f"no such endpoint: {route}")
 
     # -- config endpoints --------------------------------------------------
 
-    def _serve_waypoints(self):
-        with open(WAYPOINTS_CONFIG) as f:
-            stations = yaml.safe_load(f)["stations"]
-        self._serve_json(stations)
+    def _serve_demo_tasks(self):
+        # Canned task list for one-click demos (configs/demo_tasks.yaml). Read
+        # here only; the dashboard dispatches each entry through the normal
+        # /<robot>/dispatch_task path, so there is no server-side task state.
+        # Missing file is not an error — a deployment may simply carry no demo
+        # list; serve an empty list so the button just says so.
+        tasks = []
+        if DEMO_TASKS_CONFIG.exists():
+            with open(DEMO_TASKS_CONFIG) as f:
+                tasks = (yaml.safe_load(f) or {}).get("tasks") or []
+        self._serve_json({"tasks": [t for t in tasks if isinstance(t, dict)]})
 
     # -- launch form -------------------------------------------------------
 
@@ -200,6 +343,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             "working_db": {"path": str(working), "exists": working.exists()},
             "working_waypoints": len(maps_lib.read_working_waypoints(PLATFORM)),
             "presets": presets,
+            "worlds": simtest_world.list_worlds(),
         })
 
     def _preview_launch(self):
@@ -246,6 +390,72 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         self._serve_json(_load_nav_waypoints())
 
+    def _save_comms_gateway(self):
+        # Same deal as the waypoints: one small JSON file under data/, no
+        # --control needed, last write wins.
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            gw = _validate_gateway(body.get("gateway"))
+        except ValueError as exc:
+            self._serve_error(400, str(exc))
+            return
+        all_ = _read_comms_gateways()
+        all_[PLATFORM] = gw
+        try:
+            COMMS_GATEWAY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = COMMS_GATEWAY_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(all_, indent=2) + "\n")
+            tmp.replace(COMMS_GATEWAY_FILE)
+        except OSError as exc:
+            self._serve_error(500, f"failed to save the gateway: {exc}")
+            return
+        self._serve_json(_load_comms_gateway())
+
+    # -- comms overlay: the commsim model (commsim/viz/demo.py) ------------
+    # Server-Sent Events out, JSON commands in. ThreadingHTTPServer gives each
+    # stream its own thread; it ends when the page goes away (BrokenPipe).
+
+    def _serve_commsim_events(self):
+        try:
+            hub = _commsim_hub()
+        except Exception as exc:  # commsim missing or its config broken: say so, don't 500 the page
+            self._serve_error(503, f"comms model unavailable: {type(exc).__name__}: {exc}")
+            return
+        q = hub.subscribe()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        try:
+            while True:
+                try:
+                    self.wfile.write(f"data: {q.get(timeout=5.0)}\n\n".encode())
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            hub.unsubscribe(q)
+            self.close_connection = True
+
+    def _commsim_cmd(self):
+        body = self._read_json_body(limit=MAX_COMMSIM_BODY_BYTES)
+        if body is None:
+            return
+        if body.get("op") not in COMMSIM_OPS:
+            self._serve_error(400, f"unknown comms model op: {body.get('op')!r}")
+            return
+        try:
+            hub = _commsim_hub()
+        except Exception as exc:
+            self._serve_error(503, f"comms model unavailable: {type(exc).__name__}: {exc}")
+            return
+        hub.cmds.put(body)  # applied on the model's own thread; bad fields come back as an error event
+        self._serve_json({"ok": True})
+
     def _serve_robots(self):
         # configs/robots.yaml is the fleet roster (ids + per-scene spawn
         # poses); the dashboard only needs the id list, so reduce each
@@ -268,6 +478,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             # — same derivation as run_demo.sh: explicit robot_ids, else the
             # first --robots N of the roster, in roster order.
             live = _session_robot_ids(ids)
+            # With no session, the fleet a run brings up when it doesn't say
+            # (run_demo.sh --robots default), not every robot the roster can
+            # place: the roster grew past the usual fleet for scale and comms
+            # tests (2026-10-24), and an idle page listing six robots, four of
+            # them never started, reads as four dead robots.
+            if not live and PLATFORM != "real":
+                live = ids[:int(raw.get("default_robots") or len(ids))]
             data = {
                 "default": raw["default"],
                 "robots": live or ids,
@@ -476,7 +693,62 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except OSError as exc:
             self._serve_error(500, f"failed to load map: {exc}")
 
+    # -- tests (scripts/simtest.py) ------------------------------------------
+
+    def _serve_test_report(self):
+        """report.md of one result dir, by its directory NAME only."""
+        name = parse_qs(urlsplit(self.path).query).get("dir", [""])[0]
+        # <UTC stamp>_<test name>: no `/` or `..`, so it can't leave RESULTS_DIR.
+        if not re.match(r"^\d{8}T\d{6}Z_[a-z0-9][a-z0-9_-]{0,63}$", name):
+            self._serve_error(400, "dir must be a result directory name")
+            return
+        path = simtest_spec.RESULTS_DIR / name / "report.md"
+        if not path.is_file():
+            self._serve_error(404, f"no report for {name} (still running?)")
+            return
+        self._serve_json({"dir": name, "markdown": path.read_text()})
+
+    def _serve_test_run(self):
+        query = parse_qs(urlsplit(self.path).query)
+        raw = query.get("offset", [None])[0]
+        try:
+            offset = int(raw) if raw is not None else None
+        except ValueError:
+            self._serve_error(400, "offset must be an integer")
+            return
+        self._serve_json(TESTS.status(offset))
+
+    def _start_test(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        # A test starts its own sessions; one already up would be torn down
+        # under whoever is using it. simtest.py refuses too — say so here,
+        # where the user clicked, instead of in a log line.
+        if SESSIONS.is_busy():
+            self._serve_error(409, "a session is running — stop it before running a test")
+            return
+        try:
+            self._serve_json(TESTS.start(body.get("name"), body.get("repeats"),
+                                         body.get("variant")))
+        except simtest_spec.SpecError as exc:
+            self._serve_error(400, str(exc))
+        except RuntimeError as exc:
+            self._serve_error(409, str(exc))
+        except OSError as exc:
+            self._serve_error(500, f"failed to launch: {exc}")
+
     # -- plumbing ----------------------------------------------------------
+
+    def _with_tests(self, fn):
+        if TESTS is None:
+            self._serve_error(
+                503,
+                "test runs need the sim dashboard console (scripts/run_console.sh) — "
+                "or run them from a terminal: scripts/simtest.py run NAME",
+            )
+            return
+        fn()
 
     def _with_control(self, fn):
         if SESSIONS is None:
@@ -488,13 +760,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         fn()
 
-    def _read_json_body(self):
+    def _read_json_body(self, limit: int = MAX_BODY_BYTES):
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             self._serve_error(400, "bad Content-Length")
             return None
-        if length > MAX_BODY_BYTES:
+        if length > limit:
             self._serve_error(413, "request body too large")
             return None
         raw = self.rfile.read(length) if length else b"{}"
@@ -524,7 +796,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
-    global SESSIONS, PLATFORM
+    global SESSIONS, PLATFORM, TESTS
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8081)
@@ -543,6 +815,8 @@ def main() -> None:
     PLATFORM = args.platform or session_mod.detect_platform()
     if args.control:
         SESSIONS = session_mod.SessionManager(PLATFORM)
+        if PLATFORM == "sim":
+            TESTS = SimtestRunner(session_mod.clean_env)
 
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     mode = "control" if args.control else "read-only"

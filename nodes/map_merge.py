@@ -85,6 +85,7 @@ ANCHOR_QOS = QoSProfile(
 DEFAULTS = {
     "publish_period_s": 1.0,
     "occupied_thresh": 50,
+    "spawn_margin_m": 4.0,
 }
 
 
@@ -98,10 +99,12 @@ def load_config(path: Path | None) -> dict:
 
 
 class MapMergeNode(Node):
-    def __init__(self, robot_ids: list[str], cfg: dict):
+    def __init__(self, robot_ids: list[str], cfg: dict,
+                 keep_in: list[tuple[float, float]] | None = None):
         super().__init__("map_merge")
         self.robot_ids = robot_ids
         self.cfg = cfg
+        self.keep_in = keep_in or []
         self._grids: dict[str, tuple[np.ndarray, GridInfo]] = {}
         self._prev_out_info: GridInfo | None = None
 
@@ -186,7 +189,8 @@ class MapMergeNode(Node):
 
         resolution = sources[0][1].resolution
         fused, out_info = fuse_grids(
-            sources, resolution, self.cfg["occupied_thresh"], self._prev_out_info
+            sources, resolution, self.cfg["occupied_thresh"], self._prev_out_info,
+            keep_in=self.keep_in, margin=self.cfg["spawn_margin_m"],
         )
         # Log when the contributor set or output extent changes — silent
         # fusion is what let a robot_1-remapped-to-robot_0 camera bug look
@@ -243,13 +247,20 @@ def main() -> None:
         help="Comma-separated robot ids to fuse, e.g. robot_0,robot_1.",
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument(
+        "--keep-in",
+        default="",
+        help="Semicolon-separated map-frame x,y points the fused grid always "
+             "covers (every robot's spawn), e.g. '-7.15,11.62;1.23,13.69'.",
+    )
     args = parser.parse_args(remove_ros_args(args=sys.argv)[1:])
 
     robot_ids = [r.strip() for r in args.robot_ids.split(",") if r.strip()]
     cfg = load_config(args.config)
+    keep_in = [tuple(float(v) for v in p.split(",")) for p in args.keep_in.split(";") if p.strip()]
 
     rclpy.init(args=sys.argv)
-    node = MapMergeNode(robot_ids, cfg)
+    node = MapMergeNode(robot_ids, cfg, keep_in)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

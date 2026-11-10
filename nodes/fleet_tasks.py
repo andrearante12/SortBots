@@ -77,6 +77,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -90,10 +91,9 @@ from commsim.core.protocol import (  # noqa: E402
     BIDDING, CLAIMED, COMMITTED_COST, OPEN, Allocator, Params, TaskView, deliver,
 )
 from grid_dist import GridDistance  # noqa: E402
-from stations import load_stations  # noqa: E402
+from waypoints import load_waypoints  # noqa: E402
 
 DEFAULT_CFG = REPO_ROOT / "configs" / "fleet_tasks.yaml"
-DEFAULT_WAYPOINTS = REPO_ROOT / "configs" / "waypoints.yaml"
 
 TASKS_TOPIC = "/fleet/tasks"
 REQUEST_TOPIC = "/fleet/task_request"
@@ -173,14 +173,18 @@ class FleetTasks:
         ("log", text)
     """
 
-    def __init__(self, robot_id: str | None, params: Params, stations: dict, *,
+    def __init__(self, robot_id: str | None, params: Params, waypoints, *,
                  gateway: bool = False, can_bid: bool = True, cfg: dict | None = None,
                  now: float = 0.0):
         cfg = cfg or load_config()
         self.cfg = cfg
         self.gateway = gateway
         self.num = GATEWAY if gateway else robot_num(robot_id)
-        self.stations = stations
+        # A dict of name -> Waypoint, or a zero-argument callable returning
+        # one. The node passes a loader so a pin the operator places on the map
+        # resolves without a restart, same as task_manager re-reading it on
+        # every dispatch.
+        self._waypoints = waypoints
         self.speed = float(cfg["speed_mps"])
         self.pose: tuple[float, float] | None = None
         self._pose_at: float | None = None
@@ -190,6 +194,10 @@ class FleetTasks:
         # this time. Releasing them would send another robot to an empty shelf.
         self._retry: dict[int, float] = {}
         self._synced = False  # task_manager's latched status seen (restart adoption)
+        # Fleet tasks WE told task_manager to drop. Its CANCELLED for one of
+        # these is the echo of our own decision; a CANCELLED for anything else
+        # we own came from a person (operator Stop all / Clear tasks / x).
+        self._cancelling: set[int] = set()
         self.names: dict[int, tuple[str, str]] = {}
         # (pickup, dropoff) -> steady time until which we do not bid on it
         # again. Without it a robot that cannot do a task (no arm, a pick it
@@ -211,6 +219,9 @@ class FleetTasks:
         bids = not gateway and can_bid
         self.alloc = Allocator(self.num, params, self._cost if bids else None,
                                is_gateway=gateway, battery_fn=lambda: self.battery_pct)
+
+    def waypoints(self) -> dict:
+        return self._waypoints() if callable(self._waypoints) else self._waypoints
 
     # ---- inputs -----------------------------------------------------------
 
@@ -293,12 +304,35 @@ class FleetTasks:
         if not self._synced:
             self._synced = True
             self._adopt(st, now)
+        rej = st.get("rejected") if isinstance(st.get("rejected"), dict) else None
+        if rej is not None and self._fleet_tid(rej.get("task_id")) is not None:
+            # task_manager refused it (a waypoint renamed or deleted since the
+            # announce): same outcome as a failed first leg.
+            tid_s, state = rej.get("task_id"), "FAILED"
         tid = self._fleet_tid(tid_s)
         if tid is None:
             return
+        if state == "CANCELLED" and tid in self._cancelling:
+            self._cancelling.discard(tid)
+            return  # the echo of our own cancel
         t = self.alloc.tasks.get(tid)
         if t is None or t.state != CLAIMED or t.owner != self.num:
             return  # we no longer own it (cancelled, out-bid): not ours to report
+        if state == "CANCELLED":
+            # A person stopped it on this robot. Left alone, we would keep
+            # renewing the lease on a task nothing is working, and the board
+            # would show it claimed forever. Withdraw it fleet-wide instead:
+            # the operator meant "don't do this", not "someone else do it".
+            self._retry.pop(tid, None)
+            self.alloc.cancel(tid, now)
+            self._log(f"task {tid} cancelled on this robot by hand; withdrawn fleet-wide")
+            self._flush()
+            # The cancel we just broadcast comes back to us as stop_task, which
+            # would tell task_manager to drop a task it already dropped.
+            self._cancelling.discard(tid)
+            self._actions = [a for a in self._actions
+                             if a != ("cancel", f"{TASK_PREFIX}{tid}")]
+            return
         if state in ("NAV_TO_DROPOFF", "PLACING") and not self.alloc.committed(tid):
             self.alloc.commit(tid, now)
             self._log(f"task {tid}: item picked up, committed")
@@ -334,23 +368,29 @@ class FleetTasks:
         tid = self._fleet_tid(st.get("task_id"))
         state = st.get("state")
         if tid is not None and state in ("NAV_TO_DROPOFF", "PLACING"):
-            pick, drop = st.get("pickup"), st.get("dropoff")
+            # task_manager puts the current task's names under "task" (its
+            # summary()); top-level keys are the older shape.
+            cur = st.get("task") if isinstance(st.get("task"), dict) else st
+            pick, drop = cur.get("pickup"), cur.get("dropoff")
+            wps = self.waypoints()
             t = TaskView(tid, state=CLAIMED, owner=self.num, owner_cost=COMMITTED_COST,
                          last_renew=now, claimed_at=now)
-            if pick in self.stations and drop in self.stations:
+            if pick in wps and drop in wps:
                 self.names[tid] = (pick, drop)
-                t.pickup, t.dropoff = self._xy(pick), self._xy(drop)
+                t.pickup, t.dropoff = self._xy(pick, wps), self._xy(drop, wps)
             self.alloc.tasks[tid] = t
             self.alloc.out.append({"type": "Claim", "task_id": tid, "cost": COMMITTED_COST,
                                    "lease_s": self.alloc.p.task_lease_s})
             self._log(f"adopted task {tid} after restart: item on board")
         elif tid is not None and state not in ("DONE", "FAILED", "CANCELLED", "IDLE"):
-            self._actions.append(("cancel", f"{TASK_PREFIX}{tid}"))
+            self._cancel_local(tid)
             self._log(f"cancelled task {tid} after restart; the fleet re-auctions it")
         for q in st.get("queue") or []:
-            qt = self._fleet_tid(q)
+            # Summaries ({"task_id": ...}) from task_manager; bare ids from
+            # the older shape.
+            qt = self._fleet_tid(q.get("task_id") if isinstance(q, dict) else q)
             if qt is not None:
-                self._actions.append(("cancel", f"{TASK_PREFIX}{qt}"))
+                self._cancel_local(qt)
                 self._log(f"cancelled queued task {qt} after restart")
 
     def drive(self, dt: float, moving: bool) -> None:
@@ -365,8 +405,9 @@ class FleetTasks:
 
     def request(self, pickup: str, dropoff: str, now: float) -> int | None:
         self.now = now
-        if pickup not in self.stations or dropoff not in self.stations:
-            self._log(f"rejected task: unknown station in {pickup!r} -> {dropoff!r}")
+        wps = self.waypoints()
+        if pickup not in wps or dropoff not in wps:
+            self._log(f"rejected task: unknown waypoint in {pickup!r} -> {dropoff!r}")
             self._flush()
             return None
         # Seeded from the wall clock so a restarted gateway never reuses an ID:
@@ -375,7 +416,7 @@ class FleetTasks:
         tid = self._next_id = max(self._next_id + 1, int(time.time() * 10))
         self.names[tid] = (pickup, dropoff)
         self._announced[tid] = now
-        self.alloc.announce(tid, self._xy(pickup), self._xy(dropoff), now)
+        self.alloc.announce(tid, self._xy(pickup, wps), self._xy(dropoff, wps), now)
         self._log(f"announced task {tid}: {pickup} -> {dropoff}")
         self._flush()
         return tid
@@ -442,9 +483,11 @@ class FleetTasks:
                     and (task_id is None or al["task_id"] == task_id):
                 al["active"] = False
 
-    def _xy(self, name: str) -> tuple[float, float]:
-        x, y, _ = self.stations[name].dock_pose()
-        return (round(x, 3), round(y, 3))
+    def _xy(self, name: str, wps: dict | None = None) -> tuple[float, float]:
+        # The waypoint itself: tasks are nav-only, so the robot parks on the
+        # pin (no dock offset, unlike the retired stations).
+        w = (wps or self.waypoints())[name]
+        return (round(w.x, 3), round(w.y, 3))
 
     # ---- clock --------------------------------------------------------------
 
@@ -465,6 +508,9 @@ class FleetTasks:
         self.alloc.tick(now)
         if len(self.names) > len(self.alloc.tasks):  # the allocator pruned finished tasks
             self.names = {k: v for k, v in self.names.items() if k in self.alloc.tasks}
+        # An echo that never came (task_manager had already finished it) must
+        # not pin the id forever.
+        self._cancelling &= set(self.alloc.tasks)
         if self.gateway:
             if now >= self._next_heartbeat:
                 # Robots with no peer in range hear nobody but us; without a
@@ -501,6 +547,10 @@ class FleetTasks:
     def _log(self, text: str) -> None:
         self._actions.append(("log", text))
 
+    def _cancel_local(self, tid: int) -> None:
+        self._cancelling.add(tid)
+        self._actions.append(("cancel", f"{TASK_PREFIX}{tid}"))
+
     def _flush(self) -> None:
         out, events = self.alloc.drain()
         for m in out:
@@ -522,17 +572,17 @@ class FleetTasks:
         kind, tid = e["event"], e.get("task_id")
         if kind == "claimed":
             if tid not in self.names:
-                # Won a task announced without station names (e.g. by a
-                # commsim stub). task_manager drives to named stations only.
+                # Won a task announced without waypoint names (e.g. by a
+                # commsim stub). task_manager drives to named waypoints only.
                 self.alloc.release(tid, self.now)
-                self._log(f"released task {tid}: no station names")
+                self._log(f"released task {tid}: no waypoint names")
                 return
             pick, drop = self.names[tid]
             self._actions.append(("dispatch", {"task_id": f"{TASK_PREFIX}{tid}",
                                                "pickup": pick, "dropoff": drop}))
             self._log(f"won task {tid} ({pick} -> {drop}), cost {e.get('cost'):.1f}")
         elif kind in ("task_yielded", "stop_task"):
-            self._actions.append(("cancel", f"{TASK_PREFIX}{tid}"))
+            self._cancel_local(tid)
             self._retry.pop(tid, None)
             why = e.get("reason") or f"out-bid by {robot_name(e.get('to'))}"
             if e.get("committed"):
@@ -574,7 +624,11 @@ def main(argv=None):
     parser.add_argument("--no-bid", action="store_true",
                         help="follow the protocol but never bid (robot cannot pick)")
     parser.add_argument("--config", type=Path, default=DEFAULT_CFG)
-    parser.add_argument("--waypoints", type=Path, default=DEFAULT_WAYPOINTS)
+    parser.add_argument(
+        "--platform", default=os.environ.get("SORTBOTS_PLATFORM", "sim"),
+        help="which platform's waypoint set to read from data/nav_waypoints.json "
+             "(sim or real), the same one task_manager uses; default: "
+             "$SORTBOTS_PLATFORM, else sim")
     args = parser.parse_args(argv)
 
     import rclpy
@@ -593,7 +647,6 @@ def main(argv=None):
 
     cfg = load_config(args.config)
     params = Params.from_config(cfg)
-    stations = load_stations(args.waypoints)
     rid = args.robot_id
 
     # Reliable and deep: a lost Claim or Release costs a lease timeout, and a
@@ -612,7 +665,8 @@ def main(argv=None):
         def __init__(self):
             name = "fleet_gateway" if args.gateway else f"{rid}_fleet_tasks"
             super().__init__(name)
-            self.core = FleetTasks(None if args.gateway else rid, params, stations,
+            self.core = FleetTasks(None if args.gateway else rid, params,
+                                   lambda: load_waypoints(args.platform),
                                    gateway=args.gateway, can_bid=not args.no_bid,
                                    cfg=cfg, now=time.monotonic())
             self.sim_battery = (not args.gateway
@@ -638,8 +692,11 @@ def main(argv=None):
                     String, f"/{rid}/dispatch_task", 10)
                 self.cancel_pub = self.create_publisher(String, f"/{rid}/cancel_task", 10)
                 self.alloc_pub = self.create_publisher(String, f"/{rid}/task_alloc", LATCHED)
+                # LATCHED, matching task_manager's publisher: a volatile
+                # subscriber never gets the last status replayed, so restart
+                # adoption (_adopt) would wait for task_manager's NEXT change.
                 self.create_subscription(String, f"/{rid}/task_status",
-                                         self._on_task_status, 10)
+                                         self._on_task_status, LATCHED)
                 self.create_subscription(BatteryState, f"/{rid}/battery_state",
                                          self._on_battery, 10)
                 if self.sim_battery:
@@ -659,7 +716,8 @@ def main(argv=None):
             role = "gateway" if args.gateway else ("follower" if args.no_bid else "bidder")
             self.get_logger().info(
                 f"fleet_tasks {role} on {TASKS_TOPIC} (wire id {self.core.num}, "
-                f"{len(stations)} stations, sim battery {self.sim_battery})")
+                f"{len(self.core.waypoints())} {args.platform} waypoints, "
+                f"sim battery {self.sim_battery})")
 
         # -- inputs --
         def _on_tasks(self, msg):

@@ -119,11 +119,43 @@ scripts/sim_ctl.sh dry-run <name>
 ```
 
 Use `status: planned` for a scenario whose environment doesn't exist yet: it
-lists in the dashboard, greyed out, instead of failing at launch. One known
-gap — a person-avoidance scene needs a new `--scene` with an animated actor in
-`scripts/spawn_warehouse.py`. Multi-robot is fully wired: `run_demo.sh` derives
+lists in the dashboard, greyed out, instead of failing at launch. Moving
+obstacles are a `world:` (next section), not a new `--scene`. Multi-robot is fully wired: `run_demo.sh` derives
 `--robot-ids` from `--robots` (default 2) and threads `robot_ids:=` through to
 the bringup, one full stack per robot; `explore_fleet` is the default scenario.
+
+## Worlds and scored tests
+
+Props and scripted movers live in `configs/worlds/NAME.yaml`; a scenario adds
+one with `world: NAME` (or the launch form's **World** picker). `moving_obstacles`
+is the watch-it-live preset; `moving_obstacles_mapped` localizes on a saved map
+and is what the avoidance tests use. The sim publishes TRUE poses on
+`/sim/ground_truth` and the dashboard map draws the actors from it.
+
+Scored, repeatable runs are test cases in `configs/tests/`, run by
+`scripts/simtest.py` (it drives `sim_ctl.sh` itself — don't start a session
+first; it refuses if one is up):
+
+```bash
+scripts/simtest.py list
+scripts/simtest.py run pick_block              # ~2 min: is the harness healthy?
+scripts/simtest.py run crossing_yield          # verdict + data/simtests/<dir>/report.md
+scripts/simtest.py rescore data/simtests/<dir> # re-score recorded events, no sim
+```
+
+Pick and place (the magnet effector, `docs/manipulation.md`): `pick_block` and `place_block`
+are the two on the Tests tab, a block on a table in front of the robot. The other `pick_*`
+tests are parked (`parked: true`): off the tab, still runnable here, on the `pick_bench`
+scenario. `scripts/simtest.py run pick_place_smoke` is the one to diagnose with: its
+`oracle` variant (`perception=oracle`, ground truth instead of the camera) isolates the
+dock, arm and magnet; the `camera` variant adds perception. The sim log's `arm tcp link`
+and `magnet tcp: FK ... vs USD` lines say whether the arm's frames are right. The robot's
+arm is tucked upright while it drives: that is the planner, not a fault.
+
+Exit codes: 0 pass, 1 fail, 2 invalid test, 3 no run produced a score, 130
+interrupted. **On a shared network, export a private `ROS_DOMAIN_ID` before
+`console start`** — another machine's stack on domain 0 freezes Isaac at sim
+t=1 s and shares your `/robot_0` namespace. Full guide: `docs/testing.md`.
 
 ## When something goes wrong
 
@@ -198,19 +230,19 @@ fail deep inside sqlite.
 Prefer this. It is seconds instead of minutes, and needs no GPU or display.
 
 ```bash
-node webui/tests/scenarios_test.mjs    # scenarios tab; needs no fixture
-node webui/tests/dashboard_test.mjs    # live dashboard; needs webui/testdata/
+node webui/tests/operator_test.mjs     # operator view; needs no fixture
 python3 webui/session.py --list        # scenario validation, offline
-/usr/bin/python3 -m pytest tests/      # node + map-library logic (SYSTEM python3)
+/usr/bin/python3 -m pytest tests/      # node + map-library + simtest logic (SYSTEM python3)
+scripts/simtest.py validate             # every test case resolves
 ```
 
 Never point a browser at a live sim to test the dashboard — record a bag, build
-a fixture, test offline (`docs/running.md`, "Testing the dashboard without the
-sim").
+a fixture, test offline (`docs/running.md`).
 
 ## Reference
 
 - `docs/running.md` — the full runbook this summarises
+- `docs/testing.md` — worlds, test cases, metrics, rescoring
 - `webui/session.py` — scenario schema, `RUN_FLAGS`, phase table
 - `scripts/run_demo.sh` — what actually launches; its progress lines are parsed
   by `PHASE_PATTERNS` in `session.py`, so reword them only in the same commit

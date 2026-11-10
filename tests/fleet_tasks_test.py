@@ -19,9 +19,17 @@ import fleet_tasks as ft  # noqa: E402
 from commsim.core import fleet as F  # noqa: E402
 from commsim.core import timers  # noqa: E402
 from commsim.core.protocol import Params  # noqa: E402
-from stations import load_stations  # noqa: E402
+from waypoints import Waypoint  # noqa: E402
 
-STATIONS = load_stations(REPO / "configs" / "waypoints.yaml")
+# Fixed named waypoints at the poses the retired configs/waypoints.yaml
+# stations docked at, so the distances these tests reason about are unchanged.
+# Not data/nav_waypoints.json: that is the operator's live working set.
+WAYPOINTS = {w["name"]: Waypoint(w) for w in (
+    {"name": "shelf_a", "x": -4.5, "y": 5.2, "yaw": 1.5708},
+    {"name": "shelf_b", "x": -3.0, "y": 5.2, "yaw": 1.5708},
+    {"name": "zone_a", "x": -4.5, "y": 3.3, "yaw": -1.5708},
+    {"name": "zone_b", "x": -3.0, "y": 3.3, "yaw": -1.5708},
+)}
 CFG = ft.load_config()
 
 
@@ -30,10 +38,10 @@ class Bus:
         cfg = {**CFG, **cfg}
         self.params = Params.from_config(cfg)
         self.t = 0.0
-        self.gw = ft.FleetTasks(None, self.params, STATIONS, gateway=True, cfg=cfg)
+        self.gw = ft.FleetTasks(None, self.params, WAYPOINTS, gateway=True, cfg=cfg)
         self.nodes = {"gateway": self.gw}
         for rid, pose in robots.items():
-            n = ft.FleetTasks(rid, self.params, STATIONS, cfg=cfg, can_bid=rid not in no_bid)
+            n = ft.FleetTasks(rid, self.params, WAYPOINTS, cfg=cfg, can_bid=rid not in no_bid)
             n.set_pose(pose, 0.0)
             self.nodes[rid] = n
         self.poses_live = True  # the TF timer keeps every pose fresh (False: it stopped)
@@ -45,7 +53,7 @@ class Bus:
         self.down: set = set()
 
     def add(self, rid, pose):
-        n = ft.FleetTasks(rid, self.params, STATIONS, cfg=CFG, now=self.t)
+        n = ft.FleetTasks(rid, self.params, WAYPOINTS, cfg=CFG, now=self.t)
         n.set_pose(pose, self.t)
         self.nodes[rid] = n
         self.dispatched[rid], self.cancelled[rid] = [], []
@@ -112,7 +120,7 @@ class Bus:
 
 
 def shelf_a():
-    x, y, _ = STATIONS["shelf_a"].dock_pose()
+    x, y, _ = (WAYPOINTS["shelf_a"].x, WAYPOINTS["shelf_a"].y, 0.0)
     return (x, y)
 
 
@@ -191,7 +199,7 @@ def test_low_battery_robot_loses_to_slightly_farther_full_one():
 
 
 def test_simulated_battery_drains_only_while_moving():
-    n = ft.FleetTasks("robot_0", Params(), STATIONS, cfg=CFG)
+    n = ft.FleetTasks("robot_0", Params(), WAYPOINTS, cfg=CFG)
     n.battery_pct = 50.0
     n.drive(10.0, moving=False)
     assert n.battery_pct == 50.0
@@ -245,7 +253,7 @@ def test_late_joiner_learns_open_tasks_from_reannounce():
 
 
 def test_own_and_malformed_messages_are_ignored():
-    n = ft.FleetTasks("robot_0", Params(), STATIONS, cfg=CFG)
+    n = ft.FleetTasks("robot_0", Params(), WAYPOINTS, cfg=CFG)
     n.on_wire(ft.encode(1, {"type": "Claim", "task_id": 5, "cost": 1.0}), 0.0)
     assert 5 not in n.alloc.tasks
     n.on_wire("not json", 0.0)
@@ -279,7 +287,7 @@ def test_loaded_robot_bids_with_its_backlog_so_the_idle_one_wins():
     # robot already holding a long task must not win a second one just
     # because it stands next to the pickup: the idle one across the aisle
     # would finish it sooner.
-    zone_b = STATIONS["zone_b"].dock_pose()[:2]
+    zone_b = (WAYPOINTS["zone_b"].x, WAYPOINTS["zone_b"].y)
     assert math.dist(shelf_a(), zone_b) > 1.25  # else robot_0 should win below
     cfg = {"protocol": {**CFG["protocol"], "max_owned_tasks": 3}}
     bus = Bus({"robot_0": near(0.5), "robot_1": near(3.0)}, **cfg)
@@ -368,7 +376,7 @@ def test_restarted_fleet_tasks_adopts_the_carried_task_and_cancels_the_rest():
     assert [d["task_id"] for d in bus.dispatched["robot_0"]] == [f"fleet-{t1}", f"fleet-{t2}"]
     # fleet_tasks restarts; task_manager kept driving t1 with the item on
     # board and still has t2 queued. The latched status replays first.
-    bus.nodes["robot_0"] = fresh = ft.FleetTasks("robot_0", bus.params, STATIONS, cfg=CFG,
+    bus.nodes["robot_0"] = fresh = ft.FleetTasks("robot_0", bus.params, WAYPOINTS, cfg=CFG,
                                                  now=bus.t)
     fresh.set_pose(near(0.5), bus.t)
     bus.report("robot_0", t1, "NAV_TO_DROPOFF", pickup="shelf_a", dropoff="zone_a",
@@ -482,3 +490,71 @@ def test_robot_timers_match_the_measured_commsim_config():
         assert CFG["protocol"][k] == base["protocol"][k], k
     merged = {**base, "protocol": {**base["protocol"], **CFG["protocol"]}}
     assert timers.check(merged) == []
+
+
+def test_restart_adoption_reads_task_managers_summary_shape():
+    # task_manager.py (nav-only) carries the current task's names under "task"
+    # and its queue as summaries, not bare ids.
+    bus = Bus({"robot_0": near(0.5)})
+    bus.run(1.0)
+    t1, t2 = bus.request(), bus.request()
+    bus.run(4.0)
+    bus.nodes["robot_0"] = fresh = ft.FleetTasks("robot_0", bus.params, WAYPOINTS, cfg=CFG,
+                                                 now=bus.t)
+    fresh.set_pose(near(0.5), bus.t)
+    bus.report("robot_0", t1, "NAV_TO_DROPOFF",
+               task={"task_id": f"fleet-{t1}", "kind": "pickup",
+                     "pickup": "shelf_a", "dropoff": "zone_a"},
+               queue=[{"task_id": f"fleet-{t2}", "kind": "pickup",
+                       "pickup": "shelf_a", "dropoff": "zone_a"}])
+    assert fresh.alloc.committed(t1)
+    assert fresh.alloc.tasks[t1].pickup == shelf_a()
+    assert bus.cancelled["robot_0"] == [f"fleet-{t2}"]
+
+
+def test_hand_cancel_on_the_robot_withdraws_the_task_fleet_wide():
+    # The operator's x / Clear tasks / Stop all reaches task_manager directly.
+    # Without this the owner kept renewing the lease on a task nothing worked.
+    bus = Bus({"robot_0": near(1.0), "robot_1": near(4.0)})
+    bus.run(1.0)
+    tid = bus.request()
+    bus.run(3.0)
+    assert bus.board(tid)["owner"] == "robot_0"
+    bus.report("robot_0", tid, "CANCELLED")
+    bus.run(20.0)
+    assert {n.alloc.tasks[tid].state for n in bus.nodes.values()} == {"cancelled"}
+    assert bus.dispatched["robot_1"] == []      # withdrawn, not handed to the next robot
+    assert bus.cancelled["robot_0"] == []       # task_manager already dropped it
+
+
+def test_our_own_cancel_echo_is_not_a_hand_cancel():
+    bus = Bus({"robot_0": near(1.0)})
+    bus.run(1.0)
+    tid = bus.request()
+    bus.run(3.0)
+    bus.gw.cancel(tid, bus.t)
+    bus.run(1.0)
+    assert bus.cancelled["robot_0"] == [f"fleet-{tid}"]
+    bus.report("robot_0", tid, "CANCELLED")    # task_manager's echo
+    assert not bus.nodes["robot_0"]._cancelling
+
+
+def test_a_dispatch_task_manager_rejects_is_released_like_a_failure():
+    bus = Bus({"robot_0": near(1.0), "robot_1": near(4.0)})
+    bus.run(1.0)
+    tid = bus.request()
+    bus.run(3.0)
+    bus.nodes["robot_0"].on_task_status(json.dumps({
+        "task_id": None, "state": "IDLE",
+        "rejected": {"task_id": f"fleet-{tid}", "reason": "unknown waypoint 'shelf_a'"}}), bus.t)
+    bus._pump()
+    bus.run(5.0)
+    assert bus.board(tid)["owner"] == "robot_1"
+
+
+def test_waypoints_can_be_a_loader_read_on_every_request():
+    live = dict(WAYPOINTS)
+    gw = ft.FleetTasks(None, Params(), lambda: live, gateway=True, cfg=CFG)
+    assert gw.request("shelf_a", "new_pin", 0.0) is None
+    live["new_pin"] = Waypoint({"name": "new_pin", "x": 1.0, "y": 1.0})
+    assert gw.request("shelf_a", "new_pin", 0.1) is not None

@@ -34,9 +34,17 @@ def test_real_scenario_uses_run_robot_and_only_its_flags(tmp_path):
                              "run": {"robot_id": "robot_0", "resume": True}})
     argv = sm.launcher_argv(s, s["run"])
     assert argv[0].endswith("scripts/run_robot.sh")
-    assert argv[1:] == ["--robot-id", "robot_0", "--resume", "--keep-console"]
+    assert argv[1:] == ["--robot-id", "robot_0", "--resume", "--slam-role", "all",
+                        "--keep-console"]
     # Defaults come from the real table: no sim keys leak into `run`.
     assert set(s["run"]) == set(sm.REAL_RUN_FLAGS)
+
+
+def test_real_slam_role_is_validated(tmp_path):
+    s = _validate(tmp_path, {"name": "r", "platform": "real", "run": {"slam_role": "robot"}})
+    assert "--slam-role" in sm.launcher_argv(s, s["run"])
+    with pytest.raises(sm.ScenarioError, match="slam-role"):
+        _validate(tmp_path, {"name": "r", "platform": "real", "run": {"slam_role": "cloud"}})
 
 
 @pytest.mark.parametrize("key,value", [("scene", "nvidia"), ("robots", 1),

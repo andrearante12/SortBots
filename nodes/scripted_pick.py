@@ -1,37 +1,46 @@
 #!/usr/bin/env python3
-"""Scripted pick/place for the SortBots warehouse demo.
+"""Scripted joint-space playback for the XLeRobot arm. NO LONGER LAUNCHED.
 
-Plays back recorded joint-space poses from `configs/arm_poses.yaml`:
+nodes/magnet_pick.py now answers task_manager's pick_request: it finds a package's
+magnet plate, docks, solves the arm with nodes/arm_kin.py and picks with the magnet
+effector (hardware/magnet_effector/), instead of replaying poses that were never
+captured for this geometry. This file stays as the `--play` tool for replaying a
+recorded joint sequence against a live sim (below), and for anyone who wants to jog
+the arm by poses rather than by solving. Its pose book is still the OLD gripper's: the
+`Jaw` close/open convention and the `weld` steps do not apply to the magnet, and
+spawn_warehouse.py no longer moves a package on a `pick_cmd` it did not get a plate for.
+
+What it did, for the record. It plays back recorded joint-space poses from
+`configs/arm_poses.yaml`:
 
     STOW -> APPROACH -> DESCEND -> CLOSE -> (weld) -> LIFT -> CARRY
 
 There is no IK on this path. The poses were captured by jogging the arm with
-the dashboard's arm pad (`webui/arm.js`) and pasting the emitted YAML into the
+the old dashboard's arm pad (since removed) and pasting the emitted YAML into the
 config — so the numbers are measured, not solved, and the node needs neither
 torch nor pytorch-kinematics. That is what makes it launchable: the previous
 version carried a module-scope `import torch`, so no launch file could start it
 and every dispatched task timed out in PICKING with nothing listening. IK still
 exists in `nodes/arm_ik.py` behind `--mode ik` for anything that wants it.
 
-Protocol — unchanged, and `nodes/task_manager.py` depends on every line of it:
+Protocol (the bare-string form; nodes/magnet_pick.py's requests are JSON and
+carry the package):
 
     task_manager.py --[[/<robot>/pick_request: "attach"|"detach"]]--> this node
     this node       --[[/<robot>/arm_joint_cmd: JointState]]-------> Isaac (spawn_warehouse.py)
-    this node       --[[/<robot>/pick_cmd: "attach"|"detach"]]-----> Isaac (mock weld)
+    this node       --[[/<robot>/pick_cmd: "attach"|"detach"]]-----> Isaac (the magnet)
     this node       --[[/<robot>/pick_result: "picked"|"placed"|"failed"]]--> task_manager.py
 
 `arm_joint_cmd` must always carry ALL SIX of `ARM_JOINT_NAMES` in order:
 `spawn_warehouse._read_arm_cmd` returns None and silently drops the command if
-any name is missing. The result string must reach task_manager within its
-`PICK_TIMEOUT_SEC` (30 s) — `main()` logs each sequence's budget at startup and
-warns if a capture has grown past it.
+any name is missing.
 
-Still no real grasp physics: Isaac's `_sync_package_to_gripper` teleports the
-package onto the gripper tip while attached. What the arm does here is reach
-for it convincingly first.
+The magnet only holds a package that is within capture range of its face
+(simtest/magnet.py), so replaying these poses picks up nothing unless the arm
+happens to land on a plate.
 
-The dashboard's arm pad publishes the same topic, unarbitrated — last writer
-wins. Don't jog while a task is picking.
+Don't run this alongside nodes/magnet_pick.py: they publish the same topics,
+unarbitrated, and the last writer wins.
 
 Environment: system python3 + ROS 2 Jazzy. Nothing else.
 
@@ -86,12 +95,11 @@ HOME_Q = [0.0] * len(ARM_JOINT_NAMES)
 
 
 class ScriptedPickNode(Node):
-    def __init__(self, robot_id: str, book: PoseBook, ik=None, mock: bool = False):
+    def __init__(self, robot_id: str, book: PoseBook, ik=None):
         super().__init__(f"{robot_id}_scripted_pick")
         self.robot_id = robot_id
         self.book = book
         self.ik = ik
-        self.mock = mock
         self._last_q = list(HOME_Q)
 
         self.arm_cmd_pub = self.create_publisher(JointState, f"/{robot_id}/arm_joint_cmd", 10)
@@ -168,15 +176,7 @@ class ScriptedPickNode(Node):
             return
         self._busy = True
         try:
-            if self.mock:
-                # No arm to move (see --mock): answer as if the pick/place
-                # succeeded so the task FSM and the fleet auction run through.
-                if msg.data in ("attach", "detach"):
-                    self.get_logger().info(f"mock {msg.data}: reporting success")
-                    self._publish_result("picked" if msg.data == "attach" else "placed")
-                else:
-                    self.get_logger().error(f"unknown pick_request: {msg.data!r}")
-            elif msg.data == "attach":
+            if msg.data == "attach":
                 self._publish_result("picked" if self._play("pick") else "failed")
             elif msg.data == "detach":
                 self._publish_result("placed" if self._play("place") else "failed")
@@ -211,11 +211,6 @@ def main() -> int:
     parser.add_argument("--play", choices=("pick", "place"), default=None,
                         help="run one sequence immediately and exit — iterate on "
                              "arm_poses.yaml against a live sim without Nav2 or the task FSM")
-    parser.add_argument("--mock", action="store_true",
-                        help="never move the arm; answer every pick_request with success. "
-                             "For robots whose arm nothing animates (Isaac's mock package "
-                             "follows robot_0's gripper only), so they can still win and "
-                             "finish fleet tasks end to end")
     args = parser.parse_args()
 
     try:
@@ -233,11 +228,8 @@ def main() -> int:
         ik = ArmIKSolver(args.urdf or URDF_PATH)
 
     rclpy.init()
-    node = ScriptedPickNode(args.robot_id, book, ik=ik, mock=args.mock)
-    if args.mock:
-        node.get_logger().warn("--mock: the arm will not move; picks are reported successful")
-    else:
-        _log_budgets(node)
+    node = ScriptedPickNode(args.robot_id, book, ik=ik)
+    _log_budgets(node)
     try:
         if args.play:
             node.get_logger().info(f"--play {args.play}: running once, then exiting")

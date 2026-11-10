@@ -194,10 +194,14 @@ def _author_xform(stage, prim_path: str, translate: tuple[float, float, float]):
 
 # ------------------------------------------------------------------- materials
 
-_OMNI_PBR_MDL = (
-    "/home/andre/isaacsim/venv/lib/python3.11/site-packages/isaacsim/kit/mdl/core/Base/"
-    "OmniPBR.mdl"
-)
+# Bare module name, resolved through Kit's MDL search path (core/Base is on
+# it) — the same form omni.kit's CreateMdlMaterialPrim uses. This was an
+# absolute path into one developer's venv (/home/andre/...), which on any
+# other machine failed MDL compilation with "comp error: C120 could not find
+# module" (2026-10-06). That used to trip run_demo.sh's startup-failure grep
+# and abort the run; since the grep was dropped (2026-10-09) the material
+# just fails to load on every machine but that one.
+_OMNI_PBR_MDL = "OmniPBR.mdl"
 
 
 def _mdl_shader(stage, material_path: str):

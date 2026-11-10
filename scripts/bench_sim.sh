@@ -41,9 +41,32 @@
 # real run to tune anything else — including before believing that a win here
 # is a win there.
 #
+# A second machine, and why the advice above is machine-specific: on an RTX
+# 4070 LAPTOP GPU (8 GB, 32-thread i9-14900HX, "performance" power profile),
+# measured 2026-10-06 with 2 robots, no chase cam:
+#
+#   render-every  lite-render  camera     RTF     GPU   isaac CPU
+#   1             -            848x480    0.47x   100%  4.0 cores
+#   2             -            848x480    0.91x   100%  4.9
+#   1             yes          848x480    0.73x    90%  7.3
+#   1             -            424x240    0.62x    99%  6.2
+#   2             yes          848x480    1.11x    68%  6.0
+#   600           -            -          2.69x     0%  3.2   (physics ceiling)
+#
+# Here the GPU, not the CPU, is the wall, so the render-rate "trap" above
+# inverts: render-every 2 nearly doubles RTF, and it carries over to the full
+# stack (explore_fleet 0.38x -> 0.81x with --lite-render too) because 32
+# threads leave the ROS side unstarved. At render-every 2 camera_info still
+# arrives at 30.0/sim-s — every D435 frame is rendered. The tell for which
+# machine you have: GPU util at 100% with Isaac CPU around 4 cores is this
+# one; load near the core count is the desktop above. Power profile matters
+# too: "balanced" -> "performance" was +8% RTF on the laptop, which still
+# sat at its 86 C thermal limit.
+#
 #   scripts/bench_sim.sh                                  # current defaults
 #   scripts/bench_sim.sh --robots 1 --chase-cam-robots 0  # isolate camera cost
 #   scripts/bench_sim.sh --label "render every 2nd tick"  # annotate a run
+#   scripts/bench_sim.sh --render-every 2 --lite-render   # the GPU-bound wins
 #
 # Must be run from a shell with NO ROS 2 sourced (activate_isaac.sh enforces).
 set -uo pipefail
@@ -54,6 +77,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ROBOTS=2
 CHASE_CAM=1
 RENDER_EVERY=2
+LITE_RENDER=""
 SCENE=nvidia
 # Isaac needs to load the warehouse, import 2 URDFs and let the RTX pipeline
 # settle; the first seconds after the timeline starts are not representative.
@@ -67,6 +91,7 @@ while [[ $# -gt 0 ]]; do
     --robots) ROBOTS="$2"; shift 2 ;;
     --chase-cam-robots) CHASE_CAM="$2"; shift 2 ;;
     --render-every) RENDER_EVERY="$2"; shift 2 ;;
+    --lite-render) LITE_RENDER="--lite-render"; shift ;;
     --scene) SCENE="$2"; shift 2 ;;
     --warmup) WARMUP_S="$2"; shift 2 ;;
     --window) WINDOW_S="$2"; shift 2 ;;
@@ -98,14 +123,14 @@ LOG="$(mktemp -t bench_sim_log.XXXXXX)"
 trap 'rm -f "$RESULT" "$LOG"' EXIT
 
 echo "[bench] ${LABEL:-baseline}: robots=$ROBOTS chase_cam=$CHASE_CAM" \
-     "render_every=$RENDER_EVERY scene=$SCENE"
+     "render_every=$RENDER_EVERY ${LITE_RENDER:+lite_render }scene=$SCENE"
 echo "[bench] starting Isaac alone (no ROS pipeline)..."
 
 ISAAC_SPAWN_WAREHOUSE_RESULT="$RESULT" setsid bash -c "
   source '$REPO_ROOT/scripts/activate_isaac.sh' >/dev/null 2>&1
   exec python '$REPO_ROOT/scripts/spawn_warehouse.py' --headless --forever \
        --robots $ROBOTS --scene $SCENE --drive cmd_vel \
-       --chase-cam-robots $CHASE_CAM --render-every $RENDER_EVERY" >"$LOG" 2>&1 &
+       --chase-cam-robots $CHASE_CAM --render-every $RENDER_EVERY $LITE_RENDER" >"$LOG" 2>&1 &
 SESSION_PID=$!
 
 cleanup() {

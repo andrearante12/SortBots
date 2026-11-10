@@ -80,6 +80,57 @@ def build_chase_camera_graph(
     )
 
 
+def build_view_camera_graph(
+    *,
+    graph_path: str,
+    camera_prim_path: str,
+    topic: str,
+    width: int,
+    height: int,
+    frame_id: str,
+) -> str:
+    """An RGB-only camera graph that starts DISABLED; returns the attribute path that
+    switches it (`<graph>/CreateRenderProduct.inputs:enabled`).
+
+    IsaacCreateRenderProduct with enabled=false creates no render product, and turning
+    it off later calls hydra_texture.set_updates_enabled(False) (isaacsim.core.nodes
+    OgnIsaacCreateRenderProduct.py), so a disabled camera costs no rendering at all.
+    That is what lets the operator view's Sim view exist without paying for it while
+    nobody looks: render products, not render rate, set the sim's speed
+    (scripts/bench_sim.sh). No depth or camera_info: nothing consumes them here.
+    """
+    import omni.graph.core as og
+    import usdrt.Sdf
+
+    keys = og.Controller.Keys
+    og.Controller.edit(
+        {"graph_path": graph_path, "evaluator_name": "execution"},
+        {
+            keys.CREATE_NODES: [
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+                ("CreateRenderProduct", "isaacsim.core.nodes.IsaacCreateRenderProduct"),
+                ("RGBPublish", "isaacsim.ros2.bridge.ROS2CameraHelper"),
+            ],
+            keys.SET_VALUES: [
+                ("CreateRenderProduct.inputs:cameraPrim", [usdrt.Sdf.Path(camera_prim_path)]),
+                ("CreateRenderProduct.inputs:width", width),
+                ("CreateRenderProduct.inputs:height", height),
+                ("CreateRenderProduct.inputs:enabled", False),
+                ("RGBPublish.inputs:type", "rgb"),
+                ("RGBPublish.inputs:topicName", topic),
+                ("RGBPublish.inputs:frameId", frame_id),
+                ("RGBPublish.inputs:resetSimulationTimeOnStop", True),
+            ],
+            keys.CONNECT: [
+                ("OnPlaybackTick.outputs:tick", "CreateRenderProduct.inputs:execIn"),
+                ("CreateRenderProduct.outputs:execOut", "RGBPublish.inputs:execIn"),
+                ("CreateRenderProduct.outputs:renderProductPath", "RGBPublish.inputs:renderProductPath"),
+            ],
+        },
+    )
+    return f"{graph_path}/CreateRenderProduct.inputs:enabled"
+
+
 def build_robot_graphs(
     robot_prim_path: str,
     chassis_subpath: str,

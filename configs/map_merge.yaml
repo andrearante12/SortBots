@@ -14,3 +14,15 @@ publish_period_s: 1.0
 # value >= this counts as occupied when resolving priority ties between two
 # robots' grids that disagree about the same world cell.
 occupied_thresh: 50
+
+# The fused grid always reaches at least this far around every robot's spawn
+# (configs/robots.yaml, passed by the bringup as --keep-in), as unknown space
+# where no robot has mapped. Nav2's global costmap is sized to /map, and a
+# robot standing outside it fails every plan with "Start Coordinates ... was
+# outside bounds". On a saved map extended by a fleet (shared_map), a robot
+# spawned where the map's builder never looked stays read-only until it
+# recognises a mapped place (nodes/map_handoff.py), so it adds nothing to
+# /map and could never get inside: robot_1 and robot_3 sat at their spawns
+# for a whole 4-robot run on fleet_warehouse_test (2026-10-25). Padded,
+# they plan through unknown space (planner allow_unknown) toward the map.
+spawn_margin_m: 4.0
