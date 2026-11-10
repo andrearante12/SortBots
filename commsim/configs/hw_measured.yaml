@@ -1,0 +1,36 @@
+# Measured on the lab routers (commsim/hw/README.md step 8), layered last:
+#   python3 -m commsim.hw.deploy commsim/configs/base.yaml commsim/configs/hw_lab.yaml \
+#       commsim/configs/hw_measured.yaml --mesh-key-file ~/.config/sortbots/mesh.key --out commsim/results/hw
+#   python3 -m commsim.des.run --variants V4 --configs commsim/configs/hw_lab.yaml \
+#       commsim/configs/hw_measured.yaml --out ...      # no --bg: uses busy_share below
+# Only keys with a hardware number are set; everything else (reroute times,
+# path loss, rack attenuation) stays the emulation value or placeholder in
+# base.yaml until it is measured.
+#
+# Setup, 2026-11-09: 2 x GL-MT3000 (MT7981, mt76), OpenWrt 25.12.5, ~1 m apart
+# on a desk, campus building. No Flint 2 yet, so no third router: rerouting
+# and multi-hop are NOT measured. Far end of every probe is a router (no host
+# on robot_1's LAN), path = laptop -> Ethernet -> robot_2 -> radio -> robot_1.
+
+background:
+  # Channel busy % with the fleet idle (router_stats.sh, iw survey counters),
+  # 30 s windows, both routers. 2.4 GHz is campus Wi-Fi (GWguest, GWdevice,
+  # eduroam: 12-18 networks on ch1). Repeated reads on ch1 gave 25-36%; 0.30
+  # is the middle. Swept channels with the mesh moved there: ch6 40-47%,
+  # ch11 26-30%, ch1 27-28%, so ch1 stays. 5 GHz ch36: 3-4%.
+  busy_share: {g24: 0.30, g5: 0.04}
+
+# Not keys the code reads; recorded so the numbers live next to the config.
+# Link, ~1 m: signal -18..-27 dBm, HE (802.11ax) MCS 9-11 x 2 streams,
+#   229-287 Mb/s PHY on both bands. The DES rate table tops out at HT MCS7
+#   65 Mb/s (des/radio.py), so its data airtime is pessimistic here.
+# Round trip, 100 Hz ICMP, 150 B: idle p50 11.9 / p95 13-14 / p99 22 ms, 0 loss.
+#   Back-to-back probes return in ~1.5 ms, so the ~12 ms floor is router or
+#   adapter scheduling, not airtime (open question).
+# Saturation (HTTP from robot_1, 4 TCP streams):
+#   2.4 GHz only: 165 Mb/s, RTT p50 27 / p95 50 / p99 60 / max 84 ms, 0 loss, ch busy 90%.
+#   dual band (batman picks 5 GHz, TQ 251 vs 244): 200 Mb/s, RTT p50 17 /
+#   p95 30 / p99 38 / max 60 ms, 0 loss.
+# 802.11b rates: tx bitrate still reads 1.0 Mb/s between bursts with the
+#   99-sortbots-rates hook and the mask set by hand (management frames at the
+#   mesh basic rate?) - not fixed.

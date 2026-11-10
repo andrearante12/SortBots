@@ -1,0 +1,20 @@
+== sortbots-robot-2  2026-06-29T13:20:26Z
+== batctl n (neighbors: interface, last seen)
+[B.A.T.M.A.N. adv 2025.4-openwrt-4, MainIF/MAC: mesh-g24/94:83:c4:98:fe:55 (bat0/72:2c:e0:35:86:d2 BATMAN_IV)]
+IF             Neighbor              last-seen
+     mesh-g24	  94:83:c4:98:fe:75    0.120s
+== batctl o (originators: best next hop, TQ out of 255)
+[B.A.T.M.A.N. adv 2025.4-openwrt-4, MainIF/MAC: mesh-g24/94:83:c4:98:fe:55 (bat0/72:2c:e0:35:86:d2 BATMAN_IV)]
+   Originator        last-seen (#/255) Nexthop           [outgoingIF]
+ * 94:83:c4:98:fe:75    0.130s   (255) 94:83:c4:98:fe:75 [  mesh-g24]
+== mesh-g24 station dump (signal dBm, tx/rx bitrate, retries, failed)
+Station 94:83:c4:98:fe:75 (on mesh-g24)
+	mesh plink:	ESTAB
+	tx retries:	1
+	tx failed:	1
+	signal:  	-19 [-20, -23] dBm
+	tx bitrate:	1.0 MBit/s
+	rx bitrate:	258.0 MBit/s HE-MCS 10 HE-NSS 2 HE-GI 0 HE-DCM 0
+	last ack signal:-18 dBm
+	avg ack signal:	-19 dBm
+== mesh-g24 channel busy over 30s: 40%

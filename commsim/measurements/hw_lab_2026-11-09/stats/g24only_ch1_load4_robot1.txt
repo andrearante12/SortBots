@@ -1,0 +1,5 @@
+== mesh-g24 station dump (signal dBm, tx/rx bitrate, retries, failed)
+	tx failed:	127009
+	tx bitrate:	258.0 MBit/s HE-MCS 10 HE-NSS 2 HE-GI 0 HE-DCM 0
+	rx bitrate:	286.7 MBit/s HE-MCS 11 HE-NSS 2 HE-GI 0 HE-DCM 0
+== mesh-g24 channel busy over 10s: 90%

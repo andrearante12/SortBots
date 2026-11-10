@@ -39,7 +39,13 @@ def run_point(spec: dict) -> dict:
     cfg = load_config(*spec["configs"])
     if spec.get("radio"):
         cfg.setdefault("radio_model", {}).update(spec["radio"])
-    sim = Sim(cfg, spec["variant"], spec["n"], seed=spec["seed"], bg_share=spec["bg"],
+    # no --bg: the config's per-band background (a measured hw_measured.yaml)
+    # (a scalar when every band agrees, so base.yaml's 0/0 still reads bg=0.0 downstream)
+    bg = spec["bg"]
+    if bg is None:
+        bg = dict(cfg["background"]["busy_share"])
+        bg = bg.popitem()[1] if len(set(bg.values())) == 1 else bg
+    sim = Sim(cfg, spec["variant"], spec["n"], seed=spec["seed"], bg_share=bg,
               layout=spec["layout"], warmup_s=spec["warmup"], steady_s=spec["steady"],
               lease_beacon_hz=spec["lease_beacon_hz"],
               status_transport=spec.get("status_transport"),
@@ -47,6 +53,8 @@ def run_point(spec: dict) -> dict:
               single_connect=spec.get("single_connect"),
               overrides=spec.get("overrides"))
     res = sim.run()
+    # per-band shares as one string: summarize.py groups on this field (needs hashable)
+    res["bg_share"] = bg_str(res["bg_share"]) if isinstance(res["bg_share"], dict) else res["bg_share"]
     res.update(layout=spec["layout"], warmup_s=spec["warmup"], steady_s=spec["steady"],
                label=spec["label"], transport_liveness=spec["transport_liveness"])
     blob = json.dumps({"cfg": cfg, "spec": spec}, sort_keys=True, default=str)
@@ -69,11 +77,19 @@ def write(out: Path, rows: list[dict]) -> None:
             w.writerow({k: (";".join(v) if isinstance(v, list) else v) for k, v in r.items()})
 
 
+def bg_str(bg) -> str:
+    if isinstance(bg, str):
+        return bg
+    if isinstance(bg, dict):
+        return "/".join(f"{b}:{v:.2f}" for b, v in sorted(bg.items()))
+    return "config" if bg is None else f"{bg:.2f}"
+
+
 def fmt(r: dict) -> str:
     def g(k, d=1):
         v = r.get(k)
         return "nan" if v is None or (isinstance(v, float) and math.isnan(v)) else f"{v:.{d}f}"
-    return (f"{r['label']:<10} n={r['n']:<3} s={r['seed']} bg={r['bg_share']:.2f} "
+    return (f"{r['label']:<10} n={r['n']:<3} s={r['seed']} bg={bg_str(r['bg_share'])} "
             f"busy24={g('busy_g24', 3)} busy5={g('busy_g5', 3)} "
             f"p95={g('ctl_p95_ms')}ms p99={g('ctl_p99_ms')}ms (N={r['ctl_samples']}) "
             f"deliv={g('status_delivery', 3)} silent={r['false_silent']} "
@@ -87,7 +103,9 @@ def main(argv=None) -> int:
     ap.add_argument("--variants", nargs="+", default=["V2"])
     ap.add_argument("--n", nargs="+", type=int, default=[5])
     ap.add_argument("--seeds", nargs="+", type=int, default=[1])
-    ap.add_argument("--bg", nargs="+", type=float, default=[0.0])
+    ap.add_argument("--bg", nargs="+", type=float, default=[None],
+                    help="background busy share, every band; default: background.busy_share "
+                         "per band from the config (0 in base.yaml)")
     ap.add_argument("--layout", default="warehouse")
     ap.add_argument("--warmup", type=float, default=20.0)
     ap.add_argument("--steady", type=float, default=60.0)
@@ -148,7 +166,7 @@ def main(argv=None) -> int:
                     for r in rs:
                         for c in r["failed"]:
                             crit[c] = crit.get(c, 0) + 1
-                    print(f"== {(a.label or g[0]) + a.suffix} bg={g[1]:.2f}: FAILS at n={n} "
+                    print(f"== {(a.label or g[0]) + a.suffix} bg={bg_str(g[1])}: FAILS at n={n} "
                           f"({', '.join(f'{c} x{k}' for c, k in sorted(crit.items()))})", flush=True)
     return 0
 

@@ -290,13 +290,16 @@ def read_key(path: Path, new: bool) -> str:
             raise SystemExit(f"{path} exists; refusing to overwrite the mesh key")
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(secrets.token_urlsafe(24) + "\n")
     if not path.exists():
         raise SystemExit(f"no mesh key at {path} (create one with --new-key)")
-    if path.stat().st_mode & 0o077:
+    # POSIX only: Windows reports every regular file as 0o666 and chmod can't
+    # change that (the profile dir's ACL is what protects it there), so the
+    # check refused every key on the Windows gateway laptop (2026-11-09).
+    if os.name == "posix" and path.stat().st_mode & 0o077:
         raise SystemExit(f"{path} is readable by others; chmod 600 it")
-    key = path.read_text().strip()
+    key = path.read_text(encoding="utf-8").strip()
     # SAE passphrase limits, and no quote characters so it survives uci + sh
     if not 8 <= len(key) <= 63 or any(c in key for c in "'\"\\$`\n"):
         raise SystemExit(f"{path}: key must be 8-63 chars with no quotes, $, ` or \\")
@@ -328,13 +331,15 @@ def deploy(cfg: dict, out: Path, key: str, sources: str,
             "fleet.env": fleet_env(node, cfg),
         }
         for name, text in files.items():
-            (d / name).write_text(text)
+            # LF even from Windows: a CRLF router-setup.sh feeds `sh` `set -e\r`
+            # and every `uci set ...=value\r` (2026-11-09)
+            F.write_lf(d / name, text)
             os.chmod(d / name, 0o700 if name.endswith(".sh") else 0o600)
-    fl = json.loads((out / "fleet.json").read_text())
+    fl = json.loads((out / "fleet.json").read_text(encoding="utf-8"))
     for row, node in zip(fl, fleet):
         row["router_ip"] = router_ip(node, cfg)
         row["sortbots_id"] = sortbots_id(node)
-    (out / "fleet.json").write_text(json.dumps(fl, indent=2) + "\n")
+    F.write_lf(out / "fleet.json", json.dumps(fl, indent=2) + "\n")
     return fleet
 
 

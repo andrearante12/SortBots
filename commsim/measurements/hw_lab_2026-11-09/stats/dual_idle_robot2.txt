@@ -1,0 +1,34 @@
+== sortbots-robot-2  2026-06-29T13:29:13Z
+== batctl n (neighbors: interface, last seen)
+[B.A.T.M.A.N. adv 2025.4-openwrt-4, MainIF/MAC: mesh-g24/94:83:c4:98:fe:55 (bat0/fe:5d:f5:3f:10:d7 BATMAN_IV)]
+IF             Neighbor              last-seen
+     mesh-g24	  94:83:c4:98:fe:75    0.130s
+      mesh-g5	  94:83:c4:98:fe:73    0.090s
+== batctl o (originators: best next hop, TQ out of 255)
+[B.A.T.M.A.N. adv 2025.4-openwrt-4, MainIF/MAC: mesh-g24/94:83:c4:98:fe:55 (bat0/fe:5d:f5:3f:10:d7 BATMAN_IV)]
+   Originator        last-seen (#/255) Nexthop           [outgoingIF]
+ * 94:83:c4:98:fe:73    0.100s   (251) 94:83:c4:98:fe:73 [   mesh-g5]
+   94:83:c4:98:fe:75    0.140s   (251) 94:83:c4:98:fe:73 [   mesh-g5]
+ * 94:83:c4:98:fe:75    0.140s   (251) 94:83:c4:98:fe:75 [  mesh-g24]
+== mesh-g24 station dump (signal dBm, tx/rx bitrate, retries, failed)
+Station 94:83:c4:98:fe:75 (on mesh-g24)
+	mesh plink:	ESTAB
+	tx retries:	2
+	tx failed:	2
+	signal:  	-16 [-17, -20] dBm
+	tx bitrate:	258.0 MBit/s HE-MCS 10 HE-NSS 2 HE-GI 0 HE-DCM 0
+	rx bitrate:	286.7 MBit/s HE-MCS 11 HE-NSS 2 HE-GI 0 HE-DCM 0
+	last ack signal:-17 dBm
+	avg ack signal:	-19 dBm
+== mesh-g24 channel busy over 30s: 26%
+== mesh-g5 station dump (signal dBm, tx/rx bitrate, retries, failed)
+Station 94:83:c4:98:fe:73 (on mesh-g5)
+	mesh plink:	ESTAB
+	tx retries:	2
+	tx failed:	2
+	signal:  	-17 [-22, -18] dBm
+	tx bitrate:	286.7 MBit/s HE-MCS 11 HE-NSS 2 HE-GI 0 HE-DCM 0
+	rx bitrate:	6.0 MBit/s
+	last ack signal:-17 dBm
+	avg ack signal:	-21 dBm
+== mesh-g5 channel busy over 30s: 3%

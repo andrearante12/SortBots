@@ -14,6 +14,7 @@ from commsim.hw import probe as P
 
 CONFIGS = F.Path(__file__).resolve().parent.parent / "configs"
 KEY = "test-mesh-key-0123456789"
+POSIX = os.name == "posix"  # Windows reports every file 0o666; chmod can't change that
 
 
 def lab_cfg():
@@ -44,15 +45,16 @@ def test_router_script_carries_the_measured_design(tmp_path):
                    "mtu=1532", "mcast_rate=12000", "dhcp.lan.ignore=1", "network.wan.auto=0",
                    "legacy-2.4 6 9 12"):
         assert needle in s, needle
-    # 2.4 GHz-only lab config -> no 5 GHz mesh interface
-    assert "mesh_g24" in s and "mesh_g5" not in s
-
-
-def test_dual_band_adds_5ghz(tmp_path):
-    c = lab_cfg()
-    c["fleet"]["bands"] = ["g24", "g5"]
-    s = (bundle(tmp_path, c) / "robot_2" / "router-setup.sh").read_text()
+    # dual-band lab config (V4) -> a mesh interface per band
+    assert "mesh_g24" in s and "mesh_g5" in s
     assert "radio_for 5g" in s and "uci set wireless.$r.channel=36" in s
+
+
+def test_single_band_has_no_5ghz(tmp_path):
+    c = lab_cfg()
+    c["fleet"]["bands"] = ["g24"]
+    s = (bundle(tmp_path, c) / "robot_2" / "router-setup.sh").read_text()
+    assert "mesh_g24" in s and "mesh_g5" not in s and "radio_for 5g" not in s
 
 
 @pytest.mark.skipif(not shutil.which("dash"), reason="needs dash for a POSIX sh parse")
@@ -66,9 +68,10 @@ def test_key_only_in_router_scripts_and_private(tmp_path):
     for f in out.rglob("*"):
         if f.is_file():
             assert (KEY in f.read_text()) == (f.name == "router-setup.sh"), f
-            if f.name == "router-setup.sh":
+            assert b"\r" not in f.read_bytes(), f  # CRLF breaks sh on the router
+            if POSIX and f.name == "router-setup.sh":
                 assert f.stat().st_mode & 0o077 == 0
-    assert out.stat().st_mode & 0o077 == 0
+    assert not POSIX or out.stat().st_mode & 0o077 == 0
 
 
 def test_host_has_no_route_or_dns_onto_the_mesh(tmp_path):
@@ -97,13 +100,14 @@ def test_router_and_host_addresses_never_collide():
 def test_key_file_rules(tmp_path):
     k = tmp_path / "k"
     key = D.read_key(k, new=True)
-    assert len(key) >= 8 and k.stat().st_mode & 0o777 == 0o600
+    assert len(key) >= 8 and (not POSIX or k.stat().st_mode & 0o777 == 0o600)
     with pytest.raises(SystemExit):
         D.read_key(k, new=True)              # never overwrite an existing key
-    os.chmod(k, 0o644)
-    with pytest.raises(SystemExit):
-        D.read_key(k, new=False)             # world-readable key refused
-    os.chmod(k, 0o600)
+    if POSIX:
+        os.chmod(k, 0o644)
+        with pytest.raises(SystemExit):
+            D.read_key(k, new=False)         # world-readable key refused
+        os.chmod(k, 0o600)
     k.write_text("short\n")
     with pytest.raises(SystemExit):
         D.read_key(k, new=False)

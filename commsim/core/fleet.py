@@ -40,7 +40,7 @@ def load_config(*paths: str | Path) -> dict:
     """Merge YAML layers left to right (base, variant, layout, scenario, sweep)."""
     cfg: dict = {}
     for p in paths:
-        with open(p) as f:
+        with open(p, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
         if not isinstance(raw, dict):
             raise ValueError(f"{p}: expected a mapping")
@@ -179,20 +179,26 @@ def cyclone_config_xml(node: Node, fleet: list[Node]) -> str:
 """
 
 
+def write_lf(path: Path, text: str) -> None:
+    """Bundle files land on Linux hosts and OpenWrt: LF + UTF-8 even when
+    generated on Windows, whose defaults (CRLF, cp1252) break `sh` (2026-11-09)."""
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
 def generate(cfg: dict, out: Path) -> list[Node]:
     fleet = build_fleet(cfg)
     out.mkdir(parents=True, exist_ok=True)
     for node in fleet:
         d = out / node.name
         d.mkdir(exist_ok=True)
-        (d / "zenohd.json5").write_text(
-            json.dumps(zenoh_router_config(node, fleet, cfg), indent=2) + "\n")
-        (d / "cyclonedds.xml").write_text(cyclone_config_xml(node, fleet))
-        (d / "status_udp.json").write_text(
-            json.dumps(status_udp_config(node, fleet, cfg), indent=2) + "\n")
-        (d / "zenoh_override.txt").write_text(
-            zenoh_override(zenoh_router_config(node, fleet, cfg)) + "\n")
-    (out / "fleet.json").write_text(json.dumps(
+        write_lf(d / "zenohd.json5",
+                 json.dumps(zenoh_router_config(node, fleet, cfg), indent=2) + "\n")
+        write_lf(d / "cyclonedds.xml", cyclone_config_xml(node, fleet))
+        write_lf(d / "status_udp.json",
+                 json.dumps(status_udp_config(node, fleet, cfg), indent=2) + "\n")
+        write_lf(d / "zenoh_override.txt",
+                 zenoh_override(zenoh_router_config(node, fleet, cfg)) + "\n")
+    write_lf(out / "fleet.json", json.dumps(
         [{"robot_id": n.robot_id, "name": n.name, "ip": n.ip,
           "is_gateway": n.is_gateway, "macs": n.macs} for n in fleet], indent=2) + "\n")
     return fleet

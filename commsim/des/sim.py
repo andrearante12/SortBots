@@ -540,6 +540,8 @@ class Sim:
             single_connect = cfg["zenoh"].get("connect", "lower_id") == "lower_id"
         self.status_transport = status_transport or pc.get("status_transport", "tcp")
         self.transport_liveness = transport_liveness
+        # float = same share on every band (the sweeps); {band: share} = per band,
+        # as the lab measured it (configs/hw_measured.yaml background.busy_share)
         self.bg_share = bg_share
         self.status_only = status_only    # M1 cross-check: Status (+keepalives) only
         self.fixed_snr = fixed_snr        # {(i, j): dB} replaces propagation (cross-check)
@@ -1302,8 +1304,11 @@ class Sim:
     def background(self, band):
         st = self.st.setdefault((-1, band), Station(-1, band))
         self.ch[band].enqueue(st, Frame("bg", 0, -1))
-        lam = self.bg_share / BG_AIRTIME_S
+        lam = self.bg_for(band) / BG_AIRTIME_S
         self.at(self.now + self.rng.expovariate(lam), self.background, band)
+
+    def bg_for(self, band) -> float:
+        return self.bg_share.get(band, 0.0) if isinstance(self.bg_share, dict) else self.bg_share
 
     # ---- run ---------------------------------------------------------------
 
@@ -1340,8 +1345,8 @@ class Sim:
             self.every(0.1024, beacon, 0.01)
         if not self.status_only and self.task_rate > 0:  # 0 = tasks only on request (demo)
             self.at(rng.uniform(0, 2), self.task_arrival)
-        if self.bg_share > 0:
-            for b in self.bands:
+        for b in self.bands:
+            if self.bg_for(b) > 0:
                 self.at(0.0, self.background, b)
 
     def step(self, until: float) -> int:
