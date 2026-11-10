@@ -62,7 +62,11 @@ scripts/arm.sh head keys         # a/d pan, w/s tilt, c center
   joins the follower's own bus, so it is on whenever its calibration file exists; `--no-head`
   for the arm alone, `--head-invert pan|tilt` to flip a stick, `--head-dps` for speed.
 
-- **A joint that sometimes stops responding** is usually servo overload protection: past
+- **wrist_flex froze near magnet-straight-down** (fixed 2026-11-10): Y/A picked "up" from the
+  tool pitch at the current pose, and pitch peaks there (~+/-80 deg wrist_flex), so the direction
+  flipped every tick. Y/A now take the direction from the zero pose. LB/LT (hand-space tilt)
+  still cannot tilt the tool past vertical: past it, use Y/A.
+- **A joint that sometimes stops responding** for any other reason is usually servo overload protection: past
   `Overload_Torque` (80%) for `Protection_Time` (200 ms) a STS3215 drops to `Protective_Torque`
   (20%), too weak to lift the magnet. The pad's status line shows `FAULT <joint> overload` (any
   nonzero Status bits) for 10 s when it happens.

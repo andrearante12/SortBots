@@ -74,10 +74,14 @@ def cartesian_step(kin, q, target, inp, a, lo, hi, sign, dt, level):
     inp: dict lx ly rx ry tilt(-1/0/1) wf(-1/0/1). Returns (q, target, ok)."""
     k = (0.25 if inp["slow"] else 1.0) * LEVELS[level]
     if inp["wf"]:
-        # direct wrist_flex: which way "up" is in joint space depends on the motor sign
-        probe = q.copy()
+        # direct wrist_flex: which way "up" is in joint space depends on the motor sign. Probe it
+        # at the URDF zero pose, NOT at q: tool pitch peaks with the magnet pointing straight down
+        # (wrist_flex ~ +/-80 deg), so a probe at q flips sign there and A/Y dithered the wrist in
+        # place across that fold: "wrist_flex stuck" (live, 2026-11-10).
+        ref = np.zeros(len(q))
+        probe = ref.copy()
         probe[3] += 1e-3
-        up = 1.0 if kin.pose(probe)[3] > kin.pose(q)[3] else -1.0
+        up = 1.0 if kin.pose(probe)[3] > kin.pose(ref)[3] else -1.0
         q = q.copy()
         q[3] = np.clip(q[3] + up * inp["wf"] * math.radians(a.pitch_dps) * k * dt, lo[3], hi[3])
         target = kin.pose(q)  # the hand moves with the joint; sticks continue from here
