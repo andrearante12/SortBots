@@ -171,6 +171,16 @@ def head_step(target, pan_in, tilt_in, dps, dt, lim):
     return out
 
 
+def head_axes(x, y):
+    """Stick (deadzoned, -1..1) -> (pan, tilt) input that moves ONE axis at a time: the larger
+    one wins and the other is zeroed, because a thumb pushing "left" always leaks some up/down
+    and that drifted the tilt while panning (live, 2026-11-10). Squared response so small
+    deflections aim finely and a full push is still full speed."""
+    if abs(x) >= abs(y):
+        return x * abs(x), 0.0
+    return 0.0, y * abs(y)
+
+
 def cmd_read(a):
     bus, _ = connect_calibrated(a)
     bus.disable_torque()

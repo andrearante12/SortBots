@@ -2,6 +2,14 @@
 
 RESET, DIM, GREEN, YELLOW, RED = "\x1b[0m", "\x1b[2m", "\x1b[1;32m", "\x1b[33m", "\x1b[1;31m"
 
+# STS3215 Status register (65) bits, from Feetech's STS memory table
+_FAULT_BITS = {0: "voltage", 1: "angle-sensor", 2: "overheat", 3: "overcurrent", 5: "overload"}
+
+
+def servo_fault(bits):
+    """Status register value -> 'overload+overheat'; unknown bits show as 'bitN'."""
+    return "+".join(_FAULT_BITS.get(i, f"bit{i}") for i in range(8) if bits >> i & 1)
+
 
 def status_line(width, mode, held, pose_txt, level_txt, mag_on, mag_s, ok, bus_txt, note_txt):
     """One status line, ANSI-coloured, cut to `width` by dropping segments from the right.

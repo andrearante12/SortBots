@@ -30,3 +30,17 @@ def test_zero_input_returns_an_equal_target():
     lim = head.limits(CAL)
     t = {"head_pan": 3.0, "head_tilt": -2.0}
     assert head.head_step(t, 0.0, 0.0, 90.0, 0.1, lim) == t
+
+
+def test_head_axes_moves_one_axis_only():
+    assert head.head_axes(0.8, 0.3) == (0.8 * 0.8, 0.0)       # mostly sideways: pan only
+    assert head.head_axes(-0.2, -0.9) == (0.0, -0.9 * 0.9)    # mostly down: tilt only
+    assert head.head_axes(-1.0, 0.0) == (-1.0, 0.0)           # full push is still full speed
+    assert head.head_axes(0.0, 0.0) == (0.0, 0.0)
+
+
+def test_servo_fault_names_the_bits():
+    from status_line import servo_fault
+    assert servo_fault(0b100000) == "overload"
+    assert servo_fault(0b100100) == "overheat+overload"
+    assert servo_fault(0b10000000) == "bit7"

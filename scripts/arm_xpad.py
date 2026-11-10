@@ -21,8 +21,9 @@ scripts/arm_cartesian.py, whose live-tuned behavior this copies; kinematics in s
     hold L3 (left stick click)  speed x0.25 on top of the level
     right stick X            wrist_roll (LOCKED by default: --lock)
     B                        magnet toggle: ON needs the deadman held; OFF always works
-    hold RB                  HEAD: right stick X / Y = pan / tilt (no RT needed; the right
-                             stick stops driving the arm while RB is held)
+    hold RB                  HEAD: right stick X / Y = pan / tilt, one axis at a time (whichever
+                             the stick leans to more); no RT needed; the right stick stops
+                             driving the arm while RB is held
     X                        head back to center (0 / 0)
     START                    quit: torque off, magnet off
 
@@ -52,9 +53,9 @@ import time
 import numpy as np
 
 from arm_gamepad import JOINTS, MAX_RES
-from head import head_step
+from head import head_axes, head_step
 from so101_kin import SO101Kin
-from status_line import status_line
+from status_line import servo_fault, status_line
 from xinput_pad import XPad, deadzone
 
 # d-pad speed levels, multiples of --speed / --pitch-dps / --roll-dps / --joint-dps. Levels 1-4 are
@@ -227,7 +228,14 @@ def main():
             v = robot.bus.sync_read("Present_Voltage", normalize=False)
             t = robot.bus.sync_read("Present_Temperature", normalize=False)
             vmin = min(v.values()) / 10.0
-            return f"bus {vmin:4.1f}V {max(t.values()):.0f}C" + (" LOW" if vmin < 10.5 else "")
+            txt = f"bus {vmin:4.1f}V {max(t.values()):.0f}C" + (" LOW" if vmin < 10.5 else "")
+            # A servo in overload protection drops to Protective_Torque (20%) and looks "stuck"
+            # under the magnet's weight; its Status bits say so. Held 10 s on screen so a fault
+            # that clears between redraws is still readable.
+            for m, bits in robot.bus.sync_read("Status", normalize=False).items():
+                if bits:
+                    note(f"FAULT {m} {servo_fault(bits)}", 10.0)
+            return txt
         except Exception:
             return "bus ?"
 
@@ -265,8 +273,9 @@ def main():
             # Head: RB is its own deadman. Stick left = +pan (as `head.py keys` a), up = +tilt.
             head_held = bool(head_lim) and btn["RB"] and not a.dry_run
             if head_held:
-                new = head_step(head, -deadzone(st["rx"]) * head_sign["head_pan"],
-                                deadzone(st["ry"]) * head_sign["head_tilt"], a.head_dps, dt, head_lim)
+                pan_in, tilt_in = head_axes(-deadzone(st["rx"]), deadzone(st["ry"]))
+                new = head_step(head, pan_in * head_sign["head_pan"], tilt_in * head_sign["head_tilt"],
+                                a.head_dps, dt, head_lim)
                 if new != head:
                     head = new
                     robot.bus.sync_write("Goal_Position", head)

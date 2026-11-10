@@ -57,9 +57,15 @@ scripts/arm.sh head keys         # a/d pan, w/s tilt, c center
   Driving both from one session (e.g. the pad) means one `SerialMotorsBus` with all 7 motors.
 - Wrong direction: `head calibrate --invert head_pan` (sign flipped in software).
 - **On the pad** (`arm.sh pad`): hold **RB** and the right stick pans/tilts the head (no RT
-  needed; the right stick leaves the arm alone while RB is held), **X** re-centers it. The head
+  needed; the right stick leaves the arm alone while RB is held), **X** re-centers it. One axis
+  moves at a time: whichever way the stick leans more. The head
   joins the follower's own bus, so it is on whenever its calibration file exists; `--no-head`
   for the arm alone, `--head-invert pan|tilt` to flip a stick, `--head-dps` for speed.
+
+- **A joint that sometimes stops responding** is usually servo overload protection: past
+  `Overload_Torque` (80%) for `Protection_Time` (200 ms) a STS3215 drops to `Protective_Torque`
+  (20%), too weak to lift the magnet. The pad's status line shows `FAULT <joint> overload` (any
+  nonzero Status bits) for 10 s when it happens.
 
 ## One-time setup
 
