@@ -57,3 +57,12 @@ def test_all_stages_done():
 def test_old_samples_without_pixels_still_count():
     s = [{"head_deg": [0, 30]} for _ in range(6)]
     assert G.guide(s, [0, 30], None, WH, LIM)["progress"][0]["have"] == 6
+
+
+def test_touch_mode_boxes_the_package_then_asks_for_the_touch():
+    g = G.guide([], [3, 74], None, WH, LIM, mode="touch", marker_id=10)
+    assert any("PACKAGE" in l and "id 10" in l for l in g["lines"]) and g["box"]
+    g = G.guide([], [3, 74], None, WH, LIM, mode="touch", pending=True)
+    assert g["title"] == "Touch the circle" and g["ready"] and g["box"] is None
+    two = [_s((3, 74), _centre((0, 0))), _s((3, 74), _centre((2, 0)))]
+    assert any("book" in l for l in G.guide(two, [3, 74], None, WH, LIM, mode="touch")["lines"])

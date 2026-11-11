@@ -3,7 +3,8 @@
 markers in arm coordinates. Run through `scripts/arm.sh head handeye ...` (lerobot env, no ROS).
 
     handeye capture   collect samples: a marker taped flat on the magnet face, the arm put
-                      in poses by hand, the head in several angles
+                      in poses by hand, the head in several angles. --touch: no marker on the
+                      magnet; look at a package's marker, then touch the magnet on its circle
     handeye solve     fit the head-camera model (scripts/head_cam.py) to the samples, print
                       the error of every sample, save the calibration
     handeye check     live: every visible package's magnet target in base_link (cm), how
@@ -140,7 +141,12 @@ class Camera:
             centre = dpt if dpt is not None else m["pnp_pt"]
             if ok and centre is not None:
                 R = cv2.Rodrigues(rvec)[0]
-                n = self.face_normal(depth, u, v, size_px)
+                # Fit the face's plane halfway to the target, not round the marker: the package's
+                # marker sits near a corner of its face, so a box round it takes in the table
+                # and the side face too.
+                mid = np.asarray(centre) + R @ (head_cam.target_in_marker(self.marker_m) / 2)
+                n = self.face_normal(depth, self.intr.fx * mid[0] / mid[2] + self.intr.ppx,
+                                     self.intr.fy * mid[1] / mid[2] + self.intr.ppy, size_px)
                 if n is not None:
                     R = head_cam.align_z(R, n)
                 m["normal"] = [float(x) for x in R[:, 2]]
@@ -150,9 +156,9 @@ class Camera:
         return out, corners, ids
 
     def face_normal(self, depth, u, v, size_px):
-        """Unit normal of the surface round a marker, from depth: a box 3 marker-widths wide
-        (the target is ~2.6 widths from the centre, on the same face). None if too few points."""
-        r = int(1.5 * size_px)
+        """Unit normal of the surface round pixel (u, v), from depth: a box 2.4 marker-widths
+        wide. None if too few points."""
+        r = int(1.2 * size_px)
         h, w = depth.shape
         v0, v1, u0, u1 = max(0, int(v) - r), min(h, int(v) + r), max(0, int(u) - r), min(w, int(u) + r)
         z = depth[v0:v1:2, u0:u1:2]
@@ -296,6 +302,8 @@ def draw(cam, color, corners, ids, text, guide=None, msg=""):
 def cmd_capture(a):
     path = calib_dir() / "handeye_samples.json"
     samples = [] if a.fresh or not path.is_file() else json.loads(path.read_text())
+    if a.marker_id is None:
+        a.marker_id = 10 if a.touch else 0
     cam = Camera(marker_m=a.marker_m)
     bus, head_cal = open_bus(a.port, a.arm_id, a.head_id)
     lim = headmod.limits(head_cal)
@@ -314,6 +322,7 @@ def cmd_capture(a):
             raise
     lock = pad.lock if pad else contextlib.nullcontext()
     note = {"msg": "", "until": 0.0}
+    pending = None  # --touch: the camera's look at the package, waiting for the magnet's touch
 
     def say(text, secs=3.0):  # a result stays on the status line long enough to read
         note["msg"], note["until"] = text, time.monotonic() + secs
@@ -354,9 +363,22 @@ def cmd_capture(a):
                     step = STEPS[max(0, STEPS.index(step) - 1)]
                 elif k == "]":
                     step = STEPS[min(len(STEPS) - 1, STEPS.index(step) + 1)]
+                elif k == "u" and pending is not None:
+                    pending = None
+                    say("look cancelled: take it again")
                 elif k == "u" and samples:
                     samples.pop()
                     say("dropped last sample")
+                elif k == " " and a.touch and pending is None:
+                    msg_, pending = take_look(a, cam, head)
+                    say(msg_, 6.0)
+                elif k == " " and a.touch:
+                    msg_, done = take_touch(bus, samples, arm_held, lock, pending)
+                    say(msg_, 6.0)
+                    if done:
+                        pending = None
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text(json.dumps(samples, indent=1))
                 elif k == " ":
                     say(take_sample(a, cam, bus, samples, arm_held, lock))
                     path.parent.mkdir(parents=True, exist_ok=True)
@@ -364,18 +386,22 @@ def cmd_capture(a):
                 elif k in ("x", "\x1b"):
                     run = False
             groups = len(head_cam.head_groups(samples)) if samples else 0
-            pt = cam.point(m) if m else None
+            pt = (m["target_pt"] if a.touch else cam.point(m)) if m else None
             status = (f"{len(samples)} samples / {groups} head poses | arm {'HELD' if arm_held else 'free'} | "
                       f"head {head['head_pan']:+5.1f}/{head['head_tilt']:+5.1f} step {step:g} | marker "
                       + (f"{a.marker_id} {m['size_px']:.0f}px z{pt[2] * 100:.1f}cm" if pt else "--"))
             if pad:
                 status += f" | pad L{pad.level + 1}" + ("" if pad.ok else " LIMIT")
+            if a.touch:
+                status += " | TOUCH the circle, then B" if pending else " | LOOK: arm clear, then B"
             msg = note["msg"] if time.monotonic() < note["until"] else ""
             print("\r" + status + (" | " + msg if msg else "") + "\x1b[K", end="", flush=True)
             if not a.no_view:
                 mk = {"px": m["px"], "size_px": m["size_px"], "z": pt[2] if pt else None} if m else None
                 g = capture_guide.guide(samples, [head["head_pan"], head["head_tilt"]], mk,
-                                        (color.shape[1], color.shape[0]), lim)
+                                        (color.shape[1], color.shape[0]), lim,
+                                        mode="touch" if a.touch else "magnet", pending=pending is not None,
+                                        marker_id=a.marker_id)
                 draw(cam, color, corners, ids, status, g, msg)
     except KeyboardInterrupt:
         pass
@@ -484,6 +510,45 @@ class PadArm:
         self.pad.close()
 
 
+def take_look(a, cam, head):
+    """--touch, first B: where the camera puts the package's magnet target, arm out of the way.
+    -> (message, pending or None)."""
+    pts, pxs = [], []
+    for _ in range(10):
+        color, depth = cam.grab()
+        m = cam.markers(color, depth)[0].get(a.marker_id)
+        if m and m["target_pt"] is not None:
+            pts.append(m["target_pt"])
+            pxs.append(m["px"] + [m["size_px"]])
+    if len(pts) < 6:
+        return f"marker {a.marker_id} seen in {len(pts)}/10 frames: move the arm out of the way", None
+    pts = np.array(pts)
+    spread = float(np.linalg.norm(pts.std(0)) * 1000)
+    if spread > 4.0:
+        return f"target jitters {spread:.1f} mm: not taken", None
+    px = np.median(pxs, 0)
+    return ("LOOKED. Now drive the magnet onto the circle centre, touch lightly, press B "
+            "(BACK cancels). Don't move the package or the head."), {
+        "p_cam": [float(v) for v in np.median(pts, 0)], "head_deg": [head["head_pan"], head["head_tilt"]],
+        "px": [float(px[0]), float(px[1])], "size_px": float(px[2])}
+
+
+def take_touch(bus, samples, arm_held, lock, pending):
+    """--touch, second B: the magnet is on the circle; the arm's joints finish the sample.
+    -> (message, done)."""
+    if not arm_held:
+        return "hold the arm first (f)", False
+    with lock:
+        pos = bus.sync_read("Present_Position", num_retry=2)
+    moved = max(abs(pos["head_pan"] - pending["head_deg"][0]), abs(pos["head_tilt"] - pending["head_deg"][1]))
+    if moved > 1.0:
+        return f"the head moved {moved:.1f} deg since the look: BACK, then look again", False
+    samples.append({"arm_deg": [pos[j] for j in ARM], "head_deg": pending["head_deg"],
+                    "p_cam": pending["p_cam"], "px": pending["px"], "size_px": pending["size_px"],
+                    "kind": "touch", "t": time.time()})
+    return f"sample {len(samples)} taken. Lift the magnet off, move the package to the next box", True
+
+
 def take_sample(a, cam, bus, samples, arm_held, lock=contextlib.nullcontext()):
     if not arm_held:
         return "hold the arm first (f): a free arm drifts while the frames are taken"
@@ -525,8 +590,14 @@ def cmd_solve(a):
     pan_axis = None
     if a.pan_axis:  # measured from the shoulder_pan axis at the mounting surface
         pan_axis = np.array(a.pan_axis) + [head_cam.PAN_AXIS_X_M, 0.0, 0.0]
+    # Touch samples all have the tool pointing down, so the magnet's length and the camera's
+    # height trade off exactly: fit it only if some samples had the tool at other angles. Picks
+    # approach the same way with the same length, so the error cancels there.
+    all_touch = all(s.get("kind") == "touch" for s in samples)
+    if all_touch and not a.fixed_magnet:
+        print(f"touch samples only: magnet length held at {a.magnet_m * 1000:.1f} mm (--magnet-m)")
     hc, err = head_cam.fit(samples, kin, pan_axis=pan_axis, tilt_fwd=a.tilt_fwd,
-                           magnet_m=a.magnet_m, fit_magnet=not a.fixed_magnet)
+                           magnet_m=a.magnet_m, fit_magnet=not (a.fixed_magnet or all_touch))
     med = float(np.median(err))
     print(f"{len(samples)} samples, {len(head_cam.head_groups(samples))} head poses")
     for i, s, e in zip(keep, samples, err):
@@ -595,7 +666,12 @@ def main(argv=None):
     ap.add_argument("--no-view", action="store_true", help="no preview window (headless / ssh)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("capture")
-    c.add_argument("--marker-id", type=int, default=0, help="id of the marker taped on the magnet")
+    c.add_argument("--marker-id", type=int, default=None,
+                   help="the marker to track: taped on the magnet (default 0), or with --touch the "
+                        "package's top-face marker (default 10)")
+    c.add_argument("--touch", action="store_true",
+                   help="no marker on the magnet: B once to look at a package's marker (arm clear), "
+                        "then touch the magnet onto its circle and B again")
     c.add_argument("--fresh", action="store_true", help="discard the saved samples")
     c.add_argument("--pad", action="store_true", help="drive the arm and head with the XInput pad")
     s = sub.add_parser("solve")

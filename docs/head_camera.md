@@ -60,6 +60,24 @@ The target comes from the marker's centre (depth), its in-plane rotation (the ma
 face's tilt (a plane fit to depth over three marker-widths round it): a 2 cm marker's own tilt
 is degrees off, and at 52 mm from the target that would be millimetres.
 
+## Touch calibration (no marker on the magnet)
+
+A marker on the magnet face gets in the way of picking, so `capture --touch` uses the package
+instead: its marker (id 10 by default) gives the circle centre through the measured offset, and
+the magnet touched onto that circle gives the arm's side. Each sample is two presses of B: LOOK
+(arm clear of the package, camera reads the circle) then TOUCH (magnet on the circle centre,
+lightly). The guide's green box is where to put the package; every third one goes up on a
+book or box so the points aren't all at one height.
+
+```bash
+scripts/arm.sh head handeye capture --touch --pad
+```
+
+The tool always points down for a touch, so the magnet's length and the camera's height can't
+be told apart: `solve` holds the length at `--magnet-m` (47.1 mm) for touch-only sets. Picks
+approach the same way with the same length, so it cancels there. Synthetic check: 22 touch
+samples, 1.5 mm noise, 2.0 mm RMS, 3.4 mm worst at head angles never fitted.
+
 ## Why it is fitted, not measured
 
 The camera's pose follows two servos, and the arm's own FK carries the hand calibration's

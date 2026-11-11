@@ -7,6 +7,10 @@ workspace with 6 samples, then 4 each at pan +/-20 and tilt +/-10 from home. Eac
 target cell of a 3x2 grid over the image, a distance band and a wrist hint, so the samples spread
 over the view, over depth and over tool angle instead of clustering where it is comfortable.
 HOME is wherever the first sample was taken.
+
+mode="touch" (no marker on the magnet): the box is where to put the PACKAGE, and each sample is
+two presses of B: a look at the package's marker with the arm clear, then the magnet touched on
+its circle. Every third package goes up on a support, so the samples don't all share one height.
 """
 from __future__ import annotations
 
@@ -52,7 +56,7 @@ def cell_box(cell, wh):
     return (int(c * wh[0] / 3), int(r * wh[1] / 2), int((c + 1) * wh[0] / 3), int((r + 1) * wh[1] / 2))
 
 
-def guide(samples, head_now, marker, wh, head_lim=None):
+def guide(samples, head_now, marker, wh, head_lim=None, mode="magnet", pending=False, marker_id=0):
     """What to do now. `marker` is the magnet marker's {"px", "size_px", "z"} or None.
     -> {"title", "lines", "checks": [(text, ok)], "box": pixels or None, "progress": rows,
         "stage": i, "stages": n, "done": bool, "ready": bool}"""
@@ -75,6 +79,14 @@ def guide(samples, head_now, marker, wh, head_lim=None):
         return res
     i, name, target, plan, group = cur
     res["stage"] = i + 1
+    if pending:  # touch mode, the look is taken: the touch is all that's left for this sample
+        res.update(title=f"{name}: touch the circle" if target else "Touch the circle",
+                   lines=["Don't move the package or the head.",
+                          "Hold RT and drive the magnet straight down onto the CENTRE of the circle.",
+                          "Touch lightly: the magnet face flat on the package, plunger barely pressed.",
+                          "Release RT, press B. (BACK cancels the look.)"],
+                   ready=True)
+        return res
     if target is not None and not _near(head_now, target, ON_TARGET_DEG):
         dp, dt = target[0] - head_now[0], target[1] - head_now[1]
         axis = (f"pan {'+' if dp > 0 else '-'}" if abs(dp) >= abs(dt) else f"tilt {'+' if dt > 0 else '-'}")
@@ -90,16 +102,25 @@ def guide(samples, head_now, marker, wh, head_lim=None):
     todo = [p for p in plan if (p[0], p[1]) not in covered]
     col, row, band = todo[0] if todo else plan[len(group) % len(plan)]
     lo, hi = BANDS[band]
-    wrist = WRIST[len(samples) % len(WRIST)]
     res["box"] = cell_box((col, row), wh)
     title = "Find a HOME head angle" if target is None else f"{name}: sample {len(group) + 1} of {len(plan)}"
     lines = []
     if target is None:
         lines.append("First, aim the head at the workspace (hold RB + right stick): "
                      "the angle of your first sample becomes HOME.")
-    lines += [f"Drive the magnet so its marker sits in the GREEN box ({COLS[col]} {ROWS[row]}).",
-              f"{band.upper()}: {lo * 100:.0f}-{hi * 100:.0f} cm from the camera; {wrist}.",
-              "Marker facing the camera. Release RT, keep still, press B."]
+    if mode == "touch":
+        raised = len(samples) % 3 == 2
+        lines += [f"Put the PACKAGE so its marker (id {marker_id}) sits in the GREEN box "
+                  f"({COLS[col]} {ROWS[row]}), {lo * 100:.0f}-{hi * 100:.0f} cm from the camera"
+                  + (", up on a book or box this time." if raised else ", on the table."),
+                  "It must be where the arm can reach the circle; if the box is out of reach, "
+                  "put it as close to the box as reachable.",
+                  "Move the arm clear so the camera sees the marker, then press B (LOOK)."]
+    else:
+        wrist = WRIST[len(samples) % len(WRIST)]
+        lines += [f"Drive the magnet so its marker sits in the GREEN box ({COLS[col]} {ROWS[row]}).",
+                  f"{band.upper()}: {lo * 100:.0f}-{hi * 100:.0f} cm from the camera; {wrist}.",
+                  "Marker facing the camera. Release RT, keep still, press B."]
     res.update(title=title, lines=lines)
     seen = marker is not None
     in_box = seen and cell_of(marker["px"], wh) == (col, row)
