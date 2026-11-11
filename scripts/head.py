@@ -11,6 +11,7 @@ Its calibration lives in its own file, so `lerobot-calibrate` on the arm never t
     head.py calibrate         center the head, record its range by hand, save the calibration
     head.py read              torque off, live pan/tilt in degrees (check signs and center)
     head.py keys              torque on, a/d pan, w/s tilt, c center, [ ] step, x quit
+    head.py handeye ...       D435 <-> arm calibration and marker readout (scripts/handeye.py)
 
 Setup has to be one servo alone because every new STS3215 ships as id 1 at 1 Mbaud, the
 same id as the arm's shoulder_pan: with the arm still chained, the id write would go to both.
@@ -257,6 +258,9 @@ def cmd_keys(a):
 
 
 def main():
+    if sys.argv[1:2] == ["handeye"]:  # camera <-> arm calibration: its own CLI (scripts/handeye.py)
+        import handeye
+        return handeye.main(sys.argv[2:])
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", default=os.environ.get("ARM_PORT", "/dev/ttyACM0"))
     ap.add_argument("--id", default="sortbots_head")

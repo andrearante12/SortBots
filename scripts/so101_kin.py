@@ -62,6 +62,24 @@ class SO101Kin:
                 T = T @ R
         return T[:3, 3], wrist
 
+    def flange(self, q):
+        """4x4 base_link <- gripper_link (the link wrist_roll turns, where the magnet's horn
+        mounts). Its +z is the roll axis; the stock jaw tip sits at z = -0.098, so a tool
+        on the axis points along -z."""
+        T = np.eye(4)
+        for i, (To, rev) in enumerate(self.joints[:len(ARM)]):
+            T = T @ To
+            if rev:
+                R = np.eye(4)
+                R[:3, :3] = _rot_z(q[i])
+                T = T @ R
+        return T
+
+    def tool_point(self, q, length):
+        """A point `length` metres out along the roll axis from the flange (the magnet face
+        is ~0.047): base_link xyz."""
+        return (self.flange(q) @ np.array([0.0, 0.0, -length, 1.0]))[:3]
+
     def pose(self, q):
         """-> (x, y, z, pitch)"""
         tip, wrist = self.fk(q)
