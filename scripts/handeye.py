@@ -9,6 +9,14 @@ markers in arm coordinates. Run through `scripts/arm.sh head handeye ...` (lerob
     handeye check     live: every visible package's magnet target in base_link (cm), how
                       far the magnet face is from it, and whether the face points up
 
+capture with the XInput pad (`--pad`, the same hand-space driving as `arm.sh pad`; the arm
+starts HELD and the pad owns it, so no hands on the arm):
+    hold RT  + sticks   move the hand (left: plane, right Y: up/down)
+    Y / A               wrist_flex     LB / LT  tool tilt     d-pad up/down  speed   L3 slow
+    hold RB + right stick   head pan / tilt
+    B        take a sample            BACK  drop the last one      START  save and quit
+The keyboard keys below keep working alongside it.
+
 capture keys (terminal, the preview window only shows):
     f        arm free (torque off: move it by hand) / hold (torque on where it is)
     space    take a sample (arm must be HELD, marker in view; 10 frames averaged)
@@ -226,6 +234,21 @@ def cmd_capture(a):
     head = {m: v for m, v in bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2).items()}
     set_hold(bus, list(headmod.HEAD), True)
     arm_held, step = False, 5.0
+    pad = None
+    if a.pad:
+        try:
+            pad = PadArm(bus, lim)  # before any torque: a missing pad must leave the arm limp
+        except BaseException:
+            bus.disconnect(disable_torque=True)
+            cam.close()
+            raise
+        set_hold(bus, ARM, True)  # the pad drives a held arm; f still frees it
+        pad.resync()
+        arm_held = True
+    note = {"msg": "", "until": 0.0}
+
+    def say(text, secs=3.0):  # a result stays on the status line long enough to read
+        note["msg"], note["until"] = text, time.monotonic() + secs
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     print(f"{len(samples)} samples loaded from {path}. f free/hold arm, space sample, a/d w/s head, u undo, x quit\r")
@@ -236,11 +259,16 @@ def cmd_capture(a):
             color, depth = cam.grab()
             ms, corners, ids = cam.markers(color, depth)
             m = ms.get(a.marker_id)
-            msg = ""
-            for k in read_keys(0.0):
+            keys = read_keys(0.0)
+            if pad:
+                head, events = pad.step(head)
+                keys += [{"sample": " ", "undo": "u", "quit": "x"}[e] for e in sorted(events)]
+            for k in keys:
                 if k == "f":
                     arm_held = not arm_held
                     set_hold(bus, ARM, arm_held)
+                    if pad:
+                        pad.resync()
                 elif k in "adws":
                     mot, d = {"a": ("head_pan", 1), "d": ("head_pan", -1),
                               "w": ("head_tilt", 1), "s": ("head_tilt", -1)}[k]
@@ -253,9 +281,9 @@ def cmd_capture(a):
                     step = STEPS[min(len(STEPS) - 1, STEPS.index(step) + 1)]
                 elif k == "u" and samples:
                     samples.pop()
-                    msg = "dropped last sample"
+                    say("dropped last sample")
                 elif k == " ":
-                    msg = take_sample(a, cam, bus, samples, arm_held)
+                    say(take_sample(a, cam, bus, samples, arm_held))
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(json.dumps(samples, indent=1))
                 elif k in ("x", "\x1b"):
@@ -265,6 +293,9 @@ def cmd_capture(a):
             status = (f"{len(samples)} samples / {groups} head poses | arm {'HELD' if arm_held else 'free'} | "
                       f"head {head['head_pan']:+5.1f}/{head['head_tilt']:+5.1f} step {step:g} | marker "
                       + (f"{a.marker_id} {m['size_px']:.0f}px z{pt[2] * 100:.1f}cm" if pt else "--"))
+            if pad:
+                status += f" | pad L{pad.level + 1}" + ("" if pad.ok else " LIMIT")
+            msg = note["msg"] if time.monotonic() < note["until"] else ""
             print("\r" + status + (" | " + msg if msg else "") + "\x1b[K", end="", flush=True)
             if not a.no_view:
                 draw(cam, color, corners, ids, status)
@@ -276,7 +307,79 @@ def cmd_capture(a):
         path.write_text(json.dumps(samples, indent=1))
         bus.disconnect(disable_torque=True)
         cam.close()
+        if pad:
+            pad.close()
         print(f"\n{len(samples)} samples in {path}; torque off")
+
+
+class PadArm:
+    """The XInput pad driving the arm (arm_xpad.cartesian_step: the IK and speed caps teleop
+    already runs on) and the head, inside capture: capture owns the servo port, so the pad
+    can't be a second process."""
+
+    def __init__(self, bus, head_lim, level=2):
+        import types
+        import arm_xpad
+        from xinput_pad import XPad, deadzone
+        self.step_fn, self.levels, self.deadzone = arm_xpad.cartesian_step, arm_xpad.LEVELS, deadzone
+        self.pad = XPad()
+        self.bus, self.head_lim, self.kin = bus, head_lim, SO101Kin()
+        res = 4095
+        lo, hi = [], []
+        for j in ARM:  # calibrated range in URDF radians, 2 deg inside the stops (as arm_xpad)
+            c = bus.calibration[j]
+            mid = (c.range_min + c.range_max) / 2
+            lo.append(np.radians((c.range_min - mid) * 360 / res + 2))
+            hi.append(np.radians((c.range_max - mid) * 360 / res - 2))
+        self.lo, self.hi = np.array(lo), np.array(hi)
+        self.sign = np.ones(5)
+        self.a = types.SimpleNamespace(speed=0.10, pitch_dps=45.0, roll_dps=90.0, joint_dps=150.0,
+                                       lock=["wrist_roll"])
+        self.level = level - 1   # x0.5 by default: positioning, not racing
+        self.prev = {}
+        self.last = time.monotonic()
+        self.ok = True
+        self.resync()
+
+    def resync(self):
+        pos = self.bus.sync_read("Present_Position", ARM, num_retry=2)
+        self.q = np.clip(np.radians([pos[j] for j in ARM]), self.lo, self.hi)
+        self.target = self.kin.pose(self.q)
+
+    def step(self, head):
+        """One tick. Returns (head, events): events is a set of 'sample', 'undo', 'quit'."""
+        now = time.monotonic()
+        dt, self.last = min(0.1, now - self.last), now
+        st = self.pad.poll(1)
+        btn = st["buttons"]
+        edge = {b for b in ("B", "BACK", "START", "DUP", "DDOWN") if btn[b] and not self.prev.get(b)}
+        self.prev = dict(btn)
+        events = {e for b, e in (("B", "sample"), ("BACK", "undo"), ("START", "quit")) if b in edge}
+        if "DUP" in edge:
+            self.level = min(3, self.level + 1)
+        if "DDOWN" in edge:
+            self.level = max(0, self.level - 1)
+        dz = self.deadzone
+        if btn["RB"] and self.head_lim:
+            pan_in, tilt_in = headmod.head_axes(-dz(st["rx"]), dz(st["ry"]))
+            new = headmod.head_step(head, pan_in, tilt_in, 60.0, dt, self.head_lim)
+            if new != head:
+                head = new
+                self.bus.sync_write("Goal_Position", head)
+            st = {**st, "rx": 0.0, "ry": 0.0}
+        if st["rt"] > 0.5:
+            inp = {"lx": dz(st["lx"]), "ly": dz(st["ly"]), "rx": dz(st["rx"]), "ry": dz(st["ry"]),
+                   "tilt": float(btn["LB"]) - float(st["lt"] > 0.5),
+                   "wf": float(btn["Y"]) - float(btn["A"]), "slow": btn["L3"]}
+            self.q, self.target, self.ok = self.step_fn(self.kin, self.q, self.target, inp, self.a,
+                                                        self.lo, self.hi, self.sign, dt, self.level)
+            self.bus.sync_write("Goal_Position", dict(zip(ARM, np.degrees(self.q))))
+        else:
+            self.resync()  # re-grabbing never snaps back to a stale target
+        return head, events
+
+    def close(self):
+        self.pad.close()
 
 
 def take_sample(a, cam, bus, samples, arm_held):
@@ -388,6 +491,7 @@ def main(argv=None):
     c = sub.add_parser("capture")
     c.add_argument("--marker-id", type=int, default=0, help="id of the marker taped on the magnet")
     c.add_argument("--fresh", action="store_true", help="discard the saved samples")
+    c.add_argument("--pad", action="store_true", help="drive the arm and head with the XInput pad")
     s = sub.add_parser("solve")
     s.add_argument("--pan-axis", type=float, nargs=3, metavar=("X", "Y", "Z"),
                    help="ruler guess, metres, from the shoulder_pan axis at the mounting surface "

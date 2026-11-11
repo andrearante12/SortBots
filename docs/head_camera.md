@@ -36,7 +36,10 @@ scripts/arm.sh head handeye check
 ```
 
 1. Tape a marker **flat and centred** on the magnet face.
-2. `capture`: `f` frees the arm (move it by hand) and holds it again; `space` takes a sample
+2. `capture --pad` drives the arm and head with the XInput pad instead of by hand (hold RT +
+   sticks for the hand, RB + right stick for the head, **B** takes a sample, BACK undoes, START
+   quits; plug in the pad instead of the magnet's ESP32 if ports are short). Without `--pad`:
+   `f` frees the arm (move it by hand) and holds it again; `space` takes a sample
    (10 frames, refused if the point jitters > 4 mm); `a/d w/s` move the head; `u` undoes;
    `x` saves and quits. Samples append to
    `~/.cache/huggingface/lerobot/calibration/robots/sortbots_head/handeye_samples.json`
