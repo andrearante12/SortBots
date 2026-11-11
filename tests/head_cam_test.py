@@ -63,3 +63,24 @@ def test_kabsch_is_exact_on_clean_points():
     T = H._T(H._rpy(0.3, -0.2, 1.1), (0.1, -0.2, 0.3))
     dst = (T[:3, :3] @ src.T).T + T[:3, 3]
     assert np.allclose(H.kabsch(src, dst), T)
+
+
+def test_target_is_measured_from_the_top_edge_midpoint():
+    t = H.target_in_marker(0.020)
+    assert np.allclose(t, [-0.03568, 0.010 - 0.04793, 0.0])   # left of and below the marker
+
+
+def test_align_z_takes_the_tilt_from_depth_and_keeps_the_in_plane_rotation():
+    R_true = H._rpy(0.0, 0.0, 1.0) @ H._rx(math.radians(180 + 40))   # marker yawed 57 deg
+    R_pnp = R_true @ H._rx(math.radians(6))                          # PnP tilt 6 deg off
+    R = H.align_z(R_pnp, -R_true[:, 2])                               # normal sign is irrelevant
+    assert np.allclose(R[:, 2], R_true[:, 2])
+    assert np.allclose(R, R_true, atol=1e-9)
+
+
+def test_plane_fit_ignores_a_few_off_plane_points():
+    rng = np.random.default_rng(4)
+    pts = np.c_[rng.uniform(-0.05, 0.05, (200, 2)), np.zeros(200)]
+    pts[:10, 2] = 0.05                                                # the box edge behind
+    c, n = H.plane_fit(pts)
+    assert abs(abs(n[2]) - 1) < 1e-6

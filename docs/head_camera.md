@@ -13,6 +13,13 @@ mounting surface 38.8 mm behind the shoulder_pan axis.
 - **Marker size**: the black square's outer edge, calipers. Ours are 20 mm (`--marker-m 0.020`,
   the default). A 0.5 mm error is a 2.5 % range error on the PnP fallback.
 - **Dictionary**: `DICT_4X4_50`.
+- **The rig** (2026-11-11): the head sits on a mast beside the arm, both on one base. Lens
+  457.2 mm above the mounting surface, mast centre 127 mm horizontally from the arm base's
+  centre, arm 3.6 mm in front of it. `solve` prints the fitted lens position against these as
+  a sanity check; it does not need them.
+- **The package** (top face, same layout on every package, marker printed upright): the magnet
+  circle's centre is 35.68 mm left of and 47.93 mm below the midpoint of the marker's top black
+  edge. `head_cam.TARGET_FROM_TOP_EDGE_M`.
 - **Optional seeds** for `solve` (ruler, ±1 cm is plenty; the fit overrides them): pan axis
   from the shoulder_pan axis at the mounting surface (`--pan-axis X Y Z`, m), tilt axis
   ahead of the pan axis (`--tilt-fwd`), flange to marker surface (`--magnet-m`, 0.047 + tape).
@@ -40,8 +47,13 @@ scripts/arm.sh head handeye check
 4. `solve` prints every sample's error and saves `sortbots_head_camera.json` next to the head
    calibration. Expect an RMS of a few mm. Leave flagged outliers out with `--drop 7 12`.
    Over 1 cm: wrong marker size, a marker not flat on the face, or a stale arm calibration.
-5. `check` (torque off) prints each visible marker in base_link cm and its distance from the
-   magnet face. Put the magnet on a package's marker: `d` should read under ~1 cm.
+5. `check` (torque off) prints, for every visible package, its magnet target in base_link cm,
+   `up` (the face normal's z: ~+1.00 for a top face) and `d`, the magnet face's distance from
+   the target. Put the magnet on a package's circle by hand: `d` should read under ~1 cm.
+
+The target comes from the marker's centre (depth), its in-plane rotation (the marker), and the
+face's tilt (a plane fit to depth over three marker-widths round it): a 2 cm marker's own tilt
+is degrees off, and at 52 mm from the target that would be millimetres.
 
 ## Why it is fitted, not measured
 

@@ -6,8 +6,8 @@ markers in arm coordinates. Run through `scripts/arm.sh head handeye ...` (lerob
                       in poses by hand, the head in several angles
     handeye solve     fit the head-camera model (scripts/head_cam.py) to the samples, print
                       the error of every sample, save the calibration
-    handeye check     live: every visible marker in base_link (cm), and how far the magnet
-                      face is from it, to verify against a package
+    handeye check     live: every visible package's magnet target in base_link (cm), how
+                      far the magnet face is from it, and whether the face points up
 
 capture keys (terminal, the preview window only shows):
     f        arm free (torque off: move it by hand) / hold (torque on where it is)
@@ -24,6 +24,7 @@ own PnP pose as a fallback where depth has a hole; both are stored.
 """
 import argparse
 import json
+import math
 import os
 import select
 import sys
@@ -80,7 +81,8 @@ class Camera:
         return color, depth
 
     def markers(self, color, depth):
-        """{id: {"px", "depth_pt", "pnp_pt", "size_px"}}; points in the colour optical frame, m."""
+        """{id: {"px", "depth_pt", "pnp_pt", "size_px", "normal", "target_pt"}}; colour optical
+        frame, metres. target_pt is the package's magnet target (head_cam.TARGET_FROM_TOP_EDGE_M)."""
         cv2 = self.cv2
         corners, ids, _ = self.det.detectMarkers(color)
         out = {}
@@ -99,11 +101,39 @@ class Camera:
             dpt = None
             if win.size > 0.3 * (2 * r + 1) ** 2:
                 dpt = list(self.rs.rs2_deproject_pixel_to_point(self.intr, [float(u), float(v)], float(np.median(win))))
-            ok, _, tvec = cv2.solvePnP(obj, q.astype(np.float32), self.K, self.dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
-            out[int(i)] = {"px": [float(u), float(v)], "depth_pt": dpt,
-                           "pnp_pt": [float(t) for t in tvec.ravel()] if ok else None,
-                           "size_px": float(np.linalg.norm(q[0] - q[2]) / 1.414)}
+            ok, rvec, tvec = cv2.solvePnP(obj, q.astype(np.float32), self.K, self.dist,
+                                          flags=cv2.SOLVEPNP_IPPE_SQUARE)
+            size_px = float(np.linalg.norm(q[0] - q[2]) / 1.414)
+            m = {"px": [float(u), float(v)], "depth_pt": dpt,
+                 "pnp_pt": [float(t) for t in tvec.ravel()] if ok else None, "size_px": size_px,
+                 "normal": None, "target_pt": None}
+            centre = dpt if dpt is not None else m["pnp_pt"]
+            if ok and centre is not None:
+                R = cv2.Rodrigues(rvec)[0]
+                n = self.face_normal(depth, u, v, size_px)
+                if n is not None:
+                    R = head_cam.align_z(R, n)
+                m["normal"] = [float(x) for x in R[:, 2]]
+                m["target_pt"] = [float(x) for x in
+                                  np.asarray(centre) + R @ head_cam.target_in_marker(self.marker_m)]
+            out[int(i)] = m
         return out, corners, ids
+
+    def face_normal(self, depth, u, v, size_px):
+        """Unit normal of the surface round a marker, from depth: a box 3 marker-widths wide
+        (the target is ~2.6 widths from the centre, on the same face). None if too few points."""
+        r = int(1.5 * size_px)
+        h, w = depth.shape
+        v0, v1, u0, u1 = max(0, int(v) - r), min(h, int(v) + r), max(0, int(u) - r), min(w, int(u) + r)
+        z = depth[v0:v1:2, u0:u1:2]
+        vv, uu = np.mgrid[v0:v1:2, u0:u1:2]
+        ok = (z > 0.1) & (z < 3.0)
+        if ok.sum() < 50:
+            return None
+        z, uu, vv = z[ok], uu[ok], vv[ok]
+        # colour stream is distortion-free on the D435 (coeffs all 0), so plain pinhole
+        pts = np.stack([(uu - self.intr.ppx) / self.intr.fx * z, (vv - self.intr.ppy) / self.intr.fy * z, z], 1)
+        return head_cam.plane_fit(pts)[1]
 
     def point(self, m):
         return m["depth_pt"] if m["depth_pt"] is not None else m["pnp_pt"]
@@ -267,8 +297,14 @@ def cmd_solve(a):
     rms = float(np.sqrt(np.mean(err ** 2)))
     print(f"RMS {rms:.1f} mm, max {err.max():.1f} mm; marker surface {hc.magnet_m * 1000:.1f} mm "
           "out from the flange")
-    T = hc.matrix(0, 0)
-    print("camera at head 0/0, base_link cm:", np.round(T[:3, 3] * 100, 1))
+    # Sanity check against the rig (measured 2026-11-11): the lens is 457.2 mm above the mounting
+    # surface and its mast 127 mm horizontally from the arm base's centre. The lens moves a few
+    # cm as the head turns, so this is a ballpark, not a pass/fail.
+    pan0, tilt0 = max(head_cam.head_groups(samples).values(), key=len)[0]["head_deg"]
+    lens = hc.matrix(pan0, tilt0)[:3, 3]
+    horiz = math.hypot(lens[0] - head_cam.PAN_AXIS_X_M, lens[1])
+    print(f"lens at head {pan0:+.0f}/{tilt0:+.0f}: {lens[2] * 1000:.0f} mm up (rig: ~457), "
+          f"{horiz * 1000:.0f} mm from the arm base centre (rig: ~127)")
     out = calib_dir() / f"{a.head_id}_camera.json"
     hc.save(out, {"rms_mm": rms, "n": len(samples), "marker_m": a.marker_m, "saved": time.ctime()})
     print("saved", out)
@@ -291,11 +327,13 @@ def cmd_check(a):
             tcp = kin.tool_point(np.radians([pos[j] for j in ARM]), hc.magnet_m)
             parts = [f"magnet {np.round(tcp * 100, 1)}"]
             for i, m in sorted(ms.items()):
-                pt = cam.point(m)
-                if pt is None:
+                if m["target_pt"] is None:
                     continue
-                pb = hc.to_base(pt, pos["head_pan"], pos["head_tilt"])
-                parts.append(f"id{i} {np.round(pb * 100, 1)} d{np.linalg.norm(pb - tcp) * 100:.1f}cm")
+                T = hc.matrix(pos["head_pan"], pos["head_tilt"])
+                pb = (T @ np.append(m["target_pt"], 1.0))[:3]
+                nz = (T[:3, :3] @ m["normal"])[2]  # ~1 for a top face, ~0 for a side face
+                parts.append(f"id{i} target {np.round(pb * 100, 1)} up{nz:+.2f} "
+                             f"d{np.linalg.norm(pb - tcp) * 100:.1f}cm")
             line = " | ".join(parts)
             print("\r" + line + "\x1b[K", end="", flush=True)
             if not a.no_view:

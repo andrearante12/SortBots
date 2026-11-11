@@ -189,3 +189,41 @@ def fit(samples, kin, pan_axis=None, tilt_fwd=0.02, magnet_m=MAGNET_FACE_M, fit_
     if not fit_magnet:
         x[14] = magnet_m
     return HeadCam(x, *signs), np.linalg.norm(r.reshape(-1, 3), axis=1) * 1000.0
+
+
+# -- the package: where the magnet goes, relative to the marker -----------------------------
+# Measured on the packages (2026-11-11): the magnet circle's centre sits 35.68 mm left of and
+# 47.93 mm below the MIDPOINT OF THE MARKER'S TOP BLACK EDGE, in the marker's own axes as
+# printed (x right, y up; OpenCV's marker frame, corner 0 top-left). Same layout on every package.
+TARGET_FROM_TOP_EDGE_M = (-0.03568, -0.04793)
+
+
+def target_in_marker(marker_m, from_top_edge=TARGET_FROM_TOP_EDGE_M):
+    """The magnet target in the marker frame (origin at the marker centre), metres."""
+    return np.array([from_top_edge[0], marker_m / 2 + from_top_edge[1], 0.0])
+
+
+def plane_fit(points, inlier_m=0.005):
+    """(centroid, unit normal) of an (n,3) cloud, refit once without points > inlier_m off."""
+    pts = np.asarray(points, float)
+    for _ in range(2):
+        c = pts.mean(0)
+        n = np.linalg.svd(pts - c)[2][2]
+        keep = np.abs((pts - c) @ n) < inlier_m
+        if keep.sum() < 10 or keep.all():
+            break
+        pts = pts[keep]
+    return c, n / np.linalg.norm(n)
+
+
+def align_z(R, n):
+    """R with its z axis turned onto the plane normal n by the smallest rotation: keeps the
+    marker's in-plane rotation (which a small marker gets right) and replaces its tilt (which a
+    2 cm marker gets wrong by degrees) with the depth plane's."""
+    z = R[:, 2]
+    n = np.asarray(n, float) * (1.0 if np.dot(n, z) >= 0 else -1.0)
+    v, c = np.cross(z, n), float(np.dot(z, n))
+    if np.linalg.norm(v) < 1e-9:
+        return R.copy()
+    k = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    return (np.eye(3) + k + k @ k / (1 + c)) @ R
