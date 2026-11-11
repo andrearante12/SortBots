@@ -29,6 +29,7 @@ import math
 import os
 import select
 import sys
+import tempfile
 import termios
 import time
 import tty
@@ -183,13 +184,37 @@ def read_keys(timeout):
     return []
 
 
+PREVIEW = {"window": True, "file_at": 0.0}
+PREVIEW_JPG = Path(tempfile.gettempdir()) / "handeye_view.jpg"
+PREVIEW_HTML = PREVIEW_JPG.with_suffix(".html")
+
+
 def draw(cam, color, corners, ids, text):
+    """Preview in a window, or, where OpenCV can't open one, a JPEG + self-reloading page.
+    lerobot pulls in opencv-python-HEADLESS (imshow raises "not implemented", 2026-11-11), and
+    installing the GUI build beside it fights over the same cv2 module, so don't."""
     cv2 = cam.cv2
     if ids is not None:
         cv2.aruco.drawDetectedMarkers(color, corners, ids)
     cv2.putText(color, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-    cv2.imshow("handeye", color)
-    cv2.waitKey(1)
+    if PREVIEW["window"]:
+        try:
+            cv2.imshow("handeye", color)
+            cv2.waitKey(1)
+            return
+        except cv2.error:
+            PREVIEW["window"] = False
+            PREVIEW_HTML.write_text(
+                "<!doctype html><title>handeye</title><body style='margin:0;background:#000'>"
+                "<img id=v style='width:100%'><script>setInterval(()=>{v.src='"
+                + PREVIEW_JPG.name + "?'+Date.now()},300)</script>")
+            print(f"\r\x1b[Kno GUI in this OpenCV: live preview in a browser:  xdg-open {PREVIEW_HTML}\n")
+    now = time.monotonic()
+    if now - PREVIEW["file_at"] > 0.25:
+        PREVIEW["file_at"] = now
+        tmp = PREVIEW_JPG.with_name(".handeye_view.jpg")  # rename is atomic: no torn frames
+        cv2.imwrite(str(tmp), color, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        os.replace(tmp, PREVIEW_JPG)
 
 
 def cmd_capture(a):
