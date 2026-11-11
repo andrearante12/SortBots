@@ -11,6 +11,10 @@ HOME is wherever the first sample was taken.
 mode="touch" (no marker on the magnet): the box is where to put the PACKAGE, and each sample is
 two presses of B: a look at the package's marker with the arm clear, then the magnet touched on
 its circle. Every third package goes up on a support, so the samples don't all share one height.
+A fixed image grid sends the package out of the arm's reach (2026-11-11), so touch mode boxes
+come from a REACH MAP instead: after 3 touches at home, handeye.reach_map fits a rough camera
+pose and projects every table spot the magnet can touch (IK, straight down) into the image;
+each box goes on the reachable spot farthest from the samples already taken.
 """
 from __future__ import annotations
 
@@ -25,6 +29,8 @@ OFFSETS = [("pan +20", (20.0, 0.0)), ("pan -20", (-20.0, 0.0)),
 ON_TARGET_DEG = 3.0     # head this close to a stage's angle counts as there
 GROUP_DEG = 4.0         # a sample this close to a stage's angle counts toward it
 MIN_PX = 25             # a 4x4 marker decodes reliably from about this size
+MIN_PX_TOUCH = 18       # the package lies on the table ~55 cm out: 20 mm is ~23 px there
+BOX_HALF = (100, 70)    # touch-mode box round a reachable spot, pixels
 
 
 def stages(home, head_lim=None):
@@ -56,7 +62,64 @@ def cell_box(cell, wh):
     return (int(c * wh[0] / 3), int(r * wh[1] / 2), int((c + 1) * wh[0] / 3), int((r + 1) * wh[1] / 2))
 
 
-def guide(samples, head_now, marker, wh, head_lim=None, mode="magnet", pending=False, marker_id=0):
+def pick_spot(reach_px, taken_px):
+    """The reachable pixel farthest from every sample already taken (the first: the middle)."""
+    if not taken_px:
+        return min(reach_px, key=lambda p: (p[0] - sum(q[0] for q in reach_px) / len(reach_px)) ** 2
+                   + (p[1] - sum(q[1] for q in reach_px) / len(reach_px)) ** 2)
+    return max(reach_px, key=lambda p: min((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 for q in taken_px))
+
+
+def spot_box(px, wh):
+    return (max(0, int(px[0] - BOX_HALF[0])), max(0, int(px[1] - BOX_HALF[1])),
+            min(wh[0], int(px[0] + BOX_HALF[0])), min(wh[1], int(px[1] + BOX_HALF[1])))
+
+
+def _in(box, px):
+    return box[0] <= px[0] <= box[2] and box[1] <= px[1] <= box[3]
+
+
+def _touch_place(res, i, name, plan, group, samples, marker, wh, marker_id, reach_px):
+    """Where to put the package next, in touch mode."""
+    n = len(group)
+    # every third package raised, but never the first three: the reach map takes its height
+    # from them, and they should share the table's
+    raised = len(samples) >= 3 and len(samples) % 3 == 2
+    where = "up on a book or box this time" if raised else "on the table"
+    lines, box = [], None
+    if i == 0 and reach_px:
+        box = spot_box(pick_spot(reach_px, [s["px"] for s in group if s.get("px")]), wh)
+        lines += [f"Put the PACKAGE so marker {marker_id} sits in the GREEN box, {where}.",
+                  "The shaded dots are where the magnet can reach; the box is the reachable spot "
+                  "farthest from your earlier samples."]
+    elif i == 0:
+        lines += [["Aim the head so the arm's reach fills the image (hold RB + right stick): "
+                   "this angle becomes HOME.",
+                   "Put the PACKAGE anywhere the magnet can touch its circle, on the table."],
+                  ["Move the package 15 cm or more from the first spot, still within reach."],
+                  ["Third spot: off the line through the first two, so the three make a triangle. "
+                   "After this one the reachable area is shown and boxes follow it."]][min(n, 2)] \
+            if n < 3 else ["Spread the package over the reachable area (the reach map is still "
+                           "being worked out)."]
+    else:
+        lines += [f"Spread the package over spots the arm can reach and the camera sees: left and "
+                  f"right of the arm, near and far; {where}.",
+                  "Same reach as at home; only the view has moved."]
+    lines.append("Move the arm clear so the camera sees the marker, then press B (LOOK).")
+    res.update(title=("Find a HOME head angle" if i == 0 and n == 0 else f"{name}: sample {n + 1} of {len(plan)}"),
+               lines=lines, box=box, reach=reach_px if i == 0 else None)
+    seen = marker is not None
+    big = seen and marker["size_px"] >= MIN_PX_TOUCH
+    res["checks"] = [("marker seen", seen)]
+    if box:
+        res["checks"].append(("in the green box", seen and _in(box, marker["px"])))
+    res["checks"].append((f"marker {MIN_PX_TOUCH}+ px" + (f" (now {marker['size_px']:.0f})" if seen else ""), big))
+    res["ready"] = all(ok for _, ok in res["checks"])
+    return res
+
+
+def guide(samples, head_now, marker, wh, head_lim=None, mode="magnet", pending=False, marker_id=0,
+          reach_px=None):
     """What to do now. `marker` is the magnet marker's {"px", "size_px", "z"} or None.
     -> {"title", "lines", "checks": [(text, ok)], "box": pixels or None, "progress": rows,
         "stage": i, "stages": n, "done": bool, "ready": bool}"""
@@ -71,7 +134,7 @@ def guide(samples, head_now, marker, wh, head_lim=None, mode="magnet", pending=F
         if cur is None and len(group) < len(plan):
             cur = (i, name, target, plan, group)
     res = {"progress": progress, "stages": len(plan_stages), "checks": [], "box": None,
-           "done": cur is None, "ready": False}
+           "reach": None, "done": cur is None, "ready": False}
     if cur is None:
         res.update(stage=len(plan_stages), title="All samples taken",
                    lines=["Press START (or x) to save and quit.",
@@ -98,6 +161,8 @@ def guide(samples, head_now, marker, wh, head_lim=None, mode="magnet", pending=F
         res["checks"] = [(f"pan within {ON_TARGET_DEG:.0f} deg", abs(dp) <= ON_TARGET_DEG),
                          (f"tilt within {ON_TARGET_DEG:.0f} deg", abs(dt) <= ON_TARGET_DEG)]
         return res
+    if mode == "touch":
+        return _touch_place(res, i, name, plan, group, samples, marker, wh, marker_id, reach_px)
     covered = {cell_of(s["px"], wh) for s in group if s.get("px")}
     todo = [p for p in plan if (p[0], p[1]) not in covered]
     col, row, band = todo[0] if todo else plan[len(group) % len(plan)]
@@ -108,19 +173,10 @@ def guide(samples, head_now, marker, wh, head_lim=None, mode="magnet", pending=F
     if target is None:
         lines.append("First, aim the head at the workspace (hold RB + right stick): "
                      "the angle of your first sample becomes HOME.")
-    if mode == "touch":
-        raised = len(samples) % 3 == 2
-        lines += [f"Put the PACKAGE so its marker (id {marker_id}) sits in the GREEN box "
-                  f"({COLS[col]} {ROWS[row]}), {lo * 100:.0f}-{hi * 100:.0f} cm from the camera"
-                  + (", up on a book or box this time." if raised else ", on the table."),
-                  "It must be where the arm can reach the circle; if the box is out of reach, "
-                  "put it as close to the box as reachable.",
-                  "Move the arm clear so the camera sees the marker, then press B (LOOK)."]
-    else:
-        wrist = WRIST[len(samples) % len(WRIST)]
-        lines += [f"Drive the magnet so its marker sits in the GREEN box ({COLS[col]} {ROWS[row]}).",
-                  f"{band.upper()}: {lo * 100:.0f}-{hi * 100:.0f} cm from the camera; {wrist}.",
-                  "Marker facing the camera. Release RT, keep still, press B."]
+    wrist = WRIST[len(samples) % len(WRIST)]
+    lines += [f"Drive the magnet so its marker sits in the GREEN box ({COLS[col]} {ROWS[row]}).",
+              f"{band.upper()}: {lo * 100:.0f}-{hi * 100:.0f} cm from the camera; {wrist}.",
+              "Marker facing the camera. Release RT, keep still, press B."]
     res.update(title=title, lines=lines)
     seen = marker is not None
     in_box = seen and cell_of(marker["px"], wh) == (col, row)

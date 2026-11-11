@@ -59,10 +59,23 @@ def test_old_samples_without_pixels_still_count():
     assert G.guide(s, [0, 30], None, WH, LIM)["progress"][0]["have"] == 6
 
 
-def test_touch_mode_boxes_the_package_then_asks_for_the_touch():
+def test_touch_mode_spreads_the_first_three_by_text_then_follows_the_reach_map():
     g = G.guide([], [3, 74], None, WH, LIM, mode="touch", marker_id=10)
-    assert any("PACKAGE" in l and "id 10" in l for l in g["lines"]) and g["box"]
+    assert g["box"] is None and any("anywhere the magnet can touch" in l for l in g["lines"])
     g = G.guide([], [3, 74], None, WH, LIM, mode="touch", pending=True)
     assert g["title"] == "Touch the circle" and g["ready"] and g["box"] is None
-    two = [_s((3, 74), _centre((0, 0))), _s((3, 74), _centre((2, 0)))]
-    assert any("book" in l for l in G.guide(two, [3, 74], None, WH, LIM, mode="touch")["lines"])
+    two = [_s((3, 74), (300, 300)), _s((3, 74), (700, 300))]
+    g = G.guide(two, [3, 74], None, WH, LIM, mode="touch")
+    assert any("triangle" in l for l in g["lines"]) and not any("book" in l for l in g["lines"])
+    three = two + [_s((3, 74), (500, 600))]
+    reach = [[x, y] for x in range(200, 1100, 50) for y in range(250, 650, 50)]
+    g = G.guide(three, [3, 74], {"px": [1050, 590], "size_px": 22}, WH, LIM, mode="touch",
+                marker_id=10, reach_px=reach)
+    assert g["reach"] == reach and g["box"]
+    cx, cy = (g["box"][0] + g["box"][2]) / 2, (g["box"][1] + g["box"][3]) / 2
+    # the farthest reachable spot from the three samples: the reach's bottom-right corner
+    assert G.pick_spot(reach, [s["px"] for s in three]) == [1050, 600]
+    assert (cx, cy) == (1050, 600) or G._in(g["box"], [1050, 600])
+    assert g["ready"]  # marker seen, in that box, 18+ px
+    five = three + [_s((3, 74), (900, 300)), _s((3, 74), (300, 600))]
+    assert any("book" in l for l in G.guide(five, [3, 74], None, WH, LIM, mode="touch", reach_px=reach)["lines"])

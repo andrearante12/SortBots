@@ -271,6 +271,11 @@ def draw(cam, color, corners, ids, text, guide=None, msg=""):
     cv2 = cam.cv2
     if ids is not None:
         cv2.aruco.drawDetectedMarkers(color, corners, ids)
+    if guide and guide.get("reach"):
+        dots = color.copy()
+        for u, v in guide["reach"]:
+            cv2.circle(dots, (int(u), int(v)), 9, (80, 200, 80), -1)
+        cv2.addWeighted(dots, 0.35, color, 0.65, 0, dst=color)
     if guide and guide["box"]:
         x0, y0, x1, y1 = guide["box"]
         cv2.rectangle(color, (x0 + 3, y0 + 3), (x1 - 3, y1 - 3), (0, 255, 0) if guide["ready"] else (0, 200, 0),
@@ -323,6 +328,17 @@ def cmd_capture(a):
     lock = pad.lock if pad else contextlib.nullcontext()
     note = {"msg": "", "until": 0.0}
     pending = None  # --touch: the camera's look at the package, waiting for the magnet's touch
+    # --touch: the reach map, rebuilt in a thread (a second or so of IK) whenever the number of
+    # home touches changes, so the camera loop and the pad never wait on it
+    reach = {"key": None, "px": None, "busy": False}
+    kin_reach, (lo_reach, hi_reach) = SO101Kin(), arm_limits(bus)
+
+    def build_reach(snapshot, key):
+        try:
+            reach["px"] = reach_map(snapshot, kin_reach, lo_reach, hi_reach, cam.intr,
+                                    (cam.intr.width, cam.intr.height))
+        finally:
+            reach["key"], reach["busy"] = key, False
 
     def say(text, secs=3.0):  # a result stays on the status line long enough to read
         note["msg"], note["until"] = text, time.monotonic() + secs
@@ -396,12 +412,16 @@ def cmd_capture(a):
                 status += " | TOUCH the circle, then B" if pending else " | LOOK: arm clear, then B"
             msg = note["msg"] if time.monotonic() < note["until"] else ""
             print("\r" + status + (" | " + msg if msg else "") + "\x1b[K", end="", flush=True)
+            if a.touch and not reach["busy"] and reach["key"] != len(samples):
+                reach["busy"] = True
+                threading.Thread(target=build_reach, args=([dict(x) for x in samples], len(samples)),
+                                 daemon=True).start()
             if not a.no_view:
                 mk = {"px": m["px"], "size_px": m["size_px"], "z": pt[2] if pt else None} if m else None
                 g = capture_guide.guide(samples, [head["head_pan"], head["head_tilt"]], mk,
                                         (color.shape[1], color.shape[0]), lim,
                                         mode="touch" if a.touch else "magnet", pending=pending is not None,
-                                        marker_id=a.marker_id)
+                                        marker_id=a.marker_id, reach_px=reach["px"])
                 draw(cam, color, corners, ids, status, g, msg)
     except KeyboardInterrupt:
         pass
@@ -508,6 +528,79 @@ class PadArm:
         self._run = False
         self._thread.join(timeout=1.0)
         self.pad.close()
+
+
+def arm_limits(bus):
+    """Calibrated joint range in URDF radians, 2 deg inside the stops (as arm_xpad)."""
+    lo, hi = [], []
+    for j in ARM:
+        c = bus.calibration[j]
+        mid = (c.range_min + c.range_max) / 2
+        lo.append(np.radians((c.range_min - mid) * 360 / 4095 + 2))
+        hi.append(np.radians((c.range_max - mid) * 360 / 4095 - 2))
+    return np.array(lo), np.array(hi)
+
+
+_REACH_RZ = {}
+
+
+def down_reach_rz(kin, lo, hi, n=25000, within_deg=10.0):
+    """(r, z) of the magnet face over the arm's straight-down poses (tool within `within_deg`
+    of vertical), r measured out from the shoulder_pan axis. The reach is the same at every pan
+    angle, so one sweep at pan 0 covers the table. Sampled, not solved: IK on "pitch = -90 deg"
+    sits on the elevation fold (the same one that froze wrist_flex) and stalls there."""
+    key = (tuple(np.round(lo, 3)), tuple(np.round(hi, 3)))
+    if key not in _REACH_RZ:
+        rng = np.random.default_rng(0)
+        cos_lim, pts = math.cos(math.radians(within_deg)), []
+        for _ in range(n):
+            q = rng.uniform(lo, hi)
+            q[0] = q[4] = 0.0
+            F = kin.flange(q)
+            if -F[2, 2] < -cos_lim:  # tool axis is the flange's -z
+                p = F[:3, 3] - head_cam.MAGNET_FACE_M * F[:3, 2]
+                if p[0] > head_cam.PAN_AXIS_X_M:  # reaching forward, not back over the shoulder
+                    pts.append((math.hypot(p[0] - head_cam.PAN_AXIS_X_M, p[1]), p[2]))
+        _REACH_RZ[key] = np.array(pts)
+    return _REACH_RZ[key]
+
+
+def reach_map(samples, kin, lo, hi, intr, wh, step_m=0.03, tol_m=0.012):
+    """Pixels (at the home head angle) of package-top spots the magnet can touch pointing down.
+    Built from a ROUGH rigid fit of the home touches (>= 3, not in a line), good to a cm or two:
+    enough to keep the guide's boxes inside the reach, not a calibration. None until then."""
+    home = samples[0]["head_deg"] if samples else None
+    g = [s for s in samples if s.get("kind") == "touch" and home
+         and max(abs(s["head_deg"][0] - home[0]), abs(s["head_deg"][1] - home[1])) <= capture_guide.GROUP_DEG]
+    if len(g) < 3:
+        return None
+    tcp = np.array([kin.tool_point(np.radians(s["arm_deg"]), head_cam.MAGNET_FACE_M) for s in g])
+    if np.linalg.svd(tcp - tcp.mean(0), compute_uv=False)[1] < 0.02:
+        return None  # in a line: the rotation about it is unknown
+    cam_from_base = np.linalg.inv(head_cam.kabsch([s["p_cam"] for s in g], tcp))
+    z = float(np.median(tcp[:, 2]))  # the package top the touches were on
+    rz = down_reach_rz(kin, lo, hi)
+    rz = rz[np.abs(rz[:, 1] - z) < tol_m]
+    if not len(rz):
+        return None
+    r_lo, r_hi = rz[:, 0].min(), rz[:, 0].max()
+    out = []
+    for x in np.arange(-0.15, 0.55, step_m):
+        for y in np.arange(-0.50, 0.50, step_m):
+            r = math.hypot(x - head_cam.PAN_AXIS_X_M, y)
+            # pan turns +y to -y (FK: +pan swings the tip clockwise from above)
+            pan = -math.atan2(y, x - head_cam.PAN_AXIS_X_M)
+            if not (r_lo <= r <= r_hi and lo[0] <= pan <= hi[0]):
+                continue
+            if np.min(np.abs(rz[:, 0] - r)) > tol_m:
+                continue
+            pc = cam_from_base @ np.array([x, y, z, 1.0])
+            if pc[2] < 0.1:
+                continue
+            u, v = intr.fx * pc[0] / pc[2] + intr.ppx, intr.fy * pc[1] / pc[2] + intr.ppy
+            if 40 <= u < wh[0] - 40 and 40 <= v < wh[1] - 40:
+                out.append([float(u), float(v)])
+    return out or None
 
 
 def take_look(a, cam, head):

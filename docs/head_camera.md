@@ -66,8 +66,11 @@ A marker on the magnet face gets in the way of picking, so `capture --touch` use
 instead: its marker (id 10 by default) gives the circle centre through the measured offset, and
 the magnet touched onto that circle gives the arm's side. Each sample is two presses of B: LOOK
 (arm clear of the package, camera reads the circle) then TOUCH (magnet on the circle centre,
-lightly). The guide's green box is where to put the package; every third one goes up on a
-book or box so the points aren't all at one height.
+lightly). The first three touches at home just need to be reachable and form a triangle;
+from them capture fits a rough camera pose and draws the REACH MAP (shaded dots: package-top
+spots the magnet can touch pointing down, from a sweep of the arm's straight-down poses). After
+that each green box sits on the reachable spot farthest from the samples already taken, and
+from the fourth sample every third package goes up on a book or box.
 
 ```bash
 scripts/arm.sh head handeye capture --touch --pad
