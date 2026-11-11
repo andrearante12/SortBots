@@ -72,6 +72,8 @@ class Camera:
         cfg = rs.config()
         cfg.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
         cfg.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
+        self.cfg = cfg
+        self._last_frame, self._stale_since = None, None
         prof = self._start(cfg)
         self.depth_scale = prof.get_device().first_depth_sensor().get_depth_scale()
         self.align = rs.align(rs.stream.color)
@@ -106,11 +108,40 @@ class Camera:
                 prof.get_device().hardware_reset()
                 time.sleep(6)
 
+    STALL_S = 1.5  # colour frame number unchanged this long: the stream has stalled
+
     def grab(self):
-        fs = self.align.process(self.pipe.wait_for_frames())
-        color = np.asanyarray(fs.get_color_frame().get_data())
+        """(colour, depth) of a NEW colour frame. A D435 colour stream can stall on USB while
+        depth keeps coming (2026-11-11): the pipeline then hands back the same colour frame
+        forever, the preview froze, and a LOOK read a stale package position. Same frame number
+        for STALL_S -> reset the camera and carry on. The colour image is copied: the frame's
+        own buffer is what got drawn over again and again."""
+        while True:
+            fs = self.align.process(self.pipe.wait_for_frames())
+            cf = fs.get_color_frame()
+            n, now = cf.get_frame_number(), time.monotonic()
+            if n != self._last_frame:
+                self._last_frame, self._stale_since = n, None
+                break
+            if self._stale_since is None:
+                self._stale_since = now
+            elif now - self._stale_since > self.STALL_S:
+                self._recover()
+        color = np.array(cf.get_data(), copy=True)
         depth = np.asanyarray(fs.get_depth_frame().get_data()).astype(float) * self.depth_scale
         return color, depth
+
+    def _recover(self):
+        print(f"\r\x1b[KD435 colour stream stalled: resetting the camera (~6 s)\n", flush=True)
+        try:
+            dev = self.pipe.get_active_profile().get_device()
+            self.pipe.stop()
+            dev.hardware_reset()
+        except RuntimeError:
+            pass
+        time.sleep(6)
+        self._start(self.cfg)
+        self._last_frame, self._stale_since = None, None
 
     def markers(self, color, depth):
         """{id: {"px", "depth_pt", "pnp_pt", "size_px", "normal", "target_pt"}}; colour optical
