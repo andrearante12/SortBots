@@ -64,14 +64,10 @@ class Camera:
         import cv2
         import pyrealsense2 as rs
         self.cv2, self.rs, self.marker_m = cv2, rs, marker_m
-        self.pipe = rs.pipeline()
         cfg = rs.config()
         cfg.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
         cfg.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
-        try:
-            prof = self.pipe.start(cfg)
-        except RuntimeError as e:
-            raise SystemExit(f"D435: {e} (plugged into a USB 3 port? `lsusb -t` should say 5000M)")
+        prof = self._start(cfg)
         self.depth_scale = prof.get_device().first_depth_sensor().get_depth_scale()
         self.align = rs.align(rs.stream.color)
         self.intr = prof.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
@@ -81,8 +77,29 @@ class Camera:
         # 2 cm markers are ~30-60 px across here: subpixel corners matter for PnP
         params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
         self.det = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50), params)
-        for _ in range(15):  # auto-exposure settles
-            self.pipe.wait_for_frames()
+
+    def _start(self, cfg):
+        """Start streaming and see frames arrive. A D435 left mid-stream by a crashed run starts
+        fine and then sends nothing ("Frame didn't arrive within 5000", 2026-11-11); a hardware
+        reset clears it, so do that once before giving up."""
+        rs = self.rs
+        for attempt in (1, 2):
+            self.pipe = rs.pipeline()
+            try:
+                prof = self.pipe.start(cfg)
+            except RuntimeError as e:
+                raise SystemExit(f"D435: {e} (plugged into a USB 3 port? `lsusb -t` should say 5000M)")
+            try:
+                for _ in range(15):  # and auto-exposure settles
+                    self.pipe.wait_for_frames()
+                return prof
+            except RuntimeError:
+                self.pipe.stop()
+                if attempt == 2:
+                    raise SystemExit("D435 sends no frames even after a reset: unplug and replug it")
+                print("D435 sends no frames: resetting it (~6 s)")
+                prof.get_device().hardware_reset()
+                time.sleep(6)
 
     def grab(self):
         fs = self.align.process(self.pipe.wait_for_frames())
