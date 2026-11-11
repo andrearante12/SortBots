@@ -281,6 +281,9 @@ def take_sample(a, cam, bus, samples, arm_held):
 
 def cmd_solve(a):
     path = calib_dir() / "handeye_samples.json"
+    if not path.is_file():
+        raise SystemExit(f"no samples yet ({path}): run `scripts/arm.sh head handeye capture "
+                         "--marker-id N` first and take samples with space")
     samples = json.loads(path.read_text())
     keep = [i for i in range(len(samples)) if i not in set(a.drop)]
     samples = [samples[i] for i in keep]  # numbering below stays the capture's
