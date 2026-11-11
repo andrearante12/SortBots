@@ -81,6 +81,25 @@ be told apart: `solve` holds the length at `--magnet-m` (47.1 mm) for touch-only
 approach the same way with the same length, so it cancels there. Synthetic check: 22 touch
 samples, 1.5 mm noise, 2.0 mm RMS, 3.4 mm worst at head angles never fitted.
 
+## The arm's joint offsets (solved here too)
+
+lerobot puts each joint's 0 deg at the middle of the range you swept when calibrating, and
+`scripts/so101_kin.py` assumed that is the URDF's zero. On our arm it wasn't: the magnet held flat
+on the table read z = -11 cm (2026-11-11). `solve` therefore also fits shoulder_lift, elbow_flex
+and wrist_flex offsets (15+ samples; `--no-offsets` to skip) and writes them to
+`~/.cache/huggingface/lerobot/calibration/robots/so_follower/sortbots_arm_kin_offsets.json`,
+backing up any older one. `SO101Kin` applies them inside its FK, so teleop, IK, `check` and picks
+all use the corrected arm without other changes. Recalibrating the arm (`lerobot-calibrate`)
+moves its zeros: run capture and solve again after one.
+
+Why not a table touch: lift +d, elbow -2d, wrist +d keeps the magnet face flat and at the same
+height, so a flat surface can't tell those apart. The camera sees the reach that combination
+changes. Pan's offset is a rigid turn of the whole arm, which the camera pose absorbs. Synthetic
+check: 22 touches with offsets of 20 / -15 / 10 deg come back as 19.6 / -14.6 / 9.2 at 2.0 mm RMS.
+
+Until offsets exist, capture's reach map is off (a map built on a 10 cm-wrong arm boxed
+unreachable spots) and the guide spreads the touches by text.
+
 ## Why it is fitted, not measured
 
 The camera's pose follows two servos, and the arm's own FK carries the hand calibration's

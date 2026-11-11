@@ -2,21 +2,41 @@
 
 No torch / pytorch-kinematics (see nodes/arm_ik.py for why that is a trap): the arm is
 four joints in a chain plus a roll, so a damped-least-squares solve on a numeric Jacobian
-is plenty and imports in milliseconds. URDF zero == the middle of each joint's calibrated
-range, the same convention lerobot's DEGREES mode uses, so joint degrees from the robot map
-straight to URDF radians (times a per-joint sign if a motor turns the other way).
+is plenty and imports in milliseconds. URDF zero is ASSUMED to be the middle of each joint's
+calibrated range (lerobot's DEGREES zero), so robot degrees map to URDF radians plus a per-joint
+offset. That assumption was 11 cm wrong at the magnet on our arm (2026-11-11: the magnet flat on
+the table read z = -11 cm), because "the middle of the swept range" is not the URDF's zero for
+joints the table and base cut short. `handeye table` measures the offsets by touching the
+table; they live in OFFSETS_FILE and are applied here, inside fk/flange, so every caller passes
+robot angles (radians) and gets the corrected model: IK solves in robot angles too.
 
 Task space is (x, y, z, pitch) in base_link metres/radians over pan, lift, elbow,
 wrist_flex. `pitch` is the elevation of the wrist-joint -> tip vector, not a tool-frame
 Euler angle, so wrist_roll cannot change it. wrist_roll is left to the caller.
 """
+import json
 import math
+import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
 
 URDF = Path(__file__).resolve().parent.parent / "configs" / "so101_new_calib.urdf"
+# next to lerobot's own arm calibration (HF_LEROBOT_CALIBRATION, as lerobot resolves it)
+OFFSETS_FILE = (Path(os.environ.get("HF_LEROBOT_CALIBRATION",
+                                    Path.home() / ".cache/huggingface/lerobot/calibration")).expanduser()
+                / "robots" / "so_follower" / "sortbots_arm_kin_offsets.json")
+
+
+def load_offsets(path=OFFSETS_FILE):
+    """Joint offsets (radians, ARM order) to ADD to robot angles to get URDF angles; zeros if
+    no file."""
+    try:
+        d = json.loads(Path(path).read_text())["offsets_deg"]
+        return np.radians([d.get(j, 0.0) for j in ARM])
+    except (OSError, KeyError, ValueError):
+        return np.zeros(len(ARM))
 ARM = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
 CHAIN = ARM + ["gripper_frame_joint"]  # last one is fixed: wrist_roll frame -> tool tip
 PITCH_W = 0.1  # metres per radian: weight of pitch error against position error
@@ -35,7 +55,10 @@ def _rot_z(q):
 
 
 class SO101Kin:
-    def __init__(self, urdf=URDF):
+    def __init__(self, urdf=URDF, offsets="auto"):
+        """offsets: "auto" (OFFSETS_FILE if it exists), None (none), or 5 radians."""
+        self.off = (load_offsets() if isinstance(offsets, str) else
+                    np.zeros(len(ARM)) if offsets is None else np.asarray(offsets, float))
         root = ET.parse(urdf).getroot()
         self.joints = []
         for name in CHAIN:
@@ -46,10 +69,13 @@ class SO101Kin:
             T[:3, 3] = list(map(float, o.get("xyz").split()))
             self.joints.append((T, j.get("type") == "revolute"))
         lim = {x.get("name"): x.find("limit") for x in root.findall("joint") if x.find("limit") is not None}
-        self.urdf_limits = {n: (float(lim[n].get("lower")), float(lim[n].get("upper"))) for n in ARM}
+        # in robot angles, like everything else here
+        self.urdf_limits = {n: (float(lim[n].get("lower")) - self.off[i], float(lim[n].get("upper")) - self.off[i])
+                            for i, n in enumerate(ARM)}
 
     def fk(self, q):
-        """q: 5 URDF radians (ARM order) -> (tip xyz, wrist-joint xyz)."""
+        """q: 5 robot radians (ARM order) -> (tip xyz, wrist-joint xyz)."""
+        q = np.asarray(q, float) + self.off
         T = np.eye(4)
         wrist = None
         for i, (To, rev) in enumerate(self.joints):
@@ -66,6 +92,7 @@ class SO101Kin:
         """4x4 base_link <- gripper_link (the link wrist_roll turns, where the magnet's horn
         mounts). Its +z is the roll axis; the stock jaw tip sits at z = -0.098, so a tool
         on the axis points along -z."""
+        q = np.asarray(q, float) + self.off
         T = np.eye(4)
         for i, (To, rev) in enumerate(self.joints[:len(ARM)]):
             T = T @ To

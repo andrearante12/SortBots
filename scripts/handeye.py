@@ -51,6 +51,7 @@ import numpy as np
 import head as headmod
 import capture_guide
 import head_cam
+import so101_kin
 from so101_kin import SO101Kin
 
 ARM = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
@@ -572,7 +573,9 @@ def reach_map(samples, kin, lo, hi, intr, wh, step_m=0.03, tol_m=0.012):
     home = samples[0]["head_deg"] if samples else None
     g = [s for s in samples if s.get("kind") == "touch" and home
          and max(abs(s["head_deg"][0] - home[0]), abs(s["head_deg"][1] - home[1])) <= capture_guide.GROUP_DEG]
-    if len(g) < 3:
+    if len(g) < 3 or not np.any(kin.off):
+        # without measured joint offsets the arm model can be 10 cm out (2026-11-11), and a map
+        # built on it boxes spots the arm can't reach: text guidance until `solve` has run once
         return None
     tcp = np.array([kin.tool_point(np.radians(s["arm_deg"]), head_cam.MAGNET_FACE_M) for s in g])
     if np.linalg.svd(tcp - tcp.mean(0), compute_uv=False)[1] < 0.02:
@@ -689,8 +692,12 @@ def cmd_solve(a):
     all_touch = all(s.get("kind") == "touch" for s in samples)
     if all_touch and not a.fixed_magnet:
         print(f"touch samples only: magnet length held at {a.magnet_m * 1000:.1f} mm (--magnet-m)")
-    hc, err = head_cam.fit(samples, kin, pan_axis=pan_axis, tilt_fwd=a.tilt_fwd,
-                           magnet_m=a.magnet_m, fit_magnet=not (a.fixed_magnet or all_touch))
+    fit_off = not a.no_offsets and len(samples) >= 15
+    if not fit_off and not a.no_offsets:
+        print(f"{len(samples)} samples: too few to fit arm joint offsets as well (15+); skipping them")
+    res = head_cam.fit(samples, kin, pan_axis=pan_axis, tilt_fwd=a.tilt_fwd, magnet_m=a.magnet_m,
+                       fit_magnet=not (a.fixed_magnet or all_touch), fit_offsets=fit_off)
+    hc, err = res[0], res[1]
     med = float(np.median(err))
     print(f"{len(samples)} samples, {len(head_cam.head_groups(samples))} head poses")
     for i, s, e in zip(keep, samples, err):
@@ -707,6 +714,18 @@ def cmd_solve(a):
     horiz = math.hypot(lens[0] - head_cam.PAN_AXIS_X_M, lens[1])
     print(f"lens at head {pan0:+.0f}/{tilt0:+.0f}: {lens[2] * 1000:.0f} mm up (rig: ~457), "
           f"{horiz * 1000:.0f} mm from the arm base centre (rig: ~127)")
+    if fit_off:
+        # the fit's offsets sit on top of whatever `kin` already applied (a previous solve)
+        delta = res[2]
+        total = {j: float(math.degrees(kin.off[i]) + delta.get(j, 0.0)) for i, j in enumerate(ARM)}
+        print("arm joint offsets (deg, added to the robot's angles):",
+              {j: round(float(v), 1) for j, v in total.items() if j in delta})
+        if so101_kin.OFFSETS_FILE.is_file():
+            so101_kin.OFFSETS_FILE.with_suffix(f".backup-{time.strftime('%Y%m%d-%H%M%S')}.json").write_text(
+                so101_kin.OFFSETS_FILE.read_text())
+        so101_kin.OFFSETS_FILE.write_text(json.dumps(
+            {"offsets_deg": total, "from": "handeye solve", "n": len(samples), "saved": time.ctime()}, indent=2))
+        print("saved", so101_kin.OFFSETS_FILE, "(teleop, IK and check use it from now on)")
     out = calib_dir() / f"{a.head_id}_camera.json"
     hc.save(out, {"rms_mm": rms, "n": len(samples), "marker_m": a.marker_m, "saved": time.ctime()})
     print("saved", out)
@@ -776,6 +795,8 @@ def main(argv=None):
                    help="flange to marker surface along the tool axis, m (seed, or fixed with --fixed-magnet)")
     s.add_argument("--fixed-magnet", action="store_true", help="don't fit the magnet length")
     s.add_argument("--drop", type=int, nargs="*", default=[], help="sample numbers to leave out")
+    s.add_argument("--no-offsets", action="store_true",
+                   help="don't fit the arm's joint offsets (lift/elbow/wrist zero vs the URDF's)")
     sub.add_parser("check")
     a = ap.parse_args(argv)
     {"capture": cmd_capture, "solve": cmd_solve, "check": cmd_check}[a.cmd](a)

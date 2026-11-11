@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import head_cam as H  # noqa: E402
 from so101_kin import SO101Kin  # noqa: E402
 
-KIN = SO101Kin()
+KIN = SO101Kin(offsets=None)  # synthetic: the URDF as is, whatever this machine has measured
 # A plausible head: pan axis 12 cm behind and 30 cm above the shoulder, camera 4 cm ahead of the
 # tilt axis looking forward-down; servo signs flipped on pan to prove the sign search works.
 TRUE = H.HeadCam([-0.08, 0.02, 0.30, 0.02, -0.01, 0.03, 0.025, 0.01,
@@ -84,3 +84,32 @@ def test_plane_fit_ignores_a_few_off_plane_points():
     pts[:10, 2] = 0.05                                                # the box edge behind
     c, n = H.plane_fit(pts)
     assert abs(abs(n[2]) - 1) < 1e-6
+
+
+def test_fit_recovers_arm_joint_offsets_from_touches():
+    """The arm's reported angles are off from the URDF's (calibration "middle of the swept
+    range"); touches seen by the camera recover those offsets, which a flat table can't."""
+    true = np.radians([0, 12.0, -9.0, 5.0, 0])
+    k_true = SO101Kin(offsets=true)
+    rng = np.random.default_rng(5)
+
+    def touches(pan, tilt, n, heights=(0.0, 0.0, 0.08)):
+        T_cb = np.linalg.inv(TRUE.matrix(pan, tilt))
+        out = []
+        while len(out) < n:
+            q = rng.uniform(np.radians([-60, -30, -60, -40, 0]), np.radians([60, 100, 90, 110, 0]))
+            F = k_true.flange(q)
+            p = (F @ np.array([0, 0, -TRUE.magnet_m, 1]))[:3]
+            if F[2, 2] < 0.995 or abs(p[2] - heights[len(out) % len(heights)]) > 0.01:
+                continue                       # straight down, on the table or a raised box
+            pc = (T_cb @ np.append(p, 1))[:3]
+            if pc[2] > 0.15:
+                out.append({"arm_deg": list(np.degrees(q)), "head_deg": [pan, tilt],
+                            "p_cam": list(pc + rng.normal(0, 0.0015, 3)), "kind": "touch"})
+        return out
+
+    samples = (touches(0, 0, 6) + touches(20, 0, 4) + touches(-20, 0, 4)
+               + touches(0, 10, 4) + touches(0, -10, 4))
+    hc, err, off = H.fit(samples, KIN, magnet_m=TRUE.magnet_m, fit_magnet=False, fit_offsets=True)
+    assert abs(off["shoulder_lift"] - 12) < 1 and abs(off["elbow_flex"] + 9) < 1
+    assert abs(off["wrist_flex"] - 5) < 1 and np.sqrt(np.mean(err ** 2)) < 4.0

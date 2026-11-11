@@ -112,17 +112,23 @@ def kabsch(src, dst):
     return _T(R, cd - R @ cs)
 
 
-def tcp_of(kin, sample, magnet_m):
-    return kin.tool_point(np.radians(sample["arm_deg"]), magnet_m)
+def tcp_of(kin, sample, magnet_m, off=None):
+    """FK magnet face for a sample; `off` = (lift, elbow, wrist) radians added to its angles."""
+    q = np.radians(sample["arm_deg"])
+    if off is not None:
+        q = q + np.array([0.0, off[0], off[1], off[2], 0.0])
+    return kin.tool_point(q, magnet_m)
 
 
 def residuals(params, samples, kin, signs, fit_magnet=True, magnet_m=MAGNET_FACE_M):
-    """Per-sample base-frame error (camera's point minus FK's magnet face), flattened."""
+    """Per-sample base-frame error (camera's point minus FK's magnet face), flattened. params
+    past the 15 head-camera numbers, if any, are joint offsets (lift, elbow, wrist; radians)."""
     p = np.array(params, float)
     if not fit_magnet:
         p[14] = magnet_m
-    hc = HeadCam(p, *signs)
-    return np.concatenate([hc.to_base(s["p_cam"], *s["head_deg"]) - tcp_of(kin, s, p[14])
+    hc = HeadCam(p[:15], *signs)
+    off = p[15:18] if len(p) > 15 else None
+    return np.concatenate([hc.to_base(s["p_cam"], *s["head_deg"]) - tcp_of(kin, s, p[14], off)
                            for s in samples])
 
 
@@ -159,9 +165,16 @@ def head_groups(samples, bin_deg=2.0):
     return groups
 
 
-def fit(samples, kin, pan_axis=None, tilt_fwd=0.02, magnet_m=MAGNET_FACE_M, fit_magnet=True):
-    """-> (HeadCam, per-sample error in mm). Needs >= 4 samples at one head pose to seed, and
-    several head poses for the pan and tilt axes to be determined at all."""
+def fit(samples, kin, pan_axis=None, tilt_fwd=0.02, magnet_m=MAGNET_FACE_M, fit_magnet=True,
+        fit_offsets=False):
+    """-> (HeadCam, per-sample error in mm[, joint offsets deg]). Needs >= 4 samples at one head
+    pose to seed, and several head poses for the pan and tilt axes to be determined at all.
+
+    fit_offsets: also solve shoulder_lift / elbow_flex / wrist_flex offsets (the arm's "middle
+    of the swept range" vs the URDF's zero; 11 cm at the magnet on our arm, 2026-11-11). Touching
+    a flat table can't see them (lift +d, elbow -2d, wrist +d keeps the face flat and level);
+    the camera sees the reach that combination changes. Pan's offset is a rigid turn the camera
+    pose absorbs. Returns the offsets as a third value."""
     groups = head_groups(samples)
     g0 = max(groups.values(), key=len)
     if len(g0) < 4:
@@ -180,7 +193,8 @@ def fit(samples, kin, pan_axis=None, tilt_fwd=0.02, magnet_m=MAGNET_FACE_M, fit_
         Rp = _T(_rz(signs[0] * math.radians(pan0)), (0, 0, 0))
         Rt = _T(_ry(signs[1] * math.radians(tilt0)), (0, 0, 0))
         C = np.linalg.inv(A @ Rp @ B @ Rt) @ T_g
-        x0 = np.array([*pan_axis, 0, 0, 0, tilt_fwd, 0, *C[:3, 3], *rpy_of(C[:3, :3]), magnet_m])
+        x0 = np.array([*pan_axis, 0, 0, 0, tilt_fwd, 0, *C[:3, 3], *rpy_of(C[:3, :3]), magnet_m]
+                      + ([0.0, 0.0, 0.0] if fit_offsets else []))
         f = lambda x, sg=signs: residuals(x, samples, kin, sg, fit_magnet, magnet_m)
         x, r = _lm(f, x0)
         if best is None or r @ r < best[2] @ best[2]:
@@ -188,7 +202,11 @@ def fit(samples, kin, pan_axis=None, tilt_fwd=0.02, magnet_m=MAGNET_FACE_M, fit_
     x, signs, r = best
     if not fit_magnet:
         x[14] = magnet_m
-    return HeadCam(x, *signs), np.linalg.norm(r.reshape(-1, 3), axis=1) * 1000.0
+    err = np.linalg.norm(r.reshape(-1, 3), axis=1) * 1000.0
+    if fit_offsets:
+        return HeadCam(x[:15], *signs), err, dict(zip(("shoulder_lift", "elbow_flex", "wrist_flex"),
+                                                      np.degrees(x[15:18])))
+    return HeadCam(x[:15], *signs), err
 
 
 # -- the package: where the magnet goes, relative to the marker -----------------------------

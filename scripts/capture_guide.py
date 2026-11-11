@@ -98,9 +98,10 @@ def _touch_place(res, i, name, plan, group, samples, marker, wh, marker_id, reac
                    "Put the PACKAGE anywhere the magnet can touch its circle, on the table."],
                   ["Move the package 15 cm or more from the first spot, still within reach."],
                   ["Third spot: off the line through the first two, so the three make a triangle. "
-                   "After this one the reachable area is shown and boxes follow it."]][min(n, 2)] \
-            if n < 3 else ["Spread the package over the reachable area (the reach map is still "
-                           "being worked out)."]
+                   "(Once the arm's joint offsets are measured, a reach map shows here.)"]][min(n, 2)] \
+            if n < 3 else [f"Next spot {where}: somewhere you haven't been yet: near the arm, at "
+                           "its full reach, left and right of it. Different spots and heights "
+                           "are what pin the arm's joint offsets down."]
     else:
         lines += [f"Spread the package over spots the arm can reach and the camera sees: left and "
                   f"right of the arm, near and far; {where}.",
