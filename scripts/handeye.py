@@ -213,7 +213,10 @@ def read_keys(timeout):
 
 
 PREVIEW = {"window": True, "file_at": 0.0}
-PREVIEW_JPG = Path(tempfile.gettempdir()) / "handeye_view.jpg"
+# Its own directory, so the page can be served (`python3 -m http.server --directory`) without
+# exposing the rest of /tmp; a browser pane that won't live-reload file:// needs that.
+PREVIEW_DIR = Path(tempfile.gettempdir()) / "handeye_preview"
+PREVIEW_JPG = PREVIEW_DIR / "handeye_view.jpg"
 PREVIEW_HTML = PREVIEW_JPG.with_suffix(".html")
 # The page is opened from file://, where fetch() of a sibling file is blocked; a <script src>
 # is not, so the guide state goes out as a JS file the page re-includes every 300 ms.
@@ -275,6 +278,7 @@ def draw(cam, color, corners, ids, text, guide=None, msg=""):
             return
         except cv2.error:
             PREVIEW["window"] = False
+            PREVIEW_DIR.mkdir(exist_ok=True)
             PREVIEW_HTML.write_text(PREVIEW_PAGE)
             print(f"\r\x1b[Kno GUI in this OpenCV: live preview in a browser:  xdg-open {PREVIEW_HTML}\n")
     now = time.monotonic()
