@@ -104,7 +104,11 @@ def main():
             while True:
                 q = to_q(read_deg())
                 p = kin.pose(q)
-                print(f"x{p[0]*100:7.1f} y{p[1]*100:7.1f} z{p[2]*100:7.1f} pitch{math.degrees(p[3]):7.1f}   "
+                # the magnet face (47.1 mm out along the roll axis), the point a touch puts on a
+                # surface: rest it on the table and z should read the table's height in base_link
+                m = kin.tool_point(q, 0.0471)
+                print(f"magnet x{m[0]*100:6.1f} y{m[1]*100:6.1f} z{m[2]*100:6.1f} | "
+                      f"tip x{p[0]*100:7.1f} y{p[1]*100:7.1f} z{p[2]*100:7.1f} pitch{math.degrees(p[3]):7.1f}   "
                       + " ".join(f"{j[:5]}{d:7.1f}" for j, d in to_deg(q).items()), end="\r", flush=True)
                 time.sleep(0.05)
 
