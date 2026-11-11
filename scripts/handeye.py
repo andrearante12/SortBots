@@ -32,12 +32,14 @@ The 3-D point is the D435 depth at the marker's centre (deprojected), with the m
 own PnP pose as a fallback where depth has a hole; both are stored.
 """
 import argparse
+import contextlib
 import json
 import math
 import os
 import select
 import sys
 import tempfile
+import threading
 import termios
 import time
 import tty
@@ -253,15 +255,15 @@ def cmd_capture(a):
     arm_held, step = False, 5.0
     pad = None
     if a.pad:
+        set_hold(bus, ARM, True)  # the pad drives a held arm; f still frees it
+        arm_held = True
         try:
-            pad = PadArm(bus, lim)  # before any torque: a missing pad must leave the arm limp
-        except BaseException:
+            pad = PadArm(bus, lim, head)
+        except BaseException:  # no pad / no permission: leave the arm limp, camera stopped
             bus.disconnect(disable_torque=True)
             cam.close()
             raise
-        set_hold(bus, ARM, True)  # the pad drives a held arm; f still frees it
-        pad.resync()
-        arm_held = True
+    lock = pad.lock if pad else contextlib.nullcontext()
     note = {"msg": "", "until": 0.0}
 
     def say(text, secs=3.0):  # a result stays on the status line long enough to read
@@ -278,20 +280,27 @@ def cmd_capture(a):
             m = ms.get(a.marker_id)
             keys = read_keys(0.0)
             if pad:
-                head, events = pad.step(head)
-                keys += [{"sample": " ", "undo": "u", "quit": "x"}[e] for e in sorted(events)]
+                if pad.error is not None:
+                    raise SystemExit(f"pad thread stopped: {pad.error}")
+                keys += [{"sample": " ", "undo": "u", "quit": "x"}[e] for e in sorted(pad.take_events())]
+                head = pad.head
             for k in keys:
                 if k == "f":
                     arm_held = not arm_held
-                    set_hold(bus, ARM, arm_held)
-                    if pad:
-                        pad.resync()
+                    with lock:
+                        set_hold(bus, ARM, arm_held)
+                        if pad:
+                            pad.resync()
                 elif k in "adws":
                     mot, d = {"a": ("head_pan", 1), "d": ("head_pan", -1),
                               "w": ("head_tilt", 1), "s": ("head_tilt", -1)}[k]
                     lo, hi = lim[mot]
-                    head[mot] = min(hi, max(lo, head[mot] + d * step))
-                    bus.sync_write("Goal_Position", head)
+                    with lock:
+                        head = dict(pad.head if pad else head)
+                        head[mot] = min(hi, max(lo, head[mot] + d * step))
+                        bus.sync_write("Goal_Position", head)
+                        if pad:
+                            pad.head = head
                 elif k == "[":
                     step = STEPS[max(0, STEPS.index(step) - 1)]
                 elif k == "]":
@@ -300,7 +309,7 @@ def cmd_capture(a):
                     samples.pop()
                     say("dropped last sample")
                 elif k == " ":
-                    say(take_sample(a, cam, bus, samples, arm_held))
+                    say(take_sample(a, cam, bus, samples, arm_held, lock))
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(json.dumps(samples, indent=1))
                 elif k in ("x", "\x1b"):
@@ -322,25 +331,30 @@ def cmd_capture(a):
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(samples, indent=1))
+        if pad:
+            pad.close()  # stop its thread before the bus goes away under it
         bus.disconnect(disable_torque=True)
         cam.close()
-        if pad:
-            pad.close()
         print(f"\n{len(samples)} samples in {path}; torque off")
 
 
 class PadArm:
     """The XInput pad driving the arm (arm_xpad.cartesian_step: the IK and speed caps teleop
     already runs on) and the head, inside capture: capture owns the servo port, so the pad
-    can't be a second process."""
+    can't be a second process. It runs in its OWN 50 Hz thread: ticking it from the camera
+    loop (frame wait + depth align + ArUco, 1280x720) fed the arm a goal every 50-100 ms and
+    driving lagged badly (2026-11-11). `lock` serialises every bus access between the two."""
 
-    def __init__(self, bus, head_lim, level=2):
+    PERIOD_S = 0.02
+
+    def __init__(self, bus, head_lim, head, level=2):
         import types
         import arm_xpad
         from xinput_pad import XPad, deadzone
-        self.step_fn, self.levels, self.deadzone = arm_xpad.cartesian_step, arm_xpad.LEVELS, deadzone
+        self.step_fn, self.deadzone = arm_xpad.cartesian_step, deadzone
         self.pad = XPad()
         self.bus, self.head_lim, self.kin = bus, head_lim, SO101Kin()
+        self.head = dict(head)
         res = 4095
         lo, hi = [], []
         for j in ARM:  # calibrated range in URDF radians, 2 deg inside the stops (as arm_xpad)
@@ -353,25 +367,38 @@ class PadArm:
         self.a = types.SimpleNamespace(speed=0.10, pitch_dps=45.0, roll_dps=90.0, joint_dps=150.0,
                                        lock=["wrist_roll"])
         self.level = level - 1   # x0.5 by default: positioning, not racing
-        self.prev = {}
-        self.last = time.monotonic()
-        self.ok = True
+        self.prev, self.events, self.ok, self.error = {}, set(), True, None
+        self.lock = threading.Lock()
         self.resync()
+        self._run = True
+        self._last = time.monotonic()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
 
     def resync(self):
+        """Targets back to where the arm IS. Caller holds `lock` (or the thread isn't running)."""
         pos = self.bus.sync_read("Present_Position", ARM, num_retry=2)
         self.q = np.clip(np.radians([pos[j] for j in ARM]), self.lo, self.hi)
         self.target = self.kin.pose(self.q)
 
-    def step(self, head):
-        """One tick. Returns (head, events): events is a set of 'sample', 'undo', 'quit'."""
+    def _loop(self):
+        try:
+            while self._run:
+                t0 = time.monotonic()
+                st = self.pad.poll(5)  # outside the lock: it can wait a few ms for a report
+                with self.lock:
+                    self._tick(st)
+                time.sleep(max(0.0, self.PERIOD_S - (time.monotonic() - t0)))
+        except BaseException as e:  # pad unplugged (SystemExit from poll), bus error: surface it
+            self.error = e
+
+    def _tick(self, st):
         now = time.monotonic()
-        dt, self.last = min(0.1, now - self.last), now
-        st = self.pad.poll(1)
+        dt, self._last = min(0.1, now - self._last), now
         btn = st["buttons"]
         edge = {b for b in ("B", "BACK", "START", "DUP", "DDOWN") if btn[b] and not self.prev.get(b)}
         self.prev = dict(btn)
-        events = {e for b, e in (("B", "sample"), ("BACK", "undo"), ("START", "quit")) if b in edge}
+        self.events |= {e for b, e in (("B", "sample"), ("BACK", "undo"), ("START", "quit")) if b in edge}
         if "DUP" in edge:
             self.level = min(3, self.level + 1)
         if "DDOWN" in edge:
@@ -379,10 +406,10 @@ class PadArm:
         dz = self.deadzone
         if btn["RB"] and self.head_lim:
             pan_in, tilt_in = headmod.head_axes(-dz(st["rx"]), dz(st["ry"]))
-            new = headmod.head_step(head, pan_in, tilt_in, 60.0, dt, self.head_lim)
-            if new != head:
-                head = new
-                self.bus.sync_write("Goal_Position", head)
+            new = headmod.head_step(self.head, pan_in, tilt_in, 60.0, dt, self.head_lim)
+            if new != self.head:
+                self.head = new
+                self.bus.sync_write("Goal_Position", self.head)
             st = {**st, "rx": 0.0, "ry": 0.0}
         if st["rt"] > 0.5:
             inp = {"lx": dz(st["lx"]), "ly": dz(st["ly"]), "rx": dz(st["rx"]), "ry": dz(st["ry"]),
@@ -393,13 +420,19 @@ class PadArm:
             self.bus.sync_write("Goal_Position", dict(zip(ARM, np.degrees(self.q))))
         else:
             self.resync()  # re-grabbing never snaps back to a stale target
-        return head, events
+
+    def take_events(self):
+        with self.lock:
+            ev, self.events = self.events, set()
+        return ev
 
     def close(self):
+        self._run = False
+        self._thread.join(timeout=1.0)
         self.pad.close()
 
 
-def take_sample(a, cam, bus, samples, arm_held):
+def take_sample(a, cam, bus, samples, arm_held, lock=contextlib.nullcontext()):
     if not arm_held:
         return "hold the arm first (f): a free arm drifts while the frames are taken"
     pts, pnps = [], []
@@ -416,7 +449,8 @@ def take_sample(a, cam, bus, samples, arm_held):
     spread = float(np.linalg.norm(pts.std(0)) * 1000)
     if spread > 4.0:
         return f"point jitters {spread:.1f} mm: not taken (depth edge? tilt the marker to the camera)"
-    pos = bus.sync_read("Present_Position", num_retry=2)
+    with lock:
+        pos = bus.sync_read("Present_Position", num_retry=2)
     samples.append({"arm_deg": [pos[j] for j in ARM], "head_deg": [pos["head_pan"], pos["head_tilt"]],
                     "p_cam": [float(v) for v in np.median(pts, 0)],
                     "pnp_cam": [float(v) for v in np.median(pnps, 0)] if pnps else None,
