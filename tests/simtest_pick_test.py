@@ -157,12 +157,12 @@ def test_package_task_rejections(task, err):
 
 def test_package_task_needs_a_world_with_that_package():
     with pytest.raises(spec.SpecError, match="has no packages"):
-        spec.validate(pick(overrides={"world": "aisle_crossing"}))
+        spec.validate(pick(overrides={"world": "person_crossing"}))
 
 
 def test_pick_place_metric_needs_a_world_with_packages():
     with pytest.raises(spec.SpecError, match="has no packages"):
-        spec.validate(pick(overrides={"world": "aisle_crossing"}, tasks=[],
+        spec.validate(pick(overrides={"world": "person_crossing"}, tasks=[],
                            stop={"sim_s": 10}))
 
 
@@ -239,7 +239,7 @@ def test_probe_passes_packages_and_magnet_through_ground_truth():
 
 
 def test_a_world_without_packages_leaves_the_gt_event_as_it_was():
-    res, streams = _resolved_json(pick(overrides={"world": "aisle_crossing"},
+    res, streams = _resolved_json(pick(overrides={"world": "person_crossing"},
                                        tasks=[], stop={"sim_s": 10},
                                        metrics=[{"metric": "run_stats"}]))
     rec = FakeRecorder()
@@ -457,7 +457,7 @@ def test_metric_context_checks():
     entries = metrics.validate_list([{"metric": "pick_place"}])
     with pytest.raises(metrics.MetricError, match="has no packages"):
         metrics.MetricSet(entries, metrics.Context(robots=["robot_0"],
-                                                   world=world.load("aisle_crossing")))
+                                                   world=world.load("person_crossing")))
     bad = metrics.Context(robots=["robot_0"], world=world.load("pick_low"),
                           tasks=[{"id": "t0", "package": "pkg_9", "place": PLACE}])
     with pytest.raises(metrics.MetricError, match="not in the test's world"):

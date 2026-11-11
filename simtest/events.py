@@ -44,14 +44,17 @@ STREAMS = {
            "{grid: MapGrid}",
     "dyn": "/<rid>/dynamic_obstacles in the map frame, <=5 Hz, 0.1 m voxels: "
            "{rid, pts: [[x, y], ...]}",
+    "trk": "/<rid>/obstacle_tracks in the map frame, <=5 Hz: {rid, stamp, tracks: "
+           "[{id, moving, hits, pos: [x, y], vel: [vx, vy], cov: [sxx, sxy, syy], "
+           "pred: [[h_s, x, y], ...], extent_m, height_m}]}",
     "detect": "/<rid>/packages (nodes/package_detector.py), throttled to 2 Hz, map frame: "
               "{rid, plates: [{x, y, z, nx, ny, nz, conf}]} — each plate's centre and "
               "OUTWARD normal, what the pick controller aims at (no image data)",
 }
 
 # Recorded on every run whether or not a metric asks, so a NEW metric can be
-# scored against old runs. `dyn` is opt-in (metric or `record:`) — it is the
-# only stream whose size scales with the scene.
+# scored against old runs. `dyn` and `trk` are opt-in (metric or `record:`) —
+# they are the streams whose size scales with the scene.
 ALWAYS_RECORDED = frozenset({"start", "end", "gt", "goal", "dispatch", "task",
                              "explore", "map", "detect"})
 

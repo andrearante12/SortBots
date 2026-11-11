@@ -264,4 +264,4 @@ class MetricSet:
 # Registration: importing a module registers its metrics. Keep this list the
 # single place a new metric module is wired in.
 from . import (run, clearance, goals, contamination, detection, coverage, tasks,  # noqa: E402,F401
-               pick_place)
+               pick_place, reaction, prediction)

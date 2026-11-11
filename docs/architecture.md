@@ -84,10 +84,27 @@ would have.
 | Node | Job |
 |---|---|
 | `dynamic_obstacle_filter.py` | Masks moving pixels, plus pixels within 0.5 m of a peer's reported pose, out of depth → `depth_static` (keeps movers out of SLAM) and `dynamic_obstacles` (to Nav2). Sim only. |
-| `obstacle_detector.py` | Geometric clusters above the floor, tracked in odom with a `moving` flag → `/<id>/obstacle_tracks` (JSON), `obstacle_points`, `obstacles_viz`. No classifier: geometry catches anything with physical extent, at about 13 ms/frame. Runs on both platforms. Tuning: `configs/obstacle_detector.yaml`. |
+| `obstacle_detector.py` | Geometric clusters above the floor, tracked in odom by a constant-velocity Kalman filter with a `moving` flag and a 0.5–1.5 s look-ahead → `/<id>/obstacle_tracks` (JSON: `pos_w`, `vel`, `cov`, `pred`), `obstacle_points`, `obstacles_viz`, and `predicted_obstacles` (moving tracks' footprints swept 1.5 s ahead, a local-costmap source). No classifier: geometry catches anything with physical extent, at about 13 ms/frame. Runs on both platforms. Tuning: `configs/obstacle_detector.yaml`. |
 | `obstacle_cloud.py` | The real robot's raw live obstacle cloud when SLAM is offloaded. |
 | RTAB-Map | One per robot (`launch/sortbots_rtabmap_robot.launch.py`). Started with `MALLOC_ARENA_MAX=2`, which cut its memory growth by about half. |
 | `recon_cloud_relay.py` | Caps `cloud_map` at 200k points so rosbridge and the browser can keep up. |
+
+**Obstacle tracking and prediction.** A detection joins the Kalman track whose
+predicted position it is closest to by Mahalanobis distance (`kf_gate_chi2`, inside
+`track_gate_m`). A cluster whose centroid can't be trusted (`can_move`: clipped by the
+image edge or the range crop, long and flat, or longer than `max_moving_extent_m` unless
+it is also tall — the large-mover rule that admits a forklift) updates the track's
+position but has its velocity zeroed. `moving` needs `track_min_hits` frames at
+`moving_speed_mps`. `pred` is the state extrapolated `pred_horizons_s` ahead: a 1–2 s
+claim, not a route. `/<id>/predicted_obstacles` sweeps each moving track's footprint
+`pred_cloud_horizon_s` along its velocity, in base_link, every frame and EMPTY when
+nothing moves, so the LOCAL costmap's `predicted_scan` source (persistence 0, `clearing:
+false`) routes the controller behind a walker instead of through where they are about
+to be. The marks are lethal like any costmap obstacle, so the horizon stays short; the
+collision monitor on `depth_static` stays the safety floor. Scored by the simtest
+`prediction` metric (`docs/testing.md`). First live run (2026-11-06): the person is
+tracked at 5 m and called moving at 4 m, 5 s before the robot brakes onto their line —
+the avoidance gap is in Nav2's response, not in perception.
 
 Sim topics live under `/<id>/`: `camera/{rgb,depth,camera_info}`, `imu`, `odom`,
 `cmd_vel`. TF frames are prefixed (`robot_0/base_link`) on the shared `/tf`.

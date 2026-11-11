@@ -1,0 +1,60 @@
+# A test case (simtest/spec.py has the schema; docs/testing.md the how-to).
+
+# In detail (the description below is what the Tests tab shows):
+#
+#   robot_0 drives south out of its aisle. At t = 10.5 s a person steps out
+#   from behind a crate stack ~2 m ahead of it, onto its route, and stands
+#   there. No approach to see coming: the braking case. Pass = no contact,
+#   speed halved within 2 s of the person appearing, a gap kept, and the goal
+#   still reached by planning around someone standing still (whom the
+#   frame-difference filter no longer flags). Time to a full stop and braking
+#   distance are reported for the record — a robot that swerves cleanly need
+#   not stop.
+
+name: step_out_stop
+title: A person steps out from behind crates and stops — brake, then get past
+section: Obstacle avoidance
+description: A person steps out from behind a crate stack right in front of the robot and stands there; the robot has to brake and get past.
+
+scenario: moving_obstacles_mapped
+overrides:
+  world: person_step_out
+
+warmup_s: 5
+
+goals:
+  - robot: robot_0
+    pose: [-8.0, 3.0, -1.5708]
+    timeout_s: 120
+
+stop:
+  sim_s: 150
+  until: [goals_done]
+  settle_s: 3
+
+metrics:
+  - metric: clearance
+    pass:
+      contacts: {eq: 0}
+  - metric: clearance
+    id: clearance_props
+    params: {actors: [], props: true}
+    pass:
+      contacts: {eq: 0}
+  - metric: reaction
+    pass:
+      encounters: {gte: 1}
+      max_time_to_slow_s: {lte: 2.0}
+      min_gap_m: {gt: 0.10}
+  - metric: goals
+    pass:
+      success_rate: {gte: 1.0}
+  - metric: detection
+    pass:
+      recall: {gte: 0.3}
+  - metric: prediction                # reported: the Kalman tracker's look-ahead error
+  - metric: run_stats
+
+record: [dyn, trk]
+repeats: 1
+pass_rate: 1.0

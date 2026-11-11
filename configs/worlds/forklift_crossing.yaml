@@ -1,0 +1,25 @@
+# A world layout (simtest/world.py has the full schema). See person_crossing.yaml
+# for how these coordinates were chosen.
+
+name: forklift_crossing
+title: Open floor — a forklift crossing
+description: >
+  A forklift drives back and forth across the open floor south of robot_0's
+  aisle (y = 5.0, x -13.5 -> -6), at forklift pace. Big, fast and long: the
+  robot has to yield to something that covers its whole route in a second
+  and that the tracker can only follow through the large-mover rule. The
+  forklift never slows for the robot.
+
+scenes: [nvidia]
+autostart: true
+
+actors:
+  - id: forklift_0
+    label: forklift
+    preset: forklift
+    path:
+      waypoints: [[-13.5, 5.0], [-6.0, 5.0]]
+      speed_mps: 2.0      # a careful indoor forklift; 2.5-3 is common
+      mode: pingpong
+      start_at_s: 0.0
+      dwell_s: 2.0        # a stop at each end, as at a pick face

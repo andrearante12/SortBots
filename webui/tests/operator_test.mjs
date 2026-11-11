@@ -393,7 +393,9 @@ async function main() {
     const obstacles = (moving) => ({ data: JSON.stringify({ stamp: 1, frame: `${r0}/base_link`, world_frame: null, floor_z: 0,
       w: 848, h: 480, count: 2, moving: moving ? 1 : 0, obstacles: [
         { track_id: 4, moving, speed_mps: 1.2, vel: [0, -1.2], centroid: [2.0, 0, 0.9], min: [1.9, -0.2, 0.1], max: [2.1, 0.2, 1.7],
-          extent_m: 0.4, height_m: 1.7, range_m: 1.9, bearing_deg: 0, n: 900, uv: [380, 60, 470, 470], clipped: false, hits: 8 },
+          extent_m: 0.4, height_m: 1.7, range_m: 1.9, bearing_deg: 0, n: 900, uv: [380, 60, 470, 470], clipped: false, hits: 8,
+          // Kalman look-ahead in the (base_link) world frame: 1.5 s of walking to the robot's right.
+          pos_w: [2.0, 0], cov: [0.01, 0, 0.02], pred: [[0.5, 2.0, -0.6], [1.0, 2.0, -1.2], [1.5, 2.0, -1.8]] },
         { track_id: 2, moving: false, speed_mps: 0, vel: [0, 0], centroid: [3.0, 1.0, 0.3], min: [2.9, 0.8, 0.1], max: [3.1, 1.2, 0.5],
           extent_m: 0.4, height_m: 0.5, range_m: 3.0, bearing_deg: 18, n: 200, uv: [100, 300, 200, 400], clipped: false, hits: 30 },
       ] }) });
@@ -416,7 +418,12 @@ async function main() {
     const [ax, ay] = await page.eval(`window.__operator.toPx(${ahead[0]}, ${ahead[1]})`);
     // The marker, its 1 s velocity arrow and its label, all around the obstacle.
     const near = await redPx('#map', ax, ay, 90), all = await redPx('#map');
-    check(`${vp.label}: a moving obstacle is marked on the map 2 m ahead of its robot`, near > 30 && near === all, `near=${near} all=${all}`);
+    // The 1.5 s look-ahead point: 1.8 m to the robot's right of the obstacle, in map.
+    const pend = [ahead[0] + 1.8 * Math.sin(0.5), ahead[1] - 1.8 * Math.cos(0.5)];
+    const [px, py] = await page.eval(`window.__operator.toPx(${pend[0]}, ${pend[1]})`);
+    const atPred = await redPx('#map', px, py, 10);
+    check(`${vp.label}: a moving obstacle is marked on the map 2 m ahead of its robot`, near > 30, `near=${near} all=${all}`);
+    check(`${vp.label}: ... with its predicted path drawn out to the 1.5 s point`, atPred > 3, `atPred=${atPred}`);
     check(`${vp.label}: the card counts obstacles, moving ones and the nearest`, (await f0('obst')) === '2, 1 moving · nearest 1.9 m', await f0('obst'));
     check(`${vp.label}: the camera tile boxes the obstacles`, (await redPx(`#fleet .robot[data-id="${r0}"] canvas.obst`)) > 50);
     await emit(`/${r0}/obstacle_tracks`, obstacles(false));
@@ -429,11 +436,13 @@ async function main() {
     check(`${vp.label}: ... from the camera tile`, (await redPx(`#fleet .robot[data-id="${r0}"] canvas.obst`)) === 0);
     check(`${vp.label}: ... and from the card`, (await f0('obst')) === '—', await f0('obst'));
     const tfm = await page.eval(`JSON.stringify([
-      window.__operator.obstaclesInMap({ obstacles: [{ track_id: 1, centroid: [1, 0, 0], min: [1, 0, 0], max: [1, 0, 0], vel: [1, 0] }] }, { x: 1, y: 2, yaw: Math.PI / 2 }, { yaw: 0 })[0],
-      window.__operator.obstaclesInMap({ obstacles: [{ track_id: 1, centroid: [1, 0, 0], min: [1, 0, 0], max: [1, 0, 0], vel: [1, 0] }] }, { x: 1, y: 2, yaw: Math.PI / 2 }, null)[0]])`);
+      window.__operator.obstaclesInMap({ obstacles: [{ track_id: 1, centroid: [1, 0, 0], min: [1, 0, 0], max: [1, 0, 0], vel: [1, 0], pred: [[1, 5, 0]], cov: [0.04, 0, 0.01] }] }, { x: 1, y: 2, yaw: Math.PI / 2 }, { x: 0, y: 0, yaw: 0 })[0],
+      window.__operator.obstaclesInMap({ obstacles: [{ track_id: 1, centroid: [1, 0, 0], min: [1, 0, 0], max: [1, 0, 0], vel: [1, 0], pred: [[1, 1, 0]], cov: [0.04, 0, 0.01] }] }, { x: 1, y: 2, yaw: Math.PI / 2 }, null)[0]])`);
     const [wOdom, wBase] = JSON.parse(tfm), close = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-9);
     check(`${vp.label}: obstacle positions go base_link -> map, velocity stays in its world frame`, close(wOdom.at, [1, 3]) && close(wOdom.vel, [1, 0]), tfm);
     check(`${vp.label}: velocity without a world frame is rotated like a position`, close(wBase.vel, [0, 1]), tfm);
+    check(`${vp.label}: predicted points go through the world frame's pose, covariance rotates with it`,
+      close(wOdom.pred[0], [1, 5, 0]) && close(wBase.pred[0], [1, 1, 3]) && close(wBase.cov, [0.01, 0, 0.04]), tfm);
     // That wait also outlasted ONLINE_TTL_MS for both robots; a live one keeps sending /tf.
     await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
     await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
@@ -545,7 +554,7 @@ async function main() {
       }
       return n; })()`);
     check(`${vp.label}: no walker drawn without a sim world`, (await greenNear(1, 1, 30)) === 0);
-    await emit('/sim/world', { data: JSON.stringify({ world: 'aisle_crossing', title: 'Aisle crossing', props: [],
+    await emit('/sim/world', { data: JSON.stringify({ world: 'person_crossing', title: 'Person crossing', props: [],
       actors: [{ id: 'walker_1', label: 'walker', shape: 'cylinder', radius: 0.3, color: [0.1, 0.75, 0.2], path: [[-1, 1], [3, 1]], mode: 'pingpong' }] }) });
     await emit('/sim/ground_truth', { data: JSON.stringify({ wt: 4.2, running: true, actors: { walker_1: { x: 1, y: 1, yaw: 0, moving: true } } }) });
     await sleep(300);

@@ -236,7 +236,11 @@ def test_can_move_rules():
     body = {"clipped": False, "extent_m": 0.4, "min": [2, 0, 0.0], "max": [2.3, 0.4, 1.7]}
     assert od.can_move(body)
     assert not od.can_move({**body, "clipped": True})
-    assert not od.can_move({**body, "extent_m": 3.0})            # shelving
+    assert not od.can_move({**body, "extent_m": 4.2})            # shelving: longer than any vehicle
+    # 3 m long AND 1.7 m tall is a forklift-sized mover (large-mover rule,
+    # test_large_mover_rule_admits_tall_long_clusters_only); flat and long is not.
+    assert od.can_move({**body, "extent_m": 3.0})
+    assert not od.can_move({**body, "extent_m": 3.0, "max": [2.3, 0.4, 0.9]})
     # Shelf deck at camera height, edge-on: 1 m up but 7 cm top to bottom.
     assert not od.can_move({**body, "min": [2, 0, 0.97], "max": [2.8, 0.4, 1.04]})
 
@@ -279,3 +283,99 @@ def test_centroid_jump_restarts_track_instead_of_moving():
     for k in range(12):
         s = tr.update([(2.0, 1.0 - 1.2 * k * 0.03)], k * 0.03)[0]
     assert s["moving"]
+
+
+# -- Kalman tracker, prediction, predicted cloud (v2, 2026-11-04) -------------------
+
+def test_kf_velocity_converges_and_predicts_ahead():
+    tr = od.Tracker()
+    s = None
+    for k in range(10):
+        s = tr.update([(2.0, 1.0 - 1.0 * k * 0.1)], k * 0.1)[0]
+    assert s["vel"][1] == pytest.approx(-1.0, abs=0.1) and abs(s["vel"][0]) < 0.1
+    # pred = pos + v * h, at the configured horizons
+    assert [h for h, _, _ in s["pred"]] == od.DEFAULTS["pred_horizons_s"]
+    for h, x, y in s["pred"]:
+        assert x == pytest.approx(s["pos_w"][0] + s["vel"][0] * h, abs=4e-3)  # 3-dp rounding
+        assert y == pytest.approx(s["pos_w"][1] + s["vel"][1] * h, abs=4e-3)
+    # the filter's position uncertainty is small and well formed
+    sxx, sxy, syy = s["cov"]
+    assert 0 < sxx < 0.01 and 0 < syy < 0.01 and sxy * sxy <= sxx * syy + 1e-9
+
+
+def test_kf_averages_centroid_jitter_instead_of_trusting_one_frame():
+    """1 cm jitter at 10 Hz is 0.1 m/s frame to frame; the filter must not."""
+    rng = np.random.default_rng(1)
+    tr = od.Tracker()
+    speeds = []
+    for k in range(40):
+        x, y = 2.0 + rng.normal(0, 0.01), 0.5 + rng.normal(0, 0.01)
+        speeds.append(tr.update([(x, y)], k * 0.1)[0]["speed_mps"])
+    assert max(speeds[10:]) < od.DEFAULTS["moving_speed_mps"]
+
+
+def test_kf_mahalanobis_gate_rejects_an_outlier_near_a_confident_track():
+    tr = od.Tracker()
+    for k in range(20):
+        tid = tr.update([(2.0, 0.0)], k * 0.1)[0]["track_id"]
+    # 0.5 m away is inside track_gate_m but many sigma for a settled track:
+    # a new object, not this one moving
+    other = tr.update([(2.0, 0.5)], 2.0)[0]["track_id"]
+    assert other != tid
+
+
+def test_kf_non_movable_observation_zeroes_velocity_then_recovers():
+    tr = od.Tracker()
+    s = None
+    for k in range(8):
+        s = tr.update([(2.0, 1.0 - k * 0.1)], k * 0.1, [True])[0]
+    assert s["speed_mps"] > 0.5
+    s = tr.update([(2.0, 0.2)], 0.8, [False])[0]
+    assert s["speed_mps"] == 0.0 and not s["moving"]
+    for k in range(9, 16):
+        s = tr.update([(2.0, 1.0 - k * 0.1)], k * 0.1, [True])[0]
+    assert s["moving"] and s["vel"][1] == pytest.approx(-1.0, abs=0.15)
+
+
+def test_large_mover_rule_admits_tall_long_clusters_only():
+    forklift = {"clipped": False, "extent_m": 2.6, "min": [2, -0.6, 0.0], "max": [4.6, 0.6, 2.1]}
+    deck = {"clipped": False, "extent_m": 2.6, "min": [2, -0.6, 0.9], "max": [4.6, 0.6, 1.3]}
+    rack = {"clipped": False, "extent_m": 4.2, "min": [2, -0.6, 0.0], "max": [6.2, 0.6, 2.4]}
+    assert od.can_move(forklift)
+    assert not od.can_move(deck)           # long and flat: a shelf deck
+    assert not od.can_move(rack)           # longer than any vehicle
+    assert not od.can_move({**forklift, "clipped": True})
+    assert not od.can_move(forklift, {"large_mover_min_z_m": 2.5})
+
+
+def test_predicted_cloud_sweeps_moving_tracks_and_is_empty_otherwise():
+    tr = od.Tracker()
+    s = None
+    for k in range(10):
+        s = tr.update([(2.0, 1.0 - 1.0 * k * 0.1)], k * 0.1)[0]
+    assert s["moving"]
+    obs = [{"extent_m": 0.4}]
+    pts = od.predicted_cloud_points([s], obs)
+    assert len(pts) > 20
+    # the ribbon runs from the track toward where it is going (-y), 1.5 s ahead
+    assert pts[:, 1].min() == pytest.approx(s["pos_w"][1] - 1.5 - 0.25, abs=0.15)
+    assert pts[:, 1].max() <= s["pos_w"][1] + 0.3
+    assert abs(pts[:, 0] - 2.0).max() <= 0.3
+    # grid points, deduplicated
+    assert len({(round(float(x), 3), round(float(y), 3)) for x, y in pts}) == len(pts)
+    # a static track contributes nothing
+    still = {**s, "moving": False}
+    assert len(od.predicted_cloud_points([still], obs)) == 0
+    assert od.predicted_cloud_points([], []).shape == (0, 2)
+    # a forklift's half extent widens the ribbon
+    wide = od.predicted_cloud_points([s], [{"extent_m": 2.6}])
+    assert np.ptp(wide[:, 0]) > np.ptp(pts[:, 0]) + 1.0
+
+
+def test_payload_carries_prediction_fields():
+    tr = od.Tracker()
+    s = tr.update([(1.0, 0.0)], 0.0)[0]
+    assert set(s) >= {"track_id", "pos_w", "vel", "speed_mps", "cov", "pred", "moving", "hits"}
+    p = od.build_payload([s], stamp=1.0, frame="robot_0/base_link", floor_z=0.0,
+                         width=848, height=480, world_frame="robot_0/odom")
+    assert p["obstacles"][0]["pred"][0][0] == 0.5

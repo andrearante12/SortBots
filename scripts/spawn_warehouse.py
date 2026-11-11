@@ -983,6 +983,41 @@ def _read_arm_cmd(robot_name: str):
     ])
 
 
+def _set_op(xform, kind: str, value, suffix: str = ""):
+    """Author one xform op on a referenced prim at whatever precision the ASSET
+    already uses for it. ClearXformOpOrder() drops the order, not the
+    attributes: the NVIDIA characters ship `xformOp:rotateXYZ` as double3, and
+    AddRotateXYZOp()'s float default then raises "typeName 'double3' does not
+    match the requested precision" (first live run of a usd actor, 2026-11-06).
+    """
+    from pxr import Gf, UsdGeom
+
+    attr = xform.GetPrim().GetAttribute(f"xformOp:{kind}" + (f":{suffix}" if suffix else ""))
+    double = not (attr and attr.IsValid() and str(attr.GetTypeName()).startswith("float"))
+    prec = UsdGeom.XformOp.PrecisionDouble if double else UsdGeom.XformOp.PrecisionFloat
+    add = {"translate": xform.AddTranslateOp, "rotateXYZ": xform.AddRotateXYZOp,
+           "scale": xform.AddScaleOp}[kind]
+    op = add(prec, suffix) if suffix else add(prec)
+    op.Set((Gf.Vec3d if double else Gf.Vec3f)(*value))
+    return op
+
+
+def _asset_url(ref: str):
+    """A ref relative to the Isaac asset root -> its full URL; an absolute
+    URL/filesystem path passes through. None when the root can't be resolved."""
+    if "://" in ref or ref.startswith("/"):
+        return ref
+    try:
+        from isaacsim.storage.native import get_assets_root_path
+
+        root = get_assets_root_path()
+    except Exception:
+        root = None
+    if not root:
+        return None
+    return f"{root.rstrip('/')}/{ref.lstrip('/')}"
+
+
 def _spawn_usd_prop(stage, prim_path: str, x: float, y: float, yaw_rad: float,
                     ref: str, scale: float = 1.0, z: float = 0.0) -> bool:
     """Reference a real USD asset (an NVIDIA warehouse prop) at the station.
@@ -1020,24 +1055,17 @@ def _spawn_usd_prop(stage, prim_path: str, x: float, y: float, yaw_rad: float,
     from isaacsim.core.utils.stage import add_reference_to_stage
     from pxr import Gf, UsdGeom
 
-    if "://" not in ref and not ref.startswith("/"):
-        try:
-            from isaacsim.storage.native import get_assets_root_path
-
-            root = get_assets_root_path()
-        except Exception:
-            root = None
-        if not root:
-            return False
-        ref = f"{root.rstrip('/')}/{ref.lstrip('/')}"
+    ref = _asset_url(ref)
+    if ref is None:
+        return False
 
     add_reference_to_stage(usd_path=ref, prim_path=prim_path)
     xform = UsdGeom.Xformable(stage.GetPrimAtPath(prim_path))
     xform.ClearXformOpOrder()
-    xform.AddTranslateOp().Set(Gf.Vec3d(float(x), float(y), float(z)))
-    xform.AddRotateXYZOp().Set(Gf.Vec3f(0.0, 0.0, float(math.degrees(yaw_rad))))
+    _set_op(xform, "translate", (float(x), float(y), float(z)))
+    _set_op(xform, "rotateXYZ", (0.0, 0.0, float(math.degrees(yaw_rad))))
     if scale != 1.0:
-        xform.AddScaleOp().Set(Gf.Vec3f(float(scale), float(scale), float(scale)))
+        _set_op(xform, "scale", (float(scale),) * 3)
     return True
 
 
@@ -1072,6 +1100,230 @@ def _author_world_shape(stage, path: str, item: dict, *, collider: bool):
                            collider=collider)
     return _author_cylinder(stage, f"{path}/geom", item["radius"], item["height"],
                             (0.0, 0.0, item["height"] / 2.0), collider=collider)
+
+
+def _fallback_item(item: dict) -> dict:
+    """The primitive a usd item degrades to when its asset can't be referenced:
+    the SAME footprint the metrics score against (simtest/world.py PRESETS)."""
+    h = item["height"]
+    if item.get("fallback") == "cylinder" or ("radius" in item and item.get("fallback") != "box"):
+        from simtest import world as wl
+
+        return {**item, "shape": "cylinder", "radius": item.get("radius") or wl.half_extent(item)}
+    if "radius" in item:
+        r = item["radius"]
+        return {**item, "shape": "box", "size": (2 * r, 2 * r, h)}
+    fx, fy = item["footprint"]
+    return {**item, "shape": "box", "size": (fx, fy, h)}
+
+
+def _strip_physics(stage, root_path: str) -> int:
+    """Turn a referenced asset into a visual-only prop: no colliders, no rigid
+    bodies, no articulations, joints, cameras or graphs. Returns how many prims
+    were touched.
+
+    World actors must not be colliders (see _spawn_world), but the NVIDIA
+    characters, the forklift and the AMRs all ship physics — the robots even
+    ship sensors and OmniGraphs. Composing `*Enabled = false` overrides over
+    the reference is what PhysX honours; RemoveAPI on a referenced prim would
+    only remove the local opinion and leave the asset's. Instanceable
+    subtrees can't be authored on through their proxies, so they are made
+    un-instanceable first (visual cost: none, these are single copies).
+    """
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+    root = stage.GetPrimAtPath(root_path)
+    if not root.IsValid():
+        return 0
+    for prim in Usd.PrimRange(root):
+        if prim.IsInstanceable():
+            prim.SetInstanceable(False)
+    touched = 0
+    for prim in Usd.PrimRange(root):
+        tn = prim.GetTypeName()
+        if prim.HasAPI(UsdPhysics.CollisionAPI):
+            UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
+            touched += 1
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            UsdPhysics.RigidBodyAPI(prim).CreateRigidBodyEnabledAttr(False)
+            touched += 1
+        if prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+            UsdPhysics.ArticulationRootAPI(prim).CreateArticulationEnabledAttr(False)
+            touched += 1
+        if prim.IsA(UsdPhysics.Joint):
+            UsdPhysics.Joint(prim).CreateJointEnabledAttr(False)
+            touched += 1
+        # Sensors and graphs on a robot asset would publish, render or tick on
+        # their own; a scripted mover needs none of that. Deactivating keeps
+        # the asset's meshes (they are siblings, not children, of these).
+        if prim.IsA(UsdGeom.Camera) or tn.startswith("OmniGraph") or "Lidar" in tn \
+                or tn.startswith("Isaac") or tn.startswith("PhysxScene"):
+            prim.SetActive(False)
+            touched += 1
+    return touched
+
+
+# actor id -> {"rot", "trans", "frames", "stride_s", "phase", "idx"}: the
+# walkers _WorldRuntime.step poses every physics step. The stride is driven
+# from the WORLD clock, not baked into time samples on the USD timeline: a
+# 420 s bake froze every walker on its last pose once a live demo outlived it
+# (seen 2026-11-09 at sim t=5563 s), and the timeline knows nothing about the
+# actor dwelling or the world clock being paused/reset — so the legs walked
+# on the spot at every waypoint. Here the phase only advances while the actor
+# is actually moving, and loops forever.
+WALKERS: dict = {}
+
+
+def _find_skeleton(stage, under_path: str):
+    from pxr import Usd, UsdSkel
+
+    prim = stage.GetPrimAtPath(under_path)
+    if not prim.IsValid():
+        return None
+    for q in Usd.PrimRange(prim):
+        if q.IsA(UsdSkel.Skeleton):
+            return q
+    return None
+
+
+def _pose_walker(walker: dict, dt: float, moving: bool) -> None:
+    """Advance one walker's stride by dt seconds of world clock (only while it
+    moves) and author the matching pose if the frame changed."""
+    if moving and dt > 0.0:
+        walker["phase"] = (walker["phase"] + dt / walker["stride_s"]) % 1.0
+    frames = walker["frames"]
+    idx = int(walker["phase"] * len(frames)) % len(frames)
+    if idx == walker["idx"]:
+        return
+    walker["idx"] = idx
+    rot, trans = frames[idx]
+    walker["rot"].Set(rot)
+    if walker["trans"] is not None:
+        walker["trans"].Set(trans)
+
+
+# (character ref, clip) -> retargeted stride: two actors sharing both share
+# the work (a few hundred ms per stride).
+_STRIDE_CACHE: dict = {}
+
+
+def _spawn_walk_actor(stage, model: str, actor: dict) -> bool:
+    """A person/worker actor: a dressed NVIDIA character (the CC-rig *_new
+    characters) actually walking — one stride of Isaac's walk library
+    retargeted onto its skeleton (scripts/walk_retarget.py), looped off the
+    world clock by _WorldRuntime.step (see WALKERS). False when the asset
+    root is unreachable or the asset's structure isn't what we expect (the
+    caller falls back to a primitive)."""
+    # zlib.crc32, not hash(): PYTHONHASHSEED randomizes str hash() per
+    # process, so the same actor id would pick a different clip on every
+    # sim restart.
+    import zlib
+
+    from pxr import Sdf, Usd, UsdGeom, UsdSkel
+
+    import walk_retarget as wr
+
+    names = tuple(wr.WALK_CLIPS)
+    clip_name = names[zlib.crc32(actor["id"].encode()) % len(names)]
+    window = wr.WALK_CLIPS[clip_name]
+    ref, src_url, clip_url = (_asset_url(r) for r in (
+        actor["ref"], wr.WALK_SRC_SKEL, wr.WALK_SRC_CLIP.format(clip_name)))
+    if None in (ref, src_url, clip_url):
+        return False
+    # `model` must be DEFINED as an Xform, not left as the typeless ancestor
+    # Define(char_path) would create: the renderer ignores xform ops on an
+    # untyped prim, so yaw_offset_deg and z silently never applied (live
+    # 2026-11-09 the walker faced 90 deg off its path; plain usd actors get
+    # their typed model prim from add_reference_to_stage).
+    UsdGeom.Xform.Define(stage, model)
+    char_path = f"{model}/character"
+    # Referenced DIRECTLY, not through isaacsim's add_reference_to_stage: for
+    # an asset whose upAxis/metersPerUnit differ from the stage, that helper
+    # hands it to omni.metrics.assembler, whose change listener re-adds its
+    # own up-axis correction on every resync — on top of ours (2026-11-09:
+    # the Y-up mannequin rendered upside down). These characters are Z-up
+    # metres like the stage, but a plain reference composes exactly what we
+    # author either way.
+    UsdGeom.Xform.Define(stage, char_path).GetPrim().GetReferences().AddReference(ref)
+    skel_prim = _find_skeleton(stage, char_path)
+    if skel_prim is None:
+        emit(f"  world actor {actor['id']}: no Skeleton in {actor['ref']} — falling back")
+        return False
+    key = (actor["ref"], clip_name)
+    if key not in _STRIDE_CACHE:
+        try:
+            src_stage, clip_stage = Usd.Stage.Open(src_url), Usd.Stage.Open(clip_url)
+            src_skel = next(UsdSkel.Skeleton(q) for q in src_stage.Traverse()
+                            if q.IsA(UsdSkel.Skeleton))
+            clip = UsdSkel.Animation(clip_stage.GetDefaultPrim())
+            _STRIDE_CACHE[key] = wr.retarget_stride(src_skel, clip, window,
+                                                    UsdSkel.Skeleton(skel_prim))
+        except Exception as exc:   # asset moved/changed shape: a primitive still scores
+            emit(f"  world actor {actor['id']}: retargeting {clip_name} failed ({exc}) — "
+                 f"falling back")
+            return False
+    frames, clip_stride_s, seam = _STRIDE_CACHE[key]
+    anim_path = f"{model}/WalkAnim"
+    anim = UsdSkel.Animation.Define(stage, anim_path)
+    anim.CreateJointsAttr(UsdSkel.Skeleton(skel_prim).GetJointsAttr().Get())
+    rot0, trans0, scales = frames[0]
+    rot_attr = anim.CreateRotationsAttr(rot0)
+    trans_attr = anim.CreateTranslationsAttr(trans0)
+    anim.CreateScalesAttr(scales)
+    UsdSkel.BindingAPI.Apply(skel_prim)
+    UsdSkel.BindingAPI(skel_prim).CreateAnimationSourceRel().SetTargets([Sdf.Path(anim_path)])
+    # Play the stride at the actor's own speed so the feet keep pace with the
+    # floor instead of sliding (clips walk 1.0-1.16 m/s).
+    speed = float((actor.get("path") or {}).get("speed_mps") or 0.0)
+    rate = min(2.0, max(0.5, speed / window[2])) if speed > 0 else 1.0
+    WALKERS[actor["id"]] = {"rot": rot_attr, "trans": trans_attr,
+                            "frames": [(r, t) for r, t, _s in frames],
+                            "stride_s": clip_stride_s / rate, "phase": 0.0, "idx": 0}
+
+    xf = UsdGeom.Xformable(stage.GetPrimAtPath(model))
+    xf.ClearXformOpOrder()
+    _set_op(xf, "translate", (0.0, 0.0, float(actor["z"])))
+    _set_op(xf, "rotateXYZ", (0.0, 0.0, float(actor["yaw_offset_deg"])))
+    if actor["scale"] != 1.0:
+        _set_op(xf, "scale", (float(actor["scale"]),) * 3)
+    ox, oy = actor["origin_offset"]
+    if ox or oy:
+        _set_op(xf, "translate", (float(ox), float(oy), 0.0), suffix="origin")
+    n = _strip_physics(stage, model)
+    emit(f"  world actor {actor['id']}: {actor['ref']} walk={clip_name} retargeted, "
+         f"stride {clip_stride_s / rate:.2f}s at rate {rate:.2f} (seam {seam:.4f}), "
+         f"physics stripped on {n} prim(s)")
+    return True
+
+
+def _spawn_usd_actor(stage, path: str, actor: dict) -> bool:
+    """Reference a usd actor's asset under its Xform. The parent Xform keeps
+    the translate/rotate ops _WorldRuntime.step drives; the model sits in a
+    child with the asset's own yaw offset, floor offset and scale, so turning
+    the asset to face its direction of travel never touches the kinematics.
+    False when the asset root is unreachable (the caller falls back)."""
+    from pxr import UsdGeom
+
+    model = f"{path}/model"
+    if actor.get("anim") == "walk_cycle":
+        return _spawn_walk_actor(stage, model, actor)
+    if not _spawn_usd_prop(stage, model, 0.0, 0.0, 0.0, ref=actor["ref"], scale=1.0):
+        return False
+    xf = UsdGeom.Xformable(stage.GetPrimAtPath(model))
+    xf.ClearXformOpOrder()
+    # Ops compose right to left: lift, then face the heading, then (innermost,
+    # in the model's own frame) move its body centre onto the actor's pose.
+    _set_op(xf, "translate", (0.0, 0.0, float(actor["z"])))
+    _set_op(xf, "rotateXYZ", (0.0, 0.0, float(actor["yaw_offset_deg"])))
+    if actor["scale"] != 1.0:
+        _set_op(xf, "scale", (float(actor["scale"]),) * 3)
+    ox, oy = actor["origin_offset"]
+    if ox or oy:
+        _set_op(xf, "translate", (float(ox), float(oy), 0.0), suffix="origin")
+    n = _strip_physics(stage, model)
+    emit(f"  world actor {actor['id']}: {actor['ref']} (physics stripped on {n} prim(s), "
+         f"yaw offset {actor['yaw_offset_deg']:.0f} deg)")
+    return True
 
 
 TABLE_TOP_M, TABLE_LEG_M, TABLE_LEG_INSET_M = 0.04, 0.05, 0.03
@@ -1155,14 +1407,16 @@ def _spawn_world(stage, w: dict) -> tuple[dict, dict]:
         path = f"{WORLD_ROOT}/props/{prop['id']}"
         x, y, yaw = prop["pose"]
         if prop["shape"] == "usd":
-            ok = _spawn_usd_prop(stage, path, x, y, yaw, ref=prop["ref"], scale=prop["scale"])
+            ok = _spawn_usd_prop(stage, path, x, y, yaw + math.radians(prop["yaw_offset_deg"]),
+                                 ref=prop["ref"], scale=prop["scale"], z=prop["z"])
             if not ok:
                 # Asset root unreachable: keep the obstacle where the metrics
-                # think it is, as a plain box of the declared footprint.
-                emit(f"  world prop {prop['id']}: asset root unreachable, using a box")
-                fx, fy = prop["footprint"]
-                prop = {**prop, "shape": "box", "size": (fx, fy, prop["height"])}
+                # think it is, as a primitive of the declared footprint.
+                emit(f"  world prop {prop['id']}: asset root unreachable, using a primitive")
+                prop = _fallback_item(prop)
             else:
+                if not prop["collider"]:
+                    _strip_physics(stage, path)
                 emit(f"  world prop {prop['id']}: {prop['ref']} at ({x}, {y})")
                 continue
         xf = UsdGeom.Xform.Define(stage, path)
@@ -1183,10 +1437,15 @@ def _spawn_world(stage, w: dict) -> tuple[dict, dict]:
         xf.ClearXformOpOrder()
         t_op = xf.AddTranslateOp()
         r_op = xf.AddRotateXYZOp()
-        geom = _author_world_shape(stage, path, actor, collider=False)
-        _bind(geom, _world_color_material(stage, materials, actor["color"]))
+        shape = actor
+        if actor["shape"] == "usd" and not _spawn_usd_actor(stage, path, actor):
+            emit(f"  world actor {actor['id']}: asset root unreachable, using a primitive")
+            shape = _fallback_item(actor)
+        if shape["shape"] != "usd":
+            geom = _author_world_shape(stage, path, shape, collider=False)
+            _bind(geom, _world_color_material(stage, materials, actor["color"]))
         actors[actor["id"]] = (t_op, r_op)
-        emit(f"  world actor {actor['id']}: {actor['shape']}, {actor['path']['mode']} over "
+        emit(f"  world actor {actor['id']}: {shape['shape']}, {actor['path']['mode']} over "
              f"{len(actor['path']['waypoints'])} waypoints at {actor['path']['speed_mps']} m/s")
 
     from build_warehouse import _author_box
@@ -1263,6 +1522,7 @@ class _WorldRuntime:
         self._String = String
         self.world = w
         self.actor_ops = actor_ops
+        self.walk_wt = 0.0   # world clock the walkers were last posed at (see WALKERS)
         self.spawn = spawn_positions
         self.running = bool(w and w["autostart"])
         self.wt = 0.0                 # world clock, seconds
@@ -1311,7 +1571,8 @@ class _WorldRuntime:
             "props": [{**common(p), "footprint": wl.prop_footprint(p)}
                       for p in self.world["props"]],
             "actors": [{**common(a), "radius": a.get("radius"),
-                        "size": a.get("size"), "path": list(a["path"]["waypoints"]),
+                        "size": a.get("size"), "footprint": a.get("footprint"),
+                        "path": list(a["path"]["waypoints"]),
                         "mode": a["path"]["mode"]} for a in self.world["actors"]],
             # Static facts only: where a package IS lives in /sim/ground_truth.
             "packages": [{"id": p["id"], "label": p["label"], "size": list(p["size"]),
@@ -1468,11 +1729,16 @@ class _WorldRuntime:
         from pxr import Gf
         from simtest import world as wl
 
+        walk_dt = max(0.0, self.wt - self.walk_wt)
+        self.walk_wt = self.wt
         for actor in self.world["actors"]:
             p = wl.pose_at(actor["path"], self.wt)
             t_op, r_op = self.actor_ops[actor["id"]]
             t_op.Set(Gf.Vec3d(p["x"], p["y"], 0.0))
             r_op.Set(Gf.Vec3f(0.0, 0.0, math.degrees(p["yaw"])))
+            walker = WALKERS.get(actor["id"])
+            if walker is not None:
+                _pose_walker(walker, walk_dt, p["moving"])
 
     def tick(self, sim_t: float, robots: dict) -> None:
         """Every GROUND_TRUTH_EVERY steps: take commands, publish ground truth."""

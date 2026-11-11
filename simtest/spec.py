@@ -3,7 +3,7 @@
     name: crossing_yield
     title: Walker crosses the aisle mouth — yield and arrive
     scenario: moving_obstacles          # configs/scenarios/ — how the stack runs
-    overrides: {world: aisle_crossing}  # only keys that scenario lists under overrides:
+    overrides: {world: person_crossing}  # only keys that scenario lists under overrides:
     warmup_s: 5                         # sim-s between "stack ready" and t0
     goals:                              # Nav2 goals the probe sends, per robot in order
       - robot: robot_0
@@ -30,7 +30,7 @@
     repeats: 3
     pass_rate: 1.0                      # fraction of repeats (per variant) that must pass
     variants:                           # optional: the same test under other settings
-      - {label: head_on, set: {overrides.world: aisle_head_on}}
+      - {label: head_on, set: {overrides.world: person_head_on}}
     record: [dyn]                       # extra event streams to keep (simtest/events.py)
 
 The three layers stay separate on purpose: a world is WHAT is in the
@@ -73,7 +73,7 @@ MAX_REPEATS = 50
 MAX_VARIANTS = 20
 DEFAULT_SECTION = "Other"   # the heading a test with no `section:` sits under in the Tests tab
 TOP_KEYS = {"name", "title", "section", "parked", "description", "scenario", "overrides", "warmup_s", "goals",
-            "tasks", "stop", "metrics", "repeats", "pass_rate", "variants", "record"}
+            "tasks", "stop", "metrics", "repeats", "pass_rate", "variants", "record", "clip_view"}
 # What a variant may change. Not `scenario` or `metrics`: a variant is the
 # same question asked under different conditions, and changing the scoring
 # would make the variants' rows in one report incomparable.
@@ -366,12 +366,23 @@ def _resolve_one(raw: dict) -> dict:
         "run": run, "robots": robots, "world": world, "goals": goals, "tasks": tasks,
         "stop": stop, "metrics": entries,
         "warmup_s": _num(raw.get("warmup_s", 5.0), "warmup_s", 0, 600),
+        "clip_view": _clip_view(raw.get("clip_view")),
     }
     try:
         metrics_lib.MetricSet(entries, context(resolved))  # check_context() per metric
     except metrics_lib.MetricError as e:
         raise SpecError(str(e)) from None
     return resolved
+
+
+def _clip_view(raw) -> dict | None:
+    """A fixed camera for this test's Tests-tab clip (simtest/clip.py), when riding along
+    with robot_0 would miss what the test is about — e.g. a second robot crossing its path.
+    Same shape as a world's `view:`."""
+    try:
+        return world_lib._validate_view(raw)
+    except world_lib.WorldError as e:
+        raise SpecError(str(e).replace("view", "clip_view", 1)) from None
 
 
 def validate(raw, *, stem: str | None = None) -> dict:
@@ -489,10 +500,14 @@ def _passes_when(entries: list[dict]) -> list[str]:
             for e in entries for v, op, th in e["pass"]]
 
 
-def _clip_of(name: str) -> str | None:
-    """Its success GIF's URL under webui/, if a passing run has recorded one (simtest/clip.py)."""
-    path = clip_lib.media_path(name)
-    return f"{path.parent.name}/{path.name}" if path.exists() else None
+def _clip_of(name: str) -> tuple[str | None, str | None]:
+    """(URL under webui/, kind) of its Tests-tab GIF (simtest/clip.py): "pass" for one cut
+    from a passing run, "preview" for one that only shows what the test sets up, (None,
+    None) for neither. A passing clip wins."""
+    for kind, path in (("pass", clip_lib.media_path(name)), ("preview", clip_lib.preview_path(name))):
+        if path.exists():
+            return f"{path.parent.name}/{path.name}", kind
+    return None, None
 
 
 def list_tests() -> list[dict]:
@@ -511,7 +526,7 @@ def list_tests() -> list[dict]:
                 "repeats": t["repeats"], "runs": len(t["variants"]) * t["repeats"],
                 "sim_s": base["stop"]["sim_s"],
                 "passes_when": _passes_when(base["metrics"]),
-                "clip": _clip_of(t["name"]),
+                "clip": _clip_of(t["name"])[0], "clip_kind": _clip_of(t["name"])[1],
                 "metrics": [{"id": e["id"], "metric": e["metric"],
                              "criteria": [f"{v} {metrics_lib.OP_TEXT[op]} {th}"
                                           for v, op, th in e["pass"]]}

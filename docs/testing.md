@@ -23,12 +23,13 @@ There are three layers, kept separate on purpose:
 
 ```bash
 scripts/simtest.py list | show NAME | metrics
-scripts/simtest.py run crossing_yield [--repeats 3] [--set overrides.world=aisle_head_on]
+scripts/simtest.py run crossing_yield [--variant forklift] [--repeats 3]
+scripts/simtest.py assets                          # every usd asset the worlds name is on the asset root
 scripts/simtest.py rescore data/simtests/<dir>     # re-score recorded events, no sim
 scripts/simtest.py report DIR_A DIR_B
 ```
 
-Test cases: `crossing_yield`, `head_on_pass`, `cluttered_route`, and the pick and place
+Test cases: the obstacle avoidance suite below, and the pick and place
 tests in [Pick and place](manipulation.md#pick-and-place-sim). `pick_block` is the cheapest
 harness check: no saved map, no Nav2, about two minutes. A test's `section:` is its heading on the
 operator view's Tests tab. `parked: true` keeps a test off the tab, but `simtest.py` can
@@ -44,6 +45,51 @@ already using that port, pass `--port N --cdp-port M`.
 - The GIF is `webui/test_media/NAME.gif`. `scripts/simtest.py run NAME --clip` records the
   Sim view and writes it only if the run passes. Re-record it when the test changes, and
   commit it.
+
+## Obstacle avoidance suite
+
+`crossing_yield` (a person, or a forklift, across the route), `head_on_pass` (a person,
+or a warehouse AMR, down the aisle), `step_out_stop` (a person steps out from behind
+crates and stops: the braking case), `mixed_route` (real props, two people and a
+forklift, two legs) and `peer_crossing` (two real Nav2 robots on crossing goals, plus
+the person). All run on the saved map (`moving_obstacles_mapped`).
+
+**Actors are real assets.** A world names an obstacle by `preset:` — `person`, `worker`,
+`forklift`, `amr` (an iw_hub), `amr_tall` (a Nova Carter) — and `simtest/world.py`
+PRESETS supplies the NVIDIA asset reference plus the floor footprint and height the
+metrics score against (measured with `scripts/measure_assets.py`). Any key can be
+overridden; `shape: usd` with `ref` + `footprint` or `radius` names an asset directly.
+Assets are spawned with their physics stripped, so actors stay non-colliders; without the
+asset server an item degrades to a primitive of the same footprint. `person` and
+`worker` are Isaac's dressed construction workers (`male_adult_construction_01_new`,
+`_05_new`) and really walk: one straight stride of Isaac's walk-clip library, retargeted
+onto their rig at spawn (`scripts/walk_retarget.py`; `omni.anim.people` isn't in the pip
+install), looped in place at the actor's speed while the world moves them.
+`yaw_offset_deg` turns a model to face +x,
+`origin_offset` puts its body centre on the pose, `z` its feet on the floor.
+
+**Objective scores, not only pass/fail.** `reaction` (ground truth only) opens an
+*encounter* when an actor is within 4 m, ahead, and on a constant-velocity collision
+course, and scores time to halve speed, time to stop, braking distance, hardest
+deceleration, minimum time-to-collision, yield time and closest gap. `goals` v2 adds the
+detour ratio and mean speed; `clearance` v2 takes `peers: true` for robot-to-robot gaps.
+`prediction` scores the Kalman tracker's `trk` stream: association and moving recall,
+position/velocity RMSE, look-ahead error at each horizon (ADE/FDE) against the analytic
+actor path — exact, since paths are analytic — with `cv_fde_m`, what constant-velocity
+extrapolation of the TRUE state scores, as the floor. Judge the values that are the
+point of a test and leave the rest reported: a clean head-on pass need not slow at all.
+
+**Prediction into Nav2.** `nodes/obstacle_detector.py` publishes
+`/<id>/predicted_obstacles`, each moving track's footprint swept 1.5 s along its
+velocity, which the LOCAL costmap reads as `predicted_scan`. Flip `predict_cloud` in
+`configs/obstacle_detector.yaml` and `scripts/simtest.py report A B` to compare runs with
+and without it.
+
+**First live results (2026-11-06, `crossing_yield` person, RTX 4070 laptop).** Prediction
+off: 5 contacts, goal in 57 s, 7 encounters. On: 4 contacts, goal in 34.5 s, detour 1.04,
+2 encounters. Both fail on contact. The person was tracked at 5.1 m and called moving at
+4.2 m, 5 s before the robot braked onto their line (1.26 m of braking from 0.43 m/s), so
+the next work is Nav2's response, not perception. The other tests have not run live yet.
 
 **Other world keys:**
 
@@ -73,8 +119,8 @@ Ground truth is on `/sim/ground_truth` (10 Hz JSON). The world layout is
 `/sim/world`, and `/sim/world_cmd` restarts or pauses it. World coordinates are the
 map frame.
 
-- **Metrics** (`simtest/metrics/`): `clearance`, `goals`, `map_contamination`,
-  `detection`, `coverage`, `tasks`, `pick_place`, `run_stats`. They are pure functions of recorded
+- **Metrics** (`simtest/metrics/`): `clearance`, `reaction`, `goals`, `map_contamination`,
+  `detection`, `prediction`, `coverage`, `tasks`, `pick_place`, `run_stats`. They are pure functions of recorded
   events. To change one, edit it, bump its `version`, then `rescore`.
 - **Verdicts:** a criterion with no data FAILS.
 - **Exit codes:** 0 pass, 1 fail, 2 invalid, 3 no score.

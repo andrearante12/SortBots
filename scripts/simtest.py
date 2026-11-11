@@ -5,6 +5,7 @@
     scripts/simtest.py validate [NAME ...]        # exit 2 if any is invalid
     scripts/simtest.py show NAME                  # the resolved plan, per variant
     scripts/simtest.py metrics                    # the metric catalog (simtest/metrics)
+    scripts/simtest.py assets                     # every usd asset the worlds name is on the asset root
     scripts/simtest.py run NAME [--set k=v ...] [--repeats N] [--variant LABEL]
                                 [--dry-run] [--force] [--keep]
     scripts/simtest.py rescore DIR [--current-spec]   # re-score recorded events
@@ -61,6 +62,7 @@ from simtest import events as ev_lib  # noqa: E402
 from simtest import metrics as metrics_lib  # noqa: E402
 from simtest import report as report_lib  # noqa: E402
 from simtest import spec  # noqa: E402
+from simtest import world as world_lib  # noqa: E402
 
 SIM_CTL = REPO_ROOT / "scripts" / "sim_ctl.sh"
 # Stand-in for `bash` wherever ROS is sourced: the distrobox fallback on hosts
@@ -116,6 +118,37 @@ def cmd_validate(a) -> int:
         except spec.SpecError as e:
             bad += 1
             log(f"INVALID  {n}: {e}")
+    return 2 if bad else 0
+
+
+# The 5.1 asset root the pip-installed Isaac resolves (isaacsim.storage.native
+# get_assets_root_path). Checked with plain HTTP so a world that names an
+# asset nobody has streamed yet fails here, in seconds, not as a grey box
+# five minutes into a run (spawn_warehouse falls back to the primitive).
+ASSET_ROOT_URL = os.environ.get(
+    "SORTBOTS_ISAAC_ASSET_ROOT",
+    "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1")
+
+
+def cmd_assets(_a) -> int:
+    import urllib.error
+    import urllib.request
+
+    refs = world_lib.usd_refs()
+    bad = 0
+    for ref, users in sorted(refs.items()):
+        url = f"{ASSET_ROOT_URL.rstrip('/')}/{ref}"
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                size = resp.headers.get("Content-Length")
+            log(f"ok       {ref}  ({int(size) // 1024 if size else '?'} KB)  <- {', '.join(users)}")
+        except urllib.error.HTTPError as e:
+            bad += 1
+            log(f"MISSING  {ref}  (HTTP {e.code})  <- {', '.join(users)}")
+        except (urllib.error.URLError, OSError) as e:
+            bad += 1
+            log(f"ERROR    {ref}  ({e})  <- {', '.join(users)}")
     return 2 if bad else 0
 
 
@@ -267,7 +300,7 @@ def run_once(label: str, resolved: dict, streams: set[str], run_dir: Path, a,
                                      "streams": sorted(streams)}, indent=2))
         cmd = (f"exec python3 -m simtest.probe --variant {shlex.quote(str(vjson))} "
                f"--out {shlex.quote(str(run_dir))}")
-        if a.clip:
+        if a.clip or a.preview:
             clip_dir.mkdir(exist_ok=True)
             with open(run_dir / "clip.log", "w") as fh:
                 clip = subprocess.Popen(_ros_shell(clip_lib.capture_cmd(clip_dir, resolved)),
@@ -392,6 +425,9 @@ def cmd_run(a) -> int:
                     if a.clip and body["score"]["ok"]:
                         gif = clip_lib.encode(run_dir / "clip", clip_lib.media_path(t["name"]))
                         log(f"[simtest] clip: {gif}")
+                    if a.preview:
+                        gif = clip_lib.encode(run_dir / "clip", clip_lib.preview_path(t["name"]))
+                        log(f"[simtest] preview clip: {gif}")
                     for m in body["score"]["metrics"]:
                         for c in m["criteria"]:
                             if not c["ok"]:
@@ -516,6 +552,8 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list").set_defaults(fn=cmd_list)
     sub.add_parser("metrics").set_defaults(fn=cmd_metrics)
+    sub.add_parser("assets", help="check every usd asset the worlds and presets name "
+                   "against the Isaac asset root").set_defaults(fn=cmd_assets)
     v = sub.add_parser("validate")
     v.add_argument("names", nargs="*")
     v.set_defaults(fn=cmd_validate)
@@ -526,7 +564,7 @@ def main(argv=None) -> int:
     r = sub.add_parser("run")
     r.add_argument("name")
     r.add_argument("--set", action="append", default=[], metavar="K=V",
-                   help="change a test field before validation, e.g. overrides.world=aisle_head_on "
+                   help="change a test field before validation, e.g. overrides.world=person_head_on "
                         "or stop.sim_s=60")
     r.add_argument("--repeats", type=int)
     r.add_argument("--variant", action="append", help="run only this variant (repeatable)")
@@ -537,6 +575,9 @@ def main(argv=None) -> int:
                    help="leave the sim up after the LAST run, to look around")
     r.add_argument("--clip", action="store_true",
                    help="record the Sim view; a passing run writes webui/test_media/NAME.gif")
+    r.add_argument("--preview", action="store_true",
+                   help="record the Sim view and write webui/test_media/NAME.preview.gif "
+                        "whatever the verdict: a picture of what the test sets up")
     r.add_argument("--out", help="results dir (default data/simtests/<UTC>_<name>)")
     r.set_defaults(fn=cmd_run)
     rs = sub.add_parser("rescore")

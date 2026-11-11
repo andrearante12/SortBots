@@ -18,9 +18,15 @@ def _pct(fraction: float) -> str:
 
 
 def _clearance_target(params: dict) -> str:
+    if params.get("peers"):
+        return "another robot" if params.get("actors") == [] else "a walker or another robot"
     if params.get("props"):
         return "a crate, barrel or pallet" if params.get("actors") == [] else "a walker or a crate"
     return "a walker"
+
+
+def _s(seconds: float) -> str:
+    return f"{seconds:g} s"
 
 
 def _only_if(holds: bool, text: str) -> str | None:
@@ -41,6 +47,21 @@ SENTENCES = {
         lambda x, p: f"At most {_pct(x)} of the walkers' floor ends up on the map as an obstacle",
     ("detection", "recall", "gte"):
         lambda x, p: f"Detects walkers in at least {_pct(x)} of the frames they are in view",
+    ("goals", "max_detour_ratio", "lte"):
+        lambda x, p: f"Drives no more than {x:g}x the straight-line distance to any goal",
+    ("reaction", "encounters", "gte"):
+        lambda x, p: "Actually meets a mover on the way" if x == 1
+        else f"Meets a mover at least {int(x)} times on the way",
+    ("reaction", "max_time_to_slow_s", "lte"):
+        lambda x, p: f"Halves its speed within {_s(x)} of a mover becoming a threat, every time",
+    ("reaction", "max_time_to_stop_s", "lte"):
+        lambda x, p: f"Comes to a stop within {_s(x)} of a mover becoming a threat, every time",
+    ("reaction", "max_brake_m", "lte"):
+        lambda x, p: f"Needs no more than {_cm(x)} to brake for a mover",
+    ("reaction", "min_ttc_s", "gt"):
+        lambda x, p: f"Never comes within {_s(x)} of colliding with a mover",
+    ("reaction", "min_gap_m", "gt"):
+        lambda x, p: f"Keeps more than {_cm(x)} from a mover it is reacting to",
     ("pick_place", "detected", "gte"):
         lambda x, p: _only_if(x == 1, "The camera finds the block"),
     ("pick_place", "picked", "gte"):

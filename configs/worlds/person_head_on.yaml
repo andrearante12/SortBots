@@ -1,0 +1,26 @@
+# A world layout (simtest/world.py has the full schema). See person_crossing.yaml
+# for how these coordinates were chosen.
+
+name: person_head_on
+title: Aisle — a person coming head-on
+description: >
+  A person comes down the west half of robot_0's aisle toward the robot
+  (x = -8.8, y 15.5 -> 9.5) and back. The aisle is ~4 m between racks, so
+  there is room to pass on the east side — but only if the robot sees them
+  early enough to move over, or stops and waits. The harder case: closing
+  speed is the sum of both speeds. amr_head_on asks the same of a robot-sized
+  vehicle on the same line, so the two score side by side.
+
+scenes: [nvidia]
+autostart: true
+
+actors:
+  - id: person_0
+    label: person
+    preset: person
+    path:
+      waypoints: [[-8.8, 15.5], [-8.8, 9.5]]
+      speed_mps: 1.0
+      mode: pingpong
+      start_at_s: 0.0
+      dwell_s: 2.0

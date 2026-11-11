@@ -86,4 +86,4 @@ def test_cli_exits_nonzero_for_an_unreachable_plate(capsys):
 
 
 def test_check_on_a_world_without_packages_says_so():
-    assert pl.check_world("aisle_crossing", None) == ["aisle_crossing: no packages"]
+    assert pl.check_world("person_crossing", None) == ["person_crossing: no packages"]

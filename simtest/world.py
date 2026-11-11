@@ -60,8 +60,74 @@ USD_REF_RX = re.compile(r"^Isaac/[A-Za-z0-9_][A-Za-z0-9_./-]*\.usdz?$")
 
 SCENES = ("nvidia", "primitive")
 SHAPES = ("box", "cylinder", "usd")
-ACTOR_SHAPES = ("box", "cylinder")
+ACTOR_SHAPES = ("box", "cylinder", "usd")
 MODES = ("once", "loop", "pingpong")
+
+# Named obstacles a world can ask for by `preset:` instead of spelling out a
+# USD reference, its floor footprint and its height every time. Every key is
+# an ordinary item key, so a world can override any of them (`{preset:
+# person, radius: 0.35}`), and `fallback` is what spawn_warehouse authors
+# when the asset root is unreachable: the primitive of the same footprint,
+# so a run without the asset server still scores against the same shape.
+#
+# The refs were checked against the 5.1 asset root on 2026-11-04 and the
+# numbers measured with scripts/measure_assets.py on 2026-11-06 (headless
+# Isaac, UsdGeom.BBoxCache at identity):
+#
+#   person    male_adult_construction_01_new, ~1.75 m, facing -y
+#   worker    male_adult_construction_05_new, ~1.72 m, facing -y
+#   forklift  bbox 1.21 x 3.49 x 2.15, long axis y
+#   amr       iw_hub 1.43 x 0.66 x 0.23, body centre 0.32 behind the origin,
+#             wheels 0.08 below
+#   amr_tall  nova_carter 0.73 x 0.90 x 0.69, centre 0.22 off, base 0.14 below
+#
+# `anim: walk_cycle` (person, worker) plays a REAL walk, not a bind pose:
+# the characters are Isaac's dressed construction workers (hard hat, hi-vis
+# vest, work trousers, boots), and spawn_warehouse.py's _spawn_walk_actor
+# retargets one straight stride of Isaac's walk-clip library onto their
+# skeleton (scripts/walk_retarget.py — the library is authored for a
+# different 81-joint rig and omni.anim.people, which would map it, isn't in
+# this install), looped off the world clock (see WALKERS there). Any
+# *_new character on the same 101-joint rig works as a walking `ref`.
+# The footprint the metrics score is the body (radius); yaw_offset_deg turns
+# the model to face +x, the direction of travel (these characters face -y,
+# so 90); z puts the feet on the floor (soles at the origin, so 0).
+# Footprints/heights are the declared values the METRICS use.
+PRESETS = {
+    "person": {
+        "shape": "usd",
+        "ref": "Isaac/People/Characters/male_adult_construction_01_new/"
+               "male_adult_construction_01_new.usd",
+        "anim": "walk_cycle",
+        "radius": 0.30, "height": 1.75, "z": 0.0, "yaw_offset_deg": 90.0,
+        "color": (0.95, 0.45, 0.10), "fallback": "cylinder",
+    },
+    "worker": {
+        "shape": "usd",
+        "ref": "Isaac/People/Characters/male_adult_construction_05_new/"
+               "male_adult_construction_05_new.usd",
+        "anim": "walk_cycle",
+        "radius": 0.32, "height": 1.72, "z": 0.0, "yaw_offset_deg": 90.0,
+        "color": (0.95, 0.70, 0.10), "fallback": "cylinder",
+    },
+    "forklift": {
+        "shape": "usd", "ref": "Isaac/Props/Forklift/forklift.usd",
+        "footprint": (3.5, 1.2), "height": 2.15, "yaw_offset_deg": 90.0,
+        "color": (0.90, 0.60, 0.05), "fallback": "box",
+    },
+    "amr": {
+        "shape": "usd", "ref": "Isaac/Robots/Idealworks/iwhub/iw_hub.usd",
+        "footprint": (1.43, 0.66), "height": 0.23, "z": 0.08, "origin_offset": (0.315, 0.0),
+        "color": (0.25, 0.55, 0.85), "fallback": "box",
+    },
+    "amr_tall": {
+        "shape": "usd", "ref": "Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd",
+        "footprint": (0.9, 0.73), "height": 0.69, "z": 0.14, "yaw_offset_deg": 90.0,
+        "origin_offset": (0.225, 0.0),
+        "color": (0.25, 0.55, 0.85), "fallback": "box",
+    },
+}
+FALLBACKS = ("box", "cylinder")
 MAX_SPEED = 3.0          # m/s — a brisk human is ~1.4; anything faster is a typo
 MAX_COORD = 200.0        # m — the NVIDIA warehouse is ~30 x 40
 MAX_ITEMS = 64
@@ -148,14 +214,38 @@ def _shape(raw: dict, what: str, allowed) -> dict:
         out["ref"] = ref
         out["scale"] = _num(raw.get("scale", 1.0), f"{what}.scale", 0.0, 100.0, strict_lo=True)
         # The asset's own geometry is opaque to everything but Isaac, so the
-        # metrics need to be told how much floor it covers.
-        fp = raw.get("footprint")
-        if not isinstance(fp, (list, tuple)) or len(fp) != 2:
-            raise WorldError(f"{what}.footprint: usd props need [x, y] metres for the metrics")
-        out["footprint"] = tuple(_num(s, f"{what}.footprint", 0.0, 20.0, strict_lo=True)
-                                 for s in fp)
+        # metrics need to be told how much floor it covers: a rectangle
+        # (`footprint: [x, y]`, along the asset's forward axis) or a disc
+        # (`radius`, a person).
+        fp, radius = raw.get("footprint"), raw.get("radius")
+        if (fp is None) == (radius is None):
+            raise WorldError(f"{what}: usd items need exactly one of footprint: [x, y] "
+                             "or radius, metres, for the metrics")
+        if fp is not None:
+            if not isinstance(fp, (list, tuple)) or len(fp) != 2:
+                raise WorldError(f"{what}.footprint: expected [x, y] metres")
+            out["footprint"] = tuple(_num(s, f"{what}.footprint", 0.0, 20.0, strict_lo=True)
+                                     for s in fp)
+        else:
+            out["radius"] = _num(radius, f"{what}.radius", 0.0, 5.0, strict_lo=True)
         out["height"] = _num(raw.get("height", 1.0), f"{what}.height", 0.0, 10.0,
                              strict_lo=True)
+        # Assets don't agree on which way is forward or where their origin
+        # sits: yaw_offset_deg turns the model so its front faces the path's
+        # direction of travel, z lifts one whose origin isn't on the floor.
+        out["yaw_offset_deg"] = _num(raw.get("yaw_offset_deg", 0.0), f"{what}.yaw_offset_deg",
+                                     -360.0, 360.0)
+        out["z"] = _num(raw.get("z", 0.0), f"{what}.z", -1.0, 1.0)
+        # Where the model's body centre is in its OWN frame: the model is
+        # moved by this (before yaw_offset) so that centre lands on the pose.
+        off = raw.get("origin_offset", (0.0, 0.0))
+        if not isinstance(off, (list, tuple)) or len(off) != 2:
+            raise WorldError(f"{what}.origin_offset: expected [dx, dy] metres")
+        out["origin_offset"] = tuple(_num(v, f"{what}.origin_offset", -5.0, 5.0) for v in off)
+        fb = raw.get("fallback", "cylinder" if radius is not None else "box")
+        if fb not in FALLBACKS:
+            raise WorldError(f"{what}.fallback: expected one of {list(FALLBACKS)}, got {fb!r}")
+        out["fallback"] = fb
     return out
 
 
@@ -191,11 +281,25 @@ def _validate_path(raw, what) -> dict:
 def _validate_item(raw, what, *, actor: bool) -> dict:
     if not isinstance(raw, dict):
         raise WorldError(f"{what}: expected a mapping")
-    allowed = {"id", "shape", "size", "radius", "height", "color", "label"}
-    allowed |= {"path"} if actor else {"pose", "ref", "scale", "footprint", "collider", "style"}
+    allowed = {"id", "shape", "size", "radius", "height", "color", "label", "preset",
+               "ref", "scale", "footprint", "yaw_offset_deg", "z", "origin_offset", "fallback"}
+    allowed |= {"path", "anim"} if actor else {"pose", "collider", "style"}
     unknown = set(raw) - allowed
     if unknown:
         raise WorldError(f"{what}: unknown key(s) {sorted(unknown)}")
+    preset = raw.get("preset")
+    if preset is not None:
+        if preset not in PRESETS:
+            raise WorldError(f"{what}.preset: expected one of {sorted(PRESETS)}, got {preset!r}")
+        # The preset is the base; whatever the world wrote on top wins. A
+        # world that gives its own radius for a `person` drops the preset's
+        # footprint and vice versa, so the two never both reach _shape.
+        base = dict(PRESETS[preset])
+        if "radius" in raw:
+            base.pop("footprint", None)
+        if "footprint" in raw:
+            base.pop("radius", None)
+        raw = {**base, **{k: v for k, v in raw.items() if k != "preset"}}
     iid = raw.get("id")
     if not isinstance(iid, str) or not ID_RX.match(iid):
         raise WorldError(f"{what}.id: must match {ID_RX.pattern}")
@@ -205,6 +309,16 @@ def _validate_item(raw, what, *, actor: bool) -> dict:
                           DEFAULT_ACTOR_COLOR if actor else DEFAULT_PROP_COLOR)
     if actor:
         out["path"] = _validate_path(raw.get("path"), f"{what}.path")
+        # A real skeletal walk cycle (person/worker presets), not a bind
+        # pose: spawn_warehouse.py._spawn_walk_actor binds and loops one of
+        # Isaac's walk clips. Only meaningful on a usd actor.
+        anim = raw.get("anim")
+        if anim is not None:
+            if out["shape"] != "usd":
+                raise WorldError(f"{what}.anim: only a usd actor can have one")
+            if anim != "walk_cycle":
+                raise WorldError(f"{what}.anim: expected 'walk_cycle', got {anim!r}")
+        out["anim"] = anim
     else:
         out["pose"] = _pose(raw.get("pose"), f"{what}.pose")
         collider = raw.get("collider", True)
@@ -441,6 +555,23 @@ def load(name: str) -> dict:
     return validate(raw, stem=p.stem)
 
 
+def usd_refs() -> dict[str, list[str]]:
+    """{asset ref: [where it is used]} across the presets and every committed
+    world — what `scripts/simtest.py assets` checks against the asset root."""
+    out: dict[str, list[str]] = {}
+    for name, p in PRESETS.items():
+        out.setdefault(p["ref"], []).append(f"preset {name}")
+    for p in sorted(WORLDS_DIR.glob("*.yaml")):
+        try:
+            w = load(p.stem)
+        except WorldError:
+            continue
+        for item in w["props"] + w["actors"]:
+            if item["shape"] == "usd":
+                out.setdefault(item["ref"], []).append(f"{w['name']}/{item['id']}")
+    return out
+
+
 def list_worlds() -> list[dict]:
     """Every configs/worlds/*.yaml, with invalid ones kept and explained —
     the same rule session.load_scenarios follows."""
@@ -531,7 +662,7 @@ def pose_at(path: dict, t: float) -> dict:
 
 def footprint(item: dict, x: float, y: float, yaw: float) -> tuple:
     """The floor-plane shape of a prop or actor at a pose (simtest.geometry)."""
-    if item["shape"] == "cylinder":
+    if item["shape"] == "cylinder" or (item["shape"] == "usd" and "radius" in item):
         return geometry.circle(x, y, item["radius"])
     if item["shape"] == "box":
         return geometry.rect(x, y, yaw, item["size"][0], item["size"][1])
@@ -550,7 +681,7 @@ def actor_footprint(actor: dict, t: float) -> tuple:
 
 def half_extent(item: dict) -> float:
     """Radius of the smallest circle around the item's footprint."""
-    if item["shape"] == "cylinder":
+    if "radius" in item:
         return item["radius"]
     sx, sy = item["size"][:2] if item["shape"] == "box" else item["footprint"]
     return math.hypot(sx, sy) / 2.0

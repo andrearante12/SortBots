@@ -246,20 +246,38 @@
   // (<id>/odom, or base_link when it had no odom TF). Both are placed in `map` once, on
   // arrival, with the poses /tf gives right then, so a marker stays put while the robot
   // carries on moving instead of swinging around with it until the next message.
+  // The Kalman look-ahead (`pred`, points in the world frame) and the position
+  // covariance (`cov`) go through the world frame's full pose, not just its yaw.
   function obstaclesInMap(p, base, world) {
     const c = Math.cos(base.yaw), s = Math.sin(base.yaw);
     const toMap = (x, y) => [base.x + c * x - s * y, base.y + s * x + c * y];
-    const vyaw = world ? world.yaw : base.yaw;
-    const vc = Math.cos(vyaw), vs = Math.sin(vyaw);
+    const w = world || base, vc = Math.cos(w.yaw), vs = Math.sin(w.yaw);
+    const wToMap = (x, y) => [w.x + vc * x - vs * y, w.y + vs * x + vc * y];
     return (p.obstacles || []).map((o) => {
       const [x0, y0] = o.min, [x1, y1] = o.max, v = o.vel || [0, 0];
+      let cov = null;
+      if (o.cov) { // R C R^T for the 2x2 [[sxx, sxy], [sxy, syy]]
+        const [a, b, d] = o.cov;
+        cov = [vc * (vc * a - vs * b) - vs * (vc * b - vs * d),
+               vs * (vc * a - vs * b) + vc * (vc * b - vs * d),
+               vs * (vs * a + vc * b) + vc * (vs * b + vc * d)];
+      }
       return {
         id: o.track_id, moving: !!o.moving, speed: o.speed_mps || 0, range: o.range_m,
         at: toMap(o.centroid[0], o.centroid[1]),
         corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map(([a, b]) => toMap(a, b)),
         vel: [vc * v[0] - vs * v[1], vs * v[0] + vc * v[1]],
+        pred: (o.pred || []).map(([h, x, y]) => [h, ...wToMap(x, y)]),
+        cov,
       };
     });
+  }
+  // 2-sigma ellipse axes (semi-major, semi-minor, angle) of a [sxx, sxy, syy] covariance.
+  function covEllipse(cov) {
+    const [a, b, d] = cov, tr = (a + d) / 2, det = a * d - b * b;
+    const disc = Math.sqrt(Math.max(0, tr * tr - det));
+    const l1 = Math.max(tr + disc, 1e-9), l2 = Math.max(tr - disc, 1e-9);
+    return [2 * Math.sqrt(l1), 2 * Math.sqrt(l2), Math.abs(b) < 1e-12 ? (a >= d ? 0 : Math.PI / 2) : Math.atan2(l1 - a, b)];
   }
   function onObstacles(r, p) {
     r.obstacles = p; r.obstaclesAt = performance.now();
@@ -297,6 +315,25 @@
         ctx.lineTo(ex - Math.cos(ang - 0.45) * 8, ey - Math.sin(ang - 0.45) * 8);
         ctx.lineTo(ex - Math.cos(ang + 0.45) * 8, ey - Math.sin(ang + 0.45) * 8);
         ctx.closePath(); ctx.fill();
+        // The Kalman look-ahead: a dotted line through the predicted points and a
+        // 2-sigma ellipse of the position uncertainty at the last one — where the
+        // costmap's predicted ribbon ends. Faint, so it never reads as a plan.
+        if (o.pred && o.pred.length) {
+          ctx.globalAlpha = 0.6; ctx.setLineDash([3, 4]); ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.moveTo(a, b);
+          for (const [, px, py] of o.pred) { const [qa, qb] = toPx(px, py); ctx.lineTo(qa, qb); }
+          ctx.stroke(); ctx.setLineDash([]);
+          // The end point solid: it is where the costmap's predicted ribbon ends.
+          const [, lx, ly] = o.pred[o.pred.length - 1], [la, lb] = toPx(lx, ly);
+          ctx.globalAlpha = 1; ctx.beginPath(); ctx.arc(la, lb, 3.5, 0, 7); ctx.fill();
+          if (o.cov) {
+            const [r1, r2, ang] = covEllipse(o.cov);
+            ctx.globalAlpha = 0.15; ctx.beginPath();
+            ctx.ellipse(la, lb, Math.max(3, r1 * view.scale), Math.max(3, r2 * view.scale), -ang, 0, 7);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1; ctx.lineWidth = 2;
+        }
         const label = `moving · ${o.speed.toFixed(1)} m/s`;
         const tw = ctx.measureText(label).width + 10;
         ctx.fillRect(a - tw / 2, b - 30, tw, 16);
@@ -453,8 +490,10 @@
     ctx.closePath();
   }
   function actorShape(a, p) {
-    if (a.shape === "cylinder") return ["circle", [p.x, p.y], a.radius];
-    const [sx, sy] = a.size, c = Math.cos(p.yaw), s = Math.sin(p.yaw);
+    // usd actors (a person, a forklift) carry the floor footprint the metrics
+    // score against: a disc (radius) or a rectangle along their heading.
+    if (a.shape === "cylinder" || (a.shape === "usd" && a.radius)) return ["circle", [p.x, p.y], a.radius];
+    const [sx, sy] = a.shape === "usd" ? a.footprint : a.size, c = Math.cos(p.yaw), s = Math.sin(p.yaw);
     return ["poly", [[sx / 2, sy / 2], [-sx / 2, sy / 2], [-sx / 2, -sy / 2], [sx / 2, -sy / 2]]
       .map(([x, y]) => [p.x + c * x - s * y, p.y + s * x + c * y])];
   }
