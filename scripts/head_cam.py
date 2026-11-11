@@ -120,7 +120,7 @@ def tcp_of(kin, sample, magnet_m, off=None):
     return kin.tool_point(q, magnet_m)
 
 
-def residuals(params, samples, kin, signs, fit_magnet=True, magnet_m=MAGNET_FACE_M):
+def residuals(params, samples, kin, signs, fit_magnet=True, magnet_m=MAGNET_FACE_M, touch_z=None):
     """Per-sample base-frame error (camera's point minus FK's magnet face), flattened. params
     past the 15 head-camera numbers, if any, are joint offsets (lift, elbow, wrist; radians)."""
     p = np.array(params, float)
@@ -128,8 +128,13 @@ def residuals(params, samples, kin, signs, fit_magnet=True, magnet_m=MAGNET_FACE
         p[14] = magnet_m
     hc = HeadCam(p[:15], *signs)
     off = p[15:18] if len(p) > 15 else None
-    return np.concatenate([hc.to_base(s["p_cam"], *s["head_deg"]) - tcp_of(kin, s, p[14], off)
-                           for s in samples])
+    out = []
+    for s in samples:
+        tcp = tcp_of(kin, s, p[14], off)
+        out.append(hc.to_base(s["p_cam"], *s["head_deg"]) - tcp)
+        if touch_z is not None and s.get("kind") == "touch":
+            out.append([tcp[2] - s.get("surface_z", touch_z)])
+    return np.concatenate(out)
 
 
 def _lm(f, x, iters=300, lam=1e-3):
@@ -166,7 +171,7 @@ def head_groups(samples, bin_deg=2.0):
 
 
 def fit(samples, kin, pan_axis=None, tilt_fwd=0.02, magnet_m=MAGNET_FACE_M, fit_magnet=True,
-        fit_offsets=False):
+        fit_offsets=False, touch_z=None):
     """-> (HeadCam, per-sample error in mm[, joint offsets deg]). Needs >= 4 samples at one head
     pose to seed, and several head poses for the pan and tilt axes to be determined at all.
 
@@ -174,7 +179,12 @@ def fit(samples, kin, pan_axis=None, tilt_fwd=0.02, magnet_m=MAGNET_FACE_M, fit_
     of the swept range" vs the URDF's zero; 11 cm at the magnet on our arm, 2026-11-11). Touching
     a flat table can't see them (lift +d, elbow -2d, wrist +d keeps the face flat and level);
     the camera sees the reach that combination changes. Pan's offset is a rigid turn the camera
-    pose absorbs. Returns the offsets as a third value."""
+    pose absorbs. Returns the offsets as a third value.
+
+    touch_z: the touched surface's height in base_link (m), for touch samples. Touches all on
+    one surface leave height loose: the camera's height and the joint offsets trade (a real set
+    put the lens 9 cm low and wrist_flex 26 deg out, 2026-11-11). A sample's own "surface_z"
+    wins over it."""
     groups = head_groups(samples)
     g0 = max(groups.values(), key=len)
     if len(g0) < 4:
@@ -195,13 +205,14 @@ def fit(samples, kin, pan_axis=None, tilt_fwd=0.02, magnet_m=MAGNET_FACE_M, fit_
         C = np.linalg.inv(A @ Rp @ B @ Rt) @ T_g
         x0 = np.array([*pan_axis, 0, 0, 0, tilt_fwd, 0, *C[:3, 3], *rpy_of(C[:3, :3]), magnet_m]
                       + ([0.0, 0.0, 0.0] if fit_offsets else []))
-        f = lambda x, sg=signs: residuals(x, samples, kin, sg, fit_magnet, magnet_m)
+        f = lambda x, sg=signs: residuals(x, samples, kin, sg, fit_magnet, magnet_m, touch_z)
         x, r = _lm(f, x0)
         if best is None or r @ r < best[2] @ best[2]:
             best = (x, signs, r)
     x, signs, r = best
     if not fit_magnet:
         x[14] = magnet_m
+    r = residuals(x, samples, kin, signs, fit_magnet, magnet_m)  # the 3-D part only, for the report
     err = np.linalg.norm(r.reshape(-1, 3), axis=1) * 1000.0
     if fit_offsets:
         return HeadCam(x[:15], *signs), err, dict(zip(("shoulder_lift", "elbow_flex", "wrist_flex"),

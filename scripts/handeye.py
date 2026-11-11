@@ -713,6 +713,11 @@ def take_sample(a, cam, bus, samples, arm_held, lock=contextlib.nullcontext()):
     return f"sample {len(samples)} taken (jitter {spread:.1f} mm)"
 
 
+# A fit worse than this doesn't get to rewrite the arm model: the offsets reach teleop and IK.
+# A 28.6 mm fit (two bad touches) did, 2026-11-11.
+OFFSETS_MAX_RMS_MM = 8.0
+
+
 def cmd_solve(a):
     path = calib_dir() / "handeye_samples.json"
     if not path.is_file():
@@ -735,7 +740,8 @@ def cmd_solve(a):
     if not fit_off and not a.no_offsets:
         print(f"{len(samples)} samples: too few to fit arm joint offsets as well (15+); skipping them")
     res = head_cam.fit(samples, kin, pan_axis=pan_axis, tilt_fwd=a.tilt_fwd, magnet_m=a.magnet_m,
-                       fit_magnet=not (a.fixed_magnet or all_touch), fit_offsets=fit_off)
+                       fit_magnet=not (a.fixed_magnet or all_touch), fit_offsets=fit_off,
+                       touch_z=a.touch_z)
     hc, err = res[0], res[1]
     med = float(np.median(err))
     print(f"{len(samples)} samples, {len(head_cam.head_groups(samples))} head poses")
@@ -753,7 +759,12 @@ def cmd_solve(a):
     horiz = math.hypot(lens[0] - head_cam.PAN_AXIS_X_M, lens[1])
     print(f"lens at head {pan0:+.0f}/{tilt0:+.0f}: {lens[2] * 1000:.0f} mm up (rig: ~457), "
           f"{horiz * 1000:.0f} mm from the arm base centre (rig: ~127)")
-    if fit_off:
+    rms_ok = float(np.sqrt(np.mean(err ** 2))) <= OFFSETS_MAX_RMS_MM
+    if fit_off and not (rms_ok or a.save_offsets):
+        print(f"arm joint offsets NOT saved: RMS over {OFFSETS_MAX_RMS_MM:.0f} mm (they'd change teleop and "
+              "IK on a doubtful fit). Fitted:", {j: round(float(v), 1) for j, v in res[2].items()},
+              "| --save-offsets to save anyway")
+    if fit_off and (rms_ok or a.save_offsets):
         # the fit's offsets sit on top of whatever `kin` already applied (a previous solve)
         delta = res[2]
         total = {j: float(math.degrees(kin.off[i]) + delta.get(j, 0.0)) for i, j in enumerate(ARM)}
@@ -834,6 +845,11 @@ def main(argv=None):
                    help="flange to marker surface along the tool axis, m (seed, or fixed with --fixed-magnet)")
     s.add_argument("--fixed-magnet", action="store_true", help="don't fit the magnet length")
     s.add_argument("--drop", type=int, nargs="*", default=[], help="sample numbers to leave out")
+    s.add_argument("--touch-z", type=float,
+                   help="height (m, base_link: the arm's mounting surface) of the surface the touches "
+                        "were on, e.g. the package top; pins the height that touches on one surface leave loose")
+    s.add_argument("--save-offsets", action="store_true",
+                   help=f"save the arm joint offsets even if RMS is over {OFFSETS_MAX_RMS_MM:.0f} mm")
     s.add_argument("--no-offsets", action="store_true",
                    help="don't fit the arm's joint offsets (lift/elbow/wrist zero vs the URDF's)")
     sub.add_parser("check")
