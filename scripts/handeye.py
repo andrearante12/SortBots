@@ -15,8 +15,9 @@ capture keys (terminal, the preview window only shows):
     a/d w/s  head pan / tilt by the step;  [ ]  step 2/5/10 deg
     u        drop the last sample          x    save and quit
 
-A good set: 6+ arm poses at head 0/0, then 4+ poses at each of 4 more head angles (pan
-+/-20, tilt +/-15), the magnet spread over the camera's view and over 25-60 cm from it,
+A good set: 6+ arm poses at one head pose that sees the workspace (tilted down: at 0/0 our
+head looks over the arm), then 4+ poses at each of 4 more head angles (pan +/-20, tilt +/-15
+from there), the magnet spread over the camera's view and over 25-60 cm from it,
 the tool tilted different ways. The marker must face the camera.
 
 The 3-D point is the D435 depth at the marker's centre (deprojected), with the marker's

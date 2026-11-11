@@ -41,7 +41,9 @@ scripts/arm.sh head handeye check
    `x` saves and quits. Samples append to
    `~/.cache/huggingface/lerobot/calibration/robots/sortbots_head/handeye_samples.json`
    (`--fresh` starts over).
-3. Collect 6+ poses at head 0/0, then 4+ at each of pan ±20 and tilt ±15: magnet spread
+3. Collect 6+ poses at ONE head pose that sees the workspace (on our rig head 0/0 looks level
+   across the room, over the arm: tilt down first), then 4+ at each of pan ±20 and tilt ±10-15
+   from there: magnet spread
    across the image and over 25–60 cm from the lens, tool tilted different ways, marker facing
    the camera.
 4. `solve` prints every sample's error and saves `sortbots_head_camera.json` next to the head
