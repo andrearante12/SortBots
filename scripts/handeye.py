@@ -48,6 +48,7 @@ from pathlib import Path
 import numpy as np
 
 import head as headmod
+import capture_guide
 import head_cam
 from so101_kin import SO101Kin
 
@@ -214,16 +215,59 @@ def read_keys(timeout):
 PREVIEW = {"window": True, "file_at": 0.0}
 PREVIEW_JPG = Path(tempfile.gettempdir()) / "handeye_view.jpg"
 PREVIEW_HTML = PREVIEW_JPG.with_suffix(".html")
+# The page is opened from file://, where fetch() of a sibling file is blocked; a <script src>
+# is not, so the guide state goes out as a JS file the page re-includes every 300 ms.
+PREVIEW_JS = PREVIEW_JPG.with_name("handeye_status.js")
+PREVIEW_PAGE = """<!doctype html><meta charset=utf-8><title>handeye capture</title>
+<style>
+body{margin:0;background:#111;color:#e8e8e8;font:15px/1.4 system-ui,sans-serif;display:flex;gap:14px}
+#img{flex:1 1 auto;min-width:0}#img img{width:100%;display:block}
+#p{flex:0 0 360px;padding:12px 14px 12px 0}
+h1{font-size:20px;margin:2px 0 10px}.step{color:#9ab;font-size:13px;margin-bottom:2px}
+.do{background:#1d2d1d;border-left:4px solid #5c5;padding:10px 12px;border-radius:4px;font-size:16px}
+.do p{margin:0 0 6px}.ready{border-color:#5f5;background:#1f3d1f}
+ul{list-style:none;padding:0;margin:10px 0}li{padding:2px 0}.ok{color:#6d6}.no{color:#e77}
+table{border-collapse:collapse;width:100%;margin-top:10px;font-size:14px}
+td{padding:4px 6px;border-bottom:1px solid #2a2a2a}tr.cur td{background:#202838}
+.go{font-size:18px;font-weight:600;color:#6f6;margin:8px 0}.msg{color:#fd6;margin-top:8px}
+.st{color:#999;font-size:12px;margin-top:10px;word-break:break-word}
+@media (max-width:900px){body{flex-direction:column}#p{flex:none;padding:12px}}
+</style>
+<div id=img><img id=v alt="camera"></div><div id=p>waiting for capture...</div>
+<script>
+function esc(t){return String(t).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function render(S){
+  var g=S.guide,h='<div class=step>step '+g.stage+' of '+g.stages+'</div><h1>'+esc(g.title)+'</h1>';
+  h+='<div class="do'+(g.ready?' ready':'')+'">'+g.lines.map(l=>'<p>'+esc(l)+'</p>').join('')+'</div>';
+  if(g.checks.length)h+='<ul>'+g.checks.map(c=>'<li class='+(c[1]?'ok':'no')+'>'+(c[1]?'&#10003; ':'&#10007; ')+esc(c[0])+'</li>').join('')+'</ul>';
+  if(g.ready)h+='<div class=go>Ready: press B</div>';
+  h+='<table>'+g.progress.map((r,i)=>'<tr'+(i+1==g.stage?' class=cur':'')+'><td>'+esc(r.name)+
+     (r.target?' <span style=color:#888>('+r.target[0].toFixed(0)+', '+r.target[1].toFixed(0)+')</span>':'')+
+     '</td><td>'+r.have+' / '+r.need+'</td><td>'+(r.have>=r.need?'&#10003;':'')+'</td></tr>').join('')+'</table>';
+  if(S.msg)h+='<div class=msg>'+esc(S.msg)+'</div>';
+  h+='<div class=st>'+esc(S.status)+'</div>';
+  document.getElementById('p').innerHTML=h}
+function tick(){
+  v.src='handeye_view.jpg?'+Date.now();
+  var s=document.createElement('script');s.src='handeye_status.js?'+Date.now();
+  s.onload=s.onerror=function(){s.remove();if(window.S)render(window.S)};document.body.appendChild(s)}
+setInterval(tick,300);tick();
+</script>"""
 
 
-def draw(cam, color, corners, ids, text):
+def draw(cam, color, corners, ids, text, guide=None, msg=""):
     """Preview in a window, or, where OpenCV can't open one, a JPEG + self-reloading page.
     lerobot pulls in opencv-python-HEADLESS (imshow raises "not implemented", 2026-11-11), and
     installing the GUI build beside it fights over the same cv2 module, so don't."""
     cv2 = cam.cv2
     if ids is not None:
         cv2.aruco.drawDetectedMarkers(color, corners, ids)
-    cv2.putText(color, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+    if guide and guide["box"]:
+        x0, y0, x1, y1 = guide["box"]
+        cv2.rectangle(color, (x0 + 3, y0 + 3), (x1 - 3, y1 - 3), (0, 255, 0) if guide["ready"] else (0, 200, 0),
+                      6 if guide["ready"] else 3)
+    cv2.putText(color, text if not guide else guide["title"], (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                (0, 255, 255), 2)
     if PREVIEW["window"]:
         try:
             cv2.imshow("handeye", color)
@@ -231,10 +275,7 @@ def draw(cam, color, corners, ids, text):
             return
         except cv2.error:
             PREVIEW["window"] = False
-            PREVIEW_HTML.write_text(
-                "<!doctype html><title>handeye</title><body style='margin:0;background:#000'>"
-                "<img id=v style='width:100%'><script>setInterval(()=>{v.src='"
-                + PREVIEW_JPG.name + "?'+Date.now()},300)</script>")
+            PREVIEW_HTML.write_text(PREVIEW_PAGE)
             print(f"\r\x1b[Kno GUI in this OpenCV: live preview in a browser:  xdg-open {PREVIEW_HTML}\n")
     now = time.monotonic()
     if now - PREVIEW["file_at"] > 0.25:
@@ -242,6 +283,10 @@ def draw(cam, color, corners, ids, text):
         tmp = PREVIEW_JPG.with_name(".handeye_view.jpg")  # rename is atomic: no torn frames
         cv2.imwrite(str(tmp), color, [cv2.IMWRITE_JPEG_QUALITY, 70])
         os.replace(tmp, PREVIEW_JPG)
+        if guide is not None:
+            tmp = PREVIEW_JS.with_name(".handeye_status.js")
+            tmp.write_text("window.S=" + json.dumps({"guide": guide, "status": text, "msg": msg}) + ";")
+            os.replace(tmp, PREVIEW_JS)
 
 
 def cmd_capture(a):
@@ -324,7 +369,10 @@ def cmd_capture(a):
             msg = note["msg"] if time.monotonic() < note["until"] else ""
             print("\r" + status + (" | " + msg if msg else "") + "\x1b[K", end="", flush=True)
             if not a.no_view:
-                draw(cam, color, corners, ids, status)
+                mk = {"px": m["px"], "size_px": m["size_px"], "z": pt[2] if pt else None} if m else None
+                g = capture_guide.guide(samples, [head["head_pan"], head["head_tilt"]], mk,
+                                        (color.shape[1], color.shape[0]), lim)
+                draw(cam, color, corners, ids, status, g, msg)
     except KeyboardInterrupt:
         pass
     finally:
@@ -435,12 +483,13 @@ class PadArm:
 def take_sample(a, cam, bus, samples, arm_held, lock=contextlib.nullcontext()):
     if not arm_held:
         return "hold the arm first (f): a free arm drifts while the frames are taken"
-    pts, pnps = [], []
+    pts, pnps, pxs = [], [], []
     for _ in range(10):
         color, depth = cam.grab()
         m = cam.markers(color, depth)[0].get(a.marker_id)
         if m:
             pts.append(cam.point(m))
+            pxs.append(m["px"] + [m["size_px"]])
             if m["pnp_pt"]:
                 pnps.append(m["pnp_pt"])
     if len(pts) < 6:
@@ -454,6 +503,8 @@ def take_sample(a, cam, bus, samples, arm_held, lock=contextlib.nullcontext()):
     samples.append({"arm_deg": [pos[j] for j in ARM], "head_deg": [pos["head_pan"], pos["head_tilt"]],
                     "p_cam": [float(v) for v in np.median(pts, 0)],
                     "pnp_cam": [float(v) for v in np.median(pnps, 0)] if pnps else None,
+                    "px": [float(v) for v in np.median(pxs, 0)[:2]],
+                    "size_px": float(np.median(pxs, 0)[2]),
                     "t": time.time()})
     return f"sample {len(samples)} taken (jitter {spread:.1f} mm)"
 
