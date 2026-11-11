@@ -387,7 +387,7 @@ def cmd_capture(a):
                     samples.pop()
                     say("dropped last sample")
                 elif k == " " and a.touch and pending is None:
-                    msg_, pending = take_look(a, cam, head)
+                    msg_, pending = take_look(a, cam, bus, lock)
                     say(msg_, 6.0)
                 elif k == " " and a.touch:
                     msg_, done = take_touch(bus, samples, arm_held, lock, pending)
@@ -606,7 +606,10 @@ def reach_map(samples, kin, lo, hi, intr, wh, step_m=0.03, tol_m=0.012):
     return out or None
 
 
-def take_look(a, cam, head):
+HEAD_MOVED_DEG = 1.5  # head shift between look and touch that voids the look (servo jitter ~0.3)
+
+
+def take_look(a, cam, bus, lock):
     """--touch, first B: where the camera puts the package's magnet target, arm out of the way.
     -> (message, pending or None)."""
     pts, pxs = [], []
@@ -623,9 +626,14 @@ def take_look(a, cam, head):
     if spread > 4.0:
         return f"target jitters {spread:.1f} mm: not taken", None
     px = np.median(pxs, 0)
+    # The head's MEASURED angle, not its goal: a held STS3215 sits ~1 deg off its goal, and the
+    # touch compares against a measurement (the goal here failed every touch by 1.1 deg,
+    # 2026-11-11). It is also the angle the camera really was at.
+    with lock:
+        hp = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
     return ("LOOKED. Now drive the magnet onto the circle centre, touch lightly, press B "
             "(BACK cancels). Don't move the package or the head."), {
-        "p_cam": [float(v) for v in np.median(pts, 0)], "head_deg": [head["head_pan"], head["head_tilt"]],
+        "p_cam": [float(v) for v in np.median(pts, 0)], "head_deg": [hp["head_pan"], hp["head_tilt"]],
         "px": [float(px[0]), float(px[1])], "size_px": float(px[2])}
 
 
@@ -637,7 +645,7 @@ def take_touch(bus, samples, arm_held, lock, pending):
     with lock:
         pos = bus.sync_read("Present_Position", num_retry=2)
     moved = max(abs(pos["head_pan"] - pending["head_deg"][0]), abs(pos["head_tilt"] - pending["head_deg"][1]))
-    if moved > 1.0:
+    if moved > HEAD_MOVED_DEG:
         return f"the head moved {moved:.1f} deg since the look: BACK, then look again", False
     samples.append({"arm_deg": [pos[j] for j in ARM], "head_deg": pending["head_deg"],
                     "p_cam": pending["p_cam"], "px": pending["px"], "size_px": pending["size_px"],
