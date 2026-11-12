@@ -837,6 +837,36 @@ def cmd_check(a):
         print()
 
 
+def cmd_view(a):
+    """Camera only, no servos: the live image with every marker's id, size and distance, in the
+    same preview page as capture. For aiming the head or checking the D435 when the arm's board
+    is off or unplugged."""
+    cam = Camera(marker_m=a.marker_m)
+    print("live view; Ctrl-C quits")
+    try:
+        while True:
+            color, depth = cam.grab()
+            try:
+                ms, corners, ids = cam.markers(color, depth)
+            except Exception:
+                ms, corners, ids = {}, [], None
+            parts = []
+            for i, m in sorted(ms.items()):
+                pt = cam.point(m)
+                parts.append(f"id{i} {m['size_px']:.0f}px" + (f" {pt[2] * 100:.0f}cm" if pt else ""))
+            line = " | ".join(parts) or "no markers"
+            print("\r" + line + "\x1b[K", end="", flush=True)
+            if not a.no_view:
+                draw(cam, color, corners, ids, line[:90],
+                     {"title": "Camera view", "lines": [line], "checks": [], "box": None, "reach": None,
+                      "progress": [], "stage": 0, "stages": 0, "done": False, "ready": False})
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cam.close()
+        print()
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="handeye", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -873,8 +903,9 @@ def main(argv=None):
     s.add_argument("--no-offsets", action="store_true",
                    help="don't fit the arm's joint offsets (lift/elbow/wrist zero vs the URDF's)")
     sub.add_parser("check")
+    sub.add_parser("view", help="live camera + markers only; no servos needed")
     a = ap.parse_args(argv)
-    {"capture": cmd_capture, "solve": cmd_solve, "check": cmd_check}[a.cmd](a)
+    {"capture": cmd_capture, "solve": cmd_solve, "check": cmd_check, "view": cmd_view}[a.cmd](a)
 
 
 if __name__ == "__main__":
