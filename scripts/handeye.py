@@ -193,6 +193,10 @@ class Camera:
         r = int(1.2 * size_px)
         h, w = depth.shape
         v0, v1, u0, u1 = max(0, int(v) - r), min(h, int(v) + r), max(0, int(u) - r), min(w, int(u) + r)
+        if v1 - v0 < 4 or u1 - u0 < 4:
+            # the box lies (mostly) off the image: a marker near the edge puts the halfway point
+            # past it, and an empty slice crashed capture mid-set (2026-11-12, 21 samples in)
+            return None
         z = depth[v0:v1:2, u0:u1:2]
         vv, uu = np.mgrid[v0:v1:2, u0:u1:2]
         ok = (z > 0.1) & (z < 3.0)
@@ -202,6 +206,13 @@ class Camera:
         # colour stream is distortion-free on the D435 (coeffs all 0), so plain pinhole
         pts = np.stack([(uu - self.intr.ppx) / self.intr.fx * z, (vv - self.intr.ppy) / self.intr.fy * z, z], 1)
         return head_cam.plane_fit(pts)[1]
+
+    def marker(self, color, depth, marker_id):
+        """One marker's entry, or None; a frame that fails to process counts as not seen."""
+        try:
+            return self.markers(color, depth)[0].get(marker_id)
+        except Exception:
+            return None
 
     def point(self, m):
         return m["depth_pt"] if m["depth_pt"] is not None else m["pnp_pt"]
@@ -382,7 +393,11 @@ def cmd_capture(a):
         run = True
         while run:
             color, depth = cam.grab()
-            ms, corners, ids = cam.markers(color, depth)
+            try:
+                ms, corners, ids = cam.markers(color, depth)
+            except Exception as e:  # one bad frame must not end a calibration session
+                ms, corners, ids = {}, [], None
+                say(f"frame skipped: {type(e).__name__}: {e}", 3.0)
             m = ms.get(a.marker_id)
             keys = read_keys(0.0)
             if pad:
@@ -646,7 +661,7 @@ def take_look(a, cam, bus, lock):
     pts, pxs = [], []
     for _ in range(10):
         color, depth = cam.grab()
-        m = cam.markers(color, depth)[0].get(a.marker_id)
+        m = cam.marker(color, depth, a.marker_id)
         if m and m["target_pt"] is not None:
             pts.append(m["target_pt"])
             pxs.append(m["px"] + [m["size_px"]])
@@ -690,7 +705,7 @@ def take_sample(a, cam, bus, samples, arm_held, lock=contextlib.nullcontext()):
     pts, pnps, pxs = [], [], []
     for _ in range(10):
         color, depth = cam.grab()
-        m = cam.markers(color, depth)[0].get(a.marker_id)
+        m = cam.marker(color, depth, a.marker_id)
         if m:
             pts.append(cam.point(m))
             pxs.append(m["px"] + [m["size_px"]])
