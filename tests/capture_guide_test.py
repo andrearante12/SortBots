@@ -79,3 +79,16 @@ def test_touch_mode_spreads_the_first_three_by_text_then_follows_the_reach_map()
     assert g["ready"]  # marker seen, in that box, 18+ px
     five = three + [_s((3, 74), (900, 300)), _s((3, 74), (300, 600))]
     assert any("book" in l for l in G.guide(five, [3, 74], None, WH, LIM, mode="touch", reach_px=reach)["lines"])
+
+
+def test_touch_mode_keeps_guiding_extras_after_the_plan():
+    s = [_s((0, 30), _centre(c[:2])) for c in G.HOME_PLAN]
+    for _, (dp, dt) in G.OFFSETS:
+        s += [_s((dp, 30 + dt), _centre(c[:2])) for c in G.OTHER_PLAN]
+    g = G.guide(s, [0, 30], {"px": [600, 300], "size_px": 30}, WH, LIM, mode="touch")
+    assert g["title"] == "Extra samples: 0 taken" and any("BOOK" in l for l in g["lines"]) and g["ready"]
+    g = G.guide(s + [_s((0, 30), (100, 100))], [0, 30], None, WH, LIM, mode="touch")
+    assert g["title"] == "Extra samples: 1 taken" and any("on the table" in l for l in g["lines"])
+    g = G.guide(s, [0, 30], None, WH, LIM, mode="touch", pending=True)   # a touch after the plan
+    assert g["title"] == "Touch the circle" and g["ready"]
+    assert G.guide(s, [0, 30], None, WH, LIM)["title"] == "All samples taken"  # magnet mode as before

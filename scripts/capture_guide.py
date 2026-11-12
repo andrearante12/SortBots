@@ -136,6 +136,33 @@ def guide(samples, head_now, marker, wh, head_lim=None, mode="magnet", pending=F
             cur = (i, name, target, plan, group)
     res = {"progress": progress, "stages": len(plan_stages), "checks": [], "box": None,
            "reach": None, "done": cur is None, "ready": False}
+    name = cur[1] if cur else "extra"
+    target = cur[2] if cur else None
+    if pending:  # touch mode, the look is taken: the touch is all that's left for this sample
+        res.update(stage=cur[0] + 1 if cur else len(plan_stages),
+                   title=f"{name}: touch the circle" if target else "Touch the circle",
+                   lines=["Don't move the package or the head.",
+                          "Get the magnet FACE FLAT on the CENTRE of the circle: by hand is easiest "
+                          "(f in the capture terminal frees the arm, f again holds it).",
+                          "Touch lightly, plunger barely pressed. Then press B. (BACK cancels the look.)"],
+                   ready=True)
+        return res
+    if cur is None and mode == "touch":
+        # The plan is done but more touches still help: a first full set fitted at ~11 mm because
+        # every touch was on one surface and tilted (2026-11-11). Extras alternate raised/table.
+        extra = len(samples) - sum(len(p) for _, _, p in plan_stages)
+        raised = extra % 2 == 0
+        res.update(stage=len(plan_stages), title=f"Extra samples: {extra} taken",
+                   lines=[f"Optional, and worth ~10: put the package {'UP ON A BOOK OR BOX' if raised else 'on the table'}, "
+                          "somewhere new the arm can reach (any head angle that sees it).",
+                          "Arm clear, press B (LOOK); then magnet face FLAT on the circle, press B (TOUCH).",
+                          "Done: START (support the arm), then scripts/arm.sh head handeye solve"])
+        seen = marker is not None
+        res["checks"] = [("marker seen", seen),
+                         (f"marker {MIN_PX_TOUCH}+ px" + (f" (now {marker['size_px']:.0f})" if seen else ""),
+                          seen and marker["size_px"] >= MIN_PX_TOUCH)]
+        res["ready"] = all(ok for _, ok in res["checks"])
+        return res
     if cur is None:
         res.update(stage=len(plan_stages), title="All samples taken",
                    lines=["Press START (or x) to save and quit.",
@@ -143,14 +170,6 @@ def guide(samples, head_now, marker, wh, head_lim=None, mode="magnet", pending=F
         return res
     i, name, target, plan, group = cur
     res["stage"] = i + 1
-    if pending:  # touch mode, the look is taken: the touch is all that's left for this sample
-        res.update(title=f"{name}: touch the circle" if target else "Touch the circle",
-                   lines=["Don't move the package or the head.",
-                          "Hold RT and drive the magnet straight down onto the CENTRE of the circle.",
-                          "Touch lightly: the magnet face flat on the package, plunger barely pressed.",
-                          "Release RT, press B. (BACK cancels the look.)"],
-                   ready=True)
-        return res
     if target is not None and not _near(head_now, target, ON_TARGET_DEG):
         dp, dt = target[0] - head_now[0], target[1] - head_now[1]
         axis = (f"pan {'+' if dp > 0 else '-'}" if abs(dp) >= abs(dt) else f"tilt {'+' if dt > 0 else '-'}")
