@@ -792,6 +792,11 @@ def cmd_solve(a):
             {"offsets_deg": total, "from": "handeye solve", "n": len(samples), "saved": time.ctime()}, indent=2))
         print("saved", so101_kin.OFFSETS_FILE, "(teleop, IK and check use it from now on)")
     out = calib_dir() / f"{a.head_id}_camera.json"
+    if fit_off and not (rms_ok or a.save_offsets):
+        # The camera model was fitted WITH those offsets; saved without them it describes an arm
+        # that isn't the one in use (a 50 mm fit's camera got saved alone this way, 2026-11-12).
+        print("camera model NOT saved either: it only fits together with those offsets")
+        return
     hc.save(out, {"rms_mm": rms, "n": len(samples), "marker_m": a.marker_m, "saved": time.ctime()})
     print("saved", out)
     if rms > 10:
