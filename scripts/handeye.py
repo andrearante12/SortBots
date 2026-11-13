@@ -805,35 +805,94 @@ def cmd_solve(a):
 
 
 def cmd_check(a):
+    """Verify a saved calibration on a real package, two steps as in capture --touch:
+    space LOCKS the package target (arm clear, 10 frames, stored in base_link), then the magnet
+    is moved onto the circle and `d` is the live distance to the locked target. Touching hides
+    the marker, so a live-only readout went blank exactly when it mattered. --head PAN TILT
+    holds the head at a calibrated angle (held-out angles fitted ~2 cm worse, 2026-11-12); the
+    arm stays free (torque off) for placing by hand."""
+    if a.marker_id is None:
+        a.marker_id = 10
     hc = head_cam.HeadCam.load(calib_dir() / f"{a.head_id}_camera.json")
     kin = SO101Kin()
     cam = Camera(marker_m=a.marker_m)
-    bus, _ = open_bus(a.port, a.arm_id, a.head_id)
-    print("torque off everywhere: move the arm/head by hand. Ctrl-C quits")
+    bus, head_cal = open_bus(a.port, a.arm_id, a.head_id)
+    if a.head:
+        lim = headmod.limits(head_cal)
+        goal = {"head_pan": min(lim["head_pan"][1], max(lim["head_pan"][0], a.head[0])),
+                "head_tilt": min(lim["head_tilt"][1], max(lim["head_tilt"][0], a.head[1]))}
+        set_hold(bus, list(headmod.HEAD), True)
+        start = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
+        for k in range(1, 41):  # ~2 s ramp: no snap of the mast-mounted camera
+            bus.sync_write("Goal_Position", {m: start[m] + (goal[m] - start[m]) * k / 40 for m in goal})
+            time.sleep(0.05)
+        time.sleep(0.5)
+    locked, results = None, []
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    print(f"arm torque off. space = lock marker {a.marker_id}'s target (arm clear), r = record the "
+          "current d, c = clear the lock, x = quit\r")
     try:
-        while True:
+        tty.setcbreak(fd)
+        run = True
+        while run:
             color, depth = cam.grab()
-            ms, corners, ids = cam.markers(color, depth)
+            try:
+                ms, corners, ids = cam.markers(color, depth)
+            except Exception:
+                ms, corners, ids = {}, [], None
             pos = bus.sync_read("Present_Position", num_retry=2)
             tcp = kin.tool_point(np.radians([pos[j] for j in ARM]), hc.magnet_m)
-            parts = [f"magnet {np.round(tcp * 100, 1)}"]
-            for i, m in sorted(ms.items()):
-                if m["target_pt"] is None:
-                    continue
-                T = hc.matrix(pos["head_pan"], pos["head_tilt"])
-                pb = (T @ np.append(m["target_pt"], 1.0))[:3]
-                nz = (T[:3, :3] @ m["normal"])[2]  # ~1 for a top face, ~0 for a side face
-                parts.append(f"id{i} target {np.round(pb * 100, 1)} up{nz:+.2f} "
-                             f"d{np.linalg.norm(pb - tcp) * 100:.1f}cm")
-            line = " | ".join(parts)
-            print("\r" + line + "\x1b[K", end="", flush=True)
+            T = hc.matrix(pos["head_pan"], pos["head_tilt"])
+            msg = ""
+            for k in read_keys(0.0):
+                if k == " ":
+                    pts = []
+                    for _ in range(10):
+                        c2, d2 = cam.grab()
+                        m = cam.marker(c2, d2, a.marker_id)
+                        if m and m["target_pt"] is not None:
+                            pts.append(m["target_pt"])
+                    if len(pts) >= 6:
+                        hp = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
+                        Tl = hc.matrix(hp["head_pan"], hp["head_tilt"])
+                        locked = (Tl @ np.append(np.median(pts, 0), 1.0))[:3]
+                        msg = f"LOCKED target at {np.round(locked * 100, 1)} cm: now put the magnet on the circle"
+                    else:
+                        msg = f"marker {a.marker_id} seen in {len(pts)}/10 frames: move the arm clear"
+                elif k == "r" and locked is not None:
+                    results.append(float(np.linalg.norm(tcp - locked) * 1000))
+                    msg = f"recorded d = {results[-1]:.1f} mm ({len(results)} so far)"
+                elif k == "c":
+                    locked, msg = None, "lock cleared"
+                elif k in ("x", "\x1b"):
+                    run = False
+            head_txt = f"head {pos['head_pan']:+.1f}/{pos['head_tilt']:+.1f}"
+            if locked is not None:
+                dv = (tcp - locked) * 100
+                line = (f"d {np.linalg.norm(dv):5.1f} cm (dx {dv[0]:+.1f} dy {dv[1]:+.1f} dz {dv[2]:+.1f}) "
+                        f"| magnet {np.round(tcp * 100, 1)} | {head_txt}")
+            else:
+                seen = ms.get(a.marker_id)
+                line = (f"marker {a.marker_id} " + (f"{seen['size_px']:.0f}px" if seen else "--")
+                        + f" | arm clear, then space to lock | {head_txt}")
+            print("\r" + line + (" | " + msg if msg else "") + "\x1b[K", end="", flush=True)
             if not a.no_view:
-                draw(cam, color, corners, ids, line[:90])
+                lines = [line] + ([msg] if msg else []) + (
+                    [f"recorded: {', '.join(f'{v:.0f}' for v in results)} mm"] if results else [])
+                draw(cam, color, corners, ids, line[:90],
+                     {"title": "Check: d to the locked target" if locked is not None else "Check: lock a target",
+                      "lines": lines, "checks": [], "box": None, "reach": None, "progress": [],
+                      "stage": 0, "stages": 0, "done": False, "ready": locked is not None})
     except KeyboardInterrupt:
         pass
     finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
         bus.disconnect(disable_torque=True)
         cam.close()
+        if results:
+            print(f"\nrecorded d: {', '.join(f'{v:.1f}' for v in results)} mm; "
+                  f"median {np.median(results):.1f} mm, worst {max(results):.1f} mm")
         print()
 
 
@@ -902,7 +961,10 @@ def main(argv=None):
                    help=f"save the arm joint offsets even if RMS is over {OFFSETS_MAX_RMS_MM:.0f} mm")
     s.add_argument("--no-offsets", action="store_true",
                    help="don't fit the arm's joint offsets (lift/elbow/wrist zero vs the URDF's)")
-    sub.add_parser("check")
+    k = sub.add_parser("check")
+    k.add_argument("--marker-id", type=int, default=None, help="the package's marker (default 10)")
+    k.add_argument("--head", type=float, nargs=2, metavar=("PAN", "TILT"),
+                   help="hold the head here (degrees): use an angle the calibration was taken at")
     sub.add_parser("view", help="live camera + markers only; no servos needed")
     a = ap.parse_args(argv)
     {"capture": cmd_capture, "solve": cmd_solve, "check": cmd_check, "view": cmd_view}[a.cmd](a)
