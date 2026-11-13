@@ -390,7 +390,7 @@ tr.cur td{background:rgba(32,40,56,.7)}.go{font-size:13px;font-weight:600;color:
 <div id=p>waiting...</div></div>
 <script>
 function esc(t){return String(t).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
-var FLAG_COL={FREE:'#777',HELD:'#3a7bd5',PLANNED:'#c9a227',MOVING:'#e8742a',DESCENDING:'#e8742a',
+var FLAG_COL={FREE:'#777',LOOKING:'#c9a227',HELD:'#3a7bd5',PLANNED:'#c9a227',MOVING:'#e8742a',DESCENDING:'#e8742a',
   PRESSING:'#e8742a',LIFTING:'#e8742a',HOVERING:'#2e9e4f',HOLDING:'#8e44ad',ABORTED:'#d33',IDLE:'#777'};
 var lastBtn='';
 function send(k){fetch('/cmd?k='+encodeURIComponent(k)).catch(function(){})}
@@ -1263,10 +1263,13 @@ class CamWorker:
         """target_pt of `marker_id` from the next n processed frames (fewer on timeout)."""
         return [m["target_pt"] for m in self.entries(marker_id, n, timeout)]
 
-    def entries(self, marker_id, n=10, timeout=4.0):
-        """`marker_id`'s marker entries, with a target, from the next n processed frames."""
+    def entries(self, marker_id, n=10, timeout=4.0, give_up_s=1.5):
+        """`marker_id`'s marker entries, with a target, from the next n processed frames; none
+        at all after give_up_s ends it early (a hidden marker held PICK up for the full timeout)."""
         out, last, t0 = [], self.seq, time.monotonic()
         while len(out) < n and time.monotonic() - t0 < timeout:
+            if not out and time.monotonic() - t0 > give_up_s:
+                break
             with self.lock:
                 seq, ms = self.seq, self.ms
             if seq != last:
@@ -1663,7 +1666,7 @@ def cmd_pick(a):
             raw = (hc.matrix(hp["head_pan"], hp["head_tilt"]) @ np.append(np.median(good, 0), 1.0))[:3]
             st["locked"] = aim_corrected(raw, a.radial_mm / 1000.0)
             st["state"], st["plan"] = "lock", None
-            if st["flag"] in ("PLANNED", "ABORTED", "HOVERING"):
+            if st["flag"] in ("PLANNED", "ABORTED", "HOVERING", "LOOKING"):
                 st["flag"] = "HELD" if st["arm_held"] else "FREE"
             say(f"LOCKED target {np.round(st['locked'] * 100, 1)} cm ({len(good)}/{len(pts)} frames, spread "
                 f"{spread:.1f} mm; aim {a.radial_mm:+.0f} mm radial). Plan next")
@@ -1808,7 +1811,14 @@ def cmd_pick(a):
         """Lock; if the marker isn't seen, swing shoulder_pan LOCK_ASIDE_DEG one way, then the
         other, at the same height, and try again from each. A package placed close in had its
         marker behind the magnet's plate and wire at the rest pose: 0/20 frames (2026-11-13)."""
-        if do_lock():
+        st["flag"] = "LOOKING"
+        publish(arm_q())
+        ok = do_lock()
+        # A PICK pressed again while the first one was still looking queued an 'o' that the
+        # step-aside move then read as "any key: abort" (2026-11-13, twice in a row). Nothing
+        # moves while looking, so what came in meanwhile is dropped.
+        read_keys(0.0)
+        if ok:
             return True
         q0 = arm_q()
         for d in (LOCK_ASIDE_DEG, -LOCK_ASIDE_DEG):
@@ -1819,9 +1829,13 @@ def cmd_pick(a):
             say(f"marker hidden from here: stepping aside {d:+.0f} deg to look again", 1e9)
             if not move_to(q, "MOVING"):
                 return False
-            st["flag"] = "HELD"
-            if do_lock():
+            st["flag"] = "LOOKING"
+            publish(arm_q())
+            ok = do_lock()
+            read_keys(0.0)
+            if ok:
                 return True
+        st["flag"] = "HELD"
         say(f"marker {a.marker_id} not seen from rest or from either side: is it in view, and not "
             "covered by the arm?", 20.0)
         return False
