@@ -1355,11 +1355,10 @@ def cmd_pick(a):
             return [{"label": "arm is moving", "items": [["STOP  [any key]", "!", "stop"]]}]
         main, state = [], st["state"]
         if state == "lock":
+            # PICK only: it locks, plans and goes itself; Lock / Plan / GO stay on their keys
+            # (space, p, g) for stepping through by hand (2026-11-13)
             if mag.magnet:
-                main.append(["PICK (one button)  [o]", "o", "go"])
-            main.append(["Lock target  [space]", " ", "go"])
-            if st["locked"] is not None:
-                main.append(["Plan  [p]", "p", "go"])
+                main.append(["PICK  [o]", "o", "go"])
             if st["rest_q"] is not None:
                 main.append(["Go to rest  [h]", "h", ""])
         elif state == "planned":
