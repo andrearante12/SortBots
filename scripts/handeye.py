@@ -364,7 +364,7 @@ td{padding:4px 6px;border-bottom:1px solid #2a2a2a}tr.cur td{background:#202838}
 @media (max-width:900px){body{flex-direction:column}#side{flex:none;padding:12px}}
 </style>
 <div id=img><img id=v alt="camera"></div><div id=side><div id=btn></div>
-<div id=jog style="display:none"><div class=lbl>drive the hand (drag; release stops)</div>
+<div id=jog style="display:none"><div class=lbl>drive the hand (drag, or hold arrows / PageUp / PageDown; release stops)</div>
 <div style="display:flex;gap:10px;align-items:flex-start">
 <div id=pad><div class=ax style="top:4px;left:50%;transform:translateX(-50%)">away</div>
 <div class=ax style="bottom:4px;left:50%;transform:translateX(-50%)">toward</div>
@@ -407,6 +407,18 @@ window.addEventListener('load',function(){
     b.addEventListener('pointerdown',function(e){b.setPointerCapture(e.pointerId);J[b.dataset.j]=+b.dataset.s;jupdate()});
     ['pointerup','pointercancel','lostpointercapture'].forEach(function(n){b.addEventListener(n,function(){J[b.dataset.j]=0;jupdate()})})})});
 window.addEventListener('blur',function(){J={x:0,y:0,z:0,t:0,w:0};jupdate()});
+// keyboard: the terminal's keys, arrows/PageUp/PageDown drive like the touchpad (hold to move)
+var KEYJ={ArrowUp:['y',1],ArrowDown:['y',-1],ArrowLeft:['x',-1],ArrowRight:['x',1],PageUp:['z',1],PageDown:['z',-1]};
+var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',a:'a',d:'d',w:'w',s:'s',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
+function moving(){var g=window.S&&window.S.guide;return g&&(g.flag==='MOVING'||g.flag==='DESCENDING')}
+document.addEventListener('keydown',function(e){
+  if(e.ctrlKey||e.metaKey||e.altKey)return;
+  if(moving()){send('!');e.preventDefault();return}          // any key aborts a planned move
+  if(e.key in KEYJ){var a=KEYJ[e.key];J[a[0]]=a[1];jupdate();e.preventDefault();return}
+  if(e.repeat)return;
+  var k=KEYCMD[e.key]||KEYCMD[(e.key||'').toLowerCase()];
+  if(k){send(k);e.preventDefault()}});
+document.addEventListener('keyup',function(e){if(e.key in KEYJ){J[KEYJ[e.key][0]]=0;jupdate()}});
 function render(S){
   var g=S.guide,h=(g.flag?'<div style="display:inline-block;padding:6px 14px;border-radius:6px;font-weight:700;'+
     'font-size:20px;letter-spacing:.05em;margin:4px 0 10px;color:#fff;background:'+(FLAG_COL[g.flag]||'#777')+'">ARM: '+
@@ -441,12 +453,21 @@ def draw(cam, color, corners, ids, text, guide=None, msg=""):
         for u, v in guide["reach"]:
             cv2.circle(dots, (int(u), int(v)), 9, (80, 200, 80), -1)
         cv2.addWeighted(dots, 0.35, color, 0.65, 0, dst=color)
+    if guide and guide.get("flag"):
+        # the ARM state across the top of the picture itself (BGR), same colours as the page badge
+        col = {"FREE": (119, 119, 119), "HELD": (213, 123, 58), "PLANNED": (39, 162, 201),
+               "MOVING": (42, 116, 232), "DESCENDING": (42, 116, 232), "HOVERING": (79, 158, 46),
+               "ABORTED": (51, 51, 221)}.get(guide["flag"], (119, 119, 119))
+        cv2.rectangle(color, (0, 0), (color.shape[1], 52), col, -1)
+        cv2.putText(color, f"ARM: {guide['flag']}", (14, 38), cv2.FONT_HERSHEY_SIMPLEX, 1.15, (255, 255, 255), 3)
+        cv2.putText(color, guide.get("title", "")[:60], (380, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
     if guide and guide["box"]:
         x0, y0, x1, y1 = guide["box"]
         cv2.rectangle(color, (x0 + 3, y0 + 3), (x1 - 3, y1 - 3), (0, 255, 0) if guide["ready"] else (0, 200, 0),
                       6 if guide["ready"] else 3)
-    cv2.putText(color, text if not guide else guide["title"], (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
-                (0, 255, 255), 2)
+    if not (guide and guide.get("flag")):
+        cv2.putText(color, text if not guide else guide["title"], (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                    (0, 255, 255), 2)
     if PREVIEW["window"]:
         try:
             cv2.imshow("handeye", color)
@@ -1145,7 +1166,7 @@ def cmd_pick(a):
     head_goal = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
     worker = CamWorker(cam, a.no_view)
     jog_cfg = types.SimpleNamespace(speed=0.10, pitch_dps=45.0, roll_dps=90.0, joint_dps=150.0, lock=["wrist_roll"])
-    st = {"mag_on": False, "mag_armed_at": 0.0, "mag_t0": 0.0,
+    st = {"mag_on": False, "mag_armed_at": 0.0, "mag_t0": 0.0, "mag_fault": False,
           "arm_held": False, "quit_armed": False, "locked": None, "plan": None, "state": "lock",
           "flag": "FREE", "level": 1, "jog_q": None, "jog_target": None, "jog_ok": True,
           "msg": f"arm free: move it clear of the package, then Lock target (marker {a.marker_id})",
@@ -1160,25 +1181,51 @@ def cmd_pick(a):
 
     def buttons():
         if st["flag"] in ("MOVING", "DESCENDING"):
-            return [{"label": "arm is moving", "items": [["STOP", "!", "stop"]]}]
+            return [{"label": "arm is moving", "items": [["STOP  [any key]", "!", "stop"]]}]
         main, state = [], st["state"]
         if state == "lock":
-            main.append(["Lock target", " ", "go"])
+            main.append(["Lock target  [space]", " ", "go"])
             if st["locked"] is not None:
-                main.append(["Plan", "p", "go"])
+                main.append(["Plan  [p]", "p", "go"])
         elif state == "planned":
-            main += [["GO: hover 5 cm above", "g", "go"], ["Re-lock target", " ", ""]]
+            main += [["GO: hover 5 cm above  [g]", "g", "go"], ["Re-lock target  [space]", " ", ""]]
         elif state == "at_hover":
-            main.append(["Back up to 12 cm", "u", ""])
-        main.append(["Free arm (limp)" if st["arm_held"] else "Hold arm", "f", ""])
+            main.append(["Back up to 12 cm  [u]", "u", ""])
+        main.append(["Free arm (limp)  [f]" if st["arm_held"] else "Hold arm  [f]", "f", ""])
         rows = [{"label": "pick", "items": main}]
         if magnet:
-            rows.append({"label": "magnet", "items": [["Magnet OFF", "m", "stop"] if st["mag_on"]
-                                                      else ["Magnet ON", "m", "go"]]})
+            rows.append({"label": "magnet", "items": [["Magnet OFF  [m]", "m", "stop"] if st["mag_on"]
+                                                      else ["Magnet ON  [m]", "m", "go"]]})
+        elif st.get("mag_fault"):
+            rows.append({"label": "magnet: board not answering, treat as OFF", "items": []})
         return rows + [
-                {"label": "camera, 2 deg per press", "items": [["pan +", "a", "head"], ["pan -", "d", "head"],
-                                                              ["tilt +", "w", "head"], ["tilt -", "s", "head"]]},
-                {"label": "", "items": [["Quit: press again to confirm" if st["quit_armed"] else "Quit", "x", ""]]}]
+                {"label": "camera, 2 deg per press", "items": [["pan + [a]", "a", "head"], ["pan - [d]", "d", "head"],
+                                                              ["tilt + [w]", "w", "head"], ["tilt - [s]", "s", "head"]]},
+                {"label": "", "items": [["Quit: again to confirm  [x]" if st["quit_armed"] else "Quit  [x]", "x", ""]]}]
+
+    def magnet_fault(e):
+        """The board stopped answering (2026-11-13: likely the coil's 0.36 A sagging a shared 5 V
+        and resetting the ESP32). Its driver signals that as SystemExit, which ended the whole run
+        once. Reconnect once: opening the port resets the board, so afterwards the magnet is OFF
+        for certain, and the page says so."""
+        nonlocal magnet
+        st["mag_on"] = False
+        try:
+            magnet.close()
+        except BaseException:
+            pass
+        magnet = None
+        try:
+            from magnet import Magnet
+            magnet = Magnet()
+            magnet.off()
+            st["mag_fault"] = False
+            say(f"magnet board stopped answering ({e}); reconnected, which resets it: magnet is OFF", 1e9)
+        except BaseException as e2:
+            if isinstance(e2, KeyboardInterrupt):
+                raise
+            magnet, st["mag_fault"] = None, True
+            say(f"magnet board not answering ({e2}): treat the magnet as OFF", 1e9)
 
     def magnet_set(on):
         """ON only with the arm held (a limp arm with a load on it drops it anyway); OFF always."""
@@ -1189,8 +1236,10 @@ def cmd_pick(a):
             return
         try:
             reply = magnet.on(MAGNET_ON_S) if on else magnet.off()
-        except Exception as e:
-            say(f"magnet: {e}")
+        except BaseException as e:
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            magnet_fault(e)
             return
         st["mag_on"] = on
         st["mag_armed_at"] = st["mag_t0"] = time.monotonic()
@@ -1279,8 +1328,10 @@ def cmd_pick(a):
             if magnet and st["mag_on"] and time.monotonic() - st["mag_armed_at"] > MAGNET_REARM_S:
                 try:
                     magnet.on(MAGNET_ON_S)  # the firmware caps one `on` at 30 s: re-arm well inside it
-                except Exception as e:
-                    say(f"magnet re-arm failed: {e}", 1e9)
+                except BaseException as e:
+                    if isinstance(e, KeyboardInterrupt):
+                        raise
+                    magnet_fault(e)
                 st["mag_armed_at"] = time.monotonic()
             # ---- keys and buttons
             for k in read_keys(0.0):
@@ -1378,14 +1429,15 @@ def cmd_pick(a):
     except KeyboardInterrupt:
         pass
     finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        if magnet:
+        # each step on its own: a magnet that won't answer skipped the rest once, and the process
+        # aborted with the arm still under torque (2026-11-13)
+        for step in (lambda: termios.tcsetattr(fd, termios.TCSADRAIN, old),
+                     lambda: magnet and magnet.off(), lambda: magnet and magnet.close(),
+                     worker.stop, lambda: bus.disconnect(disable_torque=True)):
             try:
-                magnet.off()
-            finally:
-                magnet.close()
-        worker.stop()
-        bus.disconnect(disable_torque=True)
+                step()
+            except BaseException as e:
+                print(f"\ncleanup: {e}")
         print("\nmagnet off, torque off")
 
 
