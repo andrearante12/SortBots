@@ -340,35 +340,40 @@ PREVIEW_HTML = PREVIEW_JPG.with_suffix(".html")
 PREVIEW_JS = PREVIEW_JPG.with_name("handeye_status.js")
 PREVIEW_PAGE = """<!doctype html><meta charset=utf-8><title>handeye capture</title>
 <style>
-body{margin:0;background:#111;color:#e8e8e8;font:15px/1.4 system-ui,sans-serif;display:flex;gap:14px}
-#img{flex:1 1 auto;min-width:0}#img img{width:100%;display:block}
-#side{flex:0 0 380px;padding:12px 14px 12px 0}#p{padding:0}
-#top .note{background:#4a3b00;border-left:4px solid #f5c400;color:#ffe680;padding:8px 10px;border-radius:4px;
-  font-size:15px;margin:0 0 10px}
-#pad{position:relative;width:220px;height:220px;border-radius:12px;background:#1d2633;touch-action:none;
-  border:1px solid #345}#zpad{position:relative;width:60px;height:220px;border-radius:12px;background:#1d2633;
-  touch-action:none;border:1px solid #345}#knob,#zknob{position:absolute;width:34px;height:34px;border-radius:50%;
-  background:#4a90e2;left:50%;top:50%;transform:translate(-50%,-50%);pointer-events:none}
-.ax{position:absolute;color:#789;font-size:11px;pointer-events:none}
-#jog button{font:600 14px system-ui,sans-serif;margin:0 6px 6px 0;padding:8px 12px;border:0;border-radius:6px;
-  background:#444;color:#fff;cursor:pointer;touch-action:none}#jog button:active{filter:brightness(1.4)}
-#jog .lbl{color:#999;font-size:12px;margin:2px 0 6px}#jog{margin:6px 0 12px}
-#btn button{font:600 15px system-ui,sans-serif;margin:0 6px 8px 0;padding:9px 14px;border:0;border-radius:6px;
-  background:#2d4a73;color:#fff;cursor:pointer}#btn button:active{filter:brightness(1.3)}
-#btn button.stop{background:#c62828;font-size:20px;padding:14px 28px}#btn button.go{background:#2e7d32}
-#btn button.head{background:#444;min-width:44px}#btn .row{margin-bottom:4px}#btn .lbl{color:#999;font-size:12px;margin:2px 0}
-h1{font-size:20px;margin:2px 0 10px}.step{color:#9ab;font-size:13px;margin-bottom:2px}
-.do{background:#1d2d1d;border-left:4px solid #5c5;padding:10px 12px;border-radius:4px;font-size:16px}
-.do p{margin:0 0 6px}.ready{border-color:#5f5;background:#1f3d1f}
-ul{list-style:none;padding:0;margin:10px 0}li{padding:2px 0}.ok{color:#6d6}.no{color:#e77}
-table{border-collapse:collapse;width:100%;margin-top:10px;font-size:14px}
-td{padding:4px 6px;border-bottom:1px solid #2a2a2a}tr.cur td{background:#202838}
-.go{font-size:18px;font-weight:600;color:#6f6;margin:8px 0}.msg{color:#fd6;margin-top:8px}
-.st{color:#999;font-size:12px;margin-top:10px;word-break:break-word}
-@media (max-width:900px){body{flex-direction:column}#side{flex:none;padding:12px}}
+/* full-window camera, every control a small translucent overlay on it (2026-11-13) */
+html,body{margin:0;height:100%;background:#000;color:#eee;font:13px/1.35 system-ui,sans-serif;overflow:hidden}
+#img{position:fixed;inset:0}#img img{width:100%;height:100%;object-fit:contain;display:block}
+#side{position:fixed;inset:0;pointer-events:none}#side>div{pointer-events:auto}
+#top{position:absolute;top:58px;left:8px;max-width:44vw}
+#top .note{background:rgba(74,59,0,.75);border-left:3px solid #f5c400;color:#ffe680;padding:5px 10px;
+  border-radius:4px;font-size:13px}
+#btn{position:absolute;top:58px;right:8px;display:flex;flex-direction:column;align-items:flex-end;max-width:40vw}
+#btn .row{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center}
+#btn .lbl{color:rgba(255,255,255,.55);font-size:10px;margin:0 6px 4px 0}
+button{font:600 12px system-ui,sans-serif;margin:0 0 5px 5px;padding:5px 9px;border:1px solid rgba(255,255,255,.22);
+  border-radius:5px;background:rgba(45,74,115,.5);color:#fff;cursor:pointer;backdrop-filter:blur(3px);touch-action:none}
+button:active{filter:brightness(1.5)}button.go{background:rgba(46,125,50,.55)}
+button.stop{background:rgba(198,40,40,.75)}#btn button.stop{font-size:16px;padding:9px 18px}
+button.head,button.hold{background:rgba(60,60,60,.5)}
+#jog{position:absolute;left:8px;bottom:8px;background:rgba(0,0,0,.25);border-radius:8px;padding:6px}
+#jog .lbl{color:rgba(255,255,255,.6);font-size:10px;margin:2px 0 4px}#jog .row{margin:2px 0}
+#jog button{margin:0 4px 4px 0;padding:4px 8px;font-size:11px}
+#pad{position:relative;width:150px;height:150px;border-radius:10px;background:rgba(29,38,51,.35);touch-action:none;
+  border:1px solid rgba(120,150,190,.4)}#zpad{position:relative;width:40px;height:150px;border-radius:10px;
+  background:rgba(29,38,51,.35);touch-action:none;border:1px solid rgba(120,150,190,.4)}
+#knob,#zknob{position:absolute;width:24px;height:24px;border-radius:50%;background:rgba(74,144,226,.8);left:50%;top:50%;
+  transform:translate(-50%,-50%);pointer-events:none}.ax{position:absolute;color:rgba(170,190,210,.7);font-size:10px;pointer-events:none}
+#p{position:absolute;right:8px;bottom:8px;max-width:300px;max-height:40vh;overflow:auto;background:rgba(0,0,0,.45);
+  padding:6px 9px;border-radius:6px;font-size:12px}
+#p h1{font-size:14px;margin:0 0 4px}.step{color:#9ab;font-size:11px}
+.do{background:rgba(29,45,29,.6);border-left:3px solid #5c5;padding:5px 8px;border-radius:3px}.do p{margin:0 0 3px}
+.ready{border-color:#5f5}ul{list-style:none;padding:0;margin:5px 0}li{padding:1px 0}.ok{color:#6d6}.no{color:#e77}
+table{border-collapse:collapse;width:100%;margin-top:6px;font-size:11px}td{padding:2px 4px;border-bottom:1px solid rgba(255,255,255,.1)}
+tr.cur td{background:rgba(32,40,56,.7)}.go{font-size:13px;font-weight:600;color:#6f6;margin:4px 0}.msg{color:#fd6;margin-top:4px}
+.st{color:#aaa;font-size:10px;margin-top:5px;word-break:break-word}
 </style>
 <div id=img><img id=v alt="camera"></div><div id=side><div id=top></div><div id=btn></div>
-<div id=jog style="display:none"><div class=lbl>drive the hand (drag, or hold arrows / PageUp / PageDown; release stops)</div>
+<div id=jog style="display:none"><div class=lbl>hand: drag / arrows / PgUp PgDn (hold)</div>
 <div style="display:flex;gap:10px;align-items:flex-start">
 <div id=pad><div class=ax style="top:4px;left:50%;transform:translateX(-50%)">away</div>
 <div class=ax style="bottom:4px;left:50%;transform:translateX(-50%)">toward</div>
@@ -429,10 +434,10 @@ document.addEventListener('keydown',function(e){
   if(k){send(k);e.preventDefault()}});
 document.addEventListener('keyup',function(e){var kj=KEYJ[e.key]||KEYJ[(e.key||'').toLowerCase()];if(kj){J[kj[0]]=0;jupdate()}});
 function render(S){
-  var g=S.guide,h=(g.flag?'<div style="display:inline-block;padding:6px 14px;border-radius:6px;font-weight:700;'+
-    'font-size:20px;letter-spacing:.05em;margin:4px 0 10px;color:#fff;background:'+(FLAG_COL[g.flag]||'#777')+'">ARM: '+
-    esc(g.flag)+'</div>':'')+(g.magnet?' <div style="display:inline-block;padding:6px 14px;border-radius:6px;'+
-    'font-weight:700;font-size:20px;margin:4px 0 10px;color:#fff;background:'+(g.magnet==='ON'?'#c62828':'#555')+
+  var g=S.guide,h=(g.flag?'<div style="display:inline-block;padding:2px 7px;border-radius:4px;font-weight:700;'+
+    'font-size:11px;margin:0 4px 4px 0;color:#fff;background:'+(FLAG_COL[g.flag]||'#777')+'">ARM: '+
+    esc(g.flag)+'</div>':'')+(g.magnet?'<div style="display:inline-block;padding:2px 7px;border-radius:4px;'+
+    'font-weight:700;font-size:11px;margin:0 0 4px;color:#fff;background:'+(g.magnet==='ON'?'#c62828':'#555')+
     '">MAGNET: '+esc(g.magnet)+'</div>':'')+(g.stages?'<div class=step>step '+g.stage+' of '+g.stages+'</div>':'')+'<h1>'+esc(g.title)+'</h1>';
   h+='<div class="do'+(g.ready?' ready':'')+'">'+g.lines.map(l=>'<p>'+esc(l)+'</p>').join('')+'</div>';
   if(g.checks.length)h+='<ul>'+g.checks.map(c=>'<li class='+(c[1]?'ok':'no')+'>'+(c[1]?'&#10003; ':'&#10007; ')+esc(c[0])+'</li>').join('')+'</ul>';
