@@ -343,6 +343,8 @@ PREVIEW_PAGE = """<!doctype html><meta charset=utf-8><title>handeye capture</tit
 body{margin:0;background:#111;color:#e8e8e8;font:15px/1.4 system-ui,sans-serif;display:flex;gap:14px}
 #img{flex:1 1 auto;min-width:0}#img img{width:100%;display:block}
 #side{flex:0 0 380px;padding:12px 14px 12px 0}#p{padding:0}
+#top .note{background:#4a3b00;border-left:4px solid #f5c400;color:#ffe680;padding:8px 10px;border-radius:4px;
+  font-size:15px;margin:0 0 10px}
 #pad{position:relative;width:220px;height:220px;border-radius:12px;background:#1d2633;touch-action:none;
   border:1px solid #345}#zpad{position:relative;width:60px;height:220px;border-radius:12px;background:#1d2633;
   touch-action:none;border:1px solid #345}#knob,#zknob{position:absolute;width:34px;height:34px;border-radius:50%;
@@ -365,7 +367,7 @@ td{padding:4px 6px;border-bottom:1px solid #2a2a2a}tr.cur td{background:#202838}
 .st{color:#999;font-size:12px;margin-top:10px;word-break:break-word}
 @media (max-width:900px){body{flex-direction:column}#side{flex:none;padding:12px}}
 </style>
-<div id=img><img id=v alt="camera"></div><div id=side><div id=btn></div>
+<div id=img><img id=v alt="camera"></div><div id=side><div id=top></div><div id=btn></div>
 <div id=jog style="display:none"><div class=lbl>drive the hand (drag, or hold arrows / PageUp / PageDown; release stops)</div>
 <div style="display:flex;gap:10px;align-items:flex-start">
 <div id=pad><div class=ax style="top:4px;left:50%;transform:translateX(-50%)">away</div>
@@ -436,6 +438,10 @@ function render(S){
   if(g.checks.length)h+='<ul>'+g.checks.map(c=>'<li class='+(c[1]?'ok':'no')+'>'+(c[1]?'&#10003; ':'&#10007; ')+esc(c[0])+'</li>').join('')+'</ul>';
   if(g.ready&&!g.buttons)h+='<div class=go>Ready: press B</div>';
   buttons(g);document.getElementById('jog').style.display=g.jog?'block':'none';
+  // the latest message (a refusal, a warning) goes on top, above the buttons: below the drive
+  // panel it was out of sight and a refused GO looked like "nothing happens" (2026-11-13)
+  var t=document.getElementById('top'),mm=g.msg||S.msg,m=g.buttons&&mm?'<div class=note>'+esc(mm)+'</div>':'';
+  if(t.innerHTML!==m)t.innerHTML=m;
   h+='<table>'+g.progress.map((r,i)=>'<tr'+(i+1==g.stage?' class=cur':'')+'><td>'+esc(r.name)+
      (r.target?' <span style=color:#888>('+r.target[0].toFixed(0)+', '+r.target[1].toFixed(0)+')</span>':'')+
      '</td><td>'+r.have+' / '+r.need+'</td><td>'+(r.have>=r.need?'&#10003;':'')+'</td></tr>').join('')+'</table>';
@@ -1379,7 +1385,7 @@ def cmd_pick(a):
         title = {"lock": "Pick: lock the target", "planned": "Pick: plan ready",
                  "at_hover": "Pick: hovering 5 cm above the target",
                  "holding": "Pick: holding the package (drive it, then release)"}[st["state"]]
-        worker.show(txt, {"title": title, "lines": [txt] + ([msg] if msg else []), "checks": [], "box": None,
+        worker.show(txt, {"title": title, "lines": [txt], "msg": msg, "checks": [], "box": None,
                           "reach": None, "progress": [], "stage": 0, "stages": 0, "done": False,
                           "ready": st["state"] == "planned", "flag": st["flag"], "buttons": buttons(),
                           "magnet": None if not mag.magnet else ("ON" if mag.on else "OFF"),
@@ -1604,7 +1610,8 @@ def cmd_pick(a):
                 elif k == "g" and st["state"] == "planned" and tcp[2] < st["locked"][2] + 0.08:
                     # the first move is joint-interpolated: from low down it can sweep the magnet
                     # through the package, so it starts only from well above it
-                    say("raise the magnet at least 8 cm above the package first (drive it up), then GO")
+                    say(f"GO refused: the magnet is {(tcp[2] - st['locked'][2]) * 100:.1f} cm above the target and the "
+                        "first move needs 8 cm. Drive it up (PageUp / height strip), then GO", 20.0)
                 elif k == "g" and st["state"] == "planned":
                     if not st["arm_held"]:
                         hold(True)
