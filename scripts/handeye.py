@@ -1080,7 +1080,7 @@ HIGH_M, HOVER_M = 0.12, 0.05
 # Stage 2: the calibration's height is good to ~1 cm, so the last centimetre is a gentle press with
 # lift/elbow/wrist torque cut to PRESS_TORQUE: the goal goes PRESS_BELOW_M under the computed
 # surface and the servos give where the package stops them, instead of driving into it.
-CONTACT_ABOVE_M, PRESS_BELOW_M = 0.01, 0.01
+CONTACT_ABOVE_M, PRESS_BELOW_M = 0.01, 0.015  # press 15 mm: 10 fell short, 17 seated with margin (2026-11-13)
 PRESS_TORQUE, FULL_TORQUE = 350, 1000   # Torque_Limit, 0..1000 (= % x 10)
 PRESS_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_flex")
 GRIP_WAIT_S = 0.5
@@ -2011,7 +2011,7 @@ def main(argv=None):
                     help="switch the magnet on this far above the computed surface on the way down, mm "
                          "(default 10: at the start of the press)")
     pk.add_argument("--press-mm", type=float, default=PRESS_BELOW_M * 1000,
-                    help="how far under the computed surface the gentle press aims, mm (default 10)")
+                    help="how far under the computed surface the gentle press aims, mm (default 15)")
     pk.add_argument("--pitch-deg", type=float, default=None,
                     help="magnet-down pitch in the arm model, + = face turned toward the base "
                          "(default: the mean of the taught flat poses, pick_flat_poses.json)")
