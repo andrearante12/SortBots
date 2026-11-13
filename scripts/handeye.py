@@ -1495,16 +1495,27 @@ def cmd_pick(a):
         st["state"], st["flag"] = "holding", "HOLDING"
         say("HOLDING: magnet on, 12 cm up. Drive to the drop spot, then Release", 1e9)
 
+    def aim_corrected(p, radial_m):
+        """Shift a target along the horizontal line from the shoulder_pan axis through it:
+        negative = toward the base. Magnet-down picks landed ~8 mm too far out (the magnet slides
+        as it seats, 2026-11-13, at head 32/69); one radial number fixes it from any direction."""
+        d = np.array([p[0] - head_cam.PAN_AXIS_X_M, p[1]])
+        n = np.linalg.norm(d)
+        if n < 1e-6 or radial_m == 0.0:
+            return p
+        return p + np.array([*(d / n * radial_m), 0.0])
+
     def do_lock():
         """Lock marker a.marker_id's target from 10 frames. True if locked."""
         pts = worker.targets(a.marker_id)
         if len(pts) >= 6 and np.linalg.norm(np.std(pts, 0)) < 0.004:
             hp = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
-            st["locked"] = (hc.matrix(hp["head_pan"], hp["head_tilt"]) @ np.append(np.median(pts, 0), 1.0))[:3]
+            raw = (hc.matrix(hp["head_pan"], hp["head_tilt"]) @ np.append(np.median(pts, 0), 1.0))[:3]
+            st["locked"] = aim_corrected(raw, a.radial_mm / 1000.0)
             st["state"], st["plan"] = "lock", None
             if st["flag"] in ("PLANNED", "ABORTED", "HOVERING"):
                 st["flag"] = "HELD" if st["arm_held"] else "FREE"
-            say(f"LOCKED target {np.round(st['locked'] * 100, 1)} cm. Plan next")
+            say(f"LOCKED target {np.round(st['locked'] * 100, 1)} cm (aim {a.radial_mm:+.0f} mm radial). Plan next")
             return True
         say(f"marker {a.marker_id} not steady in view ({len(pts)}/10): move the arm clear of it", 20.0)
         return False
@@ -1798,6 +1809,9 @@ def main(argv=None):
     sub.add_parser("view", help="live camera + markers only; no servos needed")
     pk = sub.add_parser("pick", help="stage 1: lock a package, plan, hover 5 cm above it (no contact)")
     pk.add_argument("--marker-id", type=int, default=None, help="the package's marker (default 10)")
+    pk.add_argument("--radial-mm", type=float, default=-8.0,
+                    help="aim correction along the line from the arm base through the target, mm; "
+                         "negative = toward the base (default -8: the magnet slides out ~8 mm as it seats)")
     pk.add_argument("--head", type=float, nargs=2, metavar=("PAN", "TILT"), default=list(PICK_HEAD),
                     help=f"hold the head here (default {PICK_HEAD[0]:.0f}/{PICK_HEAD[1]:.0f}; "
                          f"HOME, the best-calibrated angle, is {HOME_HEAD[0]}/{HOME_HEAD[1]})")
