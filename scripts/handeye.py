@@ -269,7 +269,7 @@ WEB_ALLOWED = set(" fpguxadws!1234mkorhHltcz")
 JOG = {"v": {}, "t": 0.0}
 JOG_AXES = ("x", "y", "z", "t", "w", "hp", "ht")   # hand x/y/z, tool tilt, wrist; head pan/tilt
 ARM_JOG_AXES, HEAD_JOG_AXES = JOG_AXES[:5], JOG_AXES[5:]
-HEAD_DPS = 15.0   # head speed while a camera button or a/d/w/s is held
+HEAD_DPS = 25.0   # head speed at full camera-pad deflection, or a/d/w/s held (15 was slow on the pad)
 JOG_FRESH_S = 0.25
 
 
@@ -344,10 +344,11 @@ PREVIEW_PAGE = """<!doctype html><meta charset=utf-8><title>handeye capture</tit
 html,body{margin:0;height:100%;background:#000;color:#eee;font:13px/1.35 system-ui,sans-serif;overflow:hidden}
 #img{position:fixed;inset:0}#img img{width:100%;height:100%;object-fit:contain;display:block}
 #side{position:fixed;inset:0;pointer-events:none}#side>div{pointer-events:auto}
-#top{position:absolute;top:58px;left:8px;max-width:44vw}
+#top{position:absolute;top:8px;left:8px;max-width:44vw}
+.pill{display:inline-block;padding:2px 8px;border-radius:4px;font-weight:700;font-size:11px;margin:0 4px 5px 0;color:#fff}
 #top .note{background:rgba(74,59,0,.75);border-left:3px solid #f5c400;color:#ffe680;padding:5px 10px;
   border-radius:4px;font-size:13px}
-#btn{position:absolute;top:58px;right:8px;display:flex;flex-direction:column;align-items:flex-end;max-width:40vw}
+#btn{position:absolute;top:8px;right:8px;display:flex;flex-direction:column;align-items:flex-end;max-width:40vw}
 #btn .row{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center}
 #btn .lbl{color:rgba(255,255,255,.55);font-size:10px;margin:0 6px 4px 0}
 button{font:600 12px system-ui,sans-serif;margin:0 0 5px 5px;padding:5px 9px;border:1px solid rgba(255,255,255,.22);
@@ -361,7 +362,9 @@ button.head,button.hold{background:rgba(60,60,60,.5)}
 #pad{position:relative;width:150px;height:150px;border-radius:10px;background:rgba(29,38,51,.35);touch-action:none;
   border:1px solid rgba(120,150,190,.4)}#zpad{position:relative;width:40px;height:150px;border-radius:10px;
   background:rgba(29,38,51,.35);touch-action:none;border:1px solid rgba(120,150,190,.4)}
-#knob,#zknob{position:absolute;width:24px;height:24px;border-radius:50%;background:rgba(74,144,226,.8);left:50%;top:50%;
+#cpad{position:relative;width:110px;height:110px;border-radius:10px;background:rgba(51,40,29,.35);touch-action:none;
+  border:1px solid rgba(190,160,120,.4)}#cknob{background:rgba(226,160,74,.8)!important}
+#knob,#zknob,#cknob{position:absolute;width:24px;height:24px;border-radius:50%;background:rgba(74,144,226,.8);left:50%;top:50%;
   transform:translate(-50%,-50%);pointer-events:none}.ax{position:absolute;color:rgba(170,190,210,.7);font-size:10px;pointer-events:none}
 #p{position:absolute;right:8px;bottom:8px;max-width:300px;max-height:40vh;overflow:auto;background:rgba(0,0,0,.45);
   padding:6px 9px;border-radius:6px;font-size:12px}
@@ -380,12 +383,14 @@ tr.cur td{background:rgba(32,40,56,.7)}.go{font-size:13px;font-weight:600;color:
 <div class=ax style="left:4px;top:50%;transform:translateY(-50%)">left</div>
 <div class=ax style="right:4px;top:50%;transform:translateY(-50%)">right</div><div id=knob></div></div>
 <div id=zpad><div class=ax style="top:4px;left:50%;transform:translateX(-50%)">up</div>
-<div class=ax style="bottom:4px;left:50%;transform:translateX(-50%)">down</div><div id=zknob></div></div></div>
+<div class=ax style="bottom:4px;left:50%;transform:translateX(-50%)">down</div><div id=zknob></div></div>
+<div><div class=lbl style="margin-top:0">camera: drag / a d w s</div>
+<div id=cpad><div class=ax style="top:4px;left:50%;transform:translateX(-50%)">up</div>
+<div class=ax style="bottom:4px;left:50%;transform:translateX(-50%)">down</div>
+<div class=ax style="left:4px;top:50%;transform:translateY(-50%)">left</div>
+<div class=ax style="right:4px;top:50%;transform:translateY(-50%)">right</div><div id=cknob></div></div></div></div>
 <div class=row style="margin-top:8px">
 <button class=hold data-j="w" data-s="1">wrist up</button><button class=hold data-j="w" data-s="-1">wrist down</button></div>
-<div class=lbl>camera (hold; a/d/w/s)</div><div class=row><button class=hold data-j="hp" data-s="1">pan +</button>
-<button class=hold data-j="hp" data-s="-1">pan -</button><button class=hold data-j="ht" data-s="1">tilt +</button>
-<button class=hold data-j="ht" data-s="-1">tilt -</button></div>
 <div class=row><span class=lbl>speed </span><button data-k="1">L1</button><button data-k="2">L2</button><button data-k="3">L3</button><button data-k="4">L4</button></div></div>
 <div id=p>waiting...</div></div>
 <script>
@@ -401,7 +406,7 @@ function buttons(g){
       return '<button class="'+(it[2]||'')+'" data-k="'+it[1]+'">'+esc(it[0])+'</button>'}).join('')+'</div>'}).join('')}
 document.addEventListener('click',function(e){var t=e.target.closest('button[data-k]');if(t)send(t.dataset.k)});
 var J={x:0,y:0,z:0,t:0,w:0,hp:0,ht:0},jt=null;
-function jsend(){fetch('/jog?x='+J.x.toFixed(2)+'&y='+J.y.toFixed(2)+'&z='+J.z.toFixed(2)+'&t='+J.t+'&w='+J.w+'&hp='+J.hp+'&ht='+J.ht).catch(function(){})}
+function jsend(){fetch('/jog?x='+J.x.toFixed(2)+'&y='+J.y.toFixed(2)+'&z='+J.z.toFixed(2)+'&t='+J.t+'&w='+J.w+'&hp='+J.hp.toFixed(2)+'&ht='+J.ht.toFixed(2)).catch(function(){})}
 function jlive(){return J.x||J.y||J.z||J.t||J.w||J.hp||J.ht}
 function jupdate(){if(jlive()){if(!jt){jsend();jt=setInterval(jsend,80)}}else{if(jt){clearInterval(jt);jt=null}jsend()}}
 function dragger(el,knob,f){
@@ -415,6 +420,8 @@ function dragger(el,knob,f){
 window.addEventListener('load',function(){
   dragger(document.getElementById('pad'),document.getElementById('knob'),function(dx,dy){J.x=Math.abs(dx)<.08?0:dx;J.y=Math.abs(dy)<.08?0:-dy});
   dragger(document.getElementById('zpad'),document.getElementById('zknob'),function(dx,dy){J.z=Math.abs(dy)<.08?0:-dy});
+  function sq(v){return Math.abs(v)<.08?0:Math.sign(v)*v*v}
+  dragger(document.getElementById('cpad'),document.getElementById('cknob'),function(dx,dy){J.hp=-sq(dx);J.ht=-sq(dy)});
   document.querySelectorAll('#jog button.hold').forEach(function(b){
     b.addEventListener('pointerdown',function(e){b.setPointerCapture(e.pointerId);J[b.dataset.j]=+b.dataset.s;jupdate()});
     ['pointerup','pointercancel','lostpointercapture'].forEach(function(n){b.addEventListener(n,function(){J[b.dataset.j]=0;jupdate()})})})});
@@ -445,8 +452,14 @@ function render(S){
   buttons(g);document.getElementById('jog').style.display=g.jog?'block':'none';
   // the latest message (a refusal, a warning) goes on top, above the buttons: below the drive
   // panel it was out of sight and a refused GO looked like "nothing happens" (2026-11-13)
-  var t=document.getElementById('top'),mm=g.msg||S.msg,m=g.buttons&&mm?'<div class=note>'+esc(mm)+'</div>':'';
+  // pick (it has buttons): two small pills and the message, no panel (2026-11-13: minimal)
+  var t=document.getElementById('top'),mm=g.msg||S.msg,m='';
+  if(g.buttons){
+    m='<span class=pill style="background:'+(FLAG_COL[g.flag]||'#777')+'">'+esc(g.flag)+'</span>'+
+      (g.magnet?'<span class=pill style="background:'+(g.magnet==='ON'?'#c62828':'#555')+'">MAGNET '+esc(g.magnet)+'</span>':'')+
+      (mm?'<div class=note>'+esc(mm)+'</div>':'')}
   if(t.innerHTML!==m)t.innerHTML=m;
+  document.getElementById('p').style.display=g.buttons?'none':'block';
   h+='<table>'+g.progress.map((r,i)=>'<tr'+(i+1==g.stage?' class=cur':'')+'><td>'+esc(r.name)+
      (r.target?' <span style=color:#888>('+r.target[0].toFixed(0)+', '+r.target[1].toFixed(0)+')</span>':'')+
      '</td><td>'+r.have+' / '+r.need+'</td><td>'+(r.have>=r.need?'&#10003;':'')+'</td></tr>').join('')+'</table>';
@@ -473,7 +486,7 @@ def draw(cam, color, corners, ids, text, guide=None, msg=""):
         for u, v in guide["reach"]:
             cv2.circle(dots, (int(u), int(v)), 9, (80, 200, 80), -1)
         cv2.addWeighted(dots, 0.35, color, 0.65, 0, dst=color)
-    if guide and guide.get("flag"):
+    if guide and guide.get("flag") and not guide.get("buttons"):
         # the ARM state across the top of the picture itself (BGR), same colours as the page badge
         col = {"FREE": (119, 119, 119), "HELD": (213, 123, 58), "PLANNED": (39, 162, 201),
                "MOVING": (42, 116, 232), "DESCENDING": (42, 116, 232), "PRESSING": (42, 116, 232),
