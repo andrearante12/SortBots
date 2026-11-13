@@ -262,7 +262,7 @@ def set_hold(bus, motors, hold):
 # Keys the page's buttons send (/cmd?k=...), merged into read_keys so a button is the same as
 # its keyboard key. Single characters only, from this set: nothing else is accepted.
 WEB_KEYS = queue.Queue()
-WEB_ALLOWED = set(" fpguxadws!1234mk")
+WEB_ALLOWED = set(" fpguxadws!1234mko")
 # The page's touchpad: the latest hand velocity (-1..1 per axis) and when it came. The page
 # resends it every 80 ms while a finger is down; JOG_FRESH_S without one and the arm stops, so a
 # lifted finger, a closed tab or a dropped connection can't leave the arm driving.
@@ -417,7 +417,7 @@ window.addEventListener('blur',function(){J={x:0,y:0,z:0,t:0,w:0,hp:0,ht:0};jupd
 // keyboard: the terminal's keys, arrows/PageUp/PageDown drive like the touchpad (hold to move)
 var KEYJ={ArrowUp:['y',1],ArrowDown:['y',-1],ArrowLeft:['x',-1],ArrowRight:['x',1],PageUp:['z',1],PageDown:['z',-1],
   a:['hp',1],d:['hp',-1],w:['ht',1],s:['ht',-1]};
-var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
+var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',o:'o',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
 function moving(){var g=window.S&&window.S.guide;return g&&['MOVING','DESCENDING','PRESSING','LIFTING'].indexOf(g.flag)>=0}
 document.addEventListener('keydown',function(e){
   if(e.ctrlKey||e.metaKey||e.altKey)return;
@@ -1079,7 +1079,8 @@ CONTACT_ABOVE_M, PRESS_BELOW_M = 0.01, 0.01
 PRESS_TORQUE, FULL_TORQUE = 350, 1000   # Torque_Limit, 0..1000 (= % x 10)
 PRESS_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_flex")
 GRIP_WAIT_S = 0.5
-MOVING_FLAGS = ("MOVING", "DESCENDING", "PRESSING", "LIFTING")   # above the target: clearance for the joint move, and stage 1's stop
+MOVING_FLAGS = ("MOVING", "DESCENDING", "PRESSING", "LIFTING")
+CLEAR_M = 0.08   # GO's first move is joint-interpolated: it starts only this far above the package   # above the target: clearance for the joint move, and stage 1's stop
 PICK_DPS = 20.0            # joint speed cap for every pick motion
 
 
@@ -1274,6 +1275,7 @@ def cmd_pick(a):
 
     keys: f arm free/held  space lock  p plan  g go  u back up to HIGH_M  a/d/w/s head +-2 deg
           m magnet on/off (on needs the arm held)   k descend and pick (from the hover)
+          o one-button pick: hold, lock, plan, raise clear, go, descend and pick
           1-4 drive speed  any key during a planned move aborts it and holds  x quit (twice if held)"""
     import types
     import arm_xpad
@@ -1341,6 +1343,8 @@ def cmd_pick(a):
             return [{"label": "arm is moving", "items": [["STOP  [any key]", "!", "stop"]]}]
         main, state = [], st["state"]
         if state == "lock":
+            if mag.magnet:
+                main.append(["PICK (one button)  [o]", "o", "go"])
             main.append(["Lock target  [space]", " ", "go"])
             if st["locked"] is not None:
                 main.append(["Plan  [p]", "p", "go"])
@@ -1486,6 +1490,102 @@ def cmd_pick(a):
         st["state"], st["flag"] = "holding", "HOLDING"
         say("HOLDING: magnet on, 12 cm up. Drive to the drop spot, then Release", 1e9)
 
+    def do_lock():
+        """Lock marker a.marker_id's target from 10 frames. True if locked."""
+        pts = worker.targets(a.marker_id)
+        if len(pts) >= 6 and np.linalg.norm(np.std(pts, 0)) < 0.004:
+            hp = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
+            st["locked"] = (hc.matrix(hp["head_pan"], hp["head_tilt"]) @ np.append(np.median(pts, 0), 1.0))[:3]
+            st["state"], st["plan"] = "lock", None
+            if st["flag"] in ("PLANNED", "ABORTED", "HOVERING"):
+                st["flag"] = "HELD" if st["arm_held"] else "FREE"
+            say(f"LOCKED target {np.round(st['locked'] * 100, 1)} cm. Plan next")
+            return True
+        say(f"marker {a.marker_id} not steady in view ({len(pts)}/10): move the arm clear of it", 20.0)
+        return False
+
+    def do_plan():
+        """Magnet-down poses 12 cm above, at the 5 cm hover and at contact, and the descent
+        between. True if all solvable inside the joint limits."""
+        q_now = arm_q()
+        locked, roll = st["locked"], float(q_now[4])
+        sols = {n: head_cam.ik_down(kin, locked + [0, 0, dz], seeds + [q_now], lo, hi, hc.magnet_m, roll)
+                for n, dz in (("high", HIGH_M), ("hover", HOVER_M), ("contact", 0.0))}
+        bad = [n for n, v_ in sols.items() if v_ is None]
+        if bad:
+            say(f"NOT reachable straight down: {', '.join(bad)}. Move the package closer to the arm", 20.0)
+            return False
+        steps, seed = [], [sols["high"][0]]
+        for dz in np.arange(HIGH_M - 0.01, HOVER_M - 1e-6, -0.01):
+            r = head_cam.ik_down(kin, locked + [0, 0, dz], seed, lo, hi, hc.magnet_m, roll)
+            if r is None:
+                break
+            steps.append(r[0])
+            seed = [r[0]]
+        if len(steps) < round((HIGH_M - HOVER_M) / 0.01):
+            say("descent path not solvable straight down: move the package", 20.0)
+            return False
+        st["plan"], st["state"], st["flag"] = {"high": sols["high"][0], "steps": steps}, "planned", "PLANNED"
+        span = max(abs(np.degrees(sols["high"][0] - q_now)))
+        say(f"PLAN ok: {span:.0f} deg joint move to 12 cm above, then down to 5 cm. GO when ready", 1e9)
+        return True
+
+    def do_go():
+        """Joint move to 12 cm above the target, straight down to the 5 cm hover. True if there."""
+        if not st["arm_held"]:
+            hold(True)
+        ok = move_to(st["plan"]["high"], "MOVING")
+        for q in st["plan"]["steps"] if ok else []:
+            ok = move_to(q, "DESCENDING")
+            if not ok:
+                break
+        if ok:
+            st["state"], st["flag"] = "at_hover", "HOVERING"
+            err = (kin.tool_point(arm_q(), hc.magnet_m) - (st["locked"] + [0, 0, HOVER_M])) * 1000
+            say(f"HOVERING 5 cm above the target (arm model: {np.linalg.norm(err):.0f} mm off its goal). "
+                "Is the magnet centred over the circle?", 1e9)
+        else:
+            st["state"] = "lock"
+        return ok
+
+    def raise_clear():
+        """Raise the hand straight up (its tilt kept) until the magnet is CLEAR_M + 1 cm above
+        the locked target, 1 cm per step. True if it got there (or already was)."""
+        need = st["locked"][2] + CLEAR_M + 0.01
+        q = arm_q()
+        for _ in range(40):
+            z = kin.tool_point(q, hc.magnet_m)[2]
+            if z >= need:
+                return True
+            goal = kin.pose(q) + np.array([0.0, 0.0, min(0.01, need - z + 0.002), 0.0])
+            q_new, ok = kin.ik(goal, q, lo, hi)
+            if not ok:  # near straight down the tilt solve folds: put the height first
+                q_new, ok = kin.ik(goal, q, lo, hi, pitch_w=0.001)
+            if not ok:
+                say("could not raise the arm straight up from here: drive it up by hand, then PICK again", 20.0)
+                return False
+            if not move_to(q_new, "MOVING"):
+                return False
+            q = arm_q()
+        return kin.tool_point(q, hc.magnet_m)[2] >= need
+
+    def auto_pick():
+        """One button: hold, lock, plan, raise clear if low, GO to the hover, descend and pick.
+        Each step is the one its own button runs; the first refusal or abort stops the chain
+        where it is, with the reason on the page."""
+        if not mag.magnet:
+            say("no magnet board: plug in the ESP32 and restart", 20.0)
+            return
+        if not st["arm_held"]:
+            hold(True)
+        if not do_lock() or not do_plan():
+            return
+        if not raise_clear():
+            return
+        if not do_go():
+            return
+        descend_and_pick()
+
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     print("keys:" + cmd_pick.__doc__.split("keys:")[1].replace("\n", "\r\n") + "\r")
@@ -1576,57 +1676,21 @@ def cmd_pick(a):
                     else:
                         hold(not st["arm_held"])
                 elif k == " ":
-                    pts = worker.targets(a.marker_id)
-                    if len(pts) >= 6 and np.linalg.norm(np.std(pts, 0)) < 0.004:
-                        hp = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
-                        st["locked"] = (hc.matrix(hp["head_pan"], hp["head_tilt"]) @ np.append(np.median(pts, 0), 1.0))[:3]
-                        st["state"], st["plan"] = "lock", None
-                        if st["flag"] in ("PLANNED", "ABORTED", "HOVERING"):
-                            st["flag"] = "HELD" if st["arm_held"] else "FREE"
-                        say(f"LOCKED target {np.round(st['locked'] * 100, 1)} cm. Plan next")
-                    else:
-                        say(f"marker {a.marker_id} not steady in view ({len(pts)}/10): move the arm clear")
+                    do_lock()
                 elif k == "p" and st["locked"] is not None and st["state"] == "lock":
-                    locked, roll = st["locked"], float(q_now[4])
-                    sols = {n: head_cam.ik_down(kin, locked + [0, 0, dz], seeds + [q_now], lo, hi, hc.magnet_m, roll)
-                            for n, dz in (("high", HIGH_M), ("hover", HOVER_M), ("contact", 0.0))}
-                    bad = [n for n, v_ in sols.items() if v_ is None]
-                    if bad:
-                        say(f"NOT reachable straight down: {', '.join(bad)}. Move the package closer to the arm")
-                        continue
-                    steps, seed = [], [sols["high"][0]]
-                    for dz in np.arange(HIGH_M - 0.01, HOVER_M - 1e-6, -0.01):
-                        r = head_cam.ik_down(kin, locked + [0, 0, dz], seed, lo, hi, hc.magnet_m, roll)
-                        if r is None:
-                            break
-                        steps.append(r[0])
-                        seed = [r[0]]
-                    if len(steps) < round((HIGH_M - HOVER_M) / 0.01):
-                        say("descent path not solvable straight down: move the package")
-                        continue
-                    st["plan"], st["state"], st["flag"] = {"high": sols["high"][0], "steps": steps}, "planned", "PLANNED"
-                    span = max(abs(np.degrees(sols["high"][0] - q_now)))
-                    say(f"PLAN ok: {span:.0f} deg joint move to 12 cm above, then down to 5 cm. GO when ready", 1e9)
-                elif k == "g" and st["state"] == "planned" and tcp[2] < st["locked"][2] + 0.08:
-                    # the first move is joint-interpolated: from low down it can sweep the magnet
-                    # through the package, so it starts only from well above it
-                    say(f"GO refused: the magnet is {(tcp[2] - st['locked'][2]) * 100:.1f} cm above the target and the "
-                        "first move needs 8 cm. Drive it up (PageUp / height strip), then GO", 20.0)
+                    do_plan()
                 elif k == "g" and st["state"] == "planned":
-                    if not st["arm_held"]:
-                        hold(True)
-                    ok = move_to(st["plan"]["high"], "MOVING")
-                    for q in st["plan"]["steps"] if ok else []:
-                        ok = move_to(q, "DESCENDING")
-                        if not ok:
-                            break
-                    if ok:
-                        st["state"], st["flag"] = "at_hover", "HOVERING"
-                        err = (kin.tool_point(arm_q(), hc.magnet_m) - (st["locked"] + [0, 0, HOVER_M])) * 1000
-                        say(f"HOVERING 5 cm above the target (arm model: {np.linalg.norm(err):.0f} mm off its goal). "
-                            "Is the magnet centred over the circle?", 1e9)
+                    q_g = arm_q()
+                    if kin.tool_point(q_g, hc.magnet_m)[2] < st["locked"][2] + CLEAR_M:
+                        # the first move is joint-interpolated: from low down it can sweep the
+                        # magnet through the package, so it starts only from well above it
+                        say(f"GO refused: the magnet is {(kin.tool_point(q_g, hc.magnet_m)[2] - st['locked'][2]) * 100:.1f} "
+                            "cm above the target and the first move needs 8 cm. Drive it up (PageUp / height strip), "
+                            "then GO", 20.0)
                     else:
-                        st["state"] = "lock"
+                        do_go()
+                elif k == "o" and st["state"] == "lock":
+                    auto_pick()
                 elif k == "u" and st["state"] == "at_hover" and st["plan"]:
                     if move_to(st["plan"]["high"], "MOVING"):
                         st["state"], st["flag"] = "planned", "PLANNED"
