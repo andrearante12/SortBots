@@ -1285,7 +1285,7 @@ def cmd_pick(a):
 
     keys: f arm free/held  space lock  p plan  g go  u back up to HIGH_M  a/d/w/s head +-2 deg
           m magnet on/off (on needs the arm held)   k descend and pick (from the hover)
-          o one-button pick: hold, lock, plan, raise clear, go, descend and pick
+          o one-button pick: hold, rest, lock, plan, raise clear, go, descend and pick
           r record a flat pose (magnet set flat on the package by hand) to pick_flat_poses.json
           h go to the rest pose   H save where the arm is as the rest pose
           1-4 drive speed  any key during a planned move aborts it and holds  x quit (twice if held)"""
@@ -1478,14 +1478,14 @@ def cmd_pick(a):
                 return True
             time.sleep(0.02)
 
-    def move_path(zq, label, mps):
+    def move_path(zq, label, mps, z_ref=None):
         """One continuous move from where the arm is through the (z, q) poses of straight(),
         timed by height at `mps`, eased only at the two ends. Any key or STOP aborts and holds.
         True if it arrived."""
         if not zq:
             return True
         q0 = arm_q()
-        z0 = float(kin.tool_point(q0, hc.magnet_m)[2] - st["locked"][2])
+        z0 = float(kin.tool_point(q0, hc.magnet_m)[2] - (st["locked"][2] if z_ref is None else z_ref))
         zs = np.array([z0] + [z for z, _ in zq])
         qs = np.degrees(np.array([q0] + [q for _, q in zq]))
         cum = np.concatenate([[0.0], np.cumsum(np.abs(np.diff(zs)))])
@@ -1688,9 +1688,39 @@ def cmd_pick(a):
         return raise_to(st["locked"][2] + CLEAR_M + 0.01)
 
     def raise_to(need, quiet=False):
-        """Raise the hand straight up (its tilt kept) until the magnet is at height `need`, 1 cm
-        per step. True if it got there (or already was)."""
+        """Raise the hand straight up (its tilt kept) until the magnet is at height `need`.
+        True if it got there (or already was)."""
         q = arm_q()
+        tool = kin.tool_point(q, hc.magnet_m)
+        if tool[2] >= need:
+            return True
+        F = kin.flange(q)
+        if F[2, 2] > math.cos(math.radians(25)):
+            # magnet roughly down, as after a pick: SO101Kin.ik folds there and refused the lift
+            # (2026-11-13, a second PICK from 1 cm above the package), so the flange-axis solver,
+            # at the pitch the hand has now, in one continuous move
+            rad = tool[:2] / max(1e-6, np.linalg.norm(tool[:2]))
+            pitch = math.degrees(math.atan2(float(F[:3, 2][:2] @ rad), float(F[2, 2])))
+            path, seed = [], [q]
+            n = max(1, int(math.ceil((need - tool[2]) / 0.01)))
+            for i in range(1, n + 1):
+                z = tool[2] + (need - tool[2]) * i / n
+                r = head_cam.ik_down(kin, [tool[0], tool[1], z], seed, lo, hi, hc.magnet_m, float(q[4]),
+                                     tilt_tol_deg=3.0, pitch_deg=pitch)
+                if r is None:
+                    break
+                path.append((z, r[0]))
+                seed = [r[0]]
+            if path:  # as high as it solves: near the top of the reach straight-down runs out
+                if not move_path(path, "MOVING", LIFT_MPS, z_ref=0.0):
+                    return False
+                if path[-1][0] >= need - 1e-6:
+                    return True
+                q = arm_q()
+                if kin.flange(q)[2, 2] > math.cos(math.radians(25)):
+                    if not quiet:
+                        say("could only raise the arm part way straight up: drive it up by hand, then PICK again", 20.0)
+                    return False
         for _ in range(40):
             z = kin.tool_point(q, hc.magnet_m)[2]
             if z >= need:
@@ -1740,7 +1770,7 @@ def cmd_pick(a):
         say(f"rest pose saved: {np.degrees(q).round(1).tolist()} deg", 20.0)
 
     def auto_pick():
-        """One button: hold, lock, plan, raise clear if low, GO to the hover, descend and pick.
+        """One button: hold, go to rest, lock, plan, raise clear if low, GO to the hover, descend and pick.
         Each step is the one its own button runs; the first refusal or abort stops the chain
         where it is, with the reason on the page."""
         if not mag.magnet:
@@ -1748,6 +1778,11 @@ def cmd_pick(a):
             return
         if not st["arm_held"]:
             hold(True)
+        # every pick starts from rest (2026-11-13): up and clear of the package and the marker,
+        # whatever the last attempt left behind
+        if st["rest_q"] is not None and np.max(np.abs(arm_q() - st["rest_q"])) > math.radians(3):
+            if not go_rest():
+                return
         if not do_lock() or not do_plan():
             return
         if not raise_clear():
