@@ -1091,6 +1091,7 @@ PICK_DPS = 30.0            # joint speed cap for the joint-interpolated pick mov
 # poses, at these speeds: one move per cm, each >= 0.5 s plus a 0.4 s settle, made a pick take
 # ~25 stops (2026-11-13).
 DESCEND_MPS, PRESS_MPS, LIFT_MPS = 0.06, 0.012, 0.06
+LOCK_FRAMES, LOCK_MIN_FRAMES, LOCK_MAX_SPREAD_MM = 20, 12, 8.0
 
 
 def hold_head_at(bus, head_cal, pan, tilt, ramp_s=2.0):
@@ -1614,14 +1615,16 @@ def cmd_pick(a):
 
     def do_lock():
         """Lock marker a.marker_id's target from 10 frames. True if locked."""
-        pts = np.array(worker.targets(a.marker_id)).reshape(-1, 3)
-        # Robust: a single frame with a bad depth patch threw the spread over 4 mm and refused a
-        # lock on a marker seen 10/10 in clear view (2026-11-13), so frames more than 4 mm from
-        # the median are dropped and 6 good ones are enough.
+        pts = np.array(worker.targets(a.marker_id, n=LOCK_FRAMES, timeout=6.0)).reshape(-1, 3)
+        # The target's depth at head 32/69 jitters 3-5 mm frame to frame (median spread, 2026-11-13):
+        # every frame agreeing within 4 mm refused most locks. The median of 20 frames is good to
+        # ~1 mm, so: enough frames, the median of the ones near it, and a refusal only when the
+        # spread says the marker itself is wrong (partly hidden, glare), not merely noisy.
         med = np.median(pts, 0) if len(pts) else None
-        good = pts[np.linalg.norm(pts - med, axis=1) < 0.004] if len(pts) else pts
-        spread = float(np.median(np.linalg.norm(pts - med, axis=1)) * 1000) if len(pts) else 0.0
-        if len(good) >= 6:
+        dist = np.linalg.norm(pts - med, axis=1) if len(pts) else np.zeros(0)
+        spread = float(np.median(dist) * 1000) if len(pts) else 0.0
+        good = pts[dist <= max(0.004, 2.5 * spread / 1000)] if len(pts) else pts
+        if len(pts) >= LOCK_MIN_FRAMES and spread <= LOCK_MAX_SPREAD_MM:
             hp = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
             raw = (hc.matrix(hp["head_pan"], hp["head_tilt"]) @ np.append(np.median(good, 0), 1.0))[:3]
             st["locked"] = aim_corrected(raw, a.radial_mm / 1000.0)
@@ -1631,12 +1634,12 @@ def cmd_pick(a):
             say(f"LOCKED target {np.round(st['locked'] * 100, 1)} cm ({len(good)}/{len(pts)} frames, spread "
                 f"{spread:.1f} mm; aim {a.radial_mm:+.0f} mm radial). Plan next")
             return True
-        print(f"\nlock refused: {len(pts)} frames, {len(good)} within 4 mm, median spread {spread:.1f} mm")
-        if len(pts) < 6:
-            say(f"marker {a.marker_id} seen in only {len(pts)}/10 frames: move the arm clear of it", 20.0)
+        print(f"\nlock refused: {len(pts)} frames, median spread {spread:.1f} mm")
+        if len(pts) < LOCK_MIN_FRAMES:
+            say(f"marker {a.marker_id} seen in only {len(pts)}/{LOCK_FRAMES} frames: move the arm clear of it", 20.0)
         else:
-            say(f"marker {a.marker_id} seen {len(pts)}/10 but its target jitters ({len(good)} frames within 4 mm, "
-                f"median {spread:.1f} mm): depth is noisy here. Try Lock again, or move the camera a little", 20.0)
+            say(f"marker {a.marker_id} seen {len(pts)}/{LOCK_FRAMES} but its target jumps around (median "
+                f"{spread:.1f} mm): glare or part of it hidden? Try Lock again, or move the camera a little", 20.0)
         return False
 
     def do_plan():
