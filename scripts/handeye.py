@@ -267,7 +267,9 @@ WEB_ALLOWED = set(" fpguxadws!1234mk")
 # resends it every 80 ms while a finger is down; JOG_FRESH_S without one and the arm stops, so a
 # lifted finger, a closed tab or a dropped connection can't leave the arm driving.
 JOG = {"v": {}, "t": 0.0}
-JOG_AXES = ("x", "y", "z", "t", "w")
+JOG_AXES = ("x", "y", "z", "t", "w", "hp", "ht")   # hand x/y/z, tool tilt, wrist; head pan/tilt
+ARM_JOG_AXES, HEAD_JOG_AXES = JOG_AXES[:5], JOG_AXES[5:]
+HEAD_DPS = 15.0   # head speed while a camera button or a/d/w/s is held
 JOG_FRESH_S = 0.25
 
 
@@ -374,6 +376,9 @@ td{padding:4px 6px;border-bottom:1px solid #2a2a2a}tr.cur td{background:#202838}
 <div class=ax style="bottom:4px;left:50%;transform:translateX(-50%)">down</div><div id=zknob></div></div></div>
 <div class=row style="margin-top:8px"><button class=hold data-j="t" data-s="1">tilt up</button><button class=hold data-j="t" data-s="-1">tilt down</button>
 <button class=hold data-j="w" data-s="1">wrist up</button><button class=hold data-j="w" data-s="-1">wrist down</button></div>
+<div class=lbl>camera (hold; a/d/w/s)</div><div class=row><button class=hold data-j="hp" data-s="1">pan +</button>
+<button class=hold data-j="hp" data-s="-1">pan -</button><button class=hold data-j="ht" data-s="1">tilt +</button>
+<button class=hold data-j="ht" data-s="-1">tilt -</button></div>
 <div class=row><span class=lbl>speed </span><button data-k="1">L1</button><button data-k="2">L2</button><button data-k="3">L3</button><button data-k="4">L4</button></div></div>
 <div id=p>waiting...</div></div>
 <script>
@@ -388,9 +393,9 @@ function buttons(g){
     return '<div class=row>'+(row.label?'<div class=lbl>'+esc(row.label)+'</div>':'')+row.items.map(function(it){
       return '<button class="'+(it[2]||'')+'" data-k="'+it[1]+'">'+esc(it[0])+'</button>'}).join('')+'</div>'}).join('')}
 document.addEventListener('click',function(e){var t=e.target.closest('button[data-k]');if(t)send(t.dataset.k)});
-var J={x:0,y:0,z:0,t:0,w:0},jt=null;
-function jsend(){fetch('/jog?x='+J.x.toFixed(2)+'&y='+J.y.toFixed(2)+'&z='+J.z.toFixed(2)+'&t='+J.t+'&w='+J.w).catch(function(){})}
-function jlive(){return J.x||J.y||J.z||J.t||J.w}
+var J={x:0,y:0,z:0,t:0,w:0,hp:0,ht:0},jt=null;
+function jsend(){fetch('/jog?x='+J.x.toFixed(2)+'&y='+J.y.toFixed(2)+'&z='+J.z.toFixed(2)+'&t='+J.t+'&w='+J.w+'&hp='+J.hp+'&ht='+J.ht).catch(function(){})}
+function jlive(){return J.x||J.y||J.z||J.t||J.w||J.hp||J.ht}
 function jupdate(){if(jlive()){if(!jt){jsend();jt=setInterval(jsend,80)}}else{if(jt){clearInterval(jt);jt=null}jsend()}}
 function dragger(el,knob,f){
   function at(e){var r=el.getBoundingClientRect(),dx=(e.clientX-r.left)/r.width*2-1,dy=(e.clientY-r.top)/r.height*2-1;
@@ -406,19 +411,21 @@ window.addEventListener('load',function(){
   document.querySelectorAll('#jog button.hold').forEach(function(b){
     b.addEventListener('pointerdown',function(e){b.setPointerCapture(e.pointerId);J[b.dataset.j]=+b.dataset.s;jupdate()});
     ['pointerup','pointercancel','lostpointercapture'].forEach(function(n){b.addEventListener(n,function(){J[b.dataset.j]=0;jupdate()})})})});
-window.addEventListener('blur',function(){J={x:0,y:0,z:0,t:0,w:0};jupdate()});
+window.addEventListener('blur',function(){J={x:0,y:0,z:0,t:0,w:0,hp:0,ht:0};jupdate()});
 // keyboard: the terminal's keys, arrows/PageUp/PageDown drive like the touchpad (hold to move)
-var KEYJ={ArrowUp:['y',1],ArrowDown:['y',-1],ArrowLeft:['x',-1],ArrowRight:['x',1],PageUp:['z',1],PageDown:['z',-1]};
-var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',a:'a',d:'d',w:'w',s:'s',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
+var KEYJ={ArrowUp:['y',1],ArrowDown:['y',-1],ArrowLeft:['x',-1],ArrowRight:['x',1],PageUp:['z',1],PageDown:['z',-1],
+  a:['hp',1],d:['hp',-1],w:['ht',1],s:['ht',-1]};
+var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
 function moving(){var g=window.S&&window.S.guide;return g&&['MOVING','DESCENDING','PRESSING','LIFTING'].indexOf(g.flag)>=0}
 document.addEventListener('keydown',function(e){
   if(e.ctrlKey||e.metaKey||e.altKey)return;
   if(moving()){send('!');e.preventDefault();return}          // any key aborts a planned move
-  if(e.key in KEYJ){var a=KEYJ[e.key];J[a[0]]=a[1];jupdate();e.preventDefault();return}
+  var kj=KEYJ[e.key]||KEYJ[(e.key||'').toLowerCase()];
+  if(kj){J[kj[0]]=kj[1];jupdate();e.preventDefault();return}
   if(e.repeat)return;
   var k=KEYCMD[e.key]||KEYCMD[(e.key||'').toLowerCase()];
   if(k){send(k);e.preventDefault()}});
-document.addEventListener('keyup',function(e){if(e.key in KEYJ){J[KEYJ[e.key][0]]=0;jupdate()}});
+document.addEventListener('keyup',function(e){var kj=KEYJ[e.key]||KEYJ[(e.key||'').toLowerCase()];if(kj){J[kj[0]]=0;jupdate()}});
 function render(S){
   var g=S.guide,h=(g.flag?'<div style="display:inline-block;padding:6px 14px;border-radius:6px;font-weight:700;'+
     'font-size:20px;letter-spacing:.05em;margin:4px 0 10px;color:#fff;background:'+(FLAG_COL[g.flag]||'#777')+'">ARM: '+
@@ -1053,6 +1060,10 @@ def cmd_check(a):
 
 
 HOME_HEAD = (90.4, 60.7)   # the head angle most of the 2026-11-12 calibration was taken at
+# pick's default view, set from the working setup (2026-11-13). It is OUTSIDE the range the
+# 2026-11-12 calibration covers (pan ~70..110): a hover there was 1.3 cm off. Add touch samples at
+# this angle and re-solve before relying on it; the page warns while it's outside.
+PICK_HEAD = (32.0, 70.0)
 MAGNET_REARM_S, MAGNET_ON_S = 10.0, 30   # as arm_xpad: re-arm well inside the firmware's 30 s cap
 HIGH_M, HOVER_M = 0.12, 0.05
 # Stage 2: the calibration's height is good to ~1 cm, so the last centimetre is a gentle press with
@@ -1308,6 +1319,13 @@ def cmd_pick(a):
     def say(text, secs=8.0):
         st["msg"], st["until"] = text, time.monotonic() + secs
 
+    pan0, tilt0 = head_goal["head_pan"], head_goal["head_tilt"]
+    st["head_inside"] = bool(cal_lo[0] <= pan0 <= cal_hi[0] and cal_lo[1] <= tilt0 <= cal_hi[1])
+    if not st["head_inside"]:
+        say(f"head {pan0:+.0f}/{tilt0:+.0f} is OUTSIDE the calibrated range (pan {cal_lo[0] + 3:.0f}.."
+            f"{cal_hi[0] - 3:.0f}, tilt {cal_lo[1] + 3:.0f}..{cal_hi[1] - 3:.0f}): targets locked here may be "
+            "cm off. Arm free: move it clear, then Lock target", 1e9)
+
     def arm_q():
         pos = bus.sync_read("Present_Position", ARM, num_retry=2)
         return np.radians([pos[j] for j in ARM])
@@ -1338,8 +1356,6 @@ def cmd_pick(a):
         elif mag.fault:
             rows.append({"label": "magnet: board not answering, treat as OFF", "items": []})
         return rows + [
-                {"label": "camera, 2 deg per press", "items": [["pan + [a]", "a", "head"], ["pan - [d]", "d", "head"],
-                                                              ["tilt + [w]", "w", "head"], ["tilt - [s]", "s", "head"]]},
                 {"label": "", "items": [["Quit: again to confirm  [x]" if st["quit_armed"] else "Quit  [x]", "x", ""]]}]
 
     mag = MagnetLink(magnet, say)
@@ -1477,7 +1493,25 @@ def cmd_pick(a):
             tcp = kin.tool_point(q_now, hc.magnet_m)
             # ---- touchpad drive: only while fresh, never during a planned move
             v = JOG["v"] if time.monotonic() - JOG["t"] < JOG_FRESH_S else {}
-            if any(v.get(ax, 0.0) for ax in JOG_AXES):
+            # head, held: HEAD_DPS while fresh, stops with the deadman like the hand
+            if any(v.get(ax, 0.0) for ax in HEAD_JOG_AXES):
+                dt_h = min(0.1, time.monotonic() - st.get("head_t", 0.0))
+                st["head_t"] = time.monotonic()
+                for mot, ax in (("head_pan", "hp"), ("head_tilt", "ht")):
+                    lo_h, hi_h = head_lim[mot]
+                    head_goal[mot] = min(hi_h, max(lo_h, head_goal[mot] + v.get(ax, 0.0) * HEAD_DPS * dt_h))
+                bus.sync_write("Goal_Position", head_goal)
+                pan, tilt = head_goal["head_pan"], head_goal["head_tilt"]
+                inside = bool(cal_lo[0] <= pan <= cal_hi[0] and cal_lo[1] <= tilt <= cal_hi[1])
+                if inside != st.get("head_inside"):
+                    st["head_inside"] = inside
+                    say(f"head {pan:+.0f}/{tilt:+.0f} " + ("inside the calibrated range" if inside else
+                        f"is OUTSIDE the calibrated range (pan {cal_lo[0] + 3:.0f}..{cal_hi[0] - 3:.0f}, tilt "
+                        f"{cal_lo[1] + 3:.0f}..{cal_hi[1] - 3:.0f}): targets locked here may be cm off"),
+                        8.0 if inside else 1e9)
+            else:
+                st["head_t"] = time.monotonic()
+            if any(v.get(ax, 0.0) for ax in ARM_JOG_AXES):
                 if not st["arm_held"]:
                     hold(True)
                     say("arm held for driving")
@@ -1688,8 +1722,9 @@ def main(argv=None):
     sub.add_parser("view", help="live camera + markers only; no servos needed")
     pk = sub.add_parser("pick", help="stage 1: lock a package, plan, hover 5 cm above it (no contact)")
     pk.add_argument("--marker-id", type=int, default=None, help="the package's marker (default 10)")
-    pk.add_argument("--head", type=float, nargs=2, metavar=("PAN", "TILT"), default=list(HOME_HEAD),
-                    help="hold the head here; a calibrated angle (default HOME)")
+    pk.add_argument("--head", type=float, nargs=2, metavar=("PAN", "TILT"), default=list(PICK_HEAD),
+                    help=f"hold the head here (default {PICK_HEAD[0]:.0f}/{PICK_HEAD[1]:.0f}; "
+                         f"HOME, the best-calibrated angle, is {HOME_HEAD[0]}/{HOME_HEAD[1]})")
     a = ap.parse_args(argv)
     {"capture": cmd_capture, "solve": cmd_solve, "check": cmd_check, "view": cmd_view,
      "pick": cmd_pick}[a.cmd](a)
