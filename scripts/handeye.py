@@ -381,7 +381,7 @@ tr.cur td{background:rgba(32,40,56,.7)}.go{font-size:13px;font-weight:600;color:
 <div class=ax style="right:4px;top:50%;transform:translateY(-50%)">right</div><div id=knob></div></div>
 <div id=zpad><div class=ax style="top:4px;left:50%;transform:translateX(-50%)">up</div>
 <div class=ax style="bottom:4px;left:50%;transform:translateX(-50%)">down</div><div id=zknob></div></div></div>
-<div class=row style="margin-top:8px"><button class=hold data-j="t" data-s="1">tilt up</button><button class=hold data-j="t" data-s="-1">tilt down</button>
+<div class=row style="margin-top:8px">
 <button class=hold data-j="w" data-s="1">wrist up</button><button class=hold data-j="w" data-s="-1">wrist down</button></div>
 <div class=lbl>camera (hold; a/d/w/s)</div><div class=row><button class=hold data-j="hp" data-s="1">pan +</button>
 <button class=hold data-j="hp" data-s="-1">pan -</button><button class=hold data-j="ht" data-s="1">tilt +</button>
