@@ -262,7 +262,7 @@ def set_hold(bus, motors, hold):
 # Keys the page's buttons send (/cmd?k=...), merged into read_keys so a button is the same as
 # its keyboard key. Single characters only, from this set: nothing else is accepted.
 WEB_KEYS = queue.Queue()
-WEB_ALLOWED = set(" fpguxadws!1234m")
+WEB_ALLOWED = set(" fpguxadws!1234mk")
 # The page's touchpad: the latest hand velocity (-1..1 per axis) and when it came. The page
 # resends it every 80 ms while a finger is down; JOG_FRESH_S without one and the arm stops, so a
 # lifted finger, a closed tab or a dropped connection can't leave the arm driving.
@@ -379,7 +379,7 @@ td{padding:4px 6px;border-bottom:1px solid #2a2a2a}tr.cur td{background:#202838}
 <script>
 function esc(t){return String(t).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 var FLAG_COL={FREE:'#777',HELD:'#3a7bd5',PLANNED:'#c9a227',MOVING:'#e8742a',DESCENDING:'#e8742a',
-  HOVERING:'#2e9e4f',ABORTED:'#d33',IDLE:'#777'};
+  PRESSING:'#e8742a',LIFTING:'#e8742a',HOVERING:'#2e9e4f',HOLDING:'#8e44ad',ABORTED:'#d33',IDLE:'#777'};
 var lastBtn='';
 function send(k){fetch('/cmd?k='+encodeURIComponent(k)).catch(function(){})}
 function buttons(g){
@@ -409,8 +409,8 @@ window.addEventListener('load',function(){
 window.addEventListener('blur',function(){J={x:0,y:0,z:0,t:0,w:0};jupdate()});
 // keyboard: the terminal's keys, arrows/PageUp/PageDown drive like the touchpad (hold to move)
 var KEYJ={ArrowUp:['y',1],ArrowDown:['y',-1],ArrowLeft:['x',-1],ArrowRight:['x',1],PageUp:['z',1],PageDown:['z',-1]};
-var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',a:'a',d:'d',w:'w',s:'s',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
-function moving(){var g=window.S&&window.S.guide;return g&&(g.flag==='MOVING'||g.flag==='DESCENDING')}
+var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',a:'a',d:'d',w:'w',s:'s',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
+function moving(){var g=window.S&&window.S.guide;return g&&['MOVING','DESCENDING','PRESSING','LIFTING'].indexOf(g.flag)>=0}
 document.addEventListener('keydown',function(e){
   if(e.ctrlKey||e.metaKey||e.altKey)return;
   if(moving()){send('!');e.preventDefault();return}          // any key aborts a planned move
@@ -456,7 +456,8 @@ def draw(cam, color, corners, ids, text, guide=None, msg=""):
     if guide and guide.get("flag"):
         # the ARM state across the top of the picture itself (BGR), same colours as the page badge
         col = {"FREE": (119, 119, 119), "HELD": (213, 123, 58), "PLANNED": (39, 162, 201),
-               "MOVING": (42, 116, 232), "DESCENDING": (42, 116, 232), "HOVERING": (79, 158, 46),
+               "MOVING": (42, 116, 232), "DESCENDING": (42, 116, 232), "PRESSING": (42, 116, 232),
+               "LIFTING": (42, 116, 232), "HOVERING": (79, 158, 46), "HOLDING": (173, 68, 142),
                "ABORTED": (51, 51, 221)}.get(guide["flag"], (119, 119, 119))
         cv2.rectangle(color, (0, 0), (color.shape[1], 52), col, -1)
         cv2.putText(color, f"ARM: {guide['flag']}", (14, 38), cv2.FONT_HERSHEY_SIMPLEX, 1.15, (255, 255, 255), 3)
@@ -1045,7 +1046,15 @@ def cmd_check(a):
 
 HOME_HEAD = (90.4, 60.7)   # the head angle most of the 2026-11-12 calibration was taken at
 MAGNET_REARM_S, MAGNET_ON_S = 10.0, 30   # as arm_xpad: re-arm well inside the firmware's 30 s cap
-HIGH_M, HOVER_M = 0.12, 0.05   # above the target: clearance for the joint move, and stage 1's stop
+HIGH_M, HOVER_M = 0.12, 0.05
+# Stage 2: the calibration's height is good to ~1 cm, so the last centimetre is a gentle press with
+# lift/elbow/wrist torque cut to PRESS_TORQUE: the goal goes PRESS_BELOW_M under the computed
+# surface and the servos give where the package stops them, instead of driving into it.
+CONTACT_ABOVE_M, PRESS_BELOW_M = 0.01, 0.01
+PRESS_TORQUE, FULL_TORQUE = 350, 1000   # Torque_Limit, 0..1000 (= % x 10)
+PRESS_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_flex")
+GRIP_WAIT_S = 0.5
+MOVING_FLAGS = ("MOVING", "DESCENDING", "PRESSING", "LIFTING")   # above the target: clearance for the joint move, and stage 1's stop
 PICK_DPS = 20.0            # joint speed cap for every pick motion
 
 
@@ -1239,7 +1248,7 @@ def cmd_pick(a):
     the touchpad drives the hand like the pad (arm_xpad.cartesian_step, same speed caps).
 
     keys: f arm free/held  space lock  p plan  g go  u back up to HIGH_M  a/d/w/s head +-2 deg
-          m magnet on/off (on needs the arm held)
+          m magnet on/off (on needs the arm held)   k descend and pick (from the hover)
           1-4 drive speed  any key during a planned move aborts it and holds  x quit (twice if held)"""
     import types
     import arm_xpad
@@ -1278,6 +1287,8 @@ def cmd_pick(a):
     hold_head_at(bus, head_cal, *a.head)
     head_lim = headmod.limits(head_cal)
     head_goal = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
+    for j in PRESS_JOINTS:  # a crashed press can leave the RAM torque limit low: start at full
+        bus.write("Torque_Limit", j, FULL_TORQUE, normalize=False)
     worker = CamWorker(cam, a.no_view)
     jog_cfg = types.SimpleNamespace(speed=0.10, pitch_dps=45.0, roll_dps=90.0, joint_dps=150.0, lock=["wrist_roll"])
     st = {
@@ -1294,7 +1305,7 @@ def cmd_pick(a):
         return np.radians([pos[j] for j in ARM])
 
     def buttons():
-        if st["flag"] in ("MOVING", "DESCENDING"):
+        if st["flag"] in MOVING_FLAGS:
             return [{"label": "arm is moving", "items": [["STOP  [any key]", "!", "stop"]]}]
         main, state = [], st["state"]
         if state == "lock":
@@ -1304,7 +1315,11 @@ def cmd_pick(a):
         elif state == "planned":
             main += [["GO: hover 5 cm above  [g]", "g", "go"], ["Re-lock target  [space]", " ", ""]]
         elif state == "at_hover":
+            if mag.magnet:
+                main.append(["Descend and pick  [k]", "k", "go"])
             main.append(["Back up to 12 cm  [u]", "u", ""])
+        elif state == "holding":
+            main.append(["Release: magnet off  [m]", "m", "stop"])
         main.append(["Free arm (limp)  [f]" if st["arm_held"] else "Hold arm  [f]", "f", ""])
         rows = [{"label": "pick", "items": main}]
         if mag.magnet:
@@ -1336,11 +1351,12 @@ def cmd_pick(a):
             txt += f" | to target dx {dv[0]:+.1f} dy {dv[1]:+.1f} dz {dv[2]:+.1f}"
         msg = st["msg"] if time.monotonic() < st["until"] else ""
         title = {"lock": "Pick: lock the target", "planned": "Pick: plan ready",
-                 "at_hover": "Pick: hovering 5 cm above the target"}[st["state"]]
+                 "at_hover": "Pick: hovering 5 cm above the target",
+                 "holding": "Pick: holding the package (drive it, then release)"}[st["state"]]
         worker.show(txt, {"title": title, "lines": [txt] + ([msg] if msg else []), "checks": [], "box": None,
                           "reach": None, "progress": [], "stage": 0, "stages": 0, "done": False,
                           "ready": st["state"] == "planned", "flag": st["flag"], "buttons": buttons(),
-                          "jog": st["flag"] not in ("MOVING", "DESCENDING")})
+                          "jog": st["flag"] not in MOVING_FLAGS})
         return txt, msg
 
     def hold(on):
@@ -1350,12 +1366,12 @@ def cmd_pick(a):
             st["flag"] = "HELD" if on else "FREE"
         st["jog_q"] = None
 
-    def move_to(q_goal, label):
-        """Joint-interpolated move at PICK_DPS, 50 Hz, the page live from the camera thread. Any
+    def move_to(q_goal, label, dps=PICK_DPS):
+        """Joint-interpolated move at `dps`, 50 Hz, the page live from the camera thread. Any
         key or the STOP button aborts and holds. Returns True if it arrived."""
         start = dict(zip(ARM, np.degrees(arm_q())))
         goal = dict(zip(ARM, np.degrees(q_goal)))
-        dur = max(0.5, max(abs(goal[j] - start[j]) for j in ARM) / PICK_DPS)
+        dur = max(0.5, max(abs(goal[j] - start[j]) for j in ARM) / dps)
         st["flag"] = label
         t0 = time.monotonic()
         while True:
@@ -1372,6 +1388,70 @@ def cmd_pick(a):
                 time.sleep(0.4)
                 return True
             time.sleep(0.02)
+
+    def torque_limit(val):
+        for j in PRESS_JOINTS:
+            bus.write("Torque_Limit", j, val, normalize=False)
+
+    def freeze():
+        """Goal = where the arm IS, before torque comes back: after a press the goal sits under
+        the package, and full torque at that goal would drive into it."""
+        bus.sync_write("Goal_Position", bus.sync_read("Present_Position", ARM, num_retry=2))
+
+    def straight(z_from, z_to, step):
+        """Magnet-down poses from z_from to z_to above the locked target (excl. the start)."""
+        qs, seed = [], [arm_q()]
+        n = max(1, int(round(abs(z_to - z_from) / step)))
+        for i in range(1, n + 1):
+            z = z_from + (z_to - z_from) * i / n
+            r = head_cam.ik_down(kin, st["locked"] + [0, 0, z], seed, lo, hi, hc.magnet_m, float(seed[0][4]))
+            if r is None:
+                return None
+            qs.append(r[0])
+            seed = [r[0]]
+        return qs
+
+    def descend_and_pick():
+        """Stage 2, from the hover: down to CONTACT_ABOVE_M, press gently to PRESS_BELOW_M under
+        the computed surface at reduced torque, magnet on (confirmed by the board, or no lift),
+        freeze, full torque, lift straight up to HIGH_M. Any abort holds; the magnet is never
+        switched off by an abort, so a package that's caught stays caught."""
+        down = straight(HOVER_M, CONTACT_ABOVE_M, 0.01)
+        press = straight(CONTACT_ABOVE_M, -PRESS_BELOW_M, 0.004)
+        if down is None or press is None:
+            say("the descent isn't solvable straight down from here", 1e9)
+            return
+        for q in down:
+            if not move_to(q, "DESCENDING"):
+                return
+        torque_limit(PRESS_TORQUE)
+        try:
+            for q in press:
+                if not move_to(q, "PRESSING", dps=PICK_DPS * 0.3):
+                    return
+            st["flag"] = "PRESSING"
+            on = magnet_set(True)
+            time.sleep(GRIP_WAIT_S)
+            if on is not True:
+                say("the magnet did NOT confirm ON: not lifting. Check the board, then Back up", 1e9)
+                st["flag"] = "ABORTED"
+                return
+        finally:
+            freeze()
+            torque_limit(FULL_TORQUE)
+        z_now = float(kin.tool_point(arm_q(), hc.magnet_m)[2] - st["locked"][2])
+        up = straight(z_now, HIGH_M, 0.01)
+        if up is None:
+            say("magnet ON and holding, but the lift isn't solvable straight up: drive it up by hand", 1e9)
+            st["state"], st["flag"] = "holding", "HOLDING"
+            return
+        for q in up:
+            if not move_to(q, "LIFTING"):
+                say("ABORTED during the lift: holding, magnet still ON", 1e9)
+                st["state"] = "holding"
+                return
+        st["state"], st["flag"] = "holding", "HOLDING"
+        say("HOLDING: magnet on, 12 cm up. Drive to the drop spot, then Release", 1e9)
 
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
@@ -1402,7 +1482,7 @@ def cmd_pick(a):
                 st["jog_q"], st["jog_target"], st["jog_ok"] = arm_xpad.cartesian_step(
                     kin, st["jog_q"], st["jog_target"], inp, jog_cfg, lo, hi, np.ones(5), dt, st["level"])
                 bus.sync_write("Goal_Position", dict(zip(ARM, np.degrees(st["jog_q"]))))
-                if st["state"] != "lock":  # driving away invalidates a plan made from the old pose
+                if st["state"] not in ("lock", "holding"):  # driving away invalidates a plan
                     st["state"], st["plan"] = "lock", None
             else:
                 st["jog_q"], st["jog_ok"] = None, True
@@ -1427,7 +1507,15 @@ def cmd_pick(a):
                     else:
                         say(f"head {pan:+.0f}/{tilt:+.0f} (inside the calibrated range)")
                 elif k == "m":
-                    magnet_set(not mag.on)
+                    on = magnet_set(not mag.on)
+                    if st["state"] == "holding" and on is False:
+                        st["state"], st["flag"] = "lock", "HELD"
+                        say("released. Lock the next target")
+                elif k == "k" and st["state"] == "at_hover":
+                    if not mag.magnet:
+                        say("no magnet board: plug in the ESP32 and restart")
+                    else:
+                        descend_and_pick()
                 elif k in "1234":
                     st["level"] = int(k) - 1
                     say(f"drive speed L{k}")
@@ -1509,7 +1597,7 @@ def cmd_pick(a):
         # aborted with the arm still under torque (2026-11-13)
         for step in (lambda: termios.tcsetattr(fd, termios.TCSADRAIN, old),
                      lambda: mag.magnet and mag.magnet.off(), lambda: mag.magnet and mag.magnet.close(),
-                     worker.stop, lambda: bus.disconnect(disable_torque=True)):
+                     worker.stop, lambda: torque_limit(FULL_TORQUE), lambda: bus.disconnect(disable_torque=True)):
             try:
                 step()
             except BaseException as e:
