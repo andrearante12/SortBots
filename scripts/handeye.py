@@ -1092,6 +1092,7 @@ PICK_DPS = 30.0            # joint speed cap for the joint-interpolated pick mov
 # ~25 stops (2026-11-13).
 DESCEND_MPS, PRESS_MPS, LIFT_MPS = 0.06, 0.012, 0.06
 LOCK_FRAMES, LOCK_MIN_FRAMES, LOCK_MAX_SPREAD_MM = 20, 12, 8.0
+LOCK_ASIDE_DEG = 40.0   # shoulder_pan swing to get the arm out of the camera's line to the marker
 
 
 def hold_head_at(bus, head_cal, pan, tilt, ramp_s=2.0):
@@ -1769,8 +1770,30 @@ def cmd_pick(a):
         st["rest_q"] = q
         say(f"rest pose saved: {np.degrees(q).round(1).tolist()} deg", 20.0)
 
+    def lock_with_step_aside():
+        """Lock; if the marker isn't seen, swing shoulder_pan LOCK_ASIDE_DEG one way, then the
+        other, at the same height, and try again from each. A package placed close in had its
+        marker behind the magnet's plate and wire at the rest pose: 0/20 frames (2026-11-13)."""
+        if do_lock():
+            return True
+        q0 = arm_q()
+        for d in (LOCK_ASIDE_DEG, -LOCK_ASIDE_DEG):
+            q = q0.copy()
+            q[0] = float(np.clip(q0[0] + math.radians(d), lo[0], hi[0]))
+            if abs(q[0] - q0[0]) < math.radians(10):
+                continue  # against the joint limit: no room to step this way
+            say(f"marker hidden from here: stepping aside {d:+.0f} deg to look again", 1e9)
+            if not move_to(q, "MOVING"):
+                return False
+            st["flag"] = "HELD"
+            if do_lock():
+                return True
+        say(f"marker {a.marker_id} not seen from rest or from either side: is it in view, and not "
+            "covered by the arm?", 20.0)
+        return False
+
     def auto_pick():
-        """One button: hold, go to rest, lock, plan, raise clear if low, GO to the hover, descend and pick.
+        """One button: hold, go to rest, lock (stepping aside if the arm hides the marker), plan, raise clear if low, GO to the hover, descend and pick.
         Each step is the one its own button runs; the first refusal or abort stops the chain
         where it is, with the reason on the page."""
         if not mag.magnet:
@@ -1783,7 +1806,7 @@ def cmd_pick(a):
         if st["rest_q"] is not None and np.max(np.abs(arm_q() - st["rest_q"])) > math.radians(3):
             if not go_rest():
                 return
-        if not do_lock() or not do_plan():
+        if not lock_with_step_aside() or not do_plan():
             return
         if not raise_clear():
             return
