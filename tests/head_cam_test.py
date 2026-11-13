@@ -132,3 +132,17 @@ def test_ik_down_reaches_a_magnet_down_pose_and_refuses_out_of_reach():
         q, err, tilt = sol
         assert np.linalg.norm(k.tool_point(q, H.MAGNET_FACE_M) - p) < 0.002 and tilt < 2.0
     assert H.ik_down(k, [0.9, 0.0, 0.0], seeds, lo, hi) is None   # 90 cm out: unreachable
+
+
+def test_ik_down_pitch_leans_the_flange_axis_toward_the_base():
+    k = SO101Kin(offsets=np.radians([0, -7, -1.5, -13, 0]))
+    lo = np.radians([-105, -105, -95, -105, -170.0]); hi = -lo
+    seed = np.radians([-0.4, 24.1, 31.2, 52.8, 2.2])            # a hand-taught flat pose, 2026-11-13
+    p = np.array([0.20, 0.05, 0.02])
+    flat = H.ik_down(k, p, [seed], lo, hi)
+    trim = H.ik_down(k, p, [seed], lo, hi, pitch_deg=-4.0)
+    assert flat is not None and trim is not None
+    z = k.flange(trim[0])[:3, 2]
+    rad = p[:2] / np.linalg.norm(p[:2])
+    assert abs(np.degrees(np.arctan2(z[:2] @ rad, z[2])) + 4.0) < 0.5
+    assert np.linalg.norm(k.tool_point(trim[0], H.MAGNET_FACE_M) - p) < 0.002

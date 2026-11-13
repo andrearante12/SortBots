@@ -263,20 +263,27 @@ DOWN_W = 0.2  # metres of position error one radian of tool tilt is worth in ik_
 
 
 def ik_down(kin, face_target, seeds, lo, hi, magnet_m=MAGNET_FACE_M, roll=0.0,
-            pos_tol_m=0.002, tilt_tol_deg=2.0):
+            pos_tol_m=0.002, tilt_tol_deg=2.0, pitch_deg=0.0):
     """Robot angles (radians, 5) that put the magnet face on `face_target` (base_link, m) with
     the tool pointing straight down, inside [lo, hi], or None. SO101Kin.ik works on the wrist ->
     tip elevation, which folds at straight down (-90 deg) and stalls there (the same fold that
     froze wrist_flex, 2026-11-10); this works on the flange's axis instead, so straight down is
     an ordinary point. `seeds`: start poses (radians; the calibration's own touches are good
-    ones, they are all magnet-down). Returns (q, position error m, tilt deg) of the best fit."""
+    ones, they are all magnet-down). `pitch_deg` leans the flange axis in the vertical plane
+    through the base and the target, + = magnet face turned toward the base: the model's
+    "straight down" is not the real one, and a magnet flat on the package read -3.6 deg in the
+    model (2026-11-13, taught by hand); "down" then means that measured flat. Returns (q,
+    position error m, tilt deg from that axis) of the best fit."""
     face_target = np.asarray(face_target, float)
+    rad = face_target[:2] / max(1e-9, float(np.linalg.norm(face_target[:2])))
+    p = math.radians(pitch_deg)
+    up = np.array([math.sin(p) * rad[0], math.sin(p) * rad[1], math.cos(p)])
 
     def res(q4):
         F = kin.flange(np.array([*q4, roll]))
         face = (F @ np.array([0.0, 0.0, -magnet_m, 1.0]))[:3]
         # tool = flange -z: straight down means the flange z axis is +z
-        return np.concatenate([face - face_target, DOWN_W * np.array([F[0, 2], F[1, 2], 1.0 - F[2, 2]])])
+        return np.concatenate([face - face_target, DOWN_W * (F[:3, 2] - up)])
 
     best = None
     for s in seeds:
@@ -284,7 +291,7 @@ def ik_down(kin, face_target, seeds, lo, hi, magnet_m=MAGNET_FACE_M, roll=0.0,
         x = np.array(x, float)
         F = kin.flange(np.array([*x, roll]))
         pos_err = float(np.linalg.norm(r[:3]))
-        tilt = math.degrees(math.acos(max(-1.0, min(1.0, F[2, 2]))))
+        tilt = math.degrees(math.acos(max(-1.0, min(1.0, float(F[:3, 2] @ up)))))
         inside = bool(np.all(x >= lo[:4]) and np.all(x <= hi[:4]))
         score = (not inside, pos_err + DOWN_W * math.radians(tilt))
         if best is None or score < best[0]:

@@ -262,7 +262,7 @@ def set_hold(bus, motors, hold):
 # Keys the page's buttons send (/cmd?k=...), merged into read_keys so a button is the same as
 # its keyboard key. Single characters only, from this set: nothing else is accepted.
 WEB_KEYS = queue.Queue()
-WEB_ALLOWED = set(" fpguxadws!1234mkor")
+WEB_ALLOWED = set(" fpguxadws!1234mkorhH")
 # The page's touchpad: the latest hand velocity (-1..1 per axis) and when it came. The page
 # resends it every 80 ms while a finger is down; JOG_FRESH_S without one and the arm stops, so a
 # lifted finger, a closed tab or a dropped connection can't leave the arm driving.
@@ -422,7 +422,7 @@ window.addEventListener('blur',function(){J={x:0,y:0,z:0,t:0,w:0,hp:0,ht:0};jupd
 // keyboard: the terminal's keys, arrows/PageUp/PageDown drive like the touchpad (hold to move)
 var KEYJ={ArrowUp:['y',1],ArrowDown:['y',-1],ArrowLeft:['x',-1],ArrowRight:['x',1],PageUp:['z',1],PageDown:['z',-1],
   a:['hp',1],d:['hp',-1],w:['ht',1],s:['ht',-1]};
-var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',o:'o',r:'r',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
+var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',o:'o',r:'r',h:'h',H:'H',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
 function moving(){var g=window.S&&window.S.guide;return g&&['MOVING','DESCENDING','PRESSING','LIFTING'].indexOf(g.flag)>=0}
 document.addEventListener('keydown',function(e){
   if(e.ctrlKey||e.metaKey||e.altKey)return;
@@ -1282,6 +1282,7 @@ def cmd_pick(a):
           m magnet on/off (on needs the arm held)   k descend and pick (from the hover)
           o one-button pick: hold, lock, plan, raise clear, go, descend and pick
           r record a flat pose (magnet set flat on the package by hand) to pick_flat_poses.json
+          h go to the rest pose   H save where the arm is as the rest pose
           1-4 drive speed  any key during a planned move aborts it and holds  x quit (twice if held)"""
     import types
     import arm_xpad
@@ -1354,6 +1355,8 @@ def cmd_pick(a):
             main.append(["Lock target  [space]", " ", "go"])
             if st["locked"] is not None:
                 main.append(["Plan  [p]", "p", "go"])
+            if st["rest_q"] is not None:
+                main.append(["Go to rest  [h]", "h", ""])
         elif state == "planned":
             main += [["GO: hover 5 cm above  [g]", "g", "go"], ["Re-lock target  [space]", " ", ""]]
         elif state == "at_hover":
@@ -1373,7 +1376,7 @@ def cmd_pick(a):
             rows.append({"label": "magnet: board not answering, treat as OFF", "items": []})
         n_flat = len(flat_poses)
         rows.append({"label": f"teach: {n_flat} flat pose{'' if n_flat == 1 else 's'} saved",
-                     "items": [["Record flat pose  [r]", "r", ""]]})
+                     "items": [["Record flat pose  [r]", "r", ""], ["Save as rest pose  [H]", "H", ""]]})
         return rows + [
                 {"label": "", "items": [["Quit: again to confirm  [x]" if st["quit_armed"] else "Quit  [x]", "x", ""]]}]
 
@@ -1384,6 +1387,19 @@ def cmd_pick(a):
     # the pitch error the planner has to take out.
     flat_path = calib_dir() / "pick_flat_poses.json"
     flat_poses = json.loads(flat_path.read_text()) if flat_path.is_file() else []
+    if a.pitch_deg is None:  # the taught flat, averaged; wild ones (not a flat pose) left out
+        taught = [r["model_pitch_deg"] for r in flat_poses if abs(r["model_pitch_deg"]) < 15.0]
+        a.pitch_deg = float(np.mean(taught)) if taught else 0.0
+    print(f"magnet-down pitch {a.pitch_deg:+.1f} deg ({len(flat_poses)} taught flat poses)")
+
+    def down_ik(target, seeds_, roll):
+        return head_cam.ik_down(kin, target, seeds_, lo, hi, hc.magnet_m, roll, pitch_deg=a.pitch_deg)
+
+    # The rest pose (2026-11-13): where the arm starts, and goes back to when it has nothing to
+    # do (after a release, or the Rest button). Taught by hand, saved with Save as rest pose.
+    rest_path = calib_dir() / "pick_rest_pose.json"
+    st["rest_q"] = (np.radians(json.loads(rest_path.read_text())["arm_deg"])
+                    if rest_path.is_file() else None)
 
     def record_flat():
         q = arm_q()
@@ -1476,7 +1492,7 @@ def cmd_pick(a):
         n = max(1, int(round(abs(z_to - z_from) / step)))
         for i in range(1, n + 1):
             z = z_from + (z_to - z_from) * i / n
-            r = head_cam.ik_down(kin, st["locked"] + [0, 0, z], seed, lo, hi, hc.magnet_m, float(seed[0][4]))
+            r = down_ik(st["locked"] + [0, 0, z], seed, float(seed[0][4]))
             if r is None:
                 return None
             qs.append((z, r[0]))
@@ -1577,7 +1593,7 @@ def cmd_pick(a):
         between. True if all solvable inside the joint limits."""
         q_now = arm_q()
         locked, roll = st["locked"], float(q_now[4])
-        sols = {n: head_cam.ik_down(kin, locked + [0, 0, dz], seeds + [q_now], lo, hi, hc.magnet_m, roll)
+        sols = {n: down_ik(locked + [0, 0, dz], seeds + [q_now], roll)
                 for n, dz in (("high", HIGH_M), ("hover", HOVER_M), ("contact", 0.0))}
         bad = [n for n, v_ in sols.items() if v_ is None]
         if bad:
@@ -1585,7 +1601,7 @@ def cmd_pick(a):
             return False
         steps, seed = [], [sols["high"][0]]
         for dz in np.arange(HIGH_M - 0.01, HOVER_M - 1e-6, -0.01):
-            r = head_cam.ik_down(kin, locked + [0, 0, dz], seed, lo, hi, hc.magnet_m, roll)
+            r = down_ik(locked + [0, 0, dz], seed, roll)
             if r is None:
                 break
             steps.append(r[0])
@@ -1617,9 +1633,12 @@ def cmd_pick(a):
         return ok
 
     def raise_clear():
-        """Raise the hand straight up (its tilt kept) until the magnet is CLEAR_M + 1 cm above
-        the locked target, 1 cm per step. True if it got there (or already was)."""
-        need = st["locked"][2] + CLEAR_M + 0.01
+        """Raise the hand straight up until the magnet is CLEAR_M + 1 cm above the locked target."""
+        return raise_to(st["locked"][2] + CLEAR_M + 0.01)
+
+    def raise_to(need, quiet=False):
+        """Raise the hand straight up (its tilt kept) until the magnet is at height `need`, 1 cm
+        per step. True if it got there (or already was)."""
         q = arm_q()
         for _ in range(40):
             z = kin.tool_point(q, hc.magnet_m)[2]
@@ -1630,12 +1649,44 @@ def cmd_pick(a):
             if not ok:  # near straight down the tilt solve folds: put the height first
                 q_new, ok = kin.ik(goal, q, lo, hi, pitch_w=0.001)
             if not ok:
-                say("could not raise the arm straight up from here: drive it up by hand, then PICK again", 20.0)
+                if not quiet:
+                    say("could not raise the arm straight up from here: drive it up by hand, then PICK again", 20.0)
                 return False
             if not move_to(q_new, "MOVING"):
                 return False
             q = arm_q()
         return kin.tool_point(q, hc.magnet_m)[2] >= need
+
+    def go_rest():
+        """Hold, lift straight up first if the magnet is well below the rest pose's height (a
+        joint move from down at the package can sweep through it), then a joint move to rest."""
+        rest_q = st["rest_q"]
+        if rest_q is None:
+            say("no rest pose saved: put the arm there, then Save as rest pose", 20.0)
+            return False
+        if mag.on:
+            say("magnet is ON: release before going to rest", 20.0)
+            return False
+        if not st["arm_held"]:
+            hold(True)
+        q = arm_q()
+        z_rest = float(kin.tool_point(rest_q, hc.magnet_m)[2])
+        if kin.tool_point(q, hc.magnet_m)[2] < z_rest - 0.02 and np.max(np.abs(q - rest_q)) > math.radians(5):
+            # from a limp, slumped start this can be unsolvable: the joint move then goes direct
+            if not raise_to(z_rest, quiet=True) and st["flag"] == "ABORTED":
+                return False
+        if not move_to(rest_q, "MOVING"):
+            return False
+        st["state"], st["plan"], st["flag"] = "lock", None, "HELD"
+        say("at rest. PICK when the package is in place", 20.0)
+        return True
+
+    def save_rest():
+        q = arm_q()
+        rest_path.write_text(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                         "arm_deg": np.degrees(q).round(2).tolist()}, indent=1))
+        st["rest_q"] = q
+        say(f"rest pose saved: {np.degrees(q).round(1).tolist()} deg", 20.0)
 
     def auto_pick():
         """One button: hold, lock, plan, raise clear if low, GO to the hover, descend and pick.
@@ -1660,6 +1711,8 @@ def cmd_pick(a):
     last_print = 0.0
     try:
         tty.setcbreak(fd)
+        if st["rest_q"] is not None:  # start at rest (2026-11-13): any key aborts the move
+            go_rest()
         run = True
         while run:
             t_tick = time.monotonic()
@@ -1729,7 +1782,8 @@ def cmd_pick(a):
                     on = magnet_set(not mag.on)
                     if st["state"] == "holding" and on is False:
                         st["state"], st["flag"] = "lock", "HELD"
-                        say("released. Lock the next target")
+                        say("released: back to rest")
+                        go_rest()
                 elif k == "k" and st["state"] == "at_hover":
                     if not mag.magnet:
                         say("no magnet board: plug in the ESP32 and restart")
@@ -1761,6 +1815,10 @@ def cmd_pick(a):
                     auto_pick()
                 elif k == "r":
                     record_flat()
+                elif k == "H":
+                    save_rest()
+                elif k == "h" and st["state"] == "lock":
+                    go_rest()
                 elif k == "u" and st["state"] == "at_hover" and st["plan"]:
                     if move_to(st["plan"]["high"], "MOVING"):
                         st["state"], st["flag"] = "planned", "PLANNED"
@@ -1868,6 +1926,9 @@ def main(argv=None):
                          "(default 10: at the start of the press)")
     pk.add_argument("--press-mm", type=float, default=PRESS_BELOW_M * 1000,
                     help="how far under the computed surface the gentle press aims, mm (default 10)")
+    pk.add_argument("--pitch-deg", type=float, default=None,
+                    help="magnet-down pitch in the arm model, + = face turned toward the base "
+                         "(default: the mean of the taught flat poses, pick_flat_poses.json)")
     pk.add_argument("--radial-mm", type=float, default=-8.0,
                     help="aim correction along the line from the arm base through the target, mm; "
                          "negative = toward the base (default -8: the magnet slides out ~8 mm as it seats)")
