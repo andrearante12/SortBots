@@ -262,7 +262,7 @@ def set_hold(bus, motors, hold):
 # Keys the page's buttons send (/cmd?k=...), merged into read_keys so a button is the same as
 # its keyboard key. Single characters only, from this set: nothing else is accepted.
 WEB_KEYS = queue.Queue()
-WEB_ALLOWED = set(" fpguxadws!1234mko")
+WEB_ALLOWED = set(" fpguxadws!1234mkor")
 # The page's touchpad: the latest hand velocity (-1..1 per axis) and when it came. The page
 # resends it every 80 ms while a finger is down; JOG_FRESH_S without one and the arm stops, so a
 # lifted finger, a closed tab or a dropped connection can't leave the arm driving.
@@ -422,7 +422,7 @@ window.addEventListener('blur',function(){J={x:0,y:0,z:0,t:0,w:0,hp:0,ht:0};jupd
 // keyboard: the terminal's keys, arrows/PageUp/PageDown drive like the touchpad (hold to move)
 var KEYJ={ArrowUp:['y',1],ArrowDown:['y',-1],ArrowLeft:['x',-1],ArrowRight:['x',1],PageUp:['z',1],PageDown:['z',-1],
   a:['hp',1],d:['hp',-1],w:['ht',1],s:['ht',-1]};
-var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',o:'o',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
+var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',o:'o',r:'r',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
 function moving(){var g=window.S&&window.S.guide;return g&&['MOVING','DESCENDING','PRESSING','LIFTING'].indexOf(g.flag)>=0}
 document.addEventListener('keydown',function(e){
   if(e.ctrlKey||e.metaKey||e.altKey)return;
@@ -1281,6 +1281,7 @@ def cmd_pick(a):
     keys: f arm free/held  space lock  p plan  g go  u back up to HIGH_M  a/d/w/s head +-2 deg
           m magnet on/off (on needs the arm held)   k descend and pick (from the hover)
           o one-button pick: hold, lock, plan, raise clear, go, descend and pick
+          r record a flat pose (magnet set flat on the package by hand) to pick_flat_poses.json
           1-4 drive speed  any key during a planned move aborts it and holds  x quit (twice if held)"""
     import types
     import arm_xpad
@@ -1370,10 +1371,39 @@ def cmd_pick(a):
                                                       else ["Turn magnet ON  [m]", "m", "go"]]})
         elif mag.fault:
             rows.append({"label": "magnet: board not answering, treat as OFF", "items": []})
+        n_flat = len(flat_poses)
+        rows.append({"label": f"teach: {n_flat} flat pose{'' if n_flat == 1 else 's'} saved",
+                     "items": [["Record flat pose  [r]", "r", ""]]})
         return rows + [
                 {"label": "", "items": [["Quit: again to confirm  [x]" if st["quit_armed"] else "Quit  [x]", "x", ""]]}]
 
     mag = MagnetLink(magnet, say)
+    # Taught "magnet flat on the package" poses (2026-11-13): the planned magnet-down pose left
+    # the face tilted on the package, so it seated on one edge. The user sets the magnet flat by
+    # hand (limp arm, or the drive panel) and records it; the model's tilt at each such pose is
+    # the pitch error the planner has to take out.
+    flat_path = calib_dir() / "pick_flat_poses.json"
+    flat_poses = json.loads(flat_path.read_text()) if flat_path.is_file() else []
+
+    def record_flat():
+        q = arm_q()
+        F = kin.flange(q)
+        tool = kin.tool_point(q, hc.magnet_m)
+        radial = tool[:2] / max(1e-6, np.linalg.norm(tool[:2]))
+        z = F[:3, 2]  # flange +z: straight up when the magnet points straight down
+        pitch = math.degrees(math.atan2(float(z[:2] @ radial), float(z[2])))
+        side = math.degrees(math.atan2(float(z[0] * -radial[1] + z[1] * radial[0]), float(z[2])))
+        rec = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "arm_deg": np.degrees(q).round(2).tolist(),
+               "head_deg": [round(head_goal["head_pan"], 2), round(head_goal["head_tilt"], 2)],
+               "tool_m": tool.round(4).tolist(), "reach_m": round(float(np.linalg.norm(tool[:2])), 4),
+               "model_pitch_deg": round(pitch, 2), "model_side_deg": round(side, 2),
+               "locked_m": None if st["locked"] is None else np.asarray(st["locked"]).round(4).tolist(),
+               "arm_held": st["arm_held"]}
+        flat_poses.append(rec)
+        flat_path.write_text(json.dumps(flat_poses, indent=1))
+        say(f"flat pose {len(flat_poses)} saved: reach {rec['reach_m'] * 100:.1f} cm, the model reads the "
+            f"magnet {pitch:+.1f} deg off vertical (pitch, + = magnet face turned toward the base), {side:+.1f} deg sideways", 20.0)
+        print(f"\nflat pose: {rec}")
 
     def magnet_set(on):
         if on and not st["arm_held"]:
@@ -1729,6 +1759,8 @@ def cmd_pick(a):
                         do_go()
                 elif k == "o" and st["state"] == "lock":
                     auto_pick()
+                elif k == "r":
+                    record_flat()
                 elif k == "u" and st["state"] == "at_hover" and st["plan"]:
                     if move_to(st["plan"]["high"], "MOVING"):
                         st["state"], st["flag"] = "planned", "PLANNED"
