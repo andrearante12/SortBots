@@ -256,3 +256,42 @@ def align_z(R, n):
         return R.copy()
     k = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
     return (np.eye(3) + k + k @ k / (1 + c)) @ R
+
+
+# -- picking: the magnet straight down on a point -----------------------------------------------
+DOWN_W = 0.2  # metres of position error one radian of tool tilt is worth in ik_down
+
+
+def ik_down(kin, face_target, seeds, lo, hi, magnet_m=MAGNET_FACE_M, roll=0.0,
+            pos_tol_m=0.002, tilt_tol_deg=2.0):
+    """Robot angles (radians, 5) that put the magnet face on `face_target` (base_link, m) with
+    the tool pointing straight down, inside [lo, hi], or None. SO101Kin.ik works on the wrist ->
+    tip elevation, which folds at straight down (-90 deg) and stalls there (the same fold that
+    froze wrist_flex, 2026-11-10); this works on the flange's axis instead, so straight down is
+    an ordinary point. `seeds`: start poses (radians; the calibration's own touches are good
+    ones, they are all magnet-down). Returns (q, position error m, tilt deg) of the best fit."""
+    face_target = np.asarray(face_target, float)
+
+    def res(q4):
+        F = kin.flange(np.array([*q4, roll]))
+        face = (F @ np.array([0.0, 0.0, -magnet_m, 1.0]))[:3]
+        # tool = flange -z: straight down means the flange z axis is +z
+        return np.concatenate([face - face_target, DOWN_W * np.array([F[0, 2], F[1, 2], 1.0 - F[2, 2]])])
+
+    best = None
+    for s in seeds:
+        x, r = _lm(res, np.array(s[:4], float), iters=120)
+        x = np.array(x, float)
+        F = kin.flange(np.array([*x, roll]))
+        pos_err = float(np.linalg.norm(r[:3]))
+        tilt = math.degrees(math.acos(max(-1.0, min(1.0, F[2, 2]))))
+        inside = bool(np.all(x >= lo[:4]) and np.all(x <= hi[:4]))
+        score = (not inside, pos_err + DOWN_W * math.radians(tilt))
+        if best is None or score < best[0]:
+            best = (score, np.array([*x, roll]), pos_err, tilt, inside)
+    if best is None:
+        return None
+    _, q, pos_err, tilt, inside = best
+    if not inside or pos_err > pos_tol_m or tilt > tilt_tol_deg:
+        return None
+    return q, pos_err, tilt

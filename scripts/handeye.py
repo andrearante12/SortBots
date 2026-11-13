@@ -896,6 +896,200 @@ def cmd_check(a):
         print()
 
 
+HOME_HEAD = (90.4, 60.7)   # the head angle most of the 2026-11-12 calibration was taken at
+HIGH_M, HOVER_M = 0.12, 0.05   # above the target: clearance for the joint move, and stage 1's stop
+PICK_DPS = 20.0            # joint speed cap for every pick motion
+
+
+def hold_head_at(bus, head_cal, pan, tilt, ramp_s=2.0):
+    """Torque the head on where it is, then ramp it to (pan, tilt): no snap of the mast camera."""
+    lim = headmod.limits(head_cal)
+    goal = {"head_pan": min(lim["head_pan"][1], max(lim["head_pan"][0], pan)),
+            "head_tilt": min(lim["head_tilt"][1], max(lim["head_tilt"][0], tilt))}
+    set_hold(bus, list(headmod.HEAD), True)
+    start = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
+    n = max(1, int(ramp_s / 0.05))
+    for k in range(1, n + 1):
+        bus.sync_write("Goal_Position", {m: start[m] + (goal[m] - start[m]) * k / n for m in goal})
+        time.sleep(0.05)
+    time.sleep(0.5)
+
+
+def cmd_pick(a):
+    """Stage 1 of a pick: lock the package target, plan magnet-down poses with the calibrated arm,
+    move to HIGH_M above the target, descend straight down to HOVER_M and stop there. No contact,
+    no magnet: the hover shows whether the calibration puts the magnet over the circle.
+
+    keys (capture terminal):  f arm free/held   space lock the target (arm clear)
+                              p plan            g go (after a plan)      u back up to HIGH_M
+                              any key during a motion aborts it and holds   x quit"""
+    if a.marker_id is None:
+        a.marker_id = 10
+    hc = head_cam.HeadCam.load(calib_dir() / f"{a.head_id}_camera.json")
+    kin = SO101Kin()
+    if not np.any(kin.off):
+        raise SystemExit("no arm joint offsets saved: run `handeye solve` first")
+    path = calib_dir() / "handeye_samples.json"
+    seeds = [np.radians(s["arm_deg"]) for s in json.loads(path.read_text())] if path.is_file() else []
+    cam = Camera(marker_m=a.marker_m)
+    bus, head_cal = open_bus(a.port, a.arm_id, a.head_id)
+    lo, hi = arm_limits(bus)
+    hold_head_at(bus, head_cal, *a.head)
+    arm_held, quit_armed = False, False
+    locked = plan = None
+    state = "lock"   # lock -> planned -> at_hover
+    note = {"msg": f"arm free: move it clear of the package, then space to lock marker {a.marker_id}",
+            "until": time.monotonic() + 1e9}
+
+    def say(text, secs=8.0):
+        note["msg"], note["until"] = text, time.monotonic() + secs
+
+    def arm_deg():
+        pos = bus.sync_read("Present_Position", ARM, num_retry=2)
+        return {j: pos[j] for j in ARM}
+
+    def frame(status):
+        color, depth = cam.grab()
+        try:
+            ms, corners, ids = cam.markers(color, depth)
+        except Exception:
+            ms, corners, ids = {}, [], None
+        msg = note["msg"] if time.monotonic() < note["until"] else ""
+        print("\r" + status + (" | " + msg if msg else "") + "\x1b[K", end="", flush=True)
+        if not a.no_view:
+            draw(cam, color, corners, ids, status[:90],
+                 {"title": {"lock": "Pick: lock the target", "planned": "Pick: plan ready, g to go",
+                            "at_hover": "Pick: hovering 5 cm above the target"}[state],
+                  "lines": [status] + ([msg] if msg else []), "checks": [], "box": None, "reach": None,
+                  "progress": [], "stage": 0, "stages": 0, "done": False, "ready": state == "planned"})
+        return ms
+
+    def move_to(q_goal):
+        """Joint-interpolated move at PICK_DPS from where the arm is. Any key aborts and holds.
+        Returns True if it arrived."""
+        start = arm_deg()
+        goal = dict(zip(ARM, np.degrees(q_goal)))
+        span = max(abs(goal[j] - start[j]) for j in ARM)
+        dur = max(0.5, span / PICK_DPS)
+        t0 = time.monotonic()
+        while True:
+            s = min(1.0, (time.monotonic() - t0) / dur)
+            s = s * s * (3 - 2 * s)  # ease in/out
+            bus.sync_write("Goal_Position", {j: start[j] + (goal[j] - start[j]) * s for j in ARM})
+            if read_keys(0.0):
+                set_hold(bus, ARM, True)
+                say("ABORTED: holding where it is", 1e9)
+                return False
+            if s >= 1.0:
+                time.sleep(0.4)  # settle
+                return True
+            time.sleep(0.03)
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    print(cmd_pick.__doc__.split("keys")[1].replace("\n", "\r\n") + "\r")
+    try:
+        tty.setcbreak(fd)
+        run = True
+        while run:
+            q_now = np.radians([v for v in arm_deg().values()])
+            tcp = kin.tool_point(q_now, hc.magnet_m)
+            status = f"{state} | arm {'HELD' if arm_held else 'free'} | magnet {np.round(tcp * 100, 1)} cm"
+            if locked is not None:
+                dv = (tcp - locked) * 100
+                status += f" | to target dx {dv[0]:+.1f} dy {dv[1]:+.1f} dz {dv[2]:+.1f}"
+            ms = frame(status)
+            for k in read_keys(0.0):
+                if k == "f" and state != "at_hover":
+                    arm_held = not arm_held
+                    set_hold(bus, ARM, arm_held)
+                elif k == " ":
+                    pts = []
+                    for _ in range(10):
+                        c2, d2 = cam.grab()
+                        m = cam.marker(c2, d2, a.marker_id)
+                        if m and m["target_pt"] is not None:
+                            pts.append(m["target_pt"])
+                    if len(pts) >= 6 and np.linalg.norm(np.std(pts, 0)) < 0.004:
+                        hp = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
+                        locked = (hc.matrix(hp["head_pan"], hp["head_tilt"]) @ np.append(np.median(pts, 0), 1.0))[:3]
+                        state, plan = "lock", None
+                        say(f"LOCKED target {np.round(locked * 100, 1)} cm. Press p to plan")
+                    else:
+                        say(f"marker {a.marker_id} not steady in view ({len(pts)}/10): move the arm clear")
+                elif k == "p" and locked is not None:
+                    roll = float(q_now[4])
+                    sols = {}
+                    for name, dz in (("high", HIGH_M), ("hover", HOVER_M), ("contact", 0.0)):
+                        sols[name] = head_cam.ik_down(kin, locked + [0, 0, dz], seeds + [q_now], lo, hi,
+                                                      hc.magnet_m, roll)
+                    bad = [n for n, v in sols.items() if v is None]
+                    if bad:
+                        say(f"NOT reachable straight down: {', '.join(bad)}. Move the package closer to the arm")
+                        plan = None
+                    else:
+                        # the descent from high to hover, 1 cm steps, each its own magnet-down solve
+                        steps, seed = [], [sols["high"][0]]
+                        for dz in np.arange(HIGH_M - 0.01, HOVER_M - 1e-6, -0.01):
+                            r = head_cam.ik_down(kin, locked + [0, 0, dz], seed, lo, hi, hc.magnet_m, roll)
+                            if r is None:
+                                break
+                            steps.append(r[0])
+                            seed = [r[0]]
+                        if len(steps) < round((HIGH_M - HOVER_M) / 0.01):
+                            say("descent path not solvable straight down: move the package")
+                            plan = None
+                        else:
+                            plan = {"high": sols["high"][0], "steps": steps}
+                            span = max(abs(np.degrees(plan["high"] - q_now)))
+                            state = "planned"
+                            say(f"PLAN ok: {span:.0f} deg joint move to 12 cm above, then down to 5 cm. "
+                                f"g = go (any key aborts)", 1e9)
+                elif k == "g" and state == "planned" and plan and tcp[2] < locked[2] + 0.08:
+                    # the first move is joint-interpolated: from low down it can sweep the magnet
+                    # through the package, so it starts only from well above it
+                    say("raise the magnet at least 8 cm above the package first (f, lift by hand, f), then g")
+                elif k == "g" and state == "planned" and plan:
+                    if not arm_held:
+                        set_hold(bus, ARM, True)
+                        arm_held = True
+                    say("moving to 12 cm above the target...", 1e9)
+                    frame(status)
+                    ok = move_to(plan["high"])
+                    for q in plan["steps"] if ok else []:
+                        ok = move_to(q)
+                        if not ok:
+                            break
+                    if ok:
+                        state = "at_hover"
+                        q_end = np.radians(list(arm_deg().values()))
+                        err = (kin.tool_point(q_end, hc.magnet_m) - (locked + [0, 0, HOVER_M])) * 1000
+                        say(f"HOVERING 5 cm above the target (arm model says {np.linalg.norm(err):.0f} mm off its goal). "
+                            "Look: is the magnet centred over the circle? u = back up, x = quit", 1e9)
+                    else:
+                        state = "lock"
+                elif k == "u" and state == "at_hover" and plan:
+                    say("back up to 12 cm...", 1e9)
+                    if move_to(plan["high"]):
+                        state = "planned"
+                        say("at 12 cm above. g repeats the descent, x quits", 1e9)
+                elif k in ("x", "\x1b"):
+                    if arm_held and not quit_armed:
+                        say("SUPPORT THE ARM: torque goes off. Press x again to quit (any other key cancels)", 1e9)
+                        quit_armed = True
+                    else:
+                        run = False
+                if k not in ("x", "\x1b") and quit_armed:
+                    quit_armed = False
+    except KeyboardInterrupt:
+        pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        bus.disconnect(disable_torque=True)
+        cam.close()
+        print("\ntorque off")
+
+
 def cmd_view(a):
     """Camera only, no servos: the live image with every marker's id, size and distance, in the
     same preview page as capture. For aiming the head or checking the D435 when the arm's board
@@ -966,8 +1160,13 @@ def main(argv=None):
     k.add_argument("--head", type=float, nargs=2, metavar=("PAN", "TILT"),
                    help="hold the head here (degrees): use an angle the calibration was taken at")
     sub.add_parser("view", help="live camera + markers only; no servos needed")
+    pk = sub.add_parser("pick", help="stage 1: lock a package, plan, hover 5 cm above it (no contact)")
+    pk.add_argument("--marker-id", type=int, default=None, help="the package's marker (default 10)")
+    pk.add_argument("--head", type=float, nargs=2, metavar=("PAN", "TILT"), default=list(HOME_HEAD),
+                    help="hold the head here; a calibrated angle (default HOME)")
     a = ap.parse_args(argv)
-    {"capture": cmd_capture, "solve": cmd_solve, "check": cmd_check, "view": cmd_view}[a.cmd](a)
+    {"capture": cmd_capture, "solve": cmd_solve, "check": cmd_check, "view": cmd_view,
+     "pick": cmd_pick}[a.cmd](a)
 
 
 if __name__ == "__main__":

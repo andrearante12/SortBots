@@ -113,3 +113,22 @@ def test_fit_recovers_arm_joint_offsets_from_touches():
     hc, err, off = H.fit(samples, KIN, magnet_m=TRUE.magnet_m, fit_magnet=False, fit_offsets=True)
     assert abs(off["shoulder_lift"] - 12) < 1 and abs(off["elbow_flex"] + 9) < 1
     assert abs(off["wrist_flex"] - 5) < 1 and np.sqrt(np.mean(err ** 2)) < 4.0
+
+
+def test_ik_down_reaches_a_magnet_down_pose_and_refuses_out_of_reach():
+    rng = np.random.default_rng(8)
+    k = SO101Kin(offsets=np.radians([0, -7, -1.5, -13, 0]))     # with calibrated-style offsets
+    lo = np.radians([-105, -105, -95, -105, -170.0]); hi = -lo
+    seeds, targets = [], []
+    while len(targets) < 6:                                      # magnet-down poses: some seeds, some truths
+        q = rng.uniform(np.radians([-50, -40, -60, -60, 0]), np.radians([50, 100, 90, 105, 0]))
+        F = k.flange(q)
+        if F[2, 2] > 0.995:
+            (seeds if len(seeds) < 4 else targets).append(q)
+    for q_true in targets:
+        p = k.tool_point(q_true, H.MAGNET_FACE_M)
+        sol = H.ik_down(k, p, seeds, lo, hi)
+        assert sol is not None
+        q, err, tilt = sol
+        assert np.linalg.norm(k.tool_point(q, H.MAGNET_FACE_M) - p) < 0.002 and tilt < 2.0
+    assert H.ik_down(k, [0.9, 0.0, 0.0], seeds, lo, hi) is None   # 90 cm out: unreachable
