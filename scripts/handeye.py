@@ -1575,17 +1575,29 @@ def cmd_pick(a):
 
     def do_lock():
         """Lock marker a.marker_id's target from 10 frames. True if locked."""
-        pts = worker.targets(a.marker_id)
-        if len(pts) >= 6 and np.linalg.norm(np.std(pts, 0)) < 0.004:
+        pts = np.array(worker.targets(a.marker_id)).reshape(-1, 3)
+        # Robust: a single frame with a bad depth patch threw the spread over 4 mm and refused a
+        # lock on a marker seen 10/10 in clear view (2026-11-13), so frames more than 4 mm from
+        # the median are dropped and 6 good ones are enough.
+        med = np.median(pts, 0) if len(pts) else None
+        good = pts[np.linalg.norm(pts - med, axis=1) < 0.004] if len(pts) else pts
+        spread = float(np.median(np.linalg.norm(pts - med, axis=1)) * 1000) if len(pts) else 0.0
+        if len(good) >= 6:
             hp = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
-            raw = (hc.matrix(hp["head_pan"], hp["head_tilt"]) @ np.append(np.median(pts, 0), 1.0))[:3]
+            raw = (hc.matrix(hp["head_pan"], hp["head_tilt"]) @ np.append(np.median(good, 0), 1.0))[:3]
             st["locked"] = aim_corrected(raw, a.radial_mm / 1000.0)
             st["state"], st["plan"] = "lock", None
             if st["flag"] in ("PLANNED", "ABORTED", "HOVERING"):
                 st["flag"] = "HELD" if st["arm_held"] else "FREE"
-            say(f"LOCKED target {np.round(st['locked'] * 100, 1)} cm (aim {a.radial_mm:+.0f} mm radial). Plan next")
+            say(f"LOCKED target {np.round(st['locked'] * 100, 1)} cm ({len(good)}/{len(pts)} frames, spread "
+                f"{spread:.1f} mm; aim {a.radial_mm:+.0f} mm radial). Plan next")
             return True
-        say(f"marker {a.marker_id} not steady in view ({len(pts)}/10): move the arm clear of it", 20.0)
+        print(f"\nlock refused: {len(pts)} frames, {len(good)} within 4 mm, median spread {spread:.1f} mm")
+        if len(pts) < 6:
+            say(f"marker {a.marker_id} seen in only {len(pts)}/10 frames: move the arm clear of it", 20.0)
+        else:
+            say(f"marker {a.marker_id} seen {len(pts)}/10 but its target jitters ({len(good)} frames within 4 mm, "
+                f"median {spread:.1f} mm): depth is noisy here. Try Lock again, or move the camera a little", 20.0)
         return False
 
     def do_plan():
