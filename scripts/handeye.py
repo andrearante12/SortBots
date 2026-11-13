@@ -1441,7 +1441,7 @@ def cmd_pick(a):
         bus.sync_write("Goal_Position", bus.sync_read("Present_Position", ARM, num_retry=2))
 
     def straight(z_from, z_to, step):
-        """Magnet-down poses from z_from to z_to above the locked target (excl. the start)."""
+        """(z, q) magnet-down poses from z_from to z_to above the locked target (excl. the start)."""
         qs, seed = [], [arm_q()]
         n = max(1, int(round(abs(z_to - z_from) / step)))
         for i in range(1, n + 1):
@@ -1449,33 +1449,55 @@ def cmd_pick(a):
             r = head_cam.ik_down(kin, st["locked"] + [0, 0, z], seed, lo, hi, hc.magnet_m, float(seed[0][4]))
             if r is None:
                 return None
-            qs.append(r[0])
+            qs.append((z, r[0]))
             seed = [r[0]]
         return qs
 
     def descend_and_pick():
-        """Stage 2, from the hover: down to CONTACT_ABOVE_M, press gently to PRESS_BELOW_M under
-        the computed surface at reduced torque, magnet on (confirmed by the board, or no lift),
-        freeze, full torque, lift straight up to HIGH_M. Any abort holds; the magnet is never
-        switched off by an abort, so a package that's caught stays caught."""
+        """Stage 2, from the hover: down to CONTACT_ABOVE_M, then a gentle press at reduced torque
+        to --press-mm under the computed surface. The magnet goes on --magnet-on-mm above the
+        surface, on the way down, so it is already pulling as it seats (2026-11-13: switching on
+        only after the press left the package short of the face). The board must confirm ON
+        before the arm goes any lower, and again after the press, or it doesn't lift. Then
+        freeze, full torque, lift straight up to HIGH_M. Any abort holds; an abort never switches
+        the magnet off, so a package that's caught stays caught."""
+        h_on = a.magnet_on_mm / 1000.0
         down = straight(HOVER_M, CONTACT_ABOVE_M, 0.01)
         press = straight(CONTACT_ABOVE_M, -a.press_mm / 1000.0, 0.004)
         if down is None or press is None:
             say("the descent isn't solvable straight down from here", 1e9)
             return
-        for q in down:
+        on = False
+
+        def switch_on():
+            if magnet_set(True) is not True:
+                say("the magnet did NOT confirm ON: stopped here. Check the board, then Back up", 1e9)
+                st["flag"] = "ABORTED"
+                return False
+            return True
+
+        for z, q in down:  # on once ARRIVED at or below h_on, not before setting off for it
             if not move_to(q, "DESCENDING"):
                 return
+            if not on and z <= h_on + 1e-9:
+                if not switch_on():
+                    return
+                on = True
         torque_limit(PRESS_TORQUE)
         try:
-            for q in press:
+            for z, q in press:
                 if not move_to(q, "PRESSING", dps=PICK_DPS * 0.3):
                     return
+                if not on and z <= h_on + 1e-9:
+                    if not switch_on():
+                        return
+                    on = True
             st["flag"] = "PRESSING"
-            on = magnet_set(True)
+            if not on and not switch_on():
+                return
             time.sleep(GRIP_WAIT_S)
-            if on is not True:
-                say("the magnet did NOT confirm ON: not lifting. Check the board, then Back up", 1e9)
+            if mag.poll() is not True:
+                say("the magnet is not ON after the press (board): not lifting. Check the board, then Back up", 1e9)
                 st["flag"] = "ABORTED"
                 return
         finally:
@@ -1487,7 +1509,7 @@ def cmd_pick(a):
             say("magnet ON and holding, but the lift isn't solvable straight up: drive it up by hand", 1e9)
             st["state"], st["flag"] = "holding", "HOLDING"
             return
-        for q in up:
+        for _, q in up:
             if not move_to(q, "LIFTING"):
                 say("ABORTED during the lift: holding, magnet still ON", 1e9)
                 st["state"] = "holding"
@@ -1809,6 +1831,9 @@ def main(argv=None):
     sub.add_parser("view", help="live camera + markers only; no servos needed")
     pk = sub.add_parser("pick", help="stage 1: lock a package, plan, hover 5 cm above it (no contact)")
     pk.add_argument("--marker-id", type=int, default=None, help="the package's marker (default 10)")
+    pk.add_argument("--magnet-on-mm", type=float, default=CONTACT_ABOVE_M * 1000,
+                    help="switch the magnet on this far above the computed surface on the way down, mm "
+                         "(default 10: at the start of the press)")
     pk.add_argument("--press-mm", type=float, default=PRESS_BELOW_M * 1000,
                     help="how far under the computed surface the gentle press aims, mm (default 10)")
     pk.add_argument("--radial-mm", type=float, default=-8.0,
