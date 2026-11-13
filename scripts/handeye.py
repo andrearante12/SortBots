@@ -262,7 +262,13 @@ def set_hold(bus, motors, hold):
 # Keys the page's buttons send (/cmd?k=...), merged into read_keys so a button is the same as
 # its keyboard key. Single characters only, from this set: nothing else is accepted.
 WEB_KEYS = queue.Queue()
-WEB_ALLOWED = set(" fpguxadws!")
+WEB_ALLOWED = set(" fpguxadws!1234m")
+# The page's touchpad: the latest hand velocity (-1..1 per axis) and when it came. The page
+# resends it every 80 ms while a finger is down; JOG_FRESH_S without one and the arm stops, so a
+# lifted finger, a closed tab or a dropped connection can't leave the arm driving.
+JOG = {"v": {}, "t": 0.0}
+JOG_AXES = ("x", "y", "z", "t", "w")
+JOG_FRESH_S = 0.25
 
 
 def read_keys(timeout):
@@ -279,6 +285,17 @@ class _PreviewHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
+        if u.path == "/jog":
+            q = urllib.parse.parse_qs(u.query)
+            try:
+                v = {ax: max(-1.0, min(1.0, float(q.get(ax, ["0"])[0]))) for ax in JOG_AXES}
+            except ValueError:
+                self.send_error(400)
+                return
+            JOG["v"], JOG["t"] = v, time.monotonic()
+            self.send_response(204)
+            self.end_headers()
+            return
         if u.path == "/cmd":
             k = urllib.parse.parse_qs(u.query, keep_blank_values=True).get("k", [""])[0]
             if len(k) == 1 and k in WEB_ALLOWED:
@@ -324,6 +341,14 @@ PREVIEW_PAGE = """<!doctype html><meta charset=utf-8><title>handeye capture</tit
 body{margin:0;background:#111;color:#e8e8e8;font:15px/1.4 system-ui,sans-serif;display:flex;gap:14px}
 #img{flex:1 1 auto;min-width:0}#img img{width:100%;display:block}
 #side{flex:0 0 380px;padding:12px 14px 12px 0}#p{padding:0}
+#pad{position:relative;width:220px;height:220px;border-radius:12px;background:#1d2633;touch-action:none;
+  border:1px solid #345}#zpad{position:relative;width:60px;height:220px;border-radius:12px;background:#1d2633;
+  touch-action:none;border:1px solid #345}#knob,#zknob{position:absolute;width:34px;height:34px;border-radius:50%;
+  background:#4a90e2;left:50%;top:50%;transform:translate(-50%,-50%);pointer-events:none}
+.ax{position:absolute;color:#789;font-size:11px;pointer-events:none}
+#jog button{font:600 14px system-ui,sans-serif;margin:0 6px 6px 0;padding:8px 12px;border:0;border-radius:6px;
+  background:#444;color:#fff;cursor:pointer;touch-action:none}#jog button:active{filter:brightness(1.4)}
+#jog .lbl{color:#999;font-size:12px;margin:2px 0 6px}#jog{margin:6px 0 12px}
 #btn button{font:600 15px system-ui,sans-serif;margin:0 6px 8px 0;padding:9px 14px;border:0;border-radius:6px;
   background:#2d4a73;color:#fff;cursor:pointer}#btn button:active{filter:brightness(1.3)}
 #btn button.stop{background:#c62828;font-size:20px;padding:14px 28px}#btn button.go{background:#2e7d32}
@@ -338,7 +363,19 @@ td{padding:4px 6px;border-bottom:1px solid #2a2a2a}tr.cur td{background:#202838}
 .st{color:#999;font-size:12px;margin-top:10px;word-break:break-word}
 @media (max-width:900px){body{flex-direction:column}#side{flex:none;padding:12px}}
 </style>
-<div id=img><img id=v alt="camera"></div><div id=side><div id=btn></div><div id=p>waiting...</div></div>
+<div id=img><img id=v alt="camera"></div><div id=side><div id=btn></div>
+<div id=jog style="display:none"><div class=lbl>drive the hand (drag; release stops)</div>
+<div style="display:flex;gap:10px;align-items:flex-start">
+<div id=pad><div class=ax style="top:4px;left:50%;transform:translateX(-50%)">away</div>
+<div class=ax style="bottom:4px;left:50%;transform:translateX(-50%)">toward</div>
+<div class=ax style="left:4px;top:50%;transform:translateY(-50%)">left</div>
+<div class=ax style="right:4px;top:50%;transform:translateY(-50%)">right</div><div id=knob></div></div>
+<div id=zpad><div class=ax style="top:4px;left:50%;transform:translateX(-50%)">up</div>
+<div class=ax style="bottom:4px;left:50%;transform:translateX(-50%)">down</div><div id=zknob></div></div></div>
+<div class=row style="margin-top:8px"><button class=hold data-j="t" data-s="1">tilt up</button><button class=hold data-j="t" data-s="-1">tilt down</button>
+<button class=hold data-j="w" data-s="1">wrist up</button><button class=hold data-j="w" data-s="-1">wrist down</button></div>
+<div class=row><span class=lbl>speed </span><button data-k="1">L1</button><button data-k="2">L2</button><button data-k="3">L3</button><button data-k="4">L4</button></div></div>
+<div id=p>waiting...</div></div>
 <script>
 function esc(t){return String(t).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 var FLAG_COL={FREE:'#777',HELD:'#3a7bd5',PLANNED:'#c9a227',MOVING:'#e8742a',DESCENDING:'#e8742a',
@@ -351,6 +388,25 @@ function buttons(g){
     return '<div class=row>'+(row.label?'<div class=lbl>'+esc(row.label)+'</div>':'')+row.items.map(function(it){
       return '<button class="'+(it[2]||'')+'" data-k="'+it[1]+'">'+esc(it[0])+'</button>'}).join('')+'</div>'}).join('')}
 document.addEventListener('click',function(e){var t=e.target.closest('button[data-k]');if(t)send(t.dataset.k)});
+var J={x:0,y:0,z:0,t:0,w:0},jt=null;
+function jsend(){fetch('/jog?x='+J.x.toFixed(2)+'&y='+J.y.toFixed(2)+'&z='+J.z.toFixed(2)+'&t='+J.t+'&w='+J.w).catch(function(){})}
+function jlive(){return J.x||J.y||J.z||J.t||J.w}
+function jupdate(){if(jlive()){if(!jt){jsend();jt=setInterval(jsend,80)}}else{if(jt){clearInterval(jt);jt=null}jsend()}}
+function dragger(el,knob,f){
+  function at(e){var r=el.getBoundingClientRect(),dx=(e.clientX-r.left)/r.width*2-1,dy=(e.clientY-r.top)/r.height*2-1;
+    dx=Math.max(-1,Math.min(1,dx));dy=Math.max(-1,Math.min(1,dy));f(dx,dy);
+    knob.style.left=((dx+1)/2*100)+'%';knob.style.top=((dy+1)/2*100)+'%';jupdate()}
+  el.addEventListener('pointerdown',function(e){el.setPointerCapture(e.pointerId);at(e)});
+  el.addEventListener('pointermove',function(e){if(el.hasPointerCapture(e.pointerId))at(e)});
+  function end(){f(0,0);knob.style.left='50%';knob.style.top='50%';jupdate()}
+  el.addEventListener('pointerup',end);el.addEventListener('pointercancel',end);el.addEventListener('lostpointercapture',end)}
+window.addEventListener('load',function(){
+  dragger(document.getElementById('pad'),document.getElementById('knob'),function(dx,dy){J.x=Math.abs(dx)<.08?0:dx;J.y=Math.abs(dy)<.08?0:-dy});
+  dragger(document.getElementById('zpad'),document.getElementById('zknob'),function(dx,dy){J.z=Math.abs(dy)<.08?0:-dy});
+  document.querySelectorAll('#jog button.hold').forEach(function(b){
+    b.addEventListener('pointerdown',function(e){b.setPointerCapture(e.pointerId);J[b.dataset.j]=+b.dataset.s;jupdate()});
+    ['pointerup','pointercancel','lostpointercapture'].forEach(function(n){b.addEventListener(n,function(){J[b.dataset.j]=0;jupdate()})})})});
+window.addEventListener('blur',function(){J={x:0,y:0,z:0,t:0,w:0};jupdate()});
 function render(S){
   var g=S.guide,h=(g.flag?'<div style="display:inline-block;padding:6px 14px;border-radius:6px;font-weight:700;'+
     'font-size:20px;letter-spacing:.05em;margin:4px 0 10px;color:#fff;background:'+(FLAG_COL[g.flag]||'#777')+'">ARM: '+
@@ -358,7 +414,7 @@ function render(S){
   h+='<div class="do'+(g.ready?' ready':'')+'">'+g.lines.map(l=>'<p>'+esc(l)+'</p>').join('')+'</div>';
   if(g.checks.length)h+='<ul>'+g.checks.map(c=>'<li class='+(c[1]?'ok':'no')+'>'+(c[1]?'&#10003; ':'&#10007; ')+esc(c[0])+'</li>').join('')+'</ul>';
   if(g.ready&&!g.buttons)h+='<div class=go>Ready: press B</div>';
-  buttons(g);
+  buttons(g);document.getElementById('jog').style.display=g.jog?'block':'none';
   h+='<table>'+g.progress.map((r,i)=>'<tr'+(i+1==g.stage?' class=cur':'')+'><td>'+esc(r.name)+
      (r.target?' <span style=color:#888>('+r.target[0].toFixed(0)+', '+r.target[1].toFixed(0)+')</span>':'')+
      '</td><td>'+r.have+' / '+r.need+'</td><td>'+(r.have>=r.need?'&#10003;':'')+'</td></tr>').join('')+'</table>';
@@ -967,6 +1023,7 @@ def cmd_check(a):
 
 
 HOME_HEAD = (90.4, 60.7)   # the head angle most of the 2026-11-12 calibration was taken at
+MAGNET_REARM_S, MAGNET_ON_S = 10.0, 30   # as arm_xpad: re-arm well inside the firmware's 30 s cap
 HIGH_M, HOVER_M = 0.12, 0.05   # above the target: clearance for the joint move, and stage 1's stop
 PICK_DPS = 20.0            # joint speed cap for every pick motion
 
@@ -985,14 +1042,72 @@ def hold_head_at(bus, head_cal, pan, tilt, ramp_s=2.0):
     time.sleep(0.5)
 
 
-def cmd_pick(a):
-    """Stage 1 of a pick: lock the package target, plan magnet-down poses with the calibrated arm,
-    move to HIGH_M above the target, descend straight down to HOVER_M and stop there. No contact,
-    no magnet: the hover shows whether the calibration puts the magnet over the circle.
+class CamWorker:
+    """The D435 on its own thread: grab, find markers, draw the page. Control loops then run at
+    their own rate instead of waiting on frames (pad driving at camera rate lagged badly,
+    2026-11-11). The control side sets `status`/`guide` for the page and reads markers back."""
 
-    keys (capture terminal):  f arm free/held   space lock the target (arm clear)
-                              p plan            g go (after a plan)      u back up to HIGH_M
-                              any key during a motion aborts it and holds   x quit"""
+    def __init__(self, cam, no_view=False):
+        self.cam, self.no_view = cam, no_view
+        self.status, self.guide = "", None
+        self.ms, self.seq, self.err = {}, 0, None
+        self.lock = threading.Lock()
+        self._run = True
+        self._t = threading.Thread(target=self._loop, daemon=True)
+        self._t.start()
+
+    def _loop(self):
+        while self._run:
+            try:
+                color, depth = self.cam.grab()
+                try:
+                    ms, corners, ids = self.cam.markers(color, depth)
+                except Exception:
+                    ms, corners, ids = {}, [], None
+                with self.lock:
+                    self.ms, self.seq = ms, self.seq + 1
+                    status, guide = self.status, self.guide
+                if not self.no_view:
+                    draw(self.cam, color, corners, ids, status[:90], guide)
+            except Exception as e:  # keep the arm side running; it shows on the page
+                self.err = e
+                time.sleep(0.5)
+
+    def show(self, status, guide):
+        with self.lock:
+            self.status, self.guide = status, guide
+
+    def targets(self, marker_id, n=10, timeout=4.0):
+        """target_pt of `marker_id` from the next n processed frames (fewer on timeout)."""
+        out, last, t0 = [], self.seq, time.monotonic()
+        while len(out) < n and time.monotonic() - t0 < timeout:
+            with self.lock:
+                seq, ms = self.seq, self.ms
+            if seq != last:
+                last = seq
+                m = ms.get(marker_id)
+                if m and m.get("target_pt") is not None:
+                    out.append(m["target_pt"])
+            time.sleep(0.01)
+        return out
+
+    def stop(self):
+        self._run = False
+        self._t.join(timeout=2.0)
+        self.cam.close()
+
+
+def cmd_pick(a):
+    """Pick stage 1 plus hand driving, from the page's buttons and touchpad (or the keyboard):
+    lock the package target, plan magnet-down poses with the calibrated arm, move HIGH_M above
+    the target, descend straight down to HOVER_M and stop. No contact, no magnet. Between plans
+    the touchpad drives the hand like the pad (arm_xpad.cartesian_step, same speed caps).
+
+    keys: f arm free/held  space lock  p plan  g go  u back up to HIGH_M  a/d/w/s head +-2 deg
+          m magnet on/off (on needs the arm held)
+          1-4 drive speed  any key during a planned move aborts it and holds  x quit (twice if held)"""
+    import types
+    import arm_xpad
     if a.marker_id is None:
         a.marker_id = 10
     hc = head_cam.HeadCam.load(calib_dir() / f"{a.head_id}_camera.json")
@@ -1011,112 +1126,158 @@ def cmd_pick(a):
     hold_head_at(bus, head_cal, *a.head)
     head_lim = headmod.limits(head_cal)
     head_goal = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
-    arm_held, quit_armed = False, False
-    locked = plan = None
-    flag = {"v": "FREE"}   # what the page's ARM badge shows; set where the state really changes
+    worker = CamWorker(cam, a.no_view)
+    # The magnet's ESP32 (docs/magnet.md), if plugged in: everything else works without it.
+    magnet = None
+    try:
+        from magnet import Magnet
+        magnet = Magnet()
+        magnet.off()  # known state: released
+    except Exception as e:
+        print(f"no magnet ({e}): magnet button off\r")
+        magnet = None
+    jog_cfg = types.SimpleNamespace(speed=0.10, pitch_dps=45.0, roll_dps=90.0, joint_dps=150.0, lock=["wrist_roll"])
+    st = {"mag_on": False, "mag_armed_at": 0.0, "mag_t0": 0.0,
+          "arm_held": False, "quit_armed": False, "locked": None, "plan": None, "state": "lock",
+          "flag": "FREE", "level": 1, "jog_q": None, "jog_target": None, "jog_ok": True,
+          "msg": f"arm free: move it clear of the package, then Lock target (marker {a.marker_id})",
+          "until": time.monotonic() + 1e9}
+
+    def say(text, secs=8.0):
+        st["msg"], st["until"] = text, time.monotonic() + secs
+
+    def arm_q():
+        pos = bus.sync_read("Present_Position", ARM, num_retry=2)
+        return np.radians([pos[j] for j in ARM])
 
     def buttons():
-        """The page's buttons for the current state; each sends the same key as the keyboard."""
-        if flag["v"] in ("MOVING", "DESCENDING"):
+        if st["flag"] in ("MOVING", "DESCENDING"):
             return [{"label": "arm is moving", "items": [["STOP", "!", "stop"]]}]
-        main = []
+        main, state = [], st["state"]
         if state == "lock":
             main.append(["Lock target", " ", "go"])
-            if locked is not None:
+            if st["locked"] is not None:
                 main.append(["Plan", "p", "go"])
         elif state == "planned":
             main += [["GO: hover 5 cm above", "g", "go"], ["Re-lock target", " ", ""]]
         elif state == "at_hover":
             main.append(["Back up to 12 cm", "u", ""])
-        if state != "at_hover":
-            main.append(["Hold arm" if not arm_held else "Free arm (limp)", "f", ""])
-        return [{"label": "pick", "items": main},
+        main.append(["Free arm (limp)" if st["arm_held"] else "Hold arm", "f", ""])
+        rows = [{"label": "pick", "items": main}]
+        if magnet:
+            rows.append({"label": "magnet", "items": [["Magnet OFF", "m", "stop"] if st["mag_on"]
+                                                      else ["Magnet ON", "m", "go"]]})
+        return rows + [
                 {"label": "camera, 2 deg per press", "items": [["pan +", "a", "head"], ["pan -", "d", "head"],
                                                               ["tilt +", "w", "head"], ["tilt -", "s", "head"]]},
-                {"label": "", "items": [["Quit: press again to confirm" if quit_armed else "Quit", "x", ""]]}]
-    state = "lock"   # lock -> planned -> at_hover
-    note = {"msg": f"arm free: move it clear of the package, then space to lock marker {a.marker_id}",
-            "until": time.monotonic() + 1e9}
+                {"label": "", "items": [["Quit: press again to confirm" if st["quit_armed"] else "Quit", "x", ""]]}]
 
-    def say(text, secs=8.0):
-        note["msg"], note["until"] = text, time.monotonic() + secs
-
-    def arm_deg():
-        pos = bus.sync_read("Present_Position", ARM, num_retry=2)
-        return {j: pos[j] for j in ARM}
-
-    def frame(status):
-        if flag["v"] in ("FREE", "HELD"):
-            flag["v"] = "HELD" if arm_held else "FREE"
-        color, depth = cam.grab()
+    def magnet_set(on):
+        """ON only with the arm held (a limp arm with a load on it drops it anyway); OFF always."""
+        if not magnet:
+            return
+        if on and not st["arm_held"]:
+            say("hold the arm before turning the magnet on")
+            return
         try:
-            ms, corners, ids = cam.markers(color, depth)
-        except Exception:
-            ms, corners, ids = {}, [], None
-        msg = note["msg"] if time.monotonic() < note["until"] else ""
-        print("\r" + status + (" | " + msg if msg else "") + "\x1b[K", end="", flush=True)
-        if not a.no_view:
-            draw(cam, color, corners, ids, status[:90],
-                 {"title": {"lock": "Pick: lock the target", "planned": "Pick: plan ready, g to go",
-                            "at_hover": "Pick: hovering 5 cm above the target"}[state],
-                  "lines": [status] + ([msg] if msg else []), "checks": [], "box": None, "reach": None,
-                  "progress": [], "stage": 0, "stages": 0, "done": False, "ready": state == "planned",
-                  "flag": flag["v"], "buttons": buttons()})
-        return ms
+            reply = magnet.on(MAGNET_ON_S) if on else magnet.off()
+        except Exception as e:
+            say(f"magnet: {e}")
+            return
+        st["mag_on"] = on
+        st["mag_armed_at"] = st["mag_t0"] = time.monotonic()
+        say(f"magnet {reply}")
 
-    def live_status():
-        q = np.radians(list(arm_deg().values()))
+    def publish(q):
         tcp = kin.tool_point(q, hc.magnet_m)
-        txt = f"{flag['v']} | magnet {np.round(tcp * 100, 1)} cm"
-        if locked is not None:
-            dv = (tcp - locked) * 100
+        txt = (f"{st['flag']} | magnet {np.round(tcp * 100, 1)} cm | head {head_goal['head_pan']:+.0f}/"
+               f"{head_goal['head_tilt']:+.0f} | drive L{st['level'] + 1}" + ("" if st["jog_ok"] else " LIMIT")
+               + (f" | MAG ON {time.monotonic() - st['mag_t0']:.0f}s" if st["mag_on"] else (" | mag off" if magnet else "")))
+        if st["locked"] is not None:
+            dv = (tcp - st["locked"]) * 100
             txt += f" | to target dx {dv[0]:+.1f} dy {dv[1]:+.1f} dz {dv[2]:+.1f}"
-        return txt
+        msg = st["msg"] if time.monotonic() < st["until"] else ""
+        title = {"lock": "Pick: lock the target", "planned": "Pick: plan ready",
+                 "at_hover": "Pick: hovering 5 cm above the target"}[st["state"]]
+        worker.show(txt, {"title": title, "lines": [txt] + ([msg] if msg else []), "checks": [], "box": None,
+                          "reach": None, "progress": [], "stage": 0, "stages": 0, "done": False,
+                          "ready": st["state"] == "planned", "flag": st["flag"], "buttons": buttons(),
+                          "jog": st["flag"] not in ("MOVING", "DESCENDING")})
+        return txt, msg
 
-    def move_to(q_goal, label="MOVING"):
-        """Joint-interpolated move at PICK_DPS from where the arm is, the camera page live
-        throughout. Any key aborts and holds. Returns True if it arrived. Progress advances by at
-        most 0.1 s per tick: a camera frame that stalls (or a D435 reset, ~6 s) mid-move pauses
-        the motion instead of letting it jump ahead to catch up."""
-        start = arm_deg()
+    def hold(on):
+        set_hold(bus, ARM, on)
+        st["arm_held"] = on
+        if st["flag"] in ("FREE", "HELD", "ABORTED"):
+            st["flag"] = "HELD" if on else "FREE"
+        st["jog_q"] = None
+
+    def move_to(q_goal, label):
+        """Joint-interpolated move at PICK_DPS, 50 Hz, the page live from the camera thread. Any
+        key or the STOP button aborts and holds. Returns True if it arrived."""
+        start = dict(zip(ARM, np.degrees(arm_q())))
         goal = dict(zip(ARM, np.degrees(q_goal)))
-        span = max(abs(goal[j] - start[j]) for j in ARM)
-        dur = max(0.5, span / PICK_DPS)
-        flag["v"] = label
-        elapsed, last = 0.0, time.monotonic()
+        dur = max(0.5, max(abs(goal[j] - start[j]) for j in ARM) / PICK_DPS)
+        st["flag"] = label
+        t0 = time.monotonic()
         while True:
-            now = time.monotonic()
-            elapsed += min(now - last, 0.1)
-            last = now
-            s = min(1.0, elapsed / dur)
-            s = s * s * (3 - 2 * s)  # ease in/out
-            bus.sync_write("Goal_Position", {j: start[j] + (goal[j] - start[j]) * s for j in ARM})
+            s_ = min(1.0, (time.monotonic() - t0) / dur)
+            s_ = s_ * s_ * (3 - 2 * s_)
+            bus.sync_write("Goal_Position", {j: start[j] + (goal[j] - start[j]) * s_ for j in ARM})
             if read_keys(0.0):
                 set_hold(bus, ARM, True)
-                flag["v"] = "ABORTED"
+                st["flag"] = "ABORTED"
                 say("ABORTED: holding where it is", 1e9)
                 return False
-            if s >= 1.0:
-                time.sleep(0.4)  # settle
+            publish(arm_q())
+            if s_ >= 1.0:
+                time.sleep(0.4)
                 return True
-            frame(live_status())   # the page stays live while the arm moves
+            time.sleep(0.02)
 
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
-    print(cmd_pick.__doc__.split("keys")[1].replace("\n", "\r\n") + "\r")
+    print("keys:" + cmd_pick.__doc__.split("keys:")[1].replace("\n", "\r\n") + "\r")
+    last_print = 0.0
     try:
         tty.setcbreak(fd)
         run = True
         while run:
-            q_now = np.radians([v for v in arm_deg().values()])
+            t_tick = time.monotonic()
+            q_now = arm_q()
             tcp = kin.tool_point(q_now, hc.magnet_m)
-            status = (f"{state} | arm {'HELD' if arm_held else 'free'} | magnet {np.round(tcp * 100, 1)} cm "
-                      f"| head {head_goal['head_pan']:+.0f}/{head_goal['head_tilt']:+.0f}")
-            if locked is not None:
-                dv = (tcp - locked) * 100
-                status += f" | to target dx {dv[0]:+.1f} dy {dv[1]:+.1f} dz {dv[2]:+.1f}"
-            ms = frame(status)
+            # ---- touchpad drive: only while fresh, never during a planned move
+            v = JOG["v"] if time.monotonic() - JOG["t"] < JOG_FRESH_S else {}
+            if any(v.get(ax, 0.0) for ax in JOG_AXES):
+                if not st["arm_held"]:
+                    hold(True)
+                    say("arm held for driving")
+                if st["jog_q"] is None:  # start from where the arm is: no snap
+                    st["jog_q"] = np.clip(q_now, lo, hi)
+                    st["jog_target"] = kin.pose(st["jog_q"])
+                    st["jog_t"] = time.monotonic()
+                dt = min(0.1, time.monotonic() - st["jog_t"])
+                st["jog_t"] = time.monotonic()
+                inp = {"lx": v.get("x", 0.0), "ly": v.get("y", 0.0), "rx": 0.0, "ry": v.get("z", 0.0),
+                       "tilt": float(np.sign(v.get("t", 0.0))), "wf": float(np.sign(v.get("w", 0.0))),
+                       "slow": False}
+                st["jog_q"], st["jog_target"], st["jog_ok"] = arm_xpad.cartesian_step(
+                    kin, st["jog_q"], st["jog_target"], inp, jog_cfg, lo, hi, np.ones(5), dt, st["level"])
+                bus.sync_write("Goal_Position", dict(zip(ARM, np.degrees(st["jog_q"]))))
+                if st["state"] != "lock":  # driving away invalidates a plan made from the old pose
+                    st["state"], st["plan"] = "lock", None
+            else:
+                st["jog_q"], st["jog_ok"] = None, True
+            if magnet and st["mag_on"] and time.monotonic() - st["mag_armed_at"] > MAGNET_REARM_S:
+                try:
+                    magnet.on(MAGNET_ON_S)  # the firmware caps one `on` at 30 s: re-arm well inside it
+                except Exception as e:
+                    say(f"magnet re-arm failed: {e}", 1e9)
+                st["mag_armed_at"] = time.monotonic()
+            # ---- keys and buttons
             for k in read_keys(0.0):
+                if k != "x":
+                    st["quit_armed"] = False
                 if k in ("a", "d", "w", "s"):
                     mot, d = {"a": ("head_pan", 1), "d": ("head_pan", -1),
                               "w": ("head_tilt", 1), "s": ("head_tilt", -1)}[k]
@@ -1130,97 +1291,94 @@ def cmd_pick(a):
                             "targets locked here may be cm off", 1e9)
                     else:
                         say(f"head {pan:+.0f}/{tilt:+.0f} (inside the calibrated range)")
-                elif k == "f" and state != "at_hover":
-                    arm_held = not arm_held
-                    set_hold(bus, ARM, arm_held)
-                    flag["v"] = "HELD" if arm_held else "FREE"
+                elif k == "m":
+                    magnet_set(not st["mag_on"])
+                elif k in "1234":
+                    st["level"] = int(k) - 1
+                    say(f"drive speed L{k}")
+                elif k == "f" and st["state"] != "at_hover":
+                    if st["arm_held"] and st["mag_on"]:
+                        say("magnet is ON: turn it off before freeing the arm")
+                    else:
+                        hold(not st["arm_held"])
                 elif k == " ":
-                    pts = []
-                    for _ in range(10):
-                        c2, d2 = cam.grab()
-                        m = cam.marker(c2, d2, a.marker_id)
-                        if m and m["target_pt"] is not None:
-                            pts.append(m["target_pt"])
+                    pts = worker.targets(a.marker_id)
                     if len(pts) >= 6 and np.linalg.norm(np.std(pts, 0)) < 0.004:
                         hp = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
-                        locked = (hc.matrix(hp["head_pan"], hp["head_tilt"]) @ np.append(np.median(pts, 0), 1.0))[:3]
-                        state, plan = "lock", None
-                        flag["v"] = "HELD" if arm_held else "FREE"
-                        say(f"LOCKED target {np.round(locked * 100, 1)} cm. Press p to plan")
+                        st["locked"] = (hc.matrix(hp["head_pan"], hp["head_tilt"]) @ np.append(np.median(pts, 0), 1.0))[:3]
+                        st["state"], st["plan"] = "lock", None
+                        if st["flag"] in ("PLANNED", "ABORTED", "HOVERING"):
+                            st["flag"] = "HELD" if st["arm_held"] else "FREE"
+                        say(f"LOCKED target {np.round(st['locked'] * 100, 1)} cm. Plan next")
                     else:
                         say(f"marker {a.marker_id} not steady in view ({len(pts)}/10): move the arm clear")
-                elif k == "p" and locked is not None:
-                    roll = float(q_now[4])
-                    sols = {}
-                    for name, dz in (("high", HIGH_M), ("hover", HOVER_M), ("contact", 0.0)):
-                        sols[name] = head_cam.ik_down(kin, locked + [0, 0, dz], seeds + [q_now], lo, hi,
-                                                      hc.magnet_m, roll)
-                    bad = [n for n, v in sols.items() if v is None]
+                elif k == "p" and st["locked"] is not None and st["state"] == "lock":
+                    locked, roll = st["locked"], float(q_now[4])
+                    sols = {n: head_cam.ik_down(kin, locked + [0, 0, dz], seeds + [q_now], lo, hi, hc.magnet_m, roll)
+                            for n, dz in (("high", HIGH_M), ("hover", HOVER_M), ("contact", 0.0))}
+                    bad = [n for n, v_ in sols.items() if v_ is None]
                     if bad:
                         say(f"NOT reachable straight down: {', '.join(bad)}. Move the package closer to the arm")
-                        plan = None
-                    else:
-                        # the descent from high to hover, 1 cm steps, each its own magnet-down solve
-                        steps, seed = [], [sols["high"][0]]
-                        for dz in np.arange(HIGH_M - 0.01, HOVER_M - 1e-6, -0.01):
-                            r = head_cam.ik_down(kin, locked + [0, 0, dz], seed, lo, hi, hc.magnet_m, roll)
-                            if r is None:
-                                break
-                            steps.append(r[0])
-                            seed = [r[0]]
-                        if len(steps) < round((HIGH_M - HOVER_M) / 0.01):
-                            say("descent path not solvable straight down: move the package")
-                            plan = None
-                        else:
-                            plan = {"high": sols["high"][0], "steps": steps}
-                            flag["v"] = "PLANNED"
-                            span = max(abs(np.degrees(plan["high"] - q_now)))
-                            state = "planned"
-                            say(f"PLAN ok: {span:.0f} deg joint move to 12 cm above, then down to 5 cm. "
-                                f"g = go (any key aborts)", 1e9)
-                elif k == "g" and state == "planned" and plan and tcp[2] < locked[2] + 0.08:
+                        continue
+                    steps, seed = [], [sols["high"][0]]
+                    for dz in np.arange(HIGH_M - 0.01, HOVER_M - 1e-6, -0.01):
+                        r = head_cam.ik_down(kin, locked + [0, 0, dz], seed, lo, hi, hc.magnet_m, roll)
+                        if r is None:
+                            break
+                        steps.append(r[0])
+                        seed = [r[0]]
+                    if len(steps) < round((HIGH_M - HOVER_M) / 0.01):
+                        say("descent path not solvable straight down: move the package")
+                        continue
+                    st["plan"], st["state"], st["flag"] = {"high": sols["high"][0], "steps": steps}, "planned", "PLANNED"
+                    span = max(abs(np.degrees(sols["high"][0] - q_now)))
+                    say(f"PLAN ok: {span:.0f} deg joint move to 12 cm above, then down to 5 cm. GO when ready", 1e9)
+                elif k == "g" and st["state"] == "planned" and tcp[2] < st["locked"][2] + 0.08:
                     # the first move is joint-interpolated: from low down it can sweep the magnet
                     # through the package, so it starts only from well above it
-                    say("raise the magnet at least 8 cm above the package first (f, lift by hand, f), then g")
-                elif k == "g" and state == "planned" and plan:
-                    if not arm_held:
-                        set_hold(bus, ARM, True)
-                        arm_held = True
-                    say("moving to 12 cm above the target...", 1e9)
-                    frame(status)
-                    ok = move_to(plan["high"], "MOVING")
-                    for q in plan["steps"] if ok else []:
+                    say("raise the magnet at least 8 cm above the package first (drive it up), then GO")
+                elif k == "g" and st["state"] == "planned":
+                    if not st["arm_held"]:
+                        hold(True)
+                    ok = move_to(st["plan"]["high"], "MOVING")
+                    for q in st["plan"]["steps"] if ok else []:
                         ok = move_to(q, "DESCENDING")
                         if not ok:
                             break
                     if ok:
-                        state, flag["v"] = "at_hover", "HOVERING"
-                        q_end = np.radians(list(arm_deg().values()))
-                        err = (kin.tool_point(q_end, hc.magnet_m) - (locked + [0, 0, HOVER_M])) * 1000
-                        say(f"HOVERING 5 cm above the target (arm model says {np.linalg.norm(err):.0f} mm off its goal). "
-                            "Look: is the magnet centred over the circle? u = back up, x = quit", 1e9)
+                        st["state"], st["flag"] = "at_hover", "HOVERING"
+                        err = (kin.tool_point(arm_q(), hc.magnet_m) - (st["locked"] + [0, 0, HOVER_M])) * 1000
+                        say(f"HOVERING 5 cm above the target (arm model: {np.linalg.norm(err):.0f} mm off its goal). "
+                            "Is the magnet centred over the circle?", 1e9)
                     else:
-                        state = "lock"
-                elif k == "u" and state == "at_hover" and plan:
-                    say("back up to 12 cm...", 1e9)
-                    if move_to(plan["high"], "MOVING"):
-                        state, flag["v"] = "planned", "PLANNED"
-                        say("at 12 cm above. g repeats the descent, x quits", 1e9)
+                        st["state"] = "lock"
+                elif k == "u" and st["state"] == "at_hover" and st["plan"]:
+                    if move_to(st["plan"]["high"], "MOVING"):
+                        st["state"], st["flag"] = "planned", "PLANNED"
+                        say("at 12 cm above. GO repeats the descent", 1e9)
                 elif k in ("x", "\x1b"):
-                    if arm_held and not quit_armed:
-                        say("SUPPORT THE ARM: torque goes off. Press x again to quit (any other key cancels)", 1e9)
-                        quit_armed = True
+                    if st["arm_held"] and not st["quit_armed"]:
+                        st["quit_armed"] = True
+                        say("SUPPORT THE ARM: torque goes off. Quit again to confirm", 1e9)
                     else:
                         run = False
-                if k not in ("x", "\x1b") and quit_armed:
-                    quit_armed = False
+            txt, msg = publish(q_now)
+            if time.monotonic() - last_print > 0.2:
+                last_print = time.monotonic()
+                print("\r" + txt + (" | " + msg if msg else "") + "\x1b[K", end="", flush=True)
+            time.sleep(max(0.0, 0.02 - (time.monotonic() - t_tick)))
     except KeyboardInterrupt:
         pass
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        if magnet:
+            try:
+                magnet.off()
+            finally:
+                magnet.close()
+        worker.stop()
         bus.disconnect(disable_torque=True)
-        cam.close()
-        print("\ntorque off")
+        print("\nmagnet off, torque off")
 
 
 def cmd_view(a):
