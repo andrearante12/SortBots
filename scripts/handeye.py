@@ -1459,7 +1459,7 @@ def cmd_pick(a):
         freeze, full torque, lift straight up to HIGH_M. Any abort holds; the magnet is never
         switched off by an abort, so a package that's caught stays caught."""
         down = straight(HOVER_M, CONTACT_ABOVE_M, 0.01)
-        press = straight(CONTACT_ABOVE_M, -PRESS_BELOW_M, 0.004)
+        press = straight(CONTACT_ABOVE_M, -a.press_mm / 1000.0, 0.004)
         if down is None or press is None:
             say("the descent isn't solvable straight down from here", 1e9)
             return
@@ -1809,6 +1809,8 @@ def main(argv=None):
     sub.add_parser("view", help="live camera + markers only; no servos needed")
     pk = sub.add_parser("pick", help="stage 1: lock a package, plan, hover 5 cm above it (no contact)")
     pk.add_argument("--marker-id", type=int, default=None, help="the package's marker (default 10)")
+    pk.add_argument("--press-mm", type=float, default=PRESS_BELOW_M * 1000,
+                    help="how far under the computed surface the gentle press aims, mm (default 10)")
     pk.add_argument("--radial-mm", type=float, default=-8.0,
                     help="aim correction along the line from the arm base through the target, mm; "
                          "negative = toward the base (default -8: the magnet slides out ~8 mm as it seats)")
