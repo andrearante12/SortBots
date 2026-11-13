@@ -288,8 +288,12 @@ td{padding:4px 6px;border-bottom:1px solid #2a2a2a}tr.cur td{background:#202838}
 <div id=img><img id=v alt="camera"></div><div id=p>waiting for capture...</div>
 <script>
 function esc(t){return String(t).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+var FLAG_COL={FREE:'#777',HELD:'#3a7bd5',PLANNED:'#c9a227',MOVING:'#e8742a',DESCENDING:'#e8742a',
+  HOVERING:'#2e9e4f',ABORTED:'#d33',IDLE:'#777'};
 function render(S){
-  var g=S.guide,h='<div class=step>step '+g.stage+' of '+g.stages+'</div><h1>'+esc(g.title)+'</h1>';
+  var g=S.guide,h=(g.flag?'<div style="display:inline-block;padding:6px 14px;border-radius:6px;font-weight:700;'+
+    'font-size:20px;letter-spacing:.05em;margin:4px 0 10px;color:#fff;background:'+(FLAG_COL[g.flag]||'#777')+'">ARM: '+
+    esc(g.flag)+'</div>':'')+'<div class=step>step '+g.stage+' of '+g.stages+'</div><h1>'+esc(g.title)+'</h1>';
   h+='<div class="do'+(g.ready?' ready':'')+'">'+g.lines.map(l=>'<p>'+esc(l)+'</p>').join('')+'</div>';
   if(g.checks.length)h+='<ul>'+g.checks.map(c=>'<li class='+(c[1]?'ok':'no')+'>'+(c[1]?'&#10003; ':'&#10007; ')+esc(c[0])+'</li>').join('')+'</ul>';
   if(g.ready)h+='<div class=go>Ready: press B</div>';
@@ -937,6 +941,7 @@ def cmd_pick(a):
     hold_head_at(bus, head_cal, *a.head)
     arm_held, quit_armed = False, False
     locked = plan = None
+    flag = {"v": "FREE"}   # what the page's ARM badge shows; set where the state really changes
     state = "lock"   # lock -> planned -> at_hover
     note = {"msg": f"arm free: move it clear of the package, then space to lock marker {a.marker_id}",
             "until": time.monotonic() + 1e9}
@@ -949,6 +954,8 @@ def cmd_pick(a):
         return {j: pos[j] for j in ARM}
 
     def frame(status):
+        if flag["v"] in ("FREE", "HELD"):
+            flag["v"] = "HELD" if arm_held else "FREE"
         color, depth = cam.grab()
         try:
             ms, corners, ids = cam.markers(color, depth)
@@ -961,29 +968,46 @@ def cmd_pick(a):
                  {"title": {"lock": "Pick: lock the target", "planned": "Pick: plan ready, g to go",
                             "at_hover": "Pick: hovering 5 cm above the target"}[state],
                   "lines": [status] + ([msg] if msg else []), "checks": [], "box": None, "reach": None,
-                  "progress": [], "stage": 0, "stages": 0, "done": False, "ready": state == "planned"})
+                  "progress": [], "stage": 0, "stages": 0, "done": False, "ready": state == "planned",
+                  "flag": flag["v"]})
         return ms
 
-    def move_to(q_goal):
-        """Joint-interpolated move at PICK_DPS from where the arm is. Any key aborts and holds.
-        Returns True if it arrived."""
+    def live_status():
+        q = np.radians(list(arm_deg().values()))
+        tcp = kin.tool_point(q, hc.magnet_m)
+        txt = f"{flag['v']} | magnet {np.round(tcp * 100, 1)} cm"
+        if locked is not None:
+            dv = (tcp - locked) * 100
+            txt += f" | to target dx {dv[0]:+.1f} dy {dv[1]:+.1f} dz {dv[2]:+.1f}"
+        return txt
+
+    def move_to(q_goal, label="MOVING"):
+        """Joint-interpolated move at PICK_DPS from where the arm is, the camera page live
+        throughout. Any key aborts and holds. Returns True if it arrived. Progress advances by at
+        most 0.1 s per tick: a camera frame that stalls (or a D435 reset, ~6 s) mid-move pauses
+        the motion instead of letting it jump ahead to catch up."""
         start = arm_deg()
         goal = dict(zip(ARM, np.degrees(q_goal)))
         span = max(abs(goal[j] - start[j]) for j in ARM)
         dur = max(0.5, span / PICK_DPS)
-        t0 = time.monotonic()
+        flag["v"] = label
+        elapsed, last = 0.0, time.monotonic()
         while True:
-            s = min(1.0, (time.monotonic() - t0) / dur)
+            now = time.monotonic()
+            elapsed += min(now - last, 0.1)
+            last = now
+            s = min(1.0, elapsed / dur)
             s = s * s * (3 - 2 * s)  # ease in/out
             bus.sync_write("Goal_Position", {j: start[j] + (goal[j] - start[j]) * s for j in ARM})
             if read_keys(0.0):
                 set_hold(bus, ARM, True)
+                flag["v"] = "ABORTED"
                 say("ABORTED: holding where it is", 1e9)
                 return False
             if s >= 1.0:
                 time.sleep(0.4)  # settle
                 return True
-            time.sleep(0.03)
+            frame(live_status())   # the page stays live while the arm moves
 
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
@@ -1003,6 +1027,7 @@ def cmd_pick(a):
                 if k == "f" and state != "at_hover":
                     arm_held = not arm_held
                     set_hold(bus, ARM, arm_held)
+                    flag["v"] = "HELD" if arm_held else "FREE"
                 elif k == " ":
                     pts = []
                     for _ in range(10):
@@ -1014,6 +1039,7 @@ def cmd_pick(a):
                         hp = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
                         locked = (hc.matrix(hp["head_pan"], hp["head_tilt"]) @ np.append(np.median(pts, 0), 1.0))[:3]
                         state, plan = "lock", None
+                        flag["v"] = "HELD" if arm_held else "FREE"
                         say(f"LOCKED target {np.round(locked * 100, 1)} cm. Press p to plan")
                     else:
                         say(f"marker {a.marker_id} not steady in view ({len(pts)}/10): move the arm clear")
@@ -1041,6 +1067,7 @@ def cmd_pick(a):
                             plan = None
                         else:
                             plan = {"high": sols["high"][0], "steps": steps}
+                            flag["v"] = "PLANNED"
                             span = max(abs(np.degrees(plan["high"] - q_now)))
                             state = "planned"
                             say(f"PLAN ok: {span:.0f} deg joint move to 12 cm above, then down to 5 cm. "
@@ -1055,13 +1082,13 @@ def cmd_pick(a):
                         arm_held = True
                     say("moving to 12 cm above the target...", 1e9)
                     frame(status)
-                    ok = move_to(plan["high"])
+                    ok = move_to(plan["high"], "MOVING")
                     for q in plan["steps"] if ok else []:
-                        ok = move_to(q)
+                        ok = move_to(q, "DESCENDING")
                         if not ok:
                             break
                     if ok:
-                        state = "at_hover"
+                        state, flag["v"] = "at_hover", "HOVERING"
                         q_end = np.radians(list(arm_deg().values()))
                         err = (kin.tool_point(q_end, hc.magnet_m) - (locked + [0, 0, HOVER_M])) * 1000
                         say(f"HOVERING 5 cm above the target (arm model says {np.linalg.norm(err):.0f} mm off its goal). "
@@ -1070,8 +1097,8 @@ def cmd_pick(a):
                         state = "lock"
                 elif k == "u" and state == "at_hover" and plan:
                     say("back up to 12 cm...", 1e9)
-                    if move_to(plan["high"]):
-                        state = "planned"
+                    if move_to(plan["high"], "MOVING"):
+                        state, flag["v"] = "planned", "PLANNED"
                         say("at 12 cm above. g repeats the descent, x quits", 1e9)
                 elif k in ("x", "\x1b"):
                     if arm_held and not quit_armed:
