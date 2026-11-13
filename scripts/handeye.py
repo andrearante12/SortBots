@@ -1082,6 +1082,7 @@ HIGH_M, HOVER_M = 0.12, 0.05
 # surface and the servos give where the package stops them, instead of driving into it.
 CONTACT_ABOVE_M, PRESS_BELOW_M = 0.01, 0.015  # press 15 mm: 10 fell short, 17 seated with margin (2026-11-13)
 PRESS_TORQUE, FULL_TORQUE = 350, 1000   # Torque_Limit, 0..1000 (= % x 10)
+WRIST_COMPLY_TORQUE = 100  # wrist_flex during the press: the magnet tilts flat on contact
 PRESS_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_flex")
 GRIP_WAIT_S = 0.5
 MOVING_FLAGS = ("MOVING", "DESCENDING", "PRESSING", "LIFTING")
@@ -1532,13 +1533,22 @@ def cmd_pick(a):
         the package, and full torque at that goal would drive into it."""
         bus.sync_write("Goal_Position", bus.sync_read("Present_Position", ARM, num_retry=2))
 
-    def straight(z_from, z_to, step):
-        """(z, q) magnet-down poses from z_from to z_to above the locked target (excl. the start)."""
+    def model_pitch(q):
+        """The magnet axis's lean in the arm model, deg, the sign of --pitch-deg."""
+        F, tool = kin.flange(q), kin.tool_point(q, hc.magnet_m)
+        rad = tool[:2] / max(1e-6, np.linalg.norm(tool[:2]))
+        return math.degrees(math.atan2(float(F[:3, 2][:2] @ rad), float(F[2, 2])))
+
+    def straight(z_from, z_to, step, pitch=None):
+        """(z, q) magnet-down poses from z_from to z_to above the locked target (excl. the start),
+        at the taught pitch, or `pitch` (deg)."""
         qs, seed = [], [arm_q()]
         n = max(1, int(round(abs(z_to - z_from) / step)))
         for i in range(1, n + 1):
             z = z_from + (z_to - z_from) * i / n
-            r = down_ik(st["locked"] + [0, 0, z], seed, float(seed[0][4]))
+            r = (down_ik(st["locked"] + [0, 0, z], seed, float(seed[0][4])) if pitch is None else
+                 head_cam.ik_down(kin, st["locked"] + [0, 0, z], seed, lo, hi, hc.magnet_m,
+                                  float(seed[0][4]), tilt_tol_deg=3.0, pitch_deg=pitch))
             if r is None:
                 return None
             qs.append((z, r[0]))
@@ -1583,6 +1593,12 @@ def cmd_pick(a):
             if not move_path(down_b, "DESCENDING", DESCEND_MPS):
                 return
         torque_limit(a.press_torque)
+        # Compliant wrist (2026-11-13): off the taught spot the magnet came down a few degrees
+        # off flat, met the package on one edge, and pushing harder slid the hand back off the
+        # circle. With wrist_flex nearly limp through the press, that edge's contact force turns
+        # the wrist until the face lies flat; lift and elbow still push down. freeze() below
+        # keeps the angle it settled at before full torque comes back.
+        bus.write("Torque_Limit", "wrist_flex", a.wrist_torque, normalize=False)
         try:
             if not move_path(press_a, "PRESSING", PRESS_MPS):
                 return
@@ -1603,8 +1619,13 @@ def cmd_pick(a):
         finally:
             freeze()
             torque_limit(FULL_TORQUE)
-        z_now = float(kin.tool_point(arm_q(), hc.magnet_m)[2] - st["locked"][2])
-        up = straight(z_now, HIGH_M, 0.01)
+        q_seat = arm_q()
+        z_now = float(kin.tool_point(q_seat, hc.magnet_m)[2] - st["locked"][2])
+        settled = model_pitch(q_seat)
+        print(f"\nseated: magnet pitch {settled:+.1f} deg in the model (planned {a.pitch_deg:+.1f}), "
+              f"reach {np.linalg.norm(kin.tool_point(q_seat, hc.magnet_m)[:2]) * 100:.1f} cm")
+        # lift at the pitch the wrist settled to: the taught one would twist the package on the way up
+        up = straight(z_now, HIGH_M, 0.01, pitch=settled) or straight(z_now, HIGH_M, 0.01)
         if up is None:
             say("magnet ON and holding, but the lift isn't solvable straight up: drive it up by hand", 1e9)
             st["state"], st["flag"] = "holding", "HOLDING"
@@ -2110,6 +2131,9 @@ def main(argv=None):
     pk.add_argument("--press-torque", type=int, default=PRESS_TORQUE,
                     help=f"Torque_Limit of lift/elbow/wrist during the press, 0..1000 (default {PRESS_TORQUE}): "
                          "how hard it pushes; --press-mm is how far")
+    pk.add_argument("--wrist-torque", type=int, default=WRIST_COMPLY_TORQUE,
+                    help=f"wrist_flex Torque_Limit during the press, 0..1000 (default {WRIST_COMPLY_TORQUE}): low "
+                         "lets the magnet tilt flat on contact; --wrist-torque 1000 turns that off")
     pk.add_argument("--pitch-deg", type=float, default=None,
                     help="magnet-down pitch in the arm model, + = face turned toward the base "
                          "(default: the mean of the taught flat poses, pick_flat_poses.json)")
