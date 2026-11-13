@@ -422,7 +422,9 @@ document.addEventListener('keyup',function(e){if(e.key in KEYJ){J[KEYJ[e.key][0]
 function render(S){
   var g=S.guide,h=(g.flag?'<div style="display:inline-block;padding:6px 14px;border-radius:6px;font-weight:700;'+
     'font-size:20px;letter-spacing:.05em;margin:4px 0 10px;color:#fff;background:'+(FLAG_COL[g.flag]||'#777')+'">ARM: '+
-    esc(g.flag)+'</div>':'')+(g.stages?'<div class=step>step '+g.stage+' of '+g.stages+'</div>':'')+'<h1>'+esc(g.title)+'</h1>';
+    esc(g.flag)+'</div>':'')+(g.magnet?' <div style="display:inline-block;padding:6px 14px;border-radius:6px;'+
+    'font-weight:700;font-size:20px;margin:4px 0 10px;color:#fff;background:'+(g.magnet==='ON'?'#c62828':'#555')+
+    '">MAGNET: '+esc(g.magnet)+'</div>':'')+(g.stages?'<div class=step>step '+g.stage+' of '+g.stages+'</div>':'')+'<h1>'+esc(g.title)+'</h1>';
   h+='<div class="do'+(g.ready?' ready':'')+'">'+g.lines.map(l=>'<p>'+esc(l)+'</p>').join('')+'</div>';
   if(g.checks.length)h+='<ul>'+g.checks.map(c=>'<li class='+(c[1]?'ok':'no')+'>'+(c[1]?'&#10003; ':'&#10007; ')+esc(c[0])+'</li>').join('')+'</ul>';
   if(g.ready&&!g.buttons)h+='<div class=go>Ready: press B</div>';
@@ -461,7 +463,13 @@ def draw(cam, color, corners, ids, text, guide=None, msg=""):
                "ABORTED": (51, 51, 221)}.get(guide["flag"], (119, 119, 119))
         cv2.rectangle(color, (0, 0), (color.shape[1], 52), col, -1)
         cv2.putText(color, f"ARM: {guide['flag']}", (14, 38), cv2.FONT_HERSHEY_SIMPLEX, 1.15, (255, 255, 255), 3)
-        cv2.putText(color, guide.get("title", "")[:60], (380, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(color, guide.get("title", "")[:44], (380, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        if guide.get("magnet"):
+            on = guide["magnet"] == "ON"
+            x0 = color.shape[1] - 300
+            cv2.rectangle(color, (x0, 6), (color.shape[1] - 8, 46), (40, 40, 198) if on else (85, 85, 85), -1)
+            cv2.putText(color, f"MAGNET: {guide['magnet']}", (x0 + 14, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.95,
+                        (255, 255, 255), 2)
     if guide and guide["box"]:
         x0, y0, x1, y1 = guide["box"]
         cv2.rectangle(color, (x0 + 3, y0 + 3), (x1 - 3, y1 - 3), (0, 255, 0) if guide["ready"] else (0, 200, 0),
@@ -1319,12 +1327,14 @@ def cmd_pick(a):
                 main.append(["Descend and pick  [k]", "k", "go"])
             main.append(["Back up to 12 cm  [u]", "u", ""])
         elif state == "holding":
-            main.append(["Release: magnet off  [m]", "m", "stop"])
+            main.append(["Release: turn magnet OFF  [m]", "m", "stop"])
         main.append(["Free arm (limp)  [f]" if st["arm_held"] else "Hold arm  [f]", "f", ""])
         rows = [{"label": "pick", "items": main}]
         if mag.magnet:
-            rows.append({"label": "magnet (state read from the board)",
-                         "items": [["Magnet OFF  [m]", "m", "stop"] if mag.on else ["Magnet ON  [m]", "m", "go"]]})
+            # the label says what the button DOES; the state is the MAGNET pill, from the board.
+            # "Magnet OFF" on the button of an energized magnet read as a status (2026-11-13).
+            rows.append({"label": "magnet", "items": [["Turn magnet OFF  [m]", "m", "stop"] if mag.on
+                                                      else ["Turn magnet ON  [m]", "m", "go"]]})
         elif mag.fault:
             rows.append({"label": "magnet: board not answering, treat as OFF", "items": []})
         return rows + [
@@ -1356,6 +1366,7 @@ def cmd_pick(a):
         worker.show(txt, {"title": title, "lines": [txt] + ([msg] if msg else []), "checks": [], "box": None,
                           "reach": None, "progress": [], "stage": 0, "stages": 0, "done": False,
                           "ready": st["state"] == "planned", "flag": st["flag"], "buttons": buttons(),
+                          "magnet": None if not mag.magnet else ("ON" if mag.on else "OFF"),
                           "jog": st["flag"] not in MOVING_FLAGS})
         return txt, msg
 
