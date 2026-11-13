@@ -1063,6 +1063,120 @@ def hold_head_at(bus, head_cal, pan, tilt, ramp_s=2.0):
     time.sleep(0.5)
 
 
+class MagnetLink:
+    """The magnet as the BOARD reports it, not as last commanded. The page once showed MAG ON
+    while the coil was off (2026-11-13): replies weren't checked, and the board's own lines (its
+    30 s cap expiring: "ok timeout off"; a reset, e.g. the coil's 0.36 A sagging a shared 5 V:
+    "ok ready") sat unread and were taken as the reply to the next command. So: drain those
+    first, check every reply, and poll `status` (the caller does, about once a second).
+    `say(text, secs)` reports to the page. A board that stops answering is reconnected once;
+    opening the port resets it, so afterwards the magnet is OFF for certain."""
+
+    def __init__(self, magnet, say, reconnect=None):
+        self.magnet, self.say = magnet, say
+        self.on, self.fault = False, False
+        self.t0 = self.armed_at = self.polled = 0.0
+        self._reconnect = reconnect or self._open
+
+    @staticmethod
+    def _open():
+        from magnet import Magnet
+        m = Magnet()
+        m.off()
+        return m
+
+    def _call(self, fn):
+        try:
+            return fn()
+        except BaseException as e:  # the driver signals "no answer" as SystemExit
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            self._lost(e)
+            return None
+
+    def _lost(self, e):
+        self.on = False
+        try:
+            self.magnet.close()
+        except BaseException:
+            pass
+        self.magnet = None
+        try:
+            self.magnet = self._reconnect()
+            self.fault = False
+            self.say(f"magnet board stopped answering ({e}); reconnected, which resets it: magnet is OFF", 1e9)
+        except BaseException as e2:
+            if isinstance(e2, KeyboardInterrupt):
+                raise
+            self.magnet, self.fault = None, True
+            self.say(f"magnet board not answering ({e2}): treat the magnet as OFF", 1e9)
+
+    def events(self):
+        if not self.magnet:
+            return
+
+        def drain():
+            while self.magnet.s.in_waiting:
+                ln = self.magnet.s.readline().decode(errors="replace").strip()
+                if ln == "ok ready":
+                    if self.on:
+                        self.say("magnet board RESET (a 5 V dip when the coil switched on?): magnet is OFF", 1e9)
+                    self.on = False
+                elif ln in ("ok timeout off", "ok heartbeat off"):
+                    if self.on:
+                        self.say(f"magnet board: '{ln}': magnet is OFF", 1e9)
+                    self.on = False
+        self._call(drain)
+
+    def poll(self):
+        """The coil's real state (True on), or None if the board can't say."""
+        self.events()
+        if not self.magnet:
+            return None
+        reply = self._call(self.magnet.status)
+        if reply is None:
+            return None
+        self.polled = time.monotonic()
+        if not reply.startswith("ok state"):
+            self.say(f"magnet board: unexpected status reply '{reply}'", 1e9)
+            return None
+        actual = reply.split()[-1] == "on"
+        if self.on and not actual:
+            self.say("magnet board reports OFF (it reset or timed out)", 1e9)
+        self.on = actual
+        return actual
+
+    def set(self, on, settle_s=0.15):
+        """Command on/off and return what the board then reports (None if it can't say)."""
+        if not self.magnet:
+            return None
+        self.events()
+        reply = self._call(lambda: self.magnet.on(MAGNET_ON_S) if on else self.magnet.off())
+        if reply is None:
+            return None
+        if reply != ("ok on" if on else "ok off"):
+            self.say(f"magnet: board replied '{reply}'", 1e9)
+        if on:
+            self.armed_at = self.t0 = time.monotonic()
+        time.sleep(settle_s)  # a reset from the coil's inrush shows up within this
+        actual = self.poll()
+        if actual is not None and actual != on:
+            self.say(f"magnet did NOT turn {'on' if on else 'off'}: the board reports {'on' if actual else 'off'}", 1e9)
+        elif actual is not None:
+            self.say(f"magnet {'ON' if on else 'OFF'} (confirmed by the board)")
+        return actual
+
+    def rearm_if_due(self):
+        """Re-send `on` well inside the firmware's 30 s cap while the magnet is on."""
+        if self.magnet and self.on and time.monotonic() - self.armed_at > MAGNET_REARM_S:
+            self.events()
+            if self.magnet and self.on:
+                reply = self._call(lambda: self.magnet.on(MAGNET_ON_S))
+                self.armed_at = time.monotonic()
+                if reply is not None and reply != "ok on":
+                    self.say(f"magnet re-arm: board replied '{reply}'", 1e9)
+
+
 class CamWorker:
     """The D435 on its own thread: grab, find markers, draw the page. Control loops then run at
     their own rate instead of waiting on frames (pad driving at camera rate lagged badly,
@@ -1166,7 +1280,7 @@ def cmd_pick(a):
     head_goal = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
     worker = CamWorker(cam, a.no_view)
     jog_cfg = types.SimpleNamespace(speed=0.10, pitch_dps=45.0, roll_dps=90.0, joint_dps=150.0, lock=["wrist_roll"])
-    st = {"mag_on": False, "mag_armed_at": 0.0, "mag_t0": 0.0, "mag_fault": False,
+    st = {
           "arm_held": False, "quit_armed": False, "locked": None, "plan": None, "state": "lock",
           "flag": "FREE", "level": 1, "jog_q": None, "jog_target": None, "jog_ok": True,
           "msg": f"arm free: move it clear of the package, then Lock target (marker {a.marker_id})",
@@ -1193,63 +1307,30 @@ def cmd_pick(a):
             main.append(["Back up to 12 cm  [u]", "u", ""])
         main.append(["Free arm (limp)  [f]" if st["arm_held"] else "Hold arm  [f]", "f", ""])
         rows = [{"label": "pick", "items": main}]
-        if magnet:
-            rows.append({"label": "magnet", "items": [["Magnet OFF  [m]", "m", "stop"] if st["mag_on"]
-                                                      else ["Magnet ON  [m]", "m", "go"]]})
-        elif st.get("mag_fault"):
+        if mag.magnet:
+            rows.append({"label": "magnet (state read from the board)",
+                         "items": [["Magnet OFF  [m]", "m", "stop"] if mag.on else ["Magnet ON  [m]", "m", "go"]]})
+        elif mag.fault:
             rows.append({"label": "magnet: board not answering, treat as OFF", "items": []})
         return rows + [
                 {"label": "camera, 2 deg per press", "items": [["pan + [a]", "a", "head"], ["pan - [d]", "d", "head"],
                                                               ["tilt + [w]", "w", "head"], ["tilt - [s]", "s", "head"]]},
                 {"label": "", "items": [["Quit: again to confirm  [x]" if st["quit_armed"] else "Quit  [x]", "x", ""]]}]
 
-    def magnet_fault(e):
-        """The board stopped answering (2026-11-13: likely the coil's 0.36 A sagging a shared 5 V
-        and resetting the ESP32). Its driver signals that as SystemExit, which ended the whole run
-        once. Reconnect once: opening the port resets the board, so afterwards the magnet is OFF
-        for certain, and the page says so."""
-        nonlocal magnet
-        st["mag_on"] = False
-        try:
-            magnet.close()
-        except BaseException:
-            pass
-        magnet = None
-        try:
-            from magnet import Magnet
-            magnet = Magnet()
-            magnet.off()
-            st["mag_fault"] = False
-            say(f"magnet board stopped answering ({e}); reconnected, which resets it: magnet is OFF", 1e9)
-        except BaseException as e2:
-            if isinstance(e2, KeyboardInterrupt):
-                raise
-            magnet, st["mag_fault"] = None, True
-            say(f"magnet board not answering ({e2}): treat the magnet as OFF", 1e9)
+    mag = MagnetLink(magnet, say)
 
     def magnet_set(on):
-        """ON only with the arm held (a limp arm with a load on it drops it anyway); OFF always."""
-        if not magnet:
-            return
         if on and not st["arm_held"]:
             say("hold the arm before turning the magnet on")
-            return
-        try:
-            reply = magnet.on(MAGNET_ON_S) if on else magnet.off()
-        except BaseException as e:
-            if isinstance(e, KeyboardInterrupt):
-                raise
-            magnet_fault(e)
-            return
-        st["mag_on"] = on
-        st["mag_armed_at"] = st["mag_t0"] = time.monotonic()
-        say(f"magnet {reply}")
+            return False
+        return mag.set(on)
 
     def publish(q):
         tcp = kin.tool_point(q, hc.magnet_m)
         txt = (f"{st['flag']} | magnet {np.round(tcp * 100, 1)} cm | head {head_goal['head_pan']:+.0f}/"
                f"{head_goal['head_tilt']:+.0f} | drive L{st['level'] + 1}" + ("" if st["jog_ok"] else " LIMIT")
-               + (f" | MAG ON {time.monotonic() - st['mag_t0']:.0f}s" if st["mag_on"] else (" | mag off" if magnet else "")))
+               + (f" | MAG ON {time.monotonic() - mag.t0:.0f}s (board)" if mag.on
+                  else (" | mag off (board)" if mag.magnet else " | no magnet")))
         if st["locked"] is not None:
             dv = (tcp - st["locked"]) * 100
             txt += f" | to target dx {dv[0]:+.1f} dy {dv[1]:+.1f} dz {dv[2]:+.1f}"
@@ -1325,14 +1406,9 @@ def cmd_pick(a):
                     st["state"], st["plan"] = "lock", None
             else:
                 st["jog_q"], st["jog_ok"] = None, True
-            if magnet and st["mag_on"] and time.monotonic() - st["mag_armed_at"] > MAGNET_REARM_S:
-                try:
-                    magnet.on(MAGNET_ON_S)  # the firmware caps one `on` at 30 s: re-arm well inside it
-                except BaseException as e:
-                    if isinstance(e, KeyboardInterrupt):
-                        raise
-                    magnet_fault(e)
-                st["mag_armed_at"] = time.monotonic()
+            if mag.magnet and time.monotonic() - mag.polled > 1.0:
+                mag.poll()
+            mag.rearm_if_due()
             # ---- keys and buttons
             for k in read_keys(0.0):
                 if k != "x":
@@ -1351,12 +1427,12 @@ def cmd_pick(a):
                     else:
                         say(f"head {pan:+.0f}/{tilt:+.0f} (inside the calibrated range)")
                 elif k == "m":
-                    magnet_set(not st["mag_on"])
+                    magnet_set(not mag.on)
                 elif k in "1234":
                     st["level"] = int(k) - 1
                     say(f"drive speed L{k}")
                 elif k == "f" and st["state"] != "at_hover":
-                    if st["arm_held"] and st["mag_on"]:
+                    if st["arm_held"] and mag.on:
                         say("magnet is ON: turn it off before freeing the arm")
                     else:
                         hold(not st["arm_held"])
@@ -1432,7 +1508,7 @@ def cmd_pick(a):
         # each step on its own: a magnet that won't answer skipped the rest once, and the process
         # aborted with the arm still under torque (2026-11-13)
         for step in (lambda: termios.tcsetattr(fd, termios.TCSADRAIN, old),
-                     lambda: magnet and magnet.off(), lambda: magnet and magnet.close(),
+                     lambda: mag.magnet and mag.magnet.off(), lambda: mag.magnet and mag.magnet.close(),
                      worker.stop, lambda: bus.disconnect(disable_torque=True)):
             try:
                 step()
