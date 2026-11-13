@@ -390,7 +390,7 @@ tr.cur td{background:rgba(32,40,56,.7)}.go{font-size:13px;font-weight:600;color:
 <div id=p>waiting...</div></div>
 <script>
 function esc(t){return String(t).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
-var FLAG_COL={FREE:'#777',LOOKING:'#c9a227',HELD:'#3a7bd5',PLANNED:'#c9a227',MOVING:'#e8742a',DESCENDING:'#e8742a',
+var FLAG_COL={FREE:'#777',LOOKING:'#c9a227',SEARCHING:'#e8742a',HELD:'#3a7bd5',PLANNED:'#c9a227',MOVING:'#e8742a',DESCENDING:'#e8742a',
   PRESSING:'#e8742a',LIFTING:'#e8742a',HOVERING:'#2e9e4f',HOLDING:'#8e44ad',ABORTED:'#d33',IDLE:'#777'};
 var lastBtn='';
 function send(k){fetch('/cmd?k='+encodeURIComponent(k)).catch(function(){})}
@@ -423,7 +423,7 @@ window.addEventListener('blur',function(){J={x:0,y:0,z:0,t:0,w:0,hp:0,ht:0};jupd
 var KEYJ={ArrowUp:['y',1],ArrowDown:['y',-1],ArrowLeft:['x',-1],ArrowRight:['x',1],PageUp:['z',1],PageDown:['z',-1],
   a:['hp',1],d:['hp',-1],w:['ht',1],s:['ht',-1]};
 var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',o:'o',r:'r',h:'h',H:'H',l:'l',t:'t',c:'c',z:'z',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
-function moving(){var g=window.S&&window.S.guide;return g&&['MOVING','DESCENDING','PRESSING','LIFTING'].indexOf(g.flag)>=0}
+function moving(){var g=window.S&&window.S.guide;return g&&['MOVING','DESCENDING','PRESSING','LIFTING','SEARCHING'].indexOf(g.flag)>=0}
 document.addEventListener('keydown',function(e){
   if(e.ctrlKey||e.metaKey||e.altKey)return;
   if(moving()){send('!');e.preventDefault();return}          // any key aborts a planned move
@@ -1085,7 +1085,13 @@ PRESS_TORQUE, FULL_TORQUE = 350, 1000   # Torque_Limit, 0..1000 (= % x 10)
 WRIST_COMPLY_TORQUE = 100  # wrist_flex during the press: the magnet tilts flat on contact
 PRESS_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_flex")
 GRIP_WAIT_S = 0.5
-MOVING_FLAGS = ("MOVING", "DESCENDING", "PRESSING", "LIFTING")
+MOVING_FLAGS = ("MOVING", "DESCENDING", "PRESSING", "LIFTING", "SEARCHING")
+# Head search, when the package's marker isn't in view: pan offsets from where the head is (the
+# D435's colour view is ~69 deg wide, so 20 deg steps overlap), then the same a tilt step either
+# way. The head turns at SEARCH_DPS and settles SEARCH_SETTLE_S (motion blur) before each look.
+SEARCH_PAN_STEPS = (0, 20, -20, 40, -40, 60, -60, 80, -80)
+SEARCH_TILT_STEPS = (0, -15, 15)
+SEARCH_DPS, SEARCH_SETTLE_S = 60.0, 0.3
 CLEAR_M = 0.08   # GO's first move is joint-interpolated: it starts only this far above the package   # above the target: clearance for the joint move, and stage 1's stop
 PICK_DPS = 30.0            # joint speed cap for the joint-interpolated pick moves (20 was slow, 2026-11-13)
 # Straight-line sections (descent, press, lift) run as ONE continuous move through their 1 cm
@@ -1890,8 +1896,93 @@ def cmd_pick(a):
         path.write_text(json.dumps(samples, indent=1))
         say(f"dropped the last sample: {len(samples)} left", 8.0)
 
+    def move_head(pan, tilt):
+        """Ramp the head to (pan, tilt), clipped to its limits, at SEARCH_DPS; the page stays live.
+        Any key aborts. True if it got there."""
+        goal = {"head_pan": min(head_lim["head_pan"][1], max(head_lim["head_pan"][0], pan)),
+                "head_tilt": min(head_lim["head_tilt"][1], max(head_lim["head_tilt"][0], tilt))}
+        start = dict(head_goal)
+        dur = max(0.2, max(abs(goal[m] - start[m]) for m in goal) / SEARCH_DPS)
+        t0 = time.monotonic()
+        while True:
+            s_ = min(1.0, (time.monotonic() - t0) / dur)
+            for m in goal:
+                head_goal[m] = start[m] + (goal[m] - start[m]) * s_
+            bus.sync_write("Goal_Position", head_goal)
+            if read_keys(0.0):
+                st["flag"] = "ABORTED"
+                say("ABORTED: search stopped", 1e9)
+                return False
+            publish(arm_q())
+            if s_ >= 1.0:
+                time.sleep(SEARCH_SETTLE_S)
+                return True
+            time.sleep(0.02)
+
+    def aim_head_at(p_base):
+        """Head angles that put base-frame point p_base on the camera's optical axis, by the
+        calibrated model (its signs and offsets, so no guessing which way pan moves the image):
+        a coarse then a fine grid inside the head limits."""
+        def miss(pan, tilt):
+            T = hc.matrix(pan, tilt)
+            d = p_base - T[:3, 3]
+            return 1.0 - float(T[:3, 2] @ d) / float(np.linalg.norm(d))
+        (plo, phi), (tlo, thi) = head_lim["head_pan"], head_lim["head_tilt"]
+        best = (miss(head_goal["head_pan"], head_goal["head_tilt"]), head_goal["head_pan"], head_goal["head_tilt"])
+        for step, span in ((2.0, 60.0), (0.25, 3.0)):
+            c_p, c_t = best[1], best[2]
+            for pan in np.arange(max(plo, c_p - span), min(phi, c_p + span) + 1e-9, step):
+                for tilt in np.arange(max(tlo, c_t - span), min(thi, c_t + span) + 1e-9, step):
+                    e = miss(pan, tilt)
+                    if e < best[0]:
+                        best = (e, float(pan), float(tilt))
+        return best[1], best[2]
+
+    def find_marker():
+        """Make sure the package's marker is in view and near the image centre: look where the
+        head is; if it isn't there, sweep the head (SEARCH_PAN_STEPS x SEARCH_TILT_STEPS) until
+        it is; then turn the head to centre it (the image edge has the worst depth and
+        distortion, and a marker half out of frame is lost when the arm moves). True if in view."""
+        p0, t0_ = head_goal["head_pan"], head_goal["head_tilt"]
+        seen = worker.entries(a.marker_id, n=3, timeout=1.5, give_up_s=1.0)
+        if not seen:
+            st["flag"] = "SEARCHING"
+            say(f"marker {a.marker_id} not in view: searching with the head", 1e9)
+            tried = set()
+            for dt in SEARCH_TILT_STEPS:
+                for dp in SEARCH_PAN_STEPS:
+                    pan = min(head_lim["head_pan"][1], max(head_lim["head_pan"][0], p0 + dp))
+                    tilt = min(head_lim["head_tilt"][1], max(head_lim["head_tilt"][0], t0_ + dt))
+                    key = (round(pan), round(tilt))
+                    if key in tried or (dp == 0 and dt == 0):
+                        continue
+                    tried.add(key)
+                    if not move_head(pan, tilt):
+                        return False
+                    seen = worker.entries(a.marker_id, n=3, timeout=1.2, give_up_s=0.8)
+                    if seen:
+                        break
+                if seen:
+                    break
+            if not seen:  # perhaps behind the arm from every angle: back, and let the step-aside look
+                say(f"marker {a.marker_id} not found by the head search: trying with the arm stepped aside", 1e9)
+                ok = move_head(p0, t0_)
+                st["flag"] = "HELD" if ok else "ABORTED"
+                return ok
+        hp = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
+        p_base = (hc.matrix(hp["head_pan"], hp["head_tilt"])
+                  @ np.append(np.median([m["target_pt"] for m in seen], 0), 1.0))[:3]
+        pan, tilt = aim_head_at(p_base)
+        if max(abs(pan - head_goal["head_pan"]), abs(tilt - head_goal["head_tilt"])) > 2.0:
+            st["flag"] = "SEARCHING"
+            if not move_head(pan, tilt):
+                return False
+        st["flag"] = "HELD"
+        say(f"marker {a.marker_id} in view, head {head_goal['head_pan']:+.0f}/{head_goal['head_tilt']:+.0f}", 8.0)
+        return True
+
     def auto_pick():
-        """One button: hold, go to rest, lock (stepping aside if the arm hides the marker), plan, raise clear if low, GO to the hover, descend and pick.
+        """One button: hold, go to rest, find the marker (head search, centring), lock (stepping aside if the arm hides the marker), plan, raise clear if low, GO to the hover, descend and pick.
         Each step is the one its own button runs; the first refusal or abort stops the chain
         where it is, with the reason on the page."""
         if not mag.magnet:
@@ -1904,7 +1995,7 @@ def cmd_pick(a):
         if st["rest_q"] is not None and np.max(np.abs(arm_q() - st["rest_q"])) > math.radians(3):
             if not go_rest():
                 return
-        if not lock_with_step_aside() or not do_plan():
+        if not find_marker() or not lock_with_step_aside() or not do_plan():
             return
         if not raise_clear():
             return
