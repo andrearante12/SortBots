@@ -1582,7 +1582,7 @@ def cmd_pick(a):
             on = True
             if not move_path(down_b, "DESCENDING", DESCEND_MPS):
                 return
-        torque_limit(PRESS_TORQUE)
+        torque_limit(a.press_torque)
         try:
             if not move_path(press_a, "PRESSING", PRESS_MPS):
                 return
@@ -2107,6 +2107,9 @@ def main(argv=None):
                          "(default 10: at the start of the press)")
     pk.add_argument("--press-mm", type=float, default=PRESS_BELOW_M * 1000,
                     help="how far under the computed surface the gentle press aims, mm (default 15)")
+    pk.add_argument("--press-torque", type=int, default=PRESS_TORQUE,
+                    help=f"Torque_Limit of lift/elbow/wrist during the press, 0..1000 (default {PRESS_TORQUE}): "
+                         "how hard it pushes; --press-mm is how far")
     pk.add_argument("--pitch-deg", type=float, default=None,
                     help="magnet-down pitch in the arm model, + = face turned toward the base "
                          "(default: the mean of the taught flat poses, pick_flat_poses.json)")
