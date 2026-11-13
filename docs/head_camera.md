@@ -206,7 +206,7 @@ target. Put the magnet on the circle by hand: `d` should read under about 1 cm.
 
 `handeye pick` starts by moving the arm to the **rest pose**. It goes back there after
 each release, and the **Go to rest [h]** button sends it there too. To change the rest
-pose, put the arm where you want it and press **Save as rest pose [H]**. The file is
+pose, put the arm where you want it and press `H` (Shift+h) on the page. The file is
 `pick_rest_pose.json`.
 
 The model's idea of "straight down" is not the real one: a magnet held flat on a
@@ -214,7 +214,7 @@ package reads a few degrees off vertical in the model (-3.6 deg on 2026-11-13). 
 that case a planned pick seats the magnet on one edge. To correct it:
 
 1. Set the magnet flat on a package by hand (**Free arm**, then seat it).
-2. Press **Record flat pose [r]**. The pose goes to `pick_flat_poses.json`.
+2. Press `r` on the page. The pose goes to `pick_flat_poses.json`.
 3. Repeat at a few reaches.
 
 `pick` aims for the mean of the recorded pitches. Use `--pitch-deg` to override it.

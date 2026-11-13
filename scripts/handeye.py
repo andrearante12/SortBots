@@ -1086,7 +1086,11 @@ PRESS_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_flex")
 GRIP_WAIT_S = 0.5
 MOVING_FLAGS = ("MOVING", "DESCENDING", "PRESSING", "LIFTING")
 CLEAR_M = 0.08   # GO's first move is joint-interpolated: it starts only this far above the package   # above the target: clearance for the joint move, and stage 1's stop
-PICK_DPS = 20.0            # joint speed cap for every pick motion
+PICK_DPS = 30.0            # joint speed cap for the joint-interpolated pick moves (20 was slow, 2026-11-13)
+# Straight-line sections (descent, press, lift) run as ONE continuous move through their 1 cm
+# poses, at these speeds: one move per cm, each >= 0.5 s plus a 0.4 s settle, made a pick take
+# ~25 stops (2026-11-13).
+DESCEND_MPS, PRESS_MPS, LIFT_MPS = 0.06, 0.012, 0.06
 
 
 def hold_head_at(bus, head_cal, pan, tilt, ramp_s=2.0):
@@ -1374,9 +1378,6 @@ def cmd_pick(a):
                                                       else ["Turn magnet ON  [m]", "m", "go"]]})
         elif mag.fault:
             rows.append({"label": "magnet: board not answering, treat as OFF", "items": []})
-        n_flat = len(flat_poses)
-        rows.append({"label": f"teach: {n_flat} flat pose{'' if n_flat == 1 else 's'} saved",
-                     "items": [["Record flat pose  [r]", "r", ""], ["Save as rest pose  [H]", "H", ""]]})
         return rows + [
                 {"label": "", "items": [["Quit: again to confirm  [x]" if st["quit_armed"] else "Quit  [x]", "x", ""]]}]
 
@@ -1477,6 +1478,37 @@ def cmd_pick(a):
                 return True
             time.sleep(0.02)
 
+    def move_path(zq, label, mps):
+        """One continuous move from where the arm is through the (z, q) poses of straight(),
+        timed by height at `mps`, eased only at the two ends. Any key or STOP aborts and holds.
+        True if it arrived."""
+        if not zq:
+            return True
+        q0 = arm_q()
+        z0 = float(kin.tool_point(q0, hc.magnet_m)[2] - st["locked"][2])
+        zs = np.array([z0] + [z for z, _ in zq])
+        qs = np.degrees(np.array([q0] + [q for _, q in zq]))
+        cum = np.concatenate([[0.0], np.cumsum(np.abs(np.diff(zs)))])
+        dur = max(0.5, cum[-1] / mps)
+        st["flag"] = label
+        t0 = time.monotonic()
+        while True:
+            s_ = min(1.0, (time.monotonic() - t0) / dur)
+            d = s_ * s_ * (3 - 2 * s_) * cum[-1]
+            i = min(len(cum) - 2, int(np.searchsorted(cum, d, side="right")) - 1)
+            f = 0.0 if cum[i + 1] <= cum[i] else (d - cum[i]) / (cum[i + 1] - cum[i])
+            bus.sync_write("Goal_Position", dict(zip(ARM, qs[i] + (qs[i + 1] - qs[i]) * f)))
+            if read_keys(0.0):
+                set_hold(bus, ARM, True)
+                st["flag"] = "ABORTED"
+                say("ABORTED: holding where it is", 1e9)
+                return False
+            publish(arm_q())
+            if s_ >= 1.0:
+                time.sleep(0.2)
+                return True
+            time.sleep(0.02)
+
     def torque_limit(val):
         for j in PRESS_JOINTS:
             bus.write("Torque_Limit", j, val, normalize=False)
@@ -1514,6 +1546,11 @@ def cmd_pick(a):
             say("the descent isn't solvable straight down from here", 1e9)
             return
         on = False
+        # one continuous move to the magnet-on height, on, the rest in one more; the press the same
+        down_a = [(z, q) for z, q in down if z > h_on + 1e-9]
+        down_b = [(z, q) for z, q in down if z <= h_on + 1e-9]
+        press_a = [(z, q) for z, q in press if z > h_on + 1e-9]
+        press_b = [(z, q) for z, q in press if z <= h_on + 1e-9]
 
         def switch_on():
             if magnet_set(True) is not True:
@@ -1522,22 +1559,25 @@ def cmd_pick(a):
                 return False
             return True
 
-        for z, q in down:  # on once ARRIVED at or below h_on, not before setting off for it
-            if not move_to(q, "DESCENDING"):
+        # on once ARRIVED at h_on, not before setting off for it
+        if not move_path(down_a, "DESCENDING", DESCEND_MPS):
+            return
+        if down_b:
+            if not switch_on():
                 return
-            if not on and z <= h_on + 1e-9:
+            on = True
+            if not move_path(down_b, "DESCENDING", DESCEND_MPS):
+                return
+        torque_limit(PRESS_TORQUE)
+        try:
+            if not move_path(press_a, "PRESSING", PRESS_MPS):
+                return
+            if press_b and not on:
                 if not switch_on():
                     return
                 on = True
-        torque_limit(PRESS_TORQUE)
-        try:
-            for z, q in press:
-                if not move_to(q, "PRESSING", dps=PICK_DPS * 0.3):
-                    return
-                if not on and z <= h_on + 1e-9:
-                    if not switch_on():
-                        return
-                    on = True
+            if not move_path(press_b, "PRESSING", PRESS_MPS):
+                return
             st["flag"] = "PRESSING"
             if not on and not switch_on():
                 return
@@ -1555,11 +1595,10 @@ def cmd_pick(a):
             say("magnet ON and holding, but the lift isn't solvable straight up: drive it up by hand", 1e9)
             st["state"], st["flag"] = "holding", "HOLDING"
             return
-        for _, q in up:
-            if not move_to(q, "LIFTING"):
-                say("ABORTED during the lift: holding, magnet still ON", 1e9)
-                st["state"] = "holding"
-                return
+        if not move_path(up, "LIFTING", LIFT_MPS):
+            say("ABORTED during the lift: holding, magnet still ON", 1e9)
+            st["state"] = "holding"
+            return
         st["state"], st["flag"] = "holding", "HOLDING"
         say("HOLDING: magnet on, 12 cm up. Drive to the drop spot, then Release", 1e9)
 
@@ -1616,7 +1655,7 @@ def cmd_pick(a):
             r = down_ik(locked + [0, 0, dz], seed, roll)
             if r is None:
                 break
-            steps.append(r[0])
+            steps.append((float(dz), r[0]))
             seed = [r[0]]
         if len(steps) < round((HIGH_M - HOVER_M) / 0.01):
             say("descent path not solvable straight down: move the package", 20.0)
@@ -1631,10 +1670,8 @@ def cmd_pick(a):
         if not st["arm_held"]:
             hold(True)
         ok = move_to(st["plan"]["high"], "MOVING")
-        for q in st["plan"]["steps"] if ok else []:
-            ok = move_to(q, "DESCENDING")
-            if not ok:
-                break
+        if ok:
+            ok = move_path(st["plan"]["steps"], "DESCENDING", DESCEND_MPS)
         if ok:
             st["state"], st["flag"] = "at_hover", "HOVERING"
             err = (kin.tool_point(arm_q(), hc.magnet_m) - (st["locked"] + [0, 0, HOVER_M])) * 1000
