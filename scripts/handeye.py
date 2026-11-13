@@ -2015,9 +2015,11 @@ def main(argv=None):
     pk.add_argument("--pitch-deg", type=float, default=None,
                     help="magnet-down pitch in the arm model, + = face turned toward the base "
                          "(default: the mean of the taught flat poses, pick_flat_poses.json)")
-    pk.add_argument("--radial-mm", type=float, default=-8.0,
+    # default 0 since 2026-11-13: the -8 mm made up for a magnet that seated on one edge and slid;
+    # the taught magnet-down pitch seats it flat
+    pk.add_argument("--radial-mm", type=float, default=0.0,
                     help="aim correction along the line from the arm base through the target, mm; "
-                         "negative = toward the base (default -8: the magnet slides out ~8 mm as it seats)")
+                         "negative = toward the base (default 0)")
     pk.add_argument("--head", type=float, nargs=2, metavar=("PAN", "TILT"), default=list(PICK_HEAD),
                     help=f"hold the head here (default {PICK_HEAD[0]:.0f}/{PICK_HEAD[1]:.0f}; "
                          f"HOME, the best-calibrated angle, is {HOME_HEAD[0]}/{HOME_HEAD[1]})")
