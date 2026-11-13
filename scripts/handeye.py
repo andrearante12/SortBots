@@ -34,9 +34,12 @@ own PnP pose as a fallback where depth has a hole; both are stored.
 """
 import argparse
 import contextlib
+import functools
+import http.server
 import json
 import math
 import os
+import queue
 import select
 import sys
 import tempfile
@@ -44,6 +47,7 @@ import threading
 import termios
 import time
 import tty
+import urllib.parse
 from pathlib import Path
 
 import numpy as np
@@ -255,10 +259,55 @@ def set_hold(bus, motors, hold):
         bus.disable_torque(motors)
 
 
+# Keys the page's buttons send (/cmd?k=...), merged into read_keys so a button is the same as
+# its keyboard key. Single characters only, from this set: nothing else is accepted.
+WEB_KEYS = queue.Queue()
+WEB_ALLOWED = set(" fpguxadws!")
+
+
 def read_keys(timeout):
+    keys = []
     if select.select([sys.stdin], [], [], timeout)[0]:
-        return list(os.read(sys.stdin.fileno(), 64).decode(errors="ignore"))
-    return []
+        keys = list(os.read(sys.stdin.fileno(), 64).decode(errors="ignore"))
+    while not WEB_KEYS.empty():
+        keys.append(WEB_KEYS.get_nowait())
+    return keys
+
+
+class _PreviewHandler(http.server.SimpleHTTPRequestHandler):
+    """The preview directory, plus GET /cmd?k=KEY for the page's buttons."""
+
+    def do_GET(self):
+        u = urllib.parse.urlparse(self.path)
+        if u.path == "/cmd":
+            k = urllib.parse.parse_qs(u.query, keep_blank_values=True).get("k", [""])[0]
+            if len(k) == 1 and k in WEB_ALLOWED:
+                WEB_KEYS.put(k)
+                self.send_response(204)
+                self.end_headers()
+            else:
+                self.send_error(400)
+            return
+        super().do_GET()
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+def start_preview_server(port=8765):
+    """Serve the preview page (and its buttons) on 127.0.0.1 only. None if the port is taken,
+    e.g. by an old `python3 -m http.server 8765`: then the page shows but buttons can't reach us."""
+    try:
+        srv = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", port), functools.partial(_PreviewHandler, directory=str(PREVIEW_DIR)))
+    except OSError:
+        return None
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
 
 
 PREVIEW = {"window": True, "file_at": 0.0}
@@ -274,7 +323,11 @@ PREVIEW_PAGE = """<!doctype html><meta charset=utf-8><title>handeye capture</tit
 <style>
 body{margin:0;background:#111;color:#e8e8e8;font:15px/1.4 system-ui,sans-serif;display:flex;gap:14px}
 #img{flex:1 1 auto;min-width:0}#img img{width:100%;display:block}
-#p{flex:0 0 360px;padding:12px 14px 12px 0}
+#side{flex:0 0 380px;padding:12px 14px 12px 0}#p{padding:0}
+#btn button{font:600 15px system-ui,sans-serif;margin:0 6px 8px 0;padding:9px 14px;border:0;border-radius:6px;
+  background:#2d4a73;color:#fff;cursor:pointer}#btn button:active{filter:brightness(1.3)}
+#btn button.stop{background:#c62828;font-size:20px;padding:14px 28px}#btn button.go{background:#2e7d32}
+#btn button.head{background:#444;min-width:44px}#btn .row{margin-bottom:4px}#btn .lbl{color:#999;font-size:12px;margin:2px 0}
 h1{font-size:20px;margin:2px 0 10px}.step{color:#9ab;font-size:13px;margin-bottom:2px}
 .do{background:#1d2d1d;border-left:4px solid #5c5;padding:10px 12px;border-radius:4px;font-size:16px}
 .do p{margin:0 0 6px}.ready{border-color:#5f5;background:#1f3d1f}
@@ -283,20 +336,29 @@ table{border-collapse:collapse;width:100%;margin-top:10px;font-size:14px}
 td{padding:4px 6px;border-bottom:1px solid #2a2a2a}tr.cur td{background:#202838}
 .go{font-size:18px;font-weight:600;color:#6f6;margin:8px 0}.msg{color:#fd6;margin-top:8px}
 .st{color:#999;font-size:12px;margin-top:10px;word-break:break-word}
-@media (max-width:900px){body{flex-direction:column}#p{flex:none;padding:12px}}
+@media (max-width:900px){body{flex-direction:column}#side{flex:none;padding:12px}}
 </style>
-<div id=img><img id=v alt="camera"></div><div id=p>waiting for capture...</div>
+<div id=img><img id=v alt="camera"></div><div id=side><div id=btn></div><div id=p>waiting...</div></div>
 <script>
 function esc(t){return String(t).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 var FLAG_COL={FREE:'#777',HELD:'#3a7bd5',PLANNED:'#c9a227',MOVING:'#e8742a',DESCENDING:'#e8742a',
   HOVERING:'#2e9e4f',ABORTED:'#d33',IDLE:'#777'};
+var lastBtn='';
+function send(k){fetch('/cmd?k='+encodeURIComponent(k)).catch(function(){})}
+function buttons(g){
+  var b=JSON.stringify(g.buttons||[]);if(b===lastBtn)return;lastBtn=b;
+  document.getElementById('btn').innerHTML=(g.buttons||[]).map(function(row){
+    return '<div class=row>'+(row.label?'<div class=lbl>'+esc(row.label)+'</div>':'')+row.items.map(function(it){
+      return '<button class="'+(it[2]||'')+'" data-k="'+it[1]+'">'+esc(it[0])+'</button>'}).join('')+'</div>'}).join('')}
+document.addEventListener('click',function(e){var t=e.target.closest('button[data-k]');if(t)send(t.dataset.k)});
 function render(S){
   var g=S.guide,h=(g.flag?'<div style="display:inline-block;padding:6px 14px;border-radius:6px;font-weight:700;'+
     'font-size:20px;letter-spacing:.05em;margin:4px 0 10px;color:#fff;background:'+(FLAG_COL[g.flag]||'#777')+'">ARM: '+
-    esc(g.flag)+'</div>':'')+'<div class=step>step '+g.stage+' of '+g.stages+'</div><h1>'+esc(g.title)+'</h1>';
+    esc(g.flag)+'</div>':'')+(g.stages?'<div class=step>step '+g.stage+' of '+g.stages+'</div>':'')+'<h1>'+esc(g.title)+'</h1>';
   h+='<div class="do'+(g.ready?' ready':'')+'">'+g.lines.map(l=>'<p>'+esc(l)+'</p>').join('')+'</div>';
   if(g.checks.length)h+='<ul>'+g.checks.map(c=>'<li class='+(c[1]?'ok':'no')+'>'+(c[1]?'&#10003; ':'&#10007; ')+esc(c[0])+'</li>').join('')+'</ul>';
-  if(g.ready)h+='<div class=go>Ready: press B</div>';
+  if(g.ready&&!g.buttons)h+='<div class=go>Ready: press B</div>';
+  buttons(g);
   h+='<table>'+g.progress.map((r,i)=>'<tr'+(i+1==g.stage?' class=cur':'')+'><td>'+esc(r.name)+
      (r.target?' <span style=color:#888>('+r.target[0].toFixed(0)+', '+r.target[1].toFixed(0)+')</span>':'')+
      '</td><td>'+r.have+' / '+r.need+'</td><td>'+(r.have>=r.need?'&#10003;':'')+'</td></tr>').join('')+'</table>';
@@ -338,7 +400,11 @@ def draw(cam, color, corners, ids, text, guide=None, msg=""):
             PREVIEW["window"] = False
             PREVIEW_DIR.mkdir(exist_ok=True)
             PREVIEW_HTML.write_text(PREVIEW_PAGE)
-            print(f"\r\x1b[Kno GUI in this OpenCV: live preview in a browser:  xdg-open {PREVIEW_HTML}\n")
+            if start_preview_server():
+                print("\r\x1b[Klive page with buttons:  http://127.0.0.1:8765/handeye_view.html\n")
+            else:
+                print(f"\r\x1b[Kport 8765 is taken (an old http.server?): the page works but its buttons "
+                      f"won't. Stop that server, or open {PREVIEW_HTML}\n")
     now = time.monotonic()
     if now - PREVIEW["file_at"] > 0.25:
         PREVIEW["file_at"] = now
@@ -934,14 +1000,40 @@ def cmd_pick(a):
     if not np.any(kin.off):
         raise SystemExit("no arm joint offsets saved: run `handeye solve` first")
     path = calib_dir() / "handeye_samples.json"
-    seeds = [np.radians(s["arm_deg"]) for s in json.loads(path.read_text())] if path.is_file() else []
+    samples = json.loads(path.read_text()) if path.is_file() else []
+    seeds = [np.radians(s["arm_deg"]) for s in samples]
+    # the head range the calibration was fitted over: outside it the camera pose is extrapolated
+    hd = np.array([s["head_deg"] for s in samples]) if samples else np.array([[a.head[0], a.head[1]]])
+    cal_lo, cal_hi = hd.min(0) - 3.0, hd.max(0) + 3.0
     cam = Camera(marker_m=a.marker_m)
     bus, head_cal = open_bus(a.port, a.arm_id, a.head_id)
     lo, hi = arm_limits(bus)
     hold_head_at(bus, head_cal, *a.head)
+    head_lim = headmod.limits(head_cal)
+    head_goal = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
     arm_held, quit_armed = False, False
     locked = plan = None
     flag = {"v": "FREE"}   # what the page's ARM badge shows; set where the state really changes
+
+    def buttons():
+        """The page's buttons for the current state; each sends the same key as the keyboard."""
+        if flag["v"] in ("MOVING", "DESCENDING"):
+            return [{"label": "arm is moving", "items": [["STOP", "!", "stop"]]}]
+        main = []
+        if state == "lock":
+            main.append(["Lock target", " ", "go"])
+            if locked is not None:
+                main.append(["Plan", "p", "go"])
+        elif state == "planned":
+            main += [["GO: hover 5 cm above", "g", "go"], ["Re-lock target", " ", ""]]
+        elif state == "at_hover":
+            main.append(["Back up to 12 cm", "u", ""])
+        if state != "at_hover":
+            main.append(["Hold arm" if not arm_held else "Free arm (limp)", "f", ""])
+        return [{"label": "pick", "items": main},
+                {"label": "camera, 2 deg per press", "items": [["pan +", "a", "head"], ["pan -", "d", "head"],
+                                                              ["tilt +", "w", "head"], ["tilt -", "s", "head"]]},
+                {"label": "", "items": [["Quit: press again to confirm" if quit_armed else "Quit", "x", ""]]}]
     state = "lock"   # lock -> planned -> at_hover
     note = {"msg": f"arm free: move it clear of the package, then space to lock marker {a.marker_id}",
             "until": time.monotonic() + 1e9}
@@ -969,7 +1061,7 @@ def cmd_pick(a):
                             "at_hover": "Pick: hovering 5 cm above the target"}[state],
                   "lines": [status] + ([msg] if msg else []), "checks": [], "box": None, "reach": None,
                   "progress": [], "stage": 0, "stages": 0, "done": False, "ready": state == "planned",
-                  "flag": flag["v"]})
+                  "flag": flag["v"], "buttons": buttons()})
         return ms
 
     def live_status():
@@ -1018,13 +1110,27 @@ def cmd_pick(a):
         while run:
             q_now = np.radians([v for v in arm_deg().values()])
             tcp = kin.tool_point(q_now, hc.magnet_m)
-            status = f"{state} | arm {'HELD' if arm_held else 'free'} | magnet {np.round(tcp * 100, 1)} cm"
+            status = (f"{state} | arm {'HELD' if arm_held else 'free'} | magnet {np.round(tcp * 100, 1)} cm "
+                      f"| head {head_goal['head_pan']:+.0f}/{head_goal['head_tilt']:+.0f}")
             if locked is not None:
                 dv = (tcp - locked) * 100
                 status += f" | to target dx {dv[0]:+.1f} dy {dv[1]:+.1f} dz {dv[2]:+.1f}"
             ms = frame(status)
             for k in read_keys(0.0):
-                if k == "f" and state != "at_hover":
+                if k in ("a", "d", "w", "s"):
+                    mot, d = {"a": ("head_pan", 1), "d": ("head_pan", -1),
+                              "w": ("head_tilt", 1), "s": ("head_tilt", -1)}[k]
+                    lo_h, hi_h = head_lim[mot]
+                    head_goal[mot] = min(hi_h, max(lo_h, head_goal[mot] + 2.0 * d))
+                    bus.sync_write("Goal_Position", head_goal)
+                    pan, tilt = head_goal["head_pan"], head_goal["head_tilt"]
+                    if not (cal_lo[0] <= pan <= cal_hi[0] and cal_lo[1] <= tilt <= cal_hi[1]):
+                        say(f"head {pan:+.0f}/{tilt:+.0f} is OUTSIDE the calibrated range (pan "
+                            f"{cal_lo[0] + 3:.0f}..{cal_hi[0] - 3:.0f}, tilt {cal_lo[1] + 3:.0f}..{cal_hi[1] - 3:.0f}): "
+                            "targets locked here may be cm off", 1e9)
+                    else:
+                        say(f"head {pan:+.0f}/{tilt:+.0f} (inside the calibrated range)")
+                elif k == "f" and state != "at_hover":
                     arm_held = not arm_held
                     set_hold(bus, ARM, arm_held)
                     flag["v"] = "HELD" if arm_held else "FREE"
