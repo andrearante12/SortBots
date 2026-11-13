@@ -219,6 +219,20 @@ that case a planned pick seats the magnet on one edge. To correct it:
 
 `pick` aims for the mean of the recorded pitches. Use `--pitch-deg` to override it.
 
+### Touch samples from the pick page
+
+The pick page can collect touch samples itself, with the head at whatever angle it is held.
+Calibrating a new view does not need the capture tool:
+
+1. With the arm clear of the marker, press **LOOK [l]**.
+2. Put the magnet flat on the circle centre. Either use **Free arm** and place it by hand, or
+   drive it there.
+3. Press **TOUCH [t]**.
+
+Each sample is added to `handeye_samples.json` as soon as it is taken. **Cancel look [c]**
+discards a look, and **Drop last sample [z]** removes the last sample taken in this session.
+Then run `scripts/arm.sh head handeye solve` and restart `pick` to load the new model.
+
 ## Diagnostics
 
 | Command | Use |

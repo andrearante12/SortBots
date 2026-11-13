@@ -262,7 +262,7 @@ def set_hold(bus, motors, hold):
 # Keys the page's buttons send (/cmd?k=...), merged into read_keys so a button is the same as
 # its keyboard key. Single characters only, from this set: nothing else is accepted.
 WEB_KEYS = queue.Queue()
-WEB_ALLOWED = set(" fpguxadws!1234mkorhH")
+WEB_ALLOWED = set(" fpguxadws!1234mkorhHltcz")
 # The page's touchpad: the latest hand velocity (-1..1 per axis) and when it came. The page
 # resends it every 80 ms while a finger is down; JOG_FRESH_S without one and the arm stops, so a
 # lifted finger, a closed tab or a dropped connection can't leave the arm driving.
@@ -422,7 +422,7 @@ window.addEventListener('blur',function(){J={x:0,y:0,z:0,t:0,w:0,hp:0,ht:0};jupd
 // keyboard: the terminal's keys, arrows/PageUp/PageDown drive like the touchpad (hold to move)
 var KEYJ={ArrowUp:['y',1],ArrowDown:['y',-1],ArrowLeft:['x',-1],ArrowRight:['x',1],PageUp:['z',1],PageDown:['z',-1],
   a:['hp',1],d:['hp',-1],w:['ht',1],s:['ht',-1]};
-var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',o:'o',r:'r',h:'h',H:'H',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
+var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',o:'o',r:'r',h:'h',H:'H',l:'l',t:'t',c:'c',z:'z',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
 function moving(){var g=window.S&&window.S.guide;return g&&['MOVING','DESCENDING','PRESSING','LIFTING'].indexOf(g.flag)>=0}
 document.addEventListener('keydown',function(e){
   if(e.ctrlKey||e.metaKey||e.altKey)return;
@@ -1260,6 +1260,10 @@ class CamWorker:
 
     def targets(self, marker_id, n=10, timeout=4.0):
         """target_pt of `marker_id` from the next n processed frames (fewer on timeout)."""
+        return [m["target_pt"] for m in self.entries(marker_id, n, timeout)]
+
+    def entries(self, marker_id, n=10, timeout=4.0):
+        """`marker_id`'s marker entries, with a target, from the next n processed frames."""
         out, last, t0 = [], self.seq, time.monotonic()
         while len(out) < n and time.monotonic() - t0 < timeout:
             with self.lock:
@@ -1268,7 +1272,7 @@ class CamWorker:
                 last = seq
                 m = ms.get(marker_id)
                 if m and m.get("target_pt") is not None:
-                    out.append(m["target_pt"])
+                    out.append(m)
             time.sleep(0.01)
         return out
 
@@ -1289,6 +1293,8 @@ def cmd_pick(a):
           o one-button pick: hold, rest, lock, plan, raise clear, go, descend and pick
           r record a flat pose (magnet set flat on the package by hand) to pick_flat_poses.json
           h go to the rest pose   H save where the arm is as the rest pose
+          l LOOK  t TOUCH  c cancel the look  z drop the last sample: touch calibration samples,
+            added to handeye_samples.json (then `handeye solve`)
           1-4 drive speed  any key during a planned move aborts it and holds  x quit (twice if held)"""
     import types
     import arm_xpad
@@ -1372,6 +1378,13 @@ def cmd_pick(a):
             main.append(["Release: turn magnet OFF  [m]", "m", "stop"])
         main.append(["Free arm (limp)  [f]" if st["arm_held"] else "Hold arm  [f]", "f", ""])
         rows = [{"label": "pick", "items": main}]
+        if state == "lock":
+            n_here = sum(1 for x in samples if abs(x["head_deg"][0] - head_goal["head_pan"]) < 3.0
+                         and abs(x["head_deg"][1] - head_goal["head_tilt"]) < 3.0)
+            cal = ([["TOUCH  [t]", "t", "go"], ["Cancel look  [c]", "c", ""]] if st["look"] else
+                   [["LOOK  [l]", "l", ""]] + ([["Drop last sample  [z]", "z", ""]] if new_samples else []))
+            rows.append({"label": f"calibrate: {len(samples)} samples, {n_here} at this head angle",
+                         "items": cal})
         if mag.magnet:
             # the label says what the button DOES; the state is the MAGNET pill, from the board.
             # "Magnet OFF" on the button of an energized magnet read as a status (2026-11-13).
@@ -1792,6 +1805,56 @@ def cmd_pick(a):
             "covered by the arm?", 20.0)
         return False
 
+    # Touch calibration samples from this page (2026-11-13), the same ones `capture --touch`
+    # takes: LOOK records where the camera puts the package's circle (arm out of view), TOUCH
+    # the arm's joints with the magnet flat on that circle. Saved to handeye_samples.json at
+    # once; `handeye solve` turns them into the camera model.
+    st["look"] = None
+    new_samples = []
+
+    def cal_look():
+        ms_ = worker.entries(a.marker_id, n=LOCK_FRAMES, timeout=6.0)
+        if len(ms_) < LOCK_MIN_FRAMES:
+            say(f"LOOK: marker {a.marker_id} seen in only {len(ms_)}/{LOCK_FRAMES} frames: move the arm "
+                "out of the way", 20.0)
+            return
+        pts = np.array([m["target_pt"] for m in ms_])
+        med = np.median(pts, 0)
+        spread = float(np.median(np.linalg.norm(pts - med, axis=1)) * 1000)
+        if spread > LOCK_MAX_SPREAD_MM:
+            say(f"LOOK: the target jumps around ({spread:.1f} mm): glare? Try again", 20.0)
+            return
+        px = np.median([m["px"] + [m["size_px"]] for m in ms_], 0)
+        # the head's MEASURED angle, as capture: the touch is checked against it
+        hp = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
+        st["look"] = {"p_cam": [float(v) for v in med], "head_deg": [hp["head_pan"], hp["head_tilt"]],
+                      "px": [float(px[0]), float(px[1])], "size_px": float(px[2])}
+        say("LOOKED. Put the magnet flat on the circle centre (Free arm and place it by hand, or "
+            "drive it), then TOUCH. Don't move the package or the head.", 1e9)
+
+    def cal_touch():
+        pos = bus.sync_read("Present_Position", num_retry=2)
+        lk = st["look"]
+        moved = max(abs(pos["head_pan"] - lk["head_deg"][0]), abs(pos["head_tilt"] - lk["head_deg"][1]))
+        if moved > HEAD_MOVED_DEG:
+            say(f"the head moved {moved:.1f} deg since the look: Cancel, then LOOK again", 20.0)
+            return
+        smp = {"arm_deg": [pos[j] for j in ARM], "head_deg": lk["head_deg"], "p_cam": lk["p_cam"],
+               "px": lk["px"], "size_px": lk["size_px"], "kind": "touch", "t": time.time()}
+        samples.append(smp)
+        new_samples.append(smp)
+        seeds.append(np.radians(smp["arm_deg"]))
+        path.write_text(json.dumps(samples, indent=1))
+        st["look"] = None
+        say(f"sample {len(samples)} saved ({len(new_samples)} this session). Lift the magnet off, move "
+            "the package, LOOK again", 20.0)
+
+    def cal_drop():
+        smp = new_samples.pop()
+        samples.remove(smp)
+        path.write_text(json.dumps(samples, indent=1))
+        say(f"dropped the last sample: {len(samples)} left", 8.0)
+
     def auto_pick():
         """One button: hold, go to rest, lock (stepping aside if the arm hides the marker), plan, raise clear if low, GO to the hover, descend and pick.
         Each step is the one its own button runs; the first refusal or abort stops the chain
@@ -1924,6 +1987,15 @@ def cmd_pick(a):
                     auto_pick()
                 elif k == "r":
                     record_flat()
+                elif k == "l" and st["state"] == "lock" and not st["look"]:
+                    cal_look()
+                elif k == "t" and st["look"]:
+                    cal_touch()
+                elif k == "c" and st["look"]:
+                    st["look"] = None
+                    say("look cancelled", 8.0)
+                elif k == "z" and new_samples and not st["look"]:
+                    cal_drop()
                 elif k == "H":
                     save_rest()
                 elif k == "h" and st["state"] == "lock":
