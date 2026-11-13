@@ -1120,6 +1120,23 @@ def cmd_pick(a):
     # the head range the calibration was fitted over: outside it the camera pose is extrapolated
     hd = np.array([s["head_deg"] for s in samples]) if samples else np.array([[a.head[0], a.head[1]]])
     cal_lo, cal_hi = hd.min(0) - 3.0, hd.max(0) + 3.0
+    # The magnet's ESP32 (docs/magnet.md) first, before any thread or torque: everything else
+    # works without it. Its driver raises SystemExit on no answer, and a fresh plug-in can miss the
+    # first ping window, so: BaseException, and one retry (2026-11-13, it then crashed the run).
+    magnet = None
+    for attempt in (1, 2):
+        try:
+            from magnet import Magnet
+            magnet = Magnet()
+            magnet.off()  # known state: released
+            break
+        except BaseException as e:
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            print(f"magnet attempt {attempt}: {e}")
+            magnet = None
+    if magnet is None:
+        print("no magnet: running without the magnet button")
     cam = Camera(marker_m=a.marker_m)
     bus, head_cal = open_bus(a.port, a.arm_id, a.head_id)
     lo, hi = arm_limits(bus)
@@ -1127,15 +1144,6 @@ def cmd_pick(a):
     head_lim = headmod.limits(head_cal)
     head_goal = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
     worker = CamWorker(cam, a.no_view)
-    # The magnet's ESP32 (docs/magnet.md), if plugged in: everything else works without it.
-    magnet = None
-    try:
-        from magnet import Magnet
-        magnet = Magnet()
-        magnet.off()  # known state: released
-    except Exception as e:
-        print(f"no magnet ({e}): magnet button off\r")
-        magnet = None
     jog_cfg = types.SimpleNamespace(speed=0.10, pitch_dps=45.0, roll_dps=90.0, joint_dps=150.0, lock=["wrist_roll"])
     st = {"mag_on": False, "mag_armed_at": 0.0, "mag_t0": 0.0,
           "arm_held": False, "quit_armed": False, "locked": None, "plan": None, "state": "lock",
