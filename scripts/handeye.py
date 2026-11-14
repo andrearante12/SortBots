@@ -1142,7 +1142,12 @@ class MagnetLink:
     opening the port resets it, so afterwards the magnet is OFF for certain."""
 
     def __init__(self, magnet, say, reconnect=None):
-        self.magnet, self.say = magnet, say
+        self.magnet = magnet
+
+        def say_and_log(text, secs=8.0):  # the page keeps only the latest; the terminal keeps all
+            print(f"\n[magnet {time.strftime('%H:%M:%S')}] {text}")
+            say(text, secs)
+        self.say = say_and_log
         self.on, self.fault = False, False
         self.t0 = self.armed_at = self.polled = 0.0
         self._reconnect = reconnect or self._open
@@ -1637,6 +1642,12 @@ def cmd_pick(a):
             if not on and not switch_on():
                 return
             time.sleep(GRIP_WAIT_S)
+            if mag.poll() is not True:
+                # The board dropped the coil during the press (a reset under load, 2026-11-13) but
+                # the package is still under the magnet: one more ON, still pressed, often catches it
+                say("magnet went OFF during the press: switching it on again", 1e9)
+                if magnet_set(True) is True:
+                    time.sleep(GRIP_WAIT_S)
             if mag.poll() is not True:
                 say("the magnet is not ON after the press (board): not lifting. Check the board, then Back up", 1e9)
                 st["flag"] = "ABORTED"
