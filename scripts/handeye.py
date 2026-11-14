@@ -1230,6 +1230,8 @@ class MagnetLink:
             return None
         if reply != ("ok on" if on else "ok off"):
             self.say(f"magnet: board replied '{reply}'", 1e9)
+        elif not on:
+            self.on = False  # else the poll below calls a commanded release "reports OFF (it reset)"
         if on:
             self.armed_at = self.t0 = time.monotonic()
         time.sleep(settle_s)  # a reset from the coil's inrush shows up within this
@@ -1607,11 +1609,18 @@ def cmd_pick(a):
         press_b = [(z, q) for z, q in press if z <= h_on + 1e-9]
 
         def switch_on():
-            if magnet_set(True) is not True:
-                say("the magnet did NOT confirm ON: stopped here. Check the board, then Back up", 1e9)
-                st["flag"] = "ABORTED"
-                return False
-            return True
+            # The ESP32 resets now and then as the coil switches on (2026-11-13: board answering
+            # every second until the ON, then silent; the second pick of a demo aborted). The
+            # link reconnects on its own, which resets the board to a clean OFF: one more ON then.
+            for attempt in (1, 2):
+                if magnet_set(True) is True:
+                    return True
+                if attempt == 1:
+                    say("the magnet did not confirm ON (board reset?): trying once more", 1e9)
+                    time.sleep(0.3)
+            say("the magnet did NOT confirm ON: stopped here. Check the board, then Back up", 1e9)
+            st["flag"] = "ABORTED"
+            return False
 
         # on once ARRIVED at h_on, not before setting off for it
         if not move_path(down_a, "DESCENDING", DESCEND_MPS):
