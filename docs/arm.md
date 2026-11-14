@@ -9,6 +9,7 @@ scripts/arm.sh            # cartesian teleop: sticks move the hand
 scripts/arm.sh fk         # torque OFF, move by hand, watch hand xyz (check the model)
 scripts/arm.sh dry        # print IK targets, send nothing
 scripts/arm.sh joint      # joint-space teleop
+scripts/arm.sh each       # one joint at a time: hold Y/X/A/B/R = pan/lift/elbow/wrist_flex/roll, stick moves it
 ```
 
 Hold **ZR** (deadman) for everything. Left stick = hand radial/swing, right stick Y = up/down,

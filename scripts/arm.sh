@@ -5,6 +5,7 @@
 #   scripts/arm.sh fk         torque OFF, move the arm by hand, prints hand xyz (check the model)
 #   scripts/arm.sh dry        prints the IK targets, sends nothing
 #   scripts/arm.sh joint      joint-space teleop (scripts/arm_gamepad.py)
+#   scripts/arm.sh each       hold a button per joint, stick moves just that joint (scripts/arm_each.py)
 #   scripts/arm.sh keys       joint-space keyboard teleop (scripts/arm_keys.py), no gamepad needed
 #   scripts/arm.sh pad        XInput gamepad (Flydigi) joint teleop + magnet (scripts/arm_xpad.py);
 #                             `pad --no-arm` tests just the controller and magnet
@@ -35,6 +36,7 @@ case "${1:-}" in
   fk)    shift; extra=(--fk) ;;
   dry)   shift; extra=(--dry-run) ;;
   joint) shift; script=arm_gamepad.py ;;
+  each)  shift; script=arm_each.py ;;
   keys)  shift; script=arm_keys.py ;;
   pad)   shift; script=arm_xpad.py ;;
   head)  shift; script=head.py ;;
