@@ -1098,6 +1098,10 @@ HIGH_M, HOVER_M = 0.12, 0.05
 # surface and the servos give where the package stops them, instead of driving into it.
 CONTACT_ABOVE_M, PRESS_BELOW_M = 0.01, 0.015  # press 15 mm: 10 fell short, 17 seated with margin (2026-11-13)
 PRESS_TORQUE, FULL_TORQUE = 350, 1000   # Torque_Limit, 0..1000 (= % x 10)
+# The magnet's flat in the arm model. One hand-taught pose read -3.6; the compliant wrist then
+# settled at -4.1..-6.3 over a dozen picks at 15-27 cm reach (2026-11-13), so -4.7 leaves it
+# little to correct. `r` still records taught poses; the startup line shows their mean.
+PICK_PITCH_DEG = -4.7
 WRIST_COMPLY_TORQUE = 100  # wrist_flex during the press: the magnet tilts flat on contact
 PRESS_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_flex")
 GRIP_WAIT_S = 0.5
@@ -1435,10 +1439,9 @@ def cmd_pick(a):
     # the pitch error the planner has to take out.
     flat_path = calib_dir() / "pick_flat_poses.json"
     flat_poses = json.loads(flat_path.read_text()) if flat_path.is_file() else []
-    if a.pitch_deg is None:  # the taught flat, averaged; wild ones (not a flat pose) left out
-        taught = [r["model_pitch_deg"] for r in flat_poses if abs(r["model_pitch_deg"]) < 15.0]
-        a.pitch_deg = float(np.mean(taught)) if taught else 0.0
-    print(f"magnet-down pitch {a.pitch_deg:+.1f} deg ({len(flat_poses)} taught flat poses)")
+    taught = [r["model_pitch_deg"] for r in flat_poses if abs(r["model_pitch_deg"]) < 15.0]
+    print(f"magnet-down pitch {a.pitch_deg:+.1f} deg" + (f" (taught flat poses: {len(taught)}, mean "
+          f"{np.mean(taught):+.1f})" if taught else ""))
 
     def down_ik(target, seeds_, roll):
         return head_cam.ik_down(kin, target, seeds_, lo, hi, hc.magnet_m, roll, pitch_deg=a.pitch_deg)
@@ -2275,9 +2278,9 @@ def main(argv=None):
     pk.add_argument("--wrist-torque", type=int, default=WRIST_COMPLY_TORQUE,
                     help=f"wrist_flex Torque_Limit during the press, 0..1000 (default {WRIST_COMPLY_TORQUE}): low "
                          "lets the magnet tilt flat on contact; --wrist-torque 1000 turns that off")
-    pk.add_argument("--pitch-deg", type=float, default=None,
+    pk.add_argument("--pitch-deg", type=float, default=PICK_PITCH_DEG,
                     help="magnet-down pitch in the arm model, + = face turned toward the base "
-                         "(default: the mean of the taught flat poses, pick_flat_poses.json)")
+                         f"(default {PICK_PITCH_DEG})")
     # -8 mm made up for a magnet that seated on one edge and slid out; with the taught pitch it
     # seats flat, and 0 still slid a little forward on the way down (2026-11-13): -3
     pk.add_argument("--radial-mm", type=float, default=-3.0,

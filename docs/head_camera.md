@@ -217,7 +217,7 @@ that case a planned pick seats the magnet on one edge. To correct it:
 2. Press `r` on the page. The pose goes to `pick_flat_poses.json`.
 3. Repeat at a few reaches.
 
-`pick` aims for the mean of the recorded pitches. Use `--pitch-deg` to override it.
+`pick` aims for -4.7 deg (`PICK_PITCH_DEG`), set from the angles the compliant wrist settled at; the startup line shows the recorded poses' mean for comparison. Use `--pitch-deg` to override it.
 
 ### Touch samples from the pick page
 
