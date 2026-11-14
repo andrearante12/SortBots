@@ -364,8 +364,8 @@ button.head,button.hold{background:rgba(60,60,60,.5)}
   background:rgba(29,38,51,.35);touch-action:none;border:1px solid rgba(120,150,190,.4)}
 #cam{position:absolute;right:8px;bottom:8px;background:rgba(0,0,0,.25);border-radius:8px;padding:6px}
 #cam .lbl{color:rgba(255,255,255,.6);font-size:10px;margin:2px 0 4px}
-#cpad{position:relative;width:110px;height:110px;border-radius:10px;background:rgba(51,40,29,.35);touch-action:none;
-  border:1px solid rgba(190,160,120,.4)}#cknob{background:rgba(226,160,74,.8)!important}
+#cpad{position:relative;width:110px;height:110px;border-radius:10px;background:rgba(29,38,51,.35);touch-action:none;
+  border:1px solid rgba(120,150,190,.4)}
 #knob,#zknob,#cknob{position:absolute;width:24px;height:24px;border-radius:50%;background:rgba(74,144,226,.8);left:50%;top:50%;
   transform:translate(-50%,-50%);pointer-events:none}.ax{position:absolute;color:rgba(170,190,210,.7);font-size:10px;pointer-events:none}
 #p{position:absolute;right:8px;bottom:8px;max-width:300px;max-height:40vh;overflow:auto;background:rgba(0,0,0,.45);
