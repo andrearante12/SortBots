@@ -362,6 +362,8 @@ button.head,button.hold{background:rgba(60,60,60,.5)}
 #pad{position:relative;width:150px;height:150px;border-radius:10px;background:rgba(29,38,51,.35);touch-action:none;
   border:1px solid rgba(120,150,190,.4)}#zpad{position:relative;width:40px;height:150px;border-radius:10px;
   background:rgba(29,38,51,.35);touch-action:none;border:1px solid rgba(120,150,190,.4)}
+#cam{position:absolute;right:8px;bottom:8px;background:rgba(0,0,0,.25);border-radius:8px;padding:6px}
+#cam .lbl{color:rgba(255,255,255,.6);font-size:10px;margin:2px 0 4px}
 #cpad{position:relative;width:110px;height:110px;border-radius:10px;background:rgba(51,40,29,.35);touch-action:none;
   border:1px solid rgba(190,160,120,.4)}#cknob{background:rgba(226,160,74,.8)!important}
 #knob,#zknob,#cknob{position:absolute;width:24px;height:24px;border-radius:50%;background:rgba(74,144,226,.8);left:50%;top:50%;
@@ -376,22 +378,22 @@ tr.cur td{background:rgba(32,40,56,.7)}.go{font-size:13px;font-weight:600;color:
 .st{color:#aaa;font-size:10px;margin-top:5px;word-break:break-word}
 </style>
 <div id=img><img id=v alt="camera"></div><div id=side><div id=top></div><div id=btn></div>
-<div id=jog style="display:none"><div class=lbl>hand: drag / arrows / PgUp PgDn (hold)</div>
+<div id=jog style="display:none"><div class=lbl>hand:</div>
+<div class=row style="margin-bottom:4px">
+<button class=hold data-j="w" data-s="1">wrist up</button><button class=hold data-j="w" data-s="-1">wrist down</button></div>
 <div style="display:flex;gap:10px;align-items:flex-start">
 <div id=pad><div class=ax style="top:4px;left:50%;transform:translateX(-50%)">away</div>
 <div class=ax style="bottom:4px;left:50%;transform:translateX(-50%)">toward</div>
 <div class=ax style="left:4px;top:50%;transform:translateY(-50%)">left</div>
 <div class=ax style="right:4px;top:50%;transform:translateY(-50%)">right</div><div id=knob></div></div>
 <div id=zpad><div class=ax style="top:4px;left:50%;transform:translateX(-50%)">up</div>
-<div class=ax style="bottom:4px;left:50%;transform:translateX(-50%)">down</div><div id=zknob></div></div>
-<div><div class=lbl style="margin-top:0">camera: drag / a d w s</div>
+<div class=ax style="bottom:4px;left:50%;transform:translateX(-50%)">down</div><div id=zknob></div></div></div>
+<div class=row style="margin-top:6px"><span class=lbl>speed </span><button data-k="1">L1</button><button data-k="2">L2</button><button data-k="3">L3</button><button data-k="4">L4</button></div></div>
+<div id=cam style="display:none"><div class=lbl>camera:</div>
 <div id=cpad><div class=ax style="top:4px;left:50%;transform:translateX(-50%)">up</div>
 <div class=ax style="bottom:4px;left:50%;transform:translateX(-50%)">down</div>
 <div class=ax style="left:4px;top:50%;transform:translateY(-50%)">left</div>
-<div class=ax style="right:4px;top:50%;transform:translateY(-50%)">right</div><div id=cknob></div></div></div></div>
-<div class=row style="margin-top:8px">
-<button class=hold data-j="w" data-s="1">wrist up</button><button class=hold data-j="w" data-s="-1">wrist down</button></div>
-<div class=row><span class=lbl>speed </span><button data-k="1">L1</button><button data-k="2">L2</button><button data-k="3">L3</button><button data-k="4">L4</button></div></div>
+<div class=ax style="right:4px;top:50%;transform:translateY(-50%)">right</div><div id=cknob></div></div></div>
 <div id=p>waiting...</div></div>
 <script>
 function esc(t){return String(t).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
@@ -450,6 +452,7 @@ function render(S){
   if(g.checks.length)h+='<ul>'+g.checks.map(c=>'<li class='+(c[1]?'ok':'no')+'>'+(c[1]?'&#10003; ':'&#10007; ')+esc(c[0])+'</li>').join('')+'</ul>';
   if(g.ready&&!g.buttons)h+='<div class=go>Ready: press B</div>';
   buttons(g);document.getElementById('jog').style.display=g.jog?'block':'none';
+  document.getElementById('cam').style.display=g.jog?'block':'none';
   // the latest message (a refusal, a warning) goes on top, above the buttons: below the drive
   // panel it was out of sight and a refused GO looked like "nothing happens" (2026-11-13)
   // pick (it has buttons): two small pills and the message, no panel (2026-11-13: minimal)
