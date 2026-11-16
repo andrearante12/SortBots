@@ -2176,15 +2176,17 @@ def cmd_pick(a):
             hold(True)
         # every pick starts from rest (2026-11-13): up and clear of the package and the marker,
         # whatever the last attempt left behind
-        if st["rest_q"] is not None and np.max(np.abs(arm_q() - st["rest_q"])) > math.radians(3):
+        from_rest = st["rest_q"] is not None
+        if from_rest and np.max(np.abs(arm_q() - st["rest_q"])) > math.radians(3):
             if not go_rest():
                 return
         if not find_marker() or not lock_with_step_aside() or not do_plan():
             return
-        # from rest (it just went there) the joint move starts above and behind: no raise first,
-        # which lifted toward an unreachable 'clear' height over a close box (2026-11-15)
-        at_rest = st["rest_q"] is not None and np.max(np.abs(arm_q() - st["rest_q"])) < math.radians(3)
-        if st["face"] == "top" and not at_rest and not raise_clear():
+        # From rest (it just went there) the joint move starts above and behind: no raise first.
+        # Re-measuring "at rest" here failed on a servo sagging >3 deg under gravity, and the raise
+        # crawled toward 27 cm, the top of the reach, over a tall box (2026-11-15). The raise is for
+        # a pick started from wherever the hand was left, i.e. no rest pose.
+        if st["face"] == "top" and not from_rest and not raise_clear():
             return
         if not do_go():
             return
