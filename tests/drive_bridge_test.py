@@ -231,7 +231,7 @@ def _serve(tmp_path, *extra):
     base = f"http://127.0.0.1:{port}"
     for _ in range(100):
         try:
-            urllib.request.urlopen(base + "/api/version", timeout=1)
+            urllib.request.urlopen(base + "/operator.html", timeout=1)
             return p, base
         except OSError:
             time.sleep(0.1)
