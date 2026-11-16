@@ -1116,6 +1116,10 @@ FACE_TOP_DEG, FACE_SIDE_DEG, SIDE_MAX_YAW_DEG = 35.0, 35.0, 12.0
 # straight down only up to ~13 cm, so a fixed 12 cm approach refused a box 20 cm out that the
 # arm reached fine by hand (2026-11-15).
 TOP_HIGH_CANDS_M, TOP_HOVER_CANDS_M = (0.12, 0.09, 0.06), (0.05, 0.03, 0.02)
+# When the taught pitch can't reach the target (a tall box near the base: the wrist hits its
+# calibrated limit, 2026-11-15), the plan tries pitches further out, nearest first, and the
+# compliant wrist flattens the rest on contact. Hand-placed flat touches there read -15..-18.
+PITCH_FALLBACK_DEG = (-3, 3, -6, 6, -9, 9, -12, -15, -18, -21)
 SIDE_HIGH_M, SIDE_HOVER_M, SIDE_LIFT_M, SIDE_PRESS_MM = 0.06, 0.03, 0.08, 8.0
 WRIST_COMPLY_TORQUE = 100  # wrist_flex during the press: the magnet tilts flat on contact
 PRESS_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_flex")
@@ -1397,6 +1401,7 @@ def cmd_pick(a):
           "arm_held": False, "quit_armed": False, "locked": None, "plan": None, "state": "lock",
           "flag": "FREE", "level": 1, "jog_q": None, "jog_target": None, "jog_ok": True,
           "face": "top", "axis": np.array([0.0, 0.0, 1.0]), "high_m": HIGH_M, "hover_m": HOVER_M,
+          "pitch_top": None,
           "msg": f"arm free: move it clear of the package, then Lock target (marker {a.marker_id})",
           "until": time.monotonic() + 1e9}
 
@@ -1609,6 +1614,8 @@ def cmd_pick(a):
         """Magnet flat on the locked face at `target`: top faces through down_ik (the taught
         -4.7), side faces along st["axis"] at --side-pitch-deg, seeded with side poses too."""
         if st["face"] == "top" and pitch is None and tol is None:
+            if st.get("pitch_top") is not None and st["pitch_top"] != a.pitch_deg:
+                return head_cam.ik_down(kin, target, seeds_, lo, hi, hc.magnet_m, roll, pitch_deg=st["pitch_top"])
             return down_ik(target, seeds_, roll)
         side = st["face"] == "side"
         return head_cam.ik_down(kin, target, list(seeds_) + (side_seeds if side else []), lo, hi, hc.magnet_m,
@@ -1730,7 +1737,7 @@ def cmd_pick(a):
         p_seat = kin.tool_point(q_seat, hc.magnet_m)
         z_now = float((p_seat - st["locked"]) @ st["axis"])
         settled = model_pitch(q_seat)
-        planned = a.side_pitch_deg if st["face"] == "side" else a.pitch_deg
+        planned = a.side_pitch_deg if st["face"] == "side" else (st["pitch_top"] or a.pitch_deg)
         print(f"\nseated ({st['face']} face): magnet pitch {settled:+.1f} deg in the model (planned "
               f"{planned:+.1f}), reach {np.linalg.norm(p_seat[:2]) * 100:.1f} cm, height {p_seat[2] * 100:.1f} cm")
         # lift at the pitch the wrist settled to: the taught one would twist the package on the way up
@@ -1833,11 +1840,27 @@ def cmd_pick(a):
         between. True if all solvable inside the joint limits."""
         q_now = arm_q()
         locked, roll = st["locked"], float(q_now[4])
+        if st["face"] == "top":  # the taught pitch, else the nearest one that reaches contact
+            st["pitch_top"] = a.pitch_deg
+            # contact AND the lowest hover: one without the other can't be approached straight
+            def reach_ok():
+                return all(face_ik(along(d_), seeds + [q_now], roll) is not None
+                           for d_ in (0.0, TOP_HOVER_CANDS_M[-1]))
+            if not reach_ok():
+                for d in PITCH_FALLBACK_DEG:
+                    st["pitch_top"] = a.pitch_deg + d
+                    if reach_ok():
+                        print(f"\ntaught pitch {a.pitch_deg:+.1f} out of reach here: planning at {st['pitch_top']:+.1f}")
+                        break
+                else:
+                    st["pitch_top"] = a.pitch_deg
         if st["face"] == "top":  # the highest approach that solves
             for hv in TOP_HOVER_CANDS_M:
                 if face_ik(along(hv), seeds + [q_now], roll) is not None:
                     st["hover_m"] = hv
                     break
+            # nothing higher reachable (top of the reach): the joint move goes to the hover itself
+            st["high_m"] = st["hover_m"]
             for hh in TOP_HIGH_CANDS_M:
                 if hh > st["hover_m"] and face_ik(along(hh), seeds + [q_now], roll) is not None:
                     st["high_m"] = hh
@@ -1863,7 +1886,9 @@ def cmd_pick(a):
             return False
         st["plan"], st["state"], st["flag"] = {"high": sols["high"][0], "steps": steps}, "planned", "PLANNED"
         span = max(abs(np.degrees(sols["high"][0] - q_now)))
-        say(f"PLAN ok ({st['face']} face): {span:.0f} deg joint move to {hi_m * 100:.0f} cm out, then in to "
+        tilt = (f", magnet at {st['pitch_top']:+.0f} deg" if st["face"] == "top" and st["pitch_top"] != a.pitch_deg
+                else "")
+        say(f"PLAN ok ({st['face']} face{tilt}): {span:.0f} deg joint move to {hi_m * 100:.0f} cm out, then in to "
             f"{hv_m * 100:.0f} cm. GO when ready", 1e9)
         return True
 
