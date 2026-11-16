@@ -1144,6 +1144,10 @@ TOP_HIGH_CANDS_M, TOP_HOVER_CANDS_M = (0.12, 0.09, 0.06), (0.05, 0.03, 0.02)
 # calibrated limit, 2026-11-15), the plan tries pitches further out, nearest first, and the
 # compliant wrist flattens the rest on contact. Hand-placed flat touches there read -15..-18.
 PITCH_FALLBACK_DEG = (-3, 3, -6, 6, -9, 9, -12, -15, -18, -21)
+# Break-away after a top pick (2026-11-15): lifting straight off lost the grip on a tall box; by
+# hand it held when lifted LIFT_PRE_M first, then the wrist tilted (the page's "wrist up" way),
+# which pivots the package on the magnet instead of peeling it off flat. --lift-tilt-deg sets it.
+LIFT_PRE_M, LIFT_TILT_DEG = 0.015, 15.0
 SIDE_HIGH_M, SIDE_HOVER_M, SIDE_LIFT_M, SIDE_PRESS_MM = 0.06, 0.03, 0.08, 8.0
 WRIST_COMPLY_TORQUE = 100  # wrist_flex during the press: the magnet tilts flat on contact
 PRESS_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_flex")
@@ -1831,6 +1835,26 @@ def cmd_pick(a):
         planned = a.side_pitch_deg if st["face"] == "side" else (st["pitch_top"] or a.pitch_deg)
         print(f"\nseated ({st['face']} face): magnet pitch {settled:+.1f} deg in the model (planned "
               f"{planned:+.1f}), reach {np.linalg.norm(p_seat[:2]) * 100:.1f} cm, height {p_seat[2] * 100:.1f} cm")
+        if st["face"] == "top" and a.lift_tilt_deg:
+            pre = straight(z_now, z_now + LIFT_PRE_M, 0.005, pitch=settled)
+            if pre and not move_path(pre, "LIFTING", PRESS_MPS * 2):
+                say("ABORTED during the lift: holding, magnet still ON", 1e9)
+                st["state"] = "holding"
+                return
+            # "wrist up" in joint terms, probed at the zero pose as the pad and page buttons do
+            ref = np.zeros(5)
+            probe = ref.copy()
+            probe[3] += 1e-3
+            up_sign = 1.0 if kin.pose(probe)[3] > kin.pose(ref)[3] else -1.0
+            q_t = arm_q()
+            q_t[3] = float(np.clip(q_t[3] + up_sign * math.radians(a.lift_tilt_deg), lo[3], hi[3]))
+            if not move_to(q_t, "LIFTING", dps=20.0):
+                say("ABORTED during the lift: holding, magnet still ON", 1e9)
+                st["state"] = "holding"
+                return
+            q_seat = arm_q()
+            z_now = float((kin.tool_point(q_seat, hc.magnet_m) - st["locked"]) @ st["axis"])
+            settled = model_pitch(q_seat)
         # lift at the pitch the wrist settled to: the taught one would twist the package on the way up
         if st["face"] == "top":
             # as high as solves, at the settled tilt, else the planned one, else tilted further:
@@ -2643,6 +2667,9 @@ def main(argv=None):
     pk.add_argument("--press-torque", type=int, default=PRESS_TORQUE,
                     help=f"Torque_Limit of lift/elbow/wrist during the press, 0..1000 (default {PRESS_TORQUE}): "
                          "how hard it pushes; --press-mm is how far")
+    pk.add_argument("--lift-tilt-deg", type=float, default=LIFT_TILT_DEG,
+                    help=f"after a top pick: lift {LIFT_PRE_M * 100:.1f} cm, then tilt the wrist this far the "
+                         f"'wrist up' way before the rest of the lift (default {LIFT_TILT_DEG:g}; 0 = straight up)")
     pk.add_argument("--wrist-torque", type=int, default=WRIST_COMPLY_TORQUE,
                     help=f"wrist_flex Torque_Limit during the press, 0..1000 (default {WRIST_COMPLY_TORQUE}): low "
                          "lets the magnet tilt flat on contact; --wrist-torque 1000 turns that off")
