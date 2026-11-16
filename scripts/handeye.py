@@ -1705,6 +1705,29 @@ def cmd_pick(a):
             seed = [r[0]]
         return qs
 
+    def straight_blend(z_from, z_to, step):
+        """straight() for a top face whose approach angle differs from its contact angle: the pitch
+        goes from pitch_app at the hover to pitch_top at contact (z = 0) and stays there below it,
+        each step taking that or the nearest steeper one that solves. Over a tall box near the base
+        the flattest reachable angle was -22 at 2 cm, -18 at 1 cm, -14 at contact (2026-11-15)."""
+        p_app, p_top, h0 = st["pitch_app"], st["pitch_top"], max(st["hover_m"], 1e-6)
+        sgn = 1.0 if p_app >= p_top else -1.0  # "steeper" is toward the approach angle
+        qs, seed = [], [arm_q()]
+        n = max(1, int(round(abs(z_to - z_from) / step)))
+        for i in range(1, n + 1):
+            z = z_from + (z_to - z_from) * i / n
+            want = p_top + (p_app - p_top) * min(1.0, max(0.0, z / h0))
+            r = None
+            for extra in range(0, 11):
+                r = face_ik(along(z), seed, float(seed[0][4]), pitch=want + sgn * extra, tol=2.0)
+                if r is not None:
+                    break
+            if r is None:
+                return None
+            qs.append((z, r[0]))
+            seed = [r[0]]
+        return qs
+
     def lift_path(p0, height, pitch):
         """(h, q) poses lifting the magnet straight up from p0 by `height`, its axis held at the
         face's normal turned by `pitch`: a side pick lifts up, not back along the normal."""
@@ -1729,8 +1752,12 @@ def cmd_pick(a):
         the magnet off, so a package that's caught stays caught."""
         h_on = a.magnet_on_mm / 1000.0
         press_mm = a.side_press_mm if st["face"] == "side" else a.press_mm
-        down = straight(st["hover_m"], CONTACT_ABOVE_M, 0.01)
-        press = straight(CONTACT_ABOVE_M, -press_mm / 1000.0, 0.004)
+        if st["face"] == "top" and st.get("pitch_app") is not None and st["pitch_app"] != st["pitch_top"]:
+            down = straight_blend(st["hover_m"], CONTACT_ABOVE_M, 0.005)
+            press = straight_blend(CONTACT_ABOVE_M, -press_mm / 1000.0, 0.004)
+        else:
+            down = straight(st["hover_m"], CONTACT_ABOVE_M, 0.01)
+            press = straight(CONTACT_ABOVE_M, -press_mm / 1000.0, 0.004)
         if down is None or press is None:
             say(f"the approach to the {st['face']} face isn't solvable from here", 1e9)
             return
@@ -1920,33 +1947,37 @@ def cmd_pick(a):
         between. True if all solvable inside the joint limits."""
         q_now = arm_q()
         locked, roll = st["locked"], float(q_now[4])
-        if st["face"] == "top":  # the taught pitch, else the nearest one that reaches contact
-            st["pitch_top"] = a.pitch_deg
-            # contact AND the lowest hover: one without the other can't be approached straight
-            def reach_ok():
-                return all(face_ik(along(d_), seeds + [q_now], roll) is not None
-                           for d_ in (0.0, TOP_HOVER_CANDS_M[-1]))
-            if not reach_ok():
-                for d in PITCH_FALLBACK_DEG:
-                    st["pitch_top"] = a.pitch_deg + d
-                    if reach_ok():
-                        print(f"\ntaught pitch {a.pitch_deg:+.1f} out of reach here: planning at {st['pitch_top']:+.1f}")
-                        break
-                else:
-                    st["pitch_top"] = a.pitch_deg
-        if st["face"] == "top":  # the highest approach that solves
-            for hv in TOP_HOVER_CANDS_M:
-                if face_ik(along(hv), seeds + [q_now], roll) is not None:
-                    st["hover_m"] = hv
+        st["pitch_app"] = None
+        if st["face"] == "top":
+            # Contact and approach angles chosen apart (2026-11-15): one angle for both put a tall box
+            # near the base at -25.7 (the only one reaching 2 cm above it too) while hand-placed flat
+            # touches there read -15..-18; the wrist was at its stop and couldn't flatten the rest.
+            # Contact: the reachable angle nearest the taught one. Approach: the one nearest THAT which
+            # reaches a hover; the descent blends from one to the other.
+            def at(pitch, d_):
+                return face_ik(along(d_), seeds + [q_now], roll, pitch=pitch, tol=2.0) is not None
+            st["pitch_top"] = next((a.pitch_deg + d for d in (0,) + PITCH_FALLBACK_DEG if at(a.pitch_deg + d, 0.0)),
+                                   a.pitch_deg)
+            if st["pitch_top"] != a.pitch_deg:
+                print(f"\ntaught pitch {a.pitch_deg:+.1f} out of reach here: contact at {st['pitch_top']:+.1f}")
+            for d in (0,) + PITCH_FALLBACK_DEG:
+                pa = st["pitch_top"] + d
+                hv = next((h for h in TOP_HOVER_CANDS_M if at(pa, h)), None)
+                if hv is not None:
+                    st["pitch_app"], st["hover_m"] = pa, hv
                     break
+            if st["pitch_app"] is None:
+                say("top face NOT reachable from above with the magnet near flat: move the package", 20.0)
+                return False
+            if st["pitch_app"] != st["pitch_top"]:
+                print(f"\napproach at {st['pitch_app']:+.1f}, turning to {st['pitch_top']:+.1f} on the way down")
             # nothing higher reachable (top of the reach): the joint move goes to the hover itself
-            st["high_m"] = st["hover_m"]
-            for hh in TOP_HIGH_CANDS_M:
-                if hh > st["hover_m"] and face_ik(along(hh), seeds + [q_now], roll) is not None:
-                    st["high_m"] = hh
-                    break
+            st["high_m"] = next((h for h in TOP_HIGH_CANDS_M if h > st["hover_m"] and at(st["pitch_app"], h)),
+                                st["hover_m"])
         hi_m, hv_m = st["high_m"], st["hover_m"]
-        sols = {n: face_ik(along(dz), seeds + [q_now], roll)
+        pa = st["pitch_app"]  # None for a side face: its own pitch
+        sols = {n: face_ik(along(dz), seeds + [q_now], roll, pitch=pa if n != "contact" else None,
+                           tol=2.0 if pa is not None and n != "contact" else None)
                 for n, dz in (("high", hi_m), ("hover", hv_m), ("contact", 0.0))}
         bad = [n for n, v_ in sols.items() if v_ is None]
         if bad:
@@ -1956,7 +1987,7 @@ def cmd_pick(a):
             return False
         steps, seed = [], [sols["high"][0]]
         for dz in np.arange(hi_m - 0.01, hv_m - 1e-6, -0.01):
-            r = face_ik(along(dz), seed, roll)
+            r = face_ik(along(dz), seed, roll, pitch=pa, tol=2.0 if pa is not None else None)
             if r is None:
                 break
             steps.append((float(dz), r[0]))
