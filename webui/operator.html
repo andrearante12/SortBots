@@ -215,6 +215,7 @@
   #driveview .dv-live { bottom: 12px; left: 12px; display: flex; gap: 14px; align-items: center; padding: 6px 10px; font-size: .84rem; }
   #driveview .dv-live b { font-weight: 600; }
   #driveview .dv-live.on { border-color: var(--go); box-shadow: 0 0 0 2px var(--go); }
+  #driveview .dv-boot { display: block; margin-top: 6px; font-size: .78rem; color: #6c7681; }
   #driveview .dv-pickst { bottom: 56px; right: 12px; max-width: 46%; display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; font-size: .84rem; }
   #driveview .dv-pickst b { font-weight: 600; }
   #driveview .dv-pickst.moving { border-color: var(--tape); box-shadow: 0 0 0 2px var(--tape); }
@@ -516,7 +517,7 @@
       <button data-v="2d" class="active" title="Occupancy map: tools, waypoints and routes">Map</button>
       <button data-v="3d" title="The fleet's 3D point cloud (/fleet/recon_cloud). Drag to orbit, scroll to zoom, right-drag to pan">3D cloud</button>
       <button data-v="sim" hidden title="What Isaac Sim actually renders: one camera on the whole floor (configs/sim_view.yaml). Rendered only while this view is open, so it costs nothing otherwise">Sim</button>
-      <button data-v="drive" hidden title="The real robot's head camera, and driving its base with a gamepad (serve.py --drive, on the machine the robot is plugged into)">Drive</button>
+      <button data-v="drive" hidden title="The real robot: its head camera, driving its base and pick and place from a gamepad (serve.py --drive, on the machine the robot is plugged into)">Robot</button>
     </div>
     <!-- Map tools live up here, not over the map: the map gets the whole stage. -->
     <div class="seg" id="tools" role="toolbar" aria-label="Map tools">
@@ -583,7 +584,9 @@
       <span class="sp"></span>
       <button type="button" class="btn small primary" id="dv-pick" hidden title="handeye pick's one button: find the package, pick it, carry it to the taught place spot, release, back to rest. Pad: A">Pick &amp; place</button>
       <button type="button" class="btn small stop" id="dv-abort" hidden title="Stop the arm where it is (it holds). Pad: B">Abort</button>
-      <button type="button" class="btn small primary" id="dv-connect" title="Open the camera and the wheel servos. Only one program can own them: the arm's own tools have to be stopped first">Connect</button>
+      <button type="button" class="btn small primary" id="dv-start-pick" title="Start the arm's pick program (scripts/arm.sh head handeye pick): camera, arm, magnet and base, with pick and place on pad A. The arm moves to its rest pose as it starts">Start arm &amp; pick</button>
+      <button type="button" class="btn small" id="dv-connect" title="Camera and wheels only, at full frame rate, no arm. Only one program can own them: the arm's pick has to be stopped first">Drive only</button>
+      <button type="button" class="btn small stop" id="dv-stop-pick" hidden title="Quit the arm's pick program: magnet off, base stopped, arm torque OFF (support the arm)">Stop arm</button>
       <button type="button" class="btn small" id="dv-disconnect" hidden title="Stop the wheels, free them and release the camera and the servo bus">Disconnect</button>
     </div>
     <div class="float dv-err" id="dv-err" hidden></div>

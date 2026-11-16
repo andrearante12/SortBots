@@ -13,18 +13,26 @@ When `handeye pick` is running (scripts/handeye.py, its page on 127.0.0.1:8765),
 camera, the arm, the magnet and the base, so the bridge can't run at all. The Drive view then goes
 through handeye instead: its preview frame, its /base input for driving, and its one-button pick
 (key `o`: find the package, pick it, carry it to the taught place pose, release, back to rest).
+
+The operator can also START it from the Drive view (start_pick). handeye pick is a terminal
+program (raw keyboard mode on stdin, a status line it rewrites), so it runs on a pseudo-terminal
+whose master this process holds and drains; its output becomes the view's log. Stopping it is its
+own quit (`x` twice: torque goes off), so the page asks the operator to support the arm first.
 """
 from __future__ import annotations
 
 import json
 import os
-import urllib.error
-import urllib.request
+import pty
+import re
+import signal
 import socket
 import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import deque
 from pathlib import Path
 
@@ -37,6 +45,11 @@ CONFIG = REPO / "configs" / "drive_base.yaml"
 # handeye's keys for the pad's buttons: `o` is its one-button pick-and-place; any key aborts a move
 # in progress, and `c` is the one with no action of its own at rest (it only cancels a calibration look).
 PICK_KEY, ABORT_KEY = "o", "c"
+# How the Drive view starts handeye pick: arm.sh finds the arm's board by USB serial and refuses a
+# ROS-sourced env. SORTBOTS_HANDEYE_CMD (a JSON argv) replaces it in the tests.
+HANDEYE_ARGV = json.loads(os.environ["SORTBOTS_HANDEYE_CMD"]) if os.environ.get("SORTBOTS_HANDEYE_CMD") \
+    else ["bash", str(REPO / "scripts" / "arm.sh"), "head", "handeye", "pick"]
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
 class DriveProxy:
@@ -50,6 +63,8 @@ class DriveProxy:
         self.proc: subprocess.Popen | None = None
         self.log: deque[str] = deque(maxlen=LOG_LINES)
         self.lock = threading.Lock()
+        self.pick_proc: subprocess.Popen | None = None
+        self.pick_log: deque[str] = deque(maxlen=LOG_LINES)
 
     # -- lifecycle -------------------------------------------------------------------------
 
@@ -138,6 +153,82 @@ class DriveProxy:
         except (OSError, ValueError, AttributeError):
             return []
 
+    def pick_running(self) -> bool:
+        return self.pick_proc is not None and self.pick_proc.poll() is None
+
+    def start_pick(self) -> dict:
+        """Start handeye pick on a pty. Returns at once: it takes a few seconds (camera, magnet board
+        boot, the move to rest) before its page answers, and state() says `pick_starting` till then."""
+        if self.handeye_state() is not None:
+            return {"ok": True, "already": True}
+        with self.lock:
+            if self.pick_running():
+                return {"ok": True, "starting": True}
+        if self.running():
+            self.stop()  # the drive-only bridge holds the camera and the base board
+        with self.lock:
+            master, slave = pty.openpty()
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("AMENT_PREFIX_PATH", "PYTHONPATH", "LD_LIBRARY_PATH")}
+            env["TERM"] = "dumb"
+            self.pick_log.clear()
+            try:
+                # its own session: a Ctrl-C meant for serve.py's terminal must not reach the arm
+                self.pick_proc = subprocess.Popen(HANDEYE_ARGV, stdin=slave, stdout=slave, stderr=slave,
+                                                  env=env, cwd=str(REPO), start_new_session=True, close_fds=True)
+            finally:
+                os.close(slave)
+            threading.Thread(target=self._pump_pty, args=(master,), daemon=True).start()
+        time.sleep(0.5)  # arm.sh's own refusals (board unplugged, no permission) come back at once
+        if not self.pick_running():
+            return {"ok": False, "error": self._pick_death_note()}
+        return {"ok": True, "starting": True}
+
+    def _pump_pty(self, master: int) -> None:
+        # Drained always: a full pty buffer would block handeye's status prints, and so its loop.
+        buf = ""
+        while True:
+            try:
+                data = os.read(master, 4096)
+            except OSError:  # EIO: the child closed its side (exited)
+                break
+            if not data:
+                break
+            buf += ANSI.sub("", data.decode(errors="replace"))
+            *lines, buf = re.split(r"[\r\n]+", buf)
+            self.pick_log.extend(l.strip() for l in lines if l.strip())
+        if buf.strip():
+            self.pick_log.append(buf.strip())
+        os.close(master)
+
+    def _pick_death_note(self) -> str:
+        code = self.pick_proc.returncode if self.pick_proc else None
+        tail = " | ".join(list(self.pick_log)[-3:])
+        return f"handeye pick exited (code {code}){': ' + tail if tail else ''}"
+
+    def stop_pick(self) -> dict:
+        """handeye's own quit (`x` twice: magnet off, base stopped, torque off), then signals if it
+        doesn't go. Only a pick this process started is signalled; one from a terminal gets the keys."""
+        answered = self._handeye("/cmd?k=x") is not None
+        if answered:
+            time.sleep(0.3)
+            self._handeye("/cmd?k=x")
+        proc = self.pick_proc
+        if proc is None or proc.poll() is not None:
+            return {"ok": answered or proc is not None}
+        for sig, wait in ((None, 8.0), (signal.SIGINT, 5.0), (signal.SIGKILL, 3.0)):
+            if sig is not None:
+                try:
+                    proc.send_signal(sig)
+                except ProcessLookupError:
+                    break
+            try:
+                proc.wait(timeout=wait)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        return {"ok": proc.poll() is not None}
+
     def pick(self) -> dict:
         if self.running():
             return {"ok": False, "error": "pick needs `handeye pick` running, not the drive-only bridge: "
@@ -170,8 +261,13 @@ class DriveProxy:
         out = {"running": self.running(), "log": list(self.log)[-8:]}
         if not out["running"]:
             hs = self.handeye_state()
+            if hs is None and self.pick_running():
+                return {"running": False, "pick_starting": True, "pick_log": list(self.pick_log)[-4:],
+                        "speed_levels": self._speed_levels()}
+            if hs is None and self.pick_proc is not None:
+                out["pick_error"] = self._pick_death_note()
             if hs is not None:
-                return {"running": True, "backend": "handeye", "pick": hs,
+                return {"running": True, "backend": "handeye", "pick": hs, "pick_owned": self.pick_running(),
                         "camera": {"ok": True, "error": None, "fps": None},
                         "base": {"ok": bool(hs.get("base")),
                                  "error": None if hs.get("base") else "handeye pick has no base (base board unplugged, "

@@ -269,6 +269,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_drive(lambda: self._serve_json(DRIVE.stop()))
         elif route == "/api/drive/cmd":
             self._with_drive(self._drive_cmd)
+        elif route == "/api/drive/pick/start":
+            self._with_drive(lambda: self._serve_json(DRIVE.start_pick()))
+        elif route == "/api/drive/pick/stop":
+            self._with_drive(lambda: self._serve_json(DRIVE.stop_pick()))
         elif route == "/api/drive/pick":
             self._with_drive(lambda: self._serve_json(DRIVE.pick()))
         elif route == "/api/drive/abort":
@@ -869,6 +873,8 @@ def main() -> None:
     finally:
         if DRIVE is not None:
             DRIVE.stop()  # wheels to 0, torque off, bus and camera released
+            if DRIVE.pick_running():
+                DRIVE.stop_pick()  # a pick started from the page: its own quit, not a hang-up
 
 
 if __name__ == "__main__":

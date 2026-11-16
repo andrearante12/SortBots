@@ -41,6 +41,7 @@ import math
 import os
 import queue
 import select
+import signal
 import sys
 import tempfile
 import threading
@@ -2474,6 +2475,14 @@ def cmd_pick(a):
         descend_and_pick()
         if st["state"] == "holding" and st["place_q"] is not None:
             do_place()
+
+    # Started from the operator view (webui/drive_proxy.py), this terminal is a pty that serve.py
+    # holds; if serve.py dies the pty hangs up, and SIGHUP's default would end the process on the
+    # spot, the wheels on their last speed. As Ctrl-C instead, the finally below still runs: magnet
+    # off, base stopped, torque off.
+    def _hangup(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGHUP, _hangup)
 
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)

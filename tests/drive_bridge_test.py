@@ -348,3 +348,73 @@ def test_proxy_goes_through_handeye_pick_when_it_runs(tmp_path, monkeypatch=None
         assert proxy2.state()["running"] is False and not proxy2.pick()["ok"]
     finally:
         drive_proxy.HANDEYE = old
+
+
+FAKE_HANDEYE = r'''
+import http.server, json, os, sys, threading, time
+port, tty, xs = int(sys.argv[1]), os.isatty(0), []
+print("\x1b[Kfake handeye starting", flush=True)
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith("/state"):
+            b = json.dumps({"flag": "HELD", "tty": tty, "base": True}).encode()
+            self.send_response(200); self.end_headers(); self.wfile.write(b)
+        elif self.path.startswith("/cmd?k=x"):
+            xs.append(1); self.send_response(204); self.end_headers()
+        else:
+            self.send_response(404); self.end_headers()
+    def log_message(self, *a):
+        pass
+time.sleep(1.0)  # camera, magnet board, the move to rest
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+while len(xs) < 2:  # handeye's quit: x, then x again to confirm
+    print("\rHELD | magnet off\x1b[K", end="", flush=True); time.sleep(0.05)
+print("\nmagnet off, torque off", flush=True)
+'''
+
+
+def test_the_page_starts_handeye_pick_on_a_pty_and_stops_it_with_its_own_quit(tmp_path):
+    import drive_proxy
+    script = tmp_path / "fake_handeye.py"
+    script.write_text(FAKE_HANDEYE)
+    port = _free_port()
+    old = drive_proxy.HANDEYE, drive_proxy.HANDEYE_ARGV
+    drive_proxy.HANDEYE, drive_proxy.HANDEYE_ARGV = f"http://127.0.0.1:{port}", [sys.executable, str(script), str(port)]
+    _, cfg_path = _cfg(tmp_path)
+    proxy = DriveProxy(python=sys.executable, config=cfg_path, socket_path=str(tmp_path / "d.sock"))
+    try:
+        assert proxy.start_pick() == {"ok": True, "starting": True}
+        st = proxy.state()
+        assert st["pick_starting"] and not st["running"]
+        for _ in range(50):
+            st = proxy.state()
+            if st.get("backend") == "handeye":
+                break
+            time.sleep(0.1)
+        assert st["backend"] == "handeye" and st["pick_owned"] and st["pick"]["tty"] is True  # a real terminal
+        assert proxy.start_pick()["already"]  # a second press starts nothing
+        assert any("fake handeye starting" in l for l in proxy.pick_log)  # its output, ANSI stripped
+        assert not any("\x1b" in l for l in proxy.pick_log)
+        assert proxy.stop_pick()["ok"] and not proxy.pick_running()
+        assert proxy.pick_proc.returncode == 0  # it quit on its own two x's, no signal needed
+        assert any("torque off" in l for l in proxy.pick_log)
+    finally:
+        if proxy.pick_running():
+            proxy.pick_proc.kill()
+        drive_proxy.HANDEYE, drive_proxy.HANDEYE_ARGV = old
+
+
+def test_a_pick_that_cannot_start_says_why(tmp_path):
+    import drive_proxy
+    old = drive_proxy.HANDEYE, drive_proxy.HANDEYE_ARGV
+    drive_proxy.HANDEYE = f"http://127.0.0.1:{_free_port()}"
+    drive_proxy.HANDEYE_ARGV = ["bash", "-c", "echo 'arm.sh: /dev/x not found: is the board plugged in?'; exit 2"]
+    try:
+        _, cfg_path = _cfg(tmp_path)
+        proxy = DriveProxy(python=sys.executable, config=cfg_path, socket_path=str(tmp_path / "d.sock"))
+        r = proxy.start_pick()
+        assert r["ok"] is False and "code 2" in r["error"] and "board plugged in" in r["error"], r
+        assert "board plugged in" in proxy.state()["pick_error"]
+    finally:
+        drive_proxy.HANDEYE, drive_proxy.HANDEYE_ARGV = old
