@@ -269,6 +269,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_drive(lambda: self._serve_json(DRIVE.stop()))
         elif route == "/api/drive/cmd":
             self._with_drive(self._drive_cmd)
+        elif route == "/api/drive/pick":
+            self._with_drive(lambda: self._serve_json(DRIVE.pick()))
+        elif route == "/api/drive/abort":
+            self._with_drive(lambda: self._serve_json(DRIVE.abort()))
         else:
             self._serve_error(404, f"no such endpoint: {route}")
 

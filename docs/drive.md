@@ -16,6 +16,20 @@ browser (localhost) ──HTTP──▶ serve.py --drive ──unix socket──
 
 Pick **Drive** next to Map / 3D cloud, press **Connect**, press any button on the pad.
 
+**Pick and place from the pad.** Start the pick first, in a terminal, then open the Drive view:
+
+```bash
+scripts/arm.sh head handeye pick
+```
+
+`handeye pick` owns the camera, the arm, the magnet and the base, so the Drive view goes through
+it (no Connect needed): **A** is its one-button pick and place (find the package, pick it, carry it
+to the taught place spot, release, back to rest, one continuous move), **B** aborts and holds the
+arm where it is, and RT + sticks still drive the base between picks. The base stops before any
+pick starts. Teach the place spot once in handeye's own page (Save place here); without one a
+pick ends holding the package. Without `handeye pick`, Connect starts the drive-only bridge and A
+only says that the pick isn't running.
+
 - **Pad:** hold **RT** to drive (deadman), left stick moves and strafes, right stick turns,
   d-pad up/down picks one of XLeRobot's three speeds (0.1 / 0.2 / 0.3 m/s). No pad: hold
   W A S D / Q E.

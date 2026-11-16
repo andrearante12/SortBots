@@ -278,6 +278,15 @@ ARM_JOG_AXES, HEAD_JOG_AXES, JOINT_JOG_AXES = JOG_AXES[:5], JOG_AXES[5:7], JOG_A
 JOINT_JOG_DPS = 30.0  # one joint, held button, at drive speed L2 (scaled by the speed buttons)
 HEAD_DPS = 25.0   # head speed at full camera-pad deflection, or a/d/w/s held (15 was slow on the pad)
 JOG_FRESH_S = 0.25
+# The operator view's Drive view (webui/operator_drive.js -> serve.py --drive): the omni base's body
+# velocity (x m/s forward, y m/s left, w rad/s counter-clockwise) and when it came. Like JOG: the page
+# resends it every 50 ms while the operator holds the pad's deadman; BASE_FRESH_S without one and the
+# base stops. Clamped to XLeRobot's top speed level whatever the page sends.
+BASE_CMD = {"v": (0.0, 0.0, 0.0), "t": 0.0}
+BASE_FRESH_S = 0.3
+BASE_MAX_MPS, BASE_MAX_RADPS = 0.3, math.radians(90.0)
+# What the pick is doing, for GET /state (the Drive view's status line); publish() keeps it current.
+PICK_STATE = {}
 
 
 def read_keys(timeout):
@@ -304,6 +313,32 @@ class _PreviewHandler(http.server.SimpleHTTPRequestHandler):
             JOG["v"], JOG["t"] = v, time.monotonic()
             self.send_response(204)
             self.end_headers()
+            return
+        if u.path == "/base":
+            q = urllib.parse.parse_qs(u.query)
+            try:
+                x, y, w = (float(q.get(k, ["0"])[0]) for k in ("x", "y", "w"))
+            except ValueError:
+                self.send_error(400)
+                return
+            if not all(math.isfinite(v) for v in (x, y, w)):
+                self.send_error(400)
+                return
+            n = math.hypot(x, y)
+            if n > BASE_MAX_MPS:  # a diagonal is no faster than straight ahead
+                x, y = x * BASE_MAX_MPS / n, y * BASE_MAX_MPS / n
+            w = max(-BASE_MAX_RADPS, min(BASE_MAX_RADPS, w))
+            BASE_CMD["v"], BASE_CMD["t"] = (x, y, w), time.monotonic()
+            self.send_response(204)
+            self.end_headers()
+            return
+        if u.path == "/state":
+            body = json.dumps(PICK_STATE).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         if u.path == "/cmd":
             k = urllib.parse.parse_qs(u.query, keep_blank_values=True).get("k", [""])[0]
@@ -550,7 +585,9 @@ def draw(cam, color, corners, ids, text, guide=None, msg=""):
                 print(f"\r\x1b[Kport 8765 is taken (an old http.server?): the page works but its buttons "
                       f"won't. Stop that server, or open {PREVIEW_HTML}\n")
     now = time.monotonic()
-    if now - PREVIEW["file_at"] > 0.25:
+    # 10 fps while the Drive view is driving the base (4 fps is too choppy to steer by), 4 otherwise:
+    # each frame is a JPEG encode in the pick's own loop.
+    if now - PREVIEW["file_at"] > (0.1 if now - BASE_CMD["t"] < 2.0 else 0.25):
         PREVIEW["file_at"] = now
         tmp = PREVIEW_JPG.with_name(".handeye_view.jpg")  # rename is atomic: no torn frames
         cv2.imwrite(str(tmp), color, [cv2.IMWRITE_JPEG_QUALITY, 70])
@@ -1601,6 +1638,9 @@ def cmd_pick(a):
         title = {"lock": "Pick: lock the target", "planned": "Pick: plan ready",
                  "at_hover": "Pick: hovering 5 cm above the target",
                  "holding": "Pick: holding the package (drive it, then release)"}[st["state"]]
+        PICK_STATE.update(flag=st["flag"], state=st["state"], title=title, msg=msg, status=txt,
+                          magnet=None if not mag.magnet else ("ON" if mag.on else "OFF"),
+                          place_set=st["place_q"] is not None, base=base is not None, t=time.time())
         worker.show(txt, {"title": title, "lines": [txt], "msg": msg, "checks": [], "box": None,
                           "reach": None, "progress": [], "stage": 0, "stages": 0, "done": False,
                           "ready": st["state"] == "planned", "flag": st["flag"], "buttons": buttons(),
@@ -2508,8 +2548,24 @@ def cmd_pick(a):
             if mag.magnet and time.monotonic() - mag.polled > 1.0:
                 mag.poll()
             mag.rearm_if_due()
+            # ---- the Drive view's base driving: only while fresh. A planned move or a pick blocks this
+            # loop, so it never runs during one; the base is stopped before any key's action, below.
+            if base is not None:
+                bv = BASE_CMD["v"] if time.monotonic() - BASE_CMD["t"] < BASE_FRESH_S else (0.0, 0.0, 0.0)
+                if any(bv) or st.get("base_moving"):
+                    try:
+                        base.bus.sync_write("Goal_Velocity", base_mod.wheel_raw(bv[0], bv[1], math.degrees(bv[2])),
+                                            normalize=False)
+                        st["base_moving"] = any(bv)
+                    except Exception as e:
+                        say(f"base: {e}", 8.0)
             # ---- keys and buttons
-            for k in read_keys(0.0):
+            keys = read_keys(0.0)
+            if keys and st.get("base_moving"):  # a pick must not start with the wheels still turning
+                BASE_CMD["t"] = 0.0
+                base.stop()
+                st["base_moving"] = False
+            for k in keys:
                 if k != "x":
                     st["quit_armed"] = False
                 if k in ("a", "d", "w", "s"):

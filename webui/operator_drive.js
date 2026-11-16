@@ -9,6 +9,14 @@
 //   POST /api/drive/start    open the camera and the wheel servos (scripts/drive_bridge.py)
 //   POST /api/drive/stop     wheels to 0, torque off, both released
 //   POST /api/drive/cmd      {x, y, w}: m/s forward, m/s left, rad/s counter-clockwise
+//   POST /api/drive/pick     handeye pick's one button: pick, carry, place, back to rest
+//   POST /api/drive/abort    stop the arm where it is
+//
+// Two backends behind the same routes (webui/drive_proxy.py). With `handeye pick` running
+// (the arm branch's pick, scripts/handeye.py) it owns the camera, arm, magnet and base, so
+// the view goes through it ({backend: "handeye"}): pad A is its pick-and-place, B aborts,
+// RT + sticks still drive the base between picks. Without it, Connect starts the drive-only
+// bridge (scripts/drive_bridge.py) and there is no pick.
 //
 // Safety lives on the bridge, not here: it stops the wheels watchdog_s (0.3 s) after the
 // last command, so commands go out ONLY while the operator holds the deadman (RT, or a
@@ -32,13 +40,16 @@
   const RT_ON = 0.5;       // deadman: RT at least half pulled
   // Standard Gamepad mapping (w3c.github.io/gamepad): axes 0/1 left stick, 2/3 right stick,
   // buttons 7 RT, 12/13 d-pad up/down.
-  const B_RT = 7, B_UP = 12, B_DOWN = 13;
+  const B_A = 0, B_B = 1, B_RT = 7, B_UP = 12, B_DOWN = 13;
+  // handeye's flags while the arm moves on its own (handeye.py MOVING_FLAGS + the base back-off)
+  const PICK_MOVING = new Set(["MOVING", "DESCENDING", "PRESSING", "LIFTING", "SEARCHING", "LOOKING"]);
   const KEYS = { w: [1, 0, 0], s: [-1, 0, 0], a: [0, 1, 0], d: [0, -1, 0], q: [0, 0, 1], e: [0, 0, -1] };
 
   const api = window.sortbotsDrive = { available: false, padToCmd, keysToCmd };
   let open = false, st = null, level = 0;
   let levels = [{ xy_mps: 0.1, theta_dps: 30 }];
-  let wasActive = false, prevUp = false, prevDown = false;
+  let wasActive = false, prevUp = false, prevDown = false, prevA = false, prevB = false;
+  let note = null; // {text, until}: a pick refusal, shown in the error banner a while
   let inflight = false, queued = null;
   let tickTimer = null, stateTimer = null, frameTimer = null, frameToken = 0;
   const held = new Set();
@@ -98,6 +109,10 @@
       if (up && !prevUp) level = Math.min(levels.length - 1, level + 1);
       if (down && !prevDown) level = Math.max(0, level - 1);
       prevUp = up; prevDown = down;
+      const a = btn(pad, B_A) > 0.5, b = btn(pad, B_B) > 0.5;
+      if (a && !prevA) pick();
+      if (b && !prevB) abort();
+      prevA = a; prevB = b;
     }
     let cmd = pad ? padToCmd(pad, level) : null;
     if (!(cmd && cmd.active) && held.size) cmd = keysToCmd(held, level);
@@ -115,6 +130,21 @@
     $("#dv-cmd").classList.toggle("muted", !cmd);
   }
 
+  // -- pick and place (handeye pick) ---------------------------------------------------------
+  const handeye = () => !!(st && st.running && st.backend === "handeye");
+  async function pick() {
+    if (!handeye()) { note = { text: "Pick & place needs handeye pick running: scripts/arm.sh head handeye pick", until: Date.now() + 8000 }; render(); return; }
+    stopNow(); // the base stops before the arm moves (handeye stops it too)
+    const r = await post("/api/drive/pick");
+    if (r && r.ok === false) note = { text: r.error || "pick refused", until: Date.now() + 8000 };
+    refresh();
+  }
+  async function abort() {
+    if (!handeye()) return;
+    await post("/api/drive/abort");
+    refresh();
+  }
+
   // -- state, camera -------------------------------------------------------------------------
   function setSt(el, ok, label, title) {
     el.className = "dv-st " + (ok === true ? "ok" : ok === false ? "bad" : "");
@@ -123,16 +153,30 @@
   }
   function render() {
     const running = !!(st && st.running);
+    const he = handeye();
     $("#dv-connect").hidden = running;
-    $("#dv-disconnect").hidden = !running;
+    $("#dv-disconnect").hidden = !running || he; // handeye pick is stopped from its own terminal
+    $("#dv-pick").hidden = $("#dv-abort").hidden = !he;
+    const ps = $("#dv-pickst"), pk = (st && st.pick) || {};
+    ps.hidden = !he;
+    if (he) {
+      const moving = PICK_MOVING.has(pk.flag);
+      ps.classList.toggle("moving", moving);
+      ps.classList.toggle("aborted", pk.flag === "ABORTED");
+      $("#dv-pflag").textContent = pk.flag || "";
+      $("#dv-ptitle").textContent = pk.title ? `· ${pk.title}` : "";
+      $("#dv-pmsg").textContent = pk.msg || (pk.place_set === false ? "No place spot taught yet: a pick stops holding the package" : "");
+      $("#dv-pick").disabled = moving;
+    }
     const cam = (st && st.camera) || {}, base = (st && st.base) || {};
     setSt($("#dv-cam"), running ? (cam.ok ? true : cam.error ? false : null) : null,
-      cam.ok ? `Camera ${cam.fps ? cam.fps.toFixed(0) + " fps" : ""}`.trim() : "Camera");
+      cam.ok ? (he ? "Camera (handeye)" : `Camera ${cam.fps ? cam.fps.toFixed(0) + " fps" : ""}`.trim()) : "Camera");
     const ids = base.ids ? Object.values(base.ids).join("/") : "";
     setSt($("#dv-base"), running ? (base.ok ? true : base.error ? false : null) : null,
-      base.ok && base.volts ? `Wheels ${base.volts.toFixed(1)} V` : "Wheels",
+      base.ok && base.volts ? `Wheels ${base.volts.toFixed(1)} V` : base.ok && he ? "Wheels (handeye)" : "Wheels",
       `The three wheel servos${ids ? ` (ids ${ids} on ${base.port})` : ""}, configs/drive_base.yaml`);
-    const errs = [st && st.error, running && cam.error, running && base.error].filter(Boolean);
+    if (note && Date.now() > note.until) note = null;
+    const errs = [note && note.text, st && st.error, running && cam.error, running && base.error].filter(Boolean);
     const err = $("#dv-err");
     err.hidden = !errs.length;
     err.replaceChildren(...errs.map((t) => { const p = document.createElement("p"); p.textContent = t; return p; }));
@@ -173,7 +217,7 @@
     if (!on) { held.clear(); stopNow(); frames(false); return; }
     refresh(); frames(true);
     tickTimer = setInterval(tick, SEND_MS);
-    stateTimer = setInterval(refresh, STATE_MS);
+    stateTimer = setInterval(refresh, STATE_MS / 2);
     tick();
   }
   addEventListener("sortbots:view", (e) => setOpen(e.detail === "drive"));
@@ -187,6 +231,8 @@
     if (r && r.ok === false && r.error) { st = { ...(st || {}), error: r.error }; render(); }
     frames(open);
   });
+  $("#dv-pick").addEventListener("click", pick);
+  $("#dv-abort").addEventListener("click", abort);
   $("#dv-disconnect").addEventListener("click", async () => {
     held.clear(); stopNow();
     await post("/api/drive/stop");

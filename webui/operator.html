@@ -210,11 +210,15 @@
   #driveview .dv-st.ok .dot { background: var(--go); }
   #driveview .dv-st.bad .dot { background: var(--stop); }
   #driveview .dv-st.warn .dot { background: var(--tape); }
-  #driveview .dv-err { bottom: 56px; left: 12px; right: 12px; padding: 8px 12px; font-size: .84rem; color: var(--warnink); background: var(--warnbg); border-color: var(--warnline); }
+  #driveview .dv-err { bottom: 56px; left: 12px; right: calc(46% + 24px); padding: 8px 12px; font-size: .84rem; color: var(--warnink); background: var(--warnbg); border-color: var(--warnline); }
   #driveview .dv-err p { margin: 0; } #driveview .dv-err p + p { margin-top: 4px; }
   #driveview .dv-live { bottom: 12px; left: 12px; display: flex; gap: 14px; align-items: center; padding: 6px 10px; font-size: .84rem; }
   #driveview .dv-live b { font-weight: 600; }
   #driveview .dv-live.on { border-color: var(--go); box-shadow: 0 0 0 2px var(--go); }
+  #driveview .dv-pickst { bottom: 56px; right: 12px; max-width: 46%; display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; font-size: .84rem; }
+  #driveview .dv-pickst b { font-weight: 600; }
+  #driveview .dv-pickst.moving { border-color: var(--tape); box-shadow: 0 0 0 2px var(--tape); }
+  #driveview .dv-pickst.aborted b { color: var(--stop); }
   #driveview .dv-help { position: absolute; right: 12px; top: 60px; max-width: min(520px, 60%); font-size: .76rem; color: #c1c8cf; background: rgba(10,12,16,.7); padding: 6px 10px; border-radius: 6px; pointer-events: none; }
   #driveview .dv-help kbd { font: inherit; font-weight: 600; color: #fff; }
   @media (max-width: 760px) { #driveview .dv-help { display: none; } }
@@ -577,12 +581,15 @@
       <span class="dv-st" id="dv-base" title="The three wheel servos (configs/drive_base.yaml)"><i class="dot"></i><span>Wheels</span></span>
       <span class="dv-st" id="dv-pad" title="A gamepad seen by this browser. Press any button on it if it is plugged in but not listed"><i class="dot"></i><span>No gamepad</span></span>
       <span class="sp"></span>
+      <button type="button" class="btn small primary" id="dv-pick" hidden title="handeye pick's one button: find the package, pick it, carry it to the taught place spot, release, back to rest. Pad: A">Pick &amp; place</button>
+      <button type="button" class="btn small stop" id="dv-abort" hidden title="Stop the arm where it is (it holds). Pad: B">Abort</button>
       <button type="button" class="btn small primary" id="dv-connect" title="Open the camera and the wheel servos. Only one program can own them: the arm's own tools have to be stopped first">Connect</button>
       <button type="button" class="btn small" id="dv-disconnect" hidden title="Stop the wheels, free them and release the camera and the servo bus">Disconnect</button>
     </div>
     <div class="float dv-err" id="dv-err" hidden></div>
     <div class="float dv-live" id="dv-live" aria-live="polite"><span id="dv-level">Speed 1</span><span id="dv-cmd" class="muted">Hold RT to drive</span></div>
-    <div class="dv-help" id="dv-help"><kbd>RT</kbd> hold to drive &middot; <kbd>left stick</kbd> move &amp; strafe &middot; <kbd>right stick</kbd> turn &middot; <kbd>d-pad &uarr;&darr;</kbd> speed<br>No pad: hold <kbd>W A S D</kbd> to move, <kbd>Q E</kbd> to turn</div>
+    <div class="float dv-pickst" id="dv-pickst" hidden aria-live="polite"><b id="dv-pflag"></b> <span id="dv-ptitle"></span><span id="dv-pmsg" class="muted"></span></div>
+    <div class="dv-help" id="dv-help"><kbd>RT</kbd> hold to drive &middot; <kbd>left stick</kbd> move &amp; strafe &middot; <kbd>right stick</kbd> turn &middot; <kbd>d-pad &uarr;&darr;</kbd> speed<br><kbd>A</kbd> pick &amp; place &middot; <kbd>B</kbd> abort<br>No pad: hold <kbd>W A S D</kbd> to move, <kbd>Q E</kbd> to turn</div>
   </div>
   <div class="float" id="comms-bar" hidden role="toolbar" aria-label="Comms model">
     <span id="cm-state" class="muted"></span>

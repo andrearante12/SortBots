@@ -89,6 +89,7 @@ window.fetch = (url, opts) => {
     if (u.startsWith('/api/drive/cmd')) { window.__drivePosts.push({ t: performance.now(), ...JSON.parse(opts.body) }); return json({ ok: true }); }
     if (u.startsWith('/api/drive/start')) { Object.assign(d, d.onStart || {}, { running: true }); return json({ ok: true }); }
     if (u.startsWith('/api/drive/stop')) { d.running = false; window.__driveStopped = true; return json({ ok: true }); }
+    if (u.startsWith('/api/drive/pick') || u.startsWith('/api/drive/abort')) { (window.__drivePicks = window.__drivePicks || []).push(u.split('/').pop()); return json({ ok: true }); }
     return json(d);
   }
   return realFetch(url, opts);
@@ -1265,6 +1266,31 @@ async function main() {
   await page.eval(`window.__pad.buttons[7] = { pressed: false, value: 0 }`); await sleep(150);
   await click('#dv-disconnect'); await sleep(400);
   check('drive: Disconnect stops the bridge', (await page.eval(`!!window.__driveStopped`)) && await visible('#dv-connect'));
+  await page.eval(`window.__pad.buttons[0] = { pressed: true, value: 1 }`); await sleep(150);
+  await page.eval(`window.__pad.buttons[0] = { pressed: false, value: 0 }`); await sleep(150);
+  check('drive: A without handeye pick says what it needs, and sends nothing', /handeye pick/.test(await $text('#dv-err'))
+        && !(await page.eval(`(window.__drivePicks || []).length`)) && !(await visible('#dv-pick')), await $text('#dv-err'));
+  // handeye pick running: it owns the hardware, the view goes through it, A is pick-and-place.
+  await page.eval(`sessionStorage.setItem('__fakeDrive', JSON.stringify({ enabled: true, running: true, backend: 'handeye',
+    speed_levels: [{ xy_mps: 0.1, theta_dps: 30 }, { xy_mps: 0.2, theta_dps: 60 }, { xy_mps: 0.3, theta_dps: 90 }],
+    camera: { ok: true }, base: { ok: true }, pick: { flag: 'HELD', state: 'lock', title: 'Pick: lock the target', msg: '', place_set: true } }))`);
+  await load(); await click('#view [data-v="drive"]'); await sleep(400);
+  check('drive (handeye): Pick & place and Abort offered, no Connect/Disconnect', await visible('#dv-pick') && await visible('#dv-abort')
+        && !(await visible('#dv-connect')) && !(await visible('#dv-disconnect')));
+  check('drive (handeye): the pick\'s state is shown', /HELD/.test(await $text('#dv-pickst')) && /lock the target/.test(await $text('#dv-pickst')), await $text('#dv-pickst'));
+  await shot('drive-view-handeye');
+  await page.eval(`window.__pad = { id: 'Xbox Wireless Controller (STANDARD GAMEPAD)', connected: true, mapping: 'standard', axes: [0, 0, 0, 0],
+      buttons: Array.from({ length: 17 }, () => ({ pressed: false, value: 0 })) };
+    Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => [window.__pad] }); window.__drivePicks = [];`);
+  await sleep(150);
+  await page.eval(`window.__pad.buttons[0] = { pressed: true, value: 1 }`); await sleep(400);
+  check('drive (handeye): pad A is ONE pick-and-place, however long it is held', JSON.stringify(await page.eval(`window.__drivePicks`)) === '["pick"]', JSON.stringify(await page.eval(`window.__drivePicks`)));
+  await page.eval(`window.__pad.buttons[0] = { pressed: false, value: 0 }; window.__pad.buttons[1] = { pressed: true, value: 1 }`); await sleep(200);
+  check('drive (handeye): pad B aborts', (await page.eval(`window.__drivePicks.at(-1)`)) === 'abort');
+  await page.eval(`window.__pad.buttons[1] = { pressed: false, value: 0 }; window.__fakeDrive.pick = { flag: 'DESCENDING', state: 'planned', title: 'Pick: plan ready', msg: 'descending' }`);
+  await sleep(800);
+  check('drive (handeye): while the arm moves the status is marked and Pick is greyed out', (await page.eval(`document.getElementById('dv-pickst').classList.contains('moving')`))
+        && (await page.eval(`document.getElementById('dv-pick').disabled`)));
   await page.eval(`sessionStorage.removeItem('__fakeDrive'); localStorage.clear()`); await load();
 
   // -- light / dark: follows the system until the toggle pins a choice ------------------------

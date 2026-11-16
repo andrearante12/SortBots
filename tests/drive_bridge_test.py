@@ -280,3 +280,71 @@ def test_serve_drive_refuses_proxied_requests_and_drives_local_ones(tmp_path):
     finally:
         p.terminate()
         p.wait(timeout=10)
+
+
+# --------------------------------------------------------------------------- handeye pick backend
+
+def _handeye():
+    """The REAL handeye preview server (its /base, /state, /cmd) on a free port, or None where
+    handeye can't import (numpy and its siblings: the lerobot env has them)."""
+    try:
+        import handeye
+    except Exception:
+        return None, None
+    port = _free_port()
+    srv = handeye.start_preview_server(port)
+    return handeye, (srv, f"http://127.0.0.1:{port}")
+
+
+def test_handeye_base_input_is_clamped_and_stamped():
+    he, s = _handeye()
+    if he is None:
+        return
+    srv, url = s
+    try:
+        urllib.request.urlopen(url + "/base?x=5&y=5&w=99", timeout=2)
+        x, y, w = he.BASE_CMD["v"]
+        assert math.isclose(math.hypot(x, y), he.BASE_MAX_MPS) and w == he.BASE_MAX_RADPS
+        assert time.monotonic() - he.BASE_CMD["t"] < 1.0
+        for bad in ("x=nan", "x=inf", "x=fast"):
+            try:
+                urllib.request.urlopen(url + "/base?" + bad, timeout=2)
+                assert False, bad
+            except urllib.error.HTTPError as e:
+                assert e.code == 400
+    finally:
+        srv.shutdown()
+
+
+def test_proxy_goes_through_handeye_pick_when_it_runs(tmp_path, monkeypatch=None):
+    he, s = _handeye()
+    if he is None:
+        return
+    srv, url = s
+    import drive_proxy
+    old = drive_proxy.HANDEYE
+    drive_proxy.HANDEYE = url
+    try:
+        he.PICK_STATE.clear()
+        he.PICK_STATE.update(flag="HELD", state="lock", title="Pick: lock the target", msg="", base=True, place_set=True)
+        _, cfg_path = _cfg(tmp_path)
+        proxy = DriveProxy(python=sys.executable, config=cfg_path, socket_path=str(tmp_path / "d.sock"))
+        assert proxy.start() == {"ok": True, "backend": "handeye"} and not proxy.running()  # no bridge
+        st = proxy.state()
+        assert st["backend"] == "handeye" and st["base"]["ok"] and st["pick"]["flag"] == "HELD"
+        assert st["speed_levels"] == CFG["speed_levels"]
+        assert proxy.cmd(0.1, 0, 0.5)["ok"] and he.BASE_CMD["v"] == (0.1, 0.0, 0.5)
+        while not he.WEB_KEYS.empty():
+            he.WEB_KEYS.get_nowait()
+        assert proxy.pick()["ok"] and he.WEB_KEYS.get_nowait() == "o"  # one-button pick-and-place
+        assert proxy.abort()["ok"] and he.WEB_KEYS.get_nowait() == "c"  # a key: aborts a move
+    finally:
+        drive_proxy.HANDEYE = old
+        srv.shutdown()
+    # handeye gone: back to "not connected", and no pick to press
+    proxy2 = DriveProxy(python=sys.executable, config=cfg_path, socket_path=str(tmp_path / "e.sock"))
+    drive_proxy.HANDEYE = url
+    try:
+        assert proxy2.state()["running"] is False and not proxy2.pick()["ok"]
+    finally:
+        drive_proxy.HANDEYE = old
