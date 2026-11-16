@@ -2579,14 +2579,15 @@ def main(argv=None):
                     help="magnet-down pitch in the arm model, + = face turned toward the base "
                          f"(default {PICK_PITCH_DEG})")
     # -8 mm made up for a magnet that seated on one edge and slid out; with the taught pitch it
-    # seats flat, and 0 still slid a little forward on the way down (2026-11-13): -3
+    # seats flat, and 0 still slid a little forward on the way down (2026-11-13): -3. With the
+    # compliant wrist and the averaged lock, -3 landed ~2 mm short toward the base (2026-11-15): -1
     pk.add_argument("--side-pitch-deg", type=float, default=None,
                     help="pitch for side faces (default: the mean of the side flat poses recorded with r, else 0)")
     pk.add_argument("--side-press-mm", type=float, default=SIDE_PRESS_MM,
                     help=f"press depth into a side face, mm (default {SIDE_PRESS_MM:g}: it pushes the box away)")
-    pk.add_argument("--radial-mm", type=float, default=-3.0,
+    pk.add_argument("--radial-mm", type=float, default=-1.0,
                     help="aim correction along the line from the arm base through the target, mm; "
-                         "negative = toward the base (default -3)")
+                         "negative = toward the base (default -1)")
     pk.add_argument("--head", type=float, nargs=2, metavar=("PAN", "TILT"), default=list(PICK_HEAD),
                     help=f"hold the head here (default {PICK_HEAD[0]:.0f}/{PICK_HEAD[1]:.0f}; "
                          f"HOME, the best-calibrated angle, is {HOME_HEAD[0]}/{HOME_HEAD[1]})")
