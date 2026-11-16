@@ -22,6 +22,11 @@
 #     restart tailscaled if it has been offline two checks running.
 #  6. sortbots-console.service: `scripts/jetson.sh console` at boot as the
 #     repo's owner, so http://<jetson>:8081/ is up without anyone logging in.
+#  7. The checkout is shared by every user (all in the owner's group), but
+#     without setgid dirs each user's new files land in THEIR group: 247 of
+#     liam's files were unwritable to andre, and a branch switch half-applied
+#     — HEAD moved, those files didn't. Group-own everything, g+rwX, setgid
+#     dirs, and core.sharedRepository so .git stays shared too.
 set -euo pipefail
 
 [[ $(id -u) == 0 ]] || { echo "run with sudo: sudo $0 $*"; exit 1; }
@@ -126,6 +131,13 @@ TimeoutStartSec=120
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# 7 --------------------------------------------------------------------------
+GROUP="$(stat -c %G "$REPO_ROOT")"
+chgrp -R "$GROUP" "$REPO_ROOT"
+chmod -R g+rwX "$REPO_ROOT"
+find "$REPO_ROOT" -type d -exec chmod g+s {} +
+sudo -u "$OWNER" git -C "$REPO_ROOT" config core.sharedRepository group
 
 systemctl daemon-reload
 systemctl reload NetworkManager

@@ -209,6 +209,15 @@ case "${1:-}" in
       git status --short --untracked-files=no
       exit 1
     fi
+    # A switch over files this user can't replace half-applies: HEAD moves,
+    # those files keep the old branch's content (seen 2026-11-16 — other
+    # users' files in a non-setgid checkout). Refuse up front instead.
+    unwritable=$(find . -path ./.git -prune -o \( -type d ! -writable \) -print -quit 2>/dev/null)
+    if [[ -n "$unwritable" ]]; then
+      echo "ERROR: $unwritable (and maybe more) isn't writable by $USER — fix ownership first:"
+      echo "       sudo scripts/jetson_host_setup.sh   (step 7 makes the checkout group-shared)"
+      exit 1
+    fi
     old=$(git rev-parse HEAD)
     git fetch origin "$branch" || exit 1
     if [[ "$(git branch --show-current)" != "$branch" ]]; then
