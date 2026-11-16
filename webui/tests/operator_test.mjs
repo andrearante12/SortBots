@@ -1217,6 +1217,13 @@ async function main() {
   await load();
   check('drive: offered when serve.py says this browser may drive', await visible('#view [data-v="drive"]'));
   check('drive: the view is called Robot, not the map tool\'s "Drive"', (await $text('#view [data-v="drive"]')) === 'Robot');
+  check('drive: the map\'s empty screen points to the Robot view', await page.eval(`!document.getElementById('empty-robot').hidden`));
+  await click('#view [data-v="drive"]'); await sleep(200); await load();
+  check('drive: the Robot view is reopened on reload when it was the last one', await visible('#driveview'));
+  await click('#view [data-v="2d"]'); await sleep(200);
+  await click('#empty-robot'); await sleep(200);
+  check('drive: its button opens the Robot view', await visible('#driveview'));
+  await click('#view [data-v="2d"]'); await sleep(200);
   await click('#view [data-v="drive"]'); await sleep(300);
   check('drive: the view swaps the map for the camera', await visible('#driveview') && !(await visible('#map')) && !(await visible('#tools')));
   check('drive: not connected says so, and offers Connect', /Not connected/.test(await $text('#dv-msg')) && await visible('#dv-connect') && !(await visible('#dv-disconnect')));

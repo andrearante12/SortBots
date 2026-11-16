@@ -284,7 +284,14 @@
   fetch("/api/drive").then((r) => r.json()).then((s) => {
     if (!s || !s.enabled) return;
     api.available = true; st = s;
-    $('#view [data-v="drive"]').hidden = false;
+    const tab = $('#view [data-v="drive"]');
+    tab.hidden = false;
+    // The map only ever shows ROS robots; on the machine the real robot is plugged into it can
+    // only say "waiting for the robots". Point the way out of it, and come back to this view if
+    // it was the last one open (operator.js saves the view but restores only the ones it owns).
+    const out = $("#empty-robot");
+    if (out) { out.hidden = false; out.addEventListener("click", () => tab.click()); }
+    try { if (localStorage.getItem("sortbots.mapView") === "drive") tab.click(); } catch (e) { /* no storage: start on the map */ }
     render();
   }).catch(() => { /* no drive here */ });
 })();

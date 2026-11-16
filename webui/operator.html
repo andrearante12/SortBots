@@ -215,6 +215,7 @@
   #driveview .dv-live { bottom: 12px; left: 12px; display: flex; gap: 14px; align-items: center; padding: 6px 10px; font-size: .84rem; }
   #driveview .dv-live b { font-weight: 600; }
   #driveview .dv-live.on { border-color: var(--go); box-shadow: 0 0 0 2px var(--go); }
+  #empty-robot { margin-top: 8px; }
   #driveview .dv-boot { display: block; margin-top: 6px; font-size: .78rem; color: #6c7681; }
   #driveview .dv-pickst { bottom: 56px; right: 12px; max-width: 46%; display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; font-size: .84rem; }
   #driveview .dv-pickst b { font-weight: 600; }
@@ -619,7 +620,7 @@
     <p id="rc-err" hidden></p>
   </div>
   <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
-  <div id="empty" hidden><b id="empty-title">No session running</b><span class="muted" id="empty-sub">Start a session to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><button class="btn primary" id="empty-go">Start a session</button></div>
+  <div id="empty" hidden><b id="empty-title">No session running</b><span class="muted" id="empty-sub">Start a session to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><button class="btn primary" id="empty-go">Start a session</button><button class="btn" id="empty-robot" hidden title="The robot plugged into this machine: camera, driving, pick and place">Open the Robot view</button></div>
   <div id="toast" role="status"></div>
 </main>
 
