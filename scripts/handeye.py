@@ -266,7 +266,7 @@ def set_hold(bus, motors, hold):
 # Keys the page's buttons send (/cmd?k=...), merged into read_keys so a button is the same as
 # its keyboard key. Single characters only, from this set: nothing else is accepted.
 WEB_KEYS = queue.Queue()
-WEB_ALLOWED = set(" fpguxadws!1234mkorhHltcznP")
+WEB_ALLOWED = set(" fpguxadws!1234mkorhHltcznPD")
 # The page's touchpad: the latest hand velocity (-1..1 per axis) and when it came. The page
 # resends it every 80 ms while a finger is down; JOG_FRESH_S without one and the arm stops, so a
 # lifted finger, a closed tab or a dropped connection can't leave the arm driving.
@@ -455,7 +455,7 @@ document.addEventListener('click',function(e){if(e.target.id==='jtog'){var d=doc
 // keyboard: the terminal's keys, arrows/PageUp/PageDown drive like the touchpad (hold to move)
 var KEYJ={ArrowUp:['y',1],ArrowDown:['y',-1],ArrowLeft:['x',-1],ArrowRight:['x',1],PageUp:['z',1],PageDown:['z',-1],
   a:['hp',1],d:['hp',-1],w:['ht',1],s:['ht',-1]};
-var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',o:'o',r:'r',h:'h',H:'H',l:'l',t:'t',c:'c',z:'z',n:'n',P:'P',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
+var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',o:'o',r:'r',h:'h',H:'H',l:'l',t:'t',c:'c',z:'z',n:'n',P:'P',D:'D',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
 function moving(){var g=window.S&&window.S.guide;return g&&['MOVING','DESCENDING','PRESSING','LIFTING','SEARCHING'].indexOf(g.flag)>=0}
 document.addEventListener('keydown',function(e){
   if(e.ctrlKey||e.metaKey||e.altKey)return;
@@ -1397,6 +1397,7 @@ def cmd_pick(a):
           r record a flat pose (magnet set flat on the package by hand) to pick_flat_poses.json
           h go to the rest pose   H save where the arm is as the rest pose
           P save where the arm is as the place pose   n place (while holding): there, release, rest
+          D use the last hand-guided drop as the place pose (the first one becomes it by itself)
           l LOOK  t TOUCH  c cancel the look  z drop the last sample: touch calibration samples,
             added to handeye_samples.json (then `handeye solve`)
           1-4 drive speed  any key during a planned move aborts it and holds  x quit (twice if held)"""
@@ -1479,6 +1480,9 @@ def cmd_pick(a):
                 main.append(["PICK  [o]", "o", "go"])
             if st["rest_q"] is not None:
                 main.append(["Go to rest  [h]", "h", ""])
+            if st.get("last_drop_q") is not None and st["place_q"] is not None and \
+                    np.max(np.abs(st["last_drop_q"] - st["place_q"])) > math.radians(1):
+                main.append(["Use last drop as place  [D]", "D", ""])
         elif state == "planned":
             main += [["GO: hover 5 cm above  [g]", "g", "go"], ["Re-lock target  [space]", " ", ""]]
         elif state == "at_hover":
@@ -2062,8 +2066,8 @@ def cmd_pick(a):
         say("at rest. PICK when the package is in place", 20.0)
         return True
 
-    def save_place():
-        q = arm_q()
+    def save_place(q=None):
+        q = arm_q() if q is None else q
         place_path.write_text(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"),
                                           "arm_deg": np.degrees(q).round(2).tolist()}, indent=1))
         st["place_q"] = q
@@ -2409,8 +2413,14 @@ def cmd_pick(a):
                     else:
                         say(f"head {pan:+.0f}/{tilt:+.0f} (inside the calibrated range)")
                 elif k == "m":
+                    q_drop = arm_q() if st["state"] == "holding" else None
                     on = magnet_set(not mag.on)
                     if st["state"] == "holding" and on is False:
+                        # a hand-guided drop teaches the place (2026-11-15: a drop guided by hand
+                        # couldn't be reused, only the magnet's position was logged)
+                        st["last_drop_q"] = q_drop
+                        if st["place_q"] is None:
+                            save_place(q_drop)
                         st["state"], st["flag"] = "lock", "HELD"
                         say("released: back to rest")
                         go_rest()
@@ -2458,6 +2468,8 @@ def cmd_pick(a):
                     save_rest()
                 elif k == "P":
                     save_place()
+                elif k == "D" and st.get("last_drop_q") is not None:
+                    save_place(st["last_drop_q"])
                 elif k == "n" and st["state"] == "holding" and st["place_q"] is not None:
                     do_place()
                 elif k == "h" and st["state"] == "lock":
