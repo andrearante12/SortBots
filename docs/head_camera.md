@@ -202,6 +202,23 @@ Torque off. For every visible package it prints the magnet target in `base_link`
 face normal's z, about +1.00 for a top face) and `d`, the magnet face's distance from the
 target. Put the magnet on the circle by hand: `d` should read under about 1 cm.
 
+## Pick: place pose
+
+You teach the place pose by hand. While the arm holds a package:
+
+1. Drive the package to the drop spot.
+2. Press **Save place here [P]**. The pose goes to `pick_place_pose.json`.
+
+From then on, PICK carries every package to the place pose after the pick:
+
+1. A joint move to a few cm above the place pose, keeping the magnet's tilt.
+2. Straight down onto the place pose.
+3. Magnet off.
+4. Back to rest.
+
+**Place [n]** does the same for a package you are already holding. The magnet's 30 s firmware cap
+is renewed during moves, so a long carry doesn't drop the package.
+
 ## Pick: rest pose and taught magnet pitch
 
 `handeye pick` starts by moving the arm to the **rest pose**. It goes back there after

@@ -265,7 +265,7 @@ def set_hold(bus, motors, hold):
 # Keys the page's buttons send (/cmd?k=...), merged into read_keys so a button is the same as
 # its keyboard key. Single characters only, from this set: nothing else is accepted.
 WEB_KEYS = queue.Queue()
-WEB_ALLOWED = set(" fpguxadws!1234mkorhHltcz")
+WEB_ALLOWED = set(" fpguxadws!1234mkorhHltcznP")
 # The page's touchpad: the latest hand velocity (-1..1 per axis) and when it came. The page
 # resends it every 80 ms while a finger is down; JOG_FRESH_S without one and the arm stops, so a
 # lifted finger, a closed tab or a dropped connection can't leave the arm driving.
@@ -434,7 +434,7 @@ window.addEventListener('blur',function(){J={x:0,y:0,z:0,t:0,w:0,hp:0,ht:0};jupd
 // keyboard: the terminal's keys, arrows/PageUp/PageDown drive like the touchpad (hold to move)
 var KEYJ={ArrowUp:['y',1],ArrowDown:['y',-1],ArrowLeft:['x',-1],ArrowRight:['x',1],PageUp:['z',1],PageDown:['z',-1],
   a:['hp',1],d:['hp',-1],w:['ht',1],s:['ht',-1]};
-var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',o:'o',r:'r',h:'h',H:'H',l:'l',t:'t',c:'c',z:'z',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
+var KEYCMD={' ':' ',f:'f',p:'p',g:'g',u:'u',k:'k',o:'o',r:'r',h:'h',H:'H',l:'l',t:'t',c:'c',z:'z',n:'n',P:'P',m:'m','1':'1','2':'2','3':'3','4':'4',x:'x',Escape:'!'};
 function moving(){var g=window.S&&window.S.guide;return g&&['MOVING','DESCENDING','PRESSING','LIFTING','SEARCHING'].indexOf(g.flag)>=0}
 document.addEventListener('keydown',function(e){
   if(e.ctrlKey||e.metaKey||e.altKey)return;
@@ -1352,6 +1352,7 @@ def cmd_pick(a):
           o one-button pick: hold, rest, lock, plan, raise clear, go, descend and pick
           r record a flat pose (magnet set flat on the package by hand) to pick_flat_poses.json
           h go to the rest pose   H save where the arm is as the rest pose
+          P save where the arm is as the place pose   n place (while holding): there, release, rest
           l LOOK  t TOUCH  c cancel the look  z drop the last sample: touch calibration samples,
             added to handeye_samples.json (then `handeye solve`)
           1-4 drive speed  any key during a planned move aborts it and holds  x quit (twice if held)"""
@@ -1441,6 +1442,9 @@ def cmd_pick(a):
                 main.append(["Descend and pick  [k]", "k", "go"])
             main.append(["Back up to 12 cm  [u]", "u", ""])
         elif state == "holding":
+            if st["place_q"] is not None:
+                main.append(["Place  [n]", "n", "go"])
+            main.append(["Save place here  [P]", "P", ""])
             main.append(["Release: turn magnet OFF  [m]", "m", "stop"])
         main.append(["Free arm (limp)  [f]" if st["arm_held"] else "Hold arm  [f]", "f", ""])
         rows = [{"label": "pick", "items": main}]
@@ -1486,6 +1490,12 @@ def cmd_pick(a):
     rest_path = calib_dir() / "pick_rest_pose.json"
     st["rest_q"] = (np.radians(json.loads(rest_path.read_text())["arm_deg"])
                     if rest_path.is_file() else None)
+    # The place pose (2026-11-15): taught by hand like the rest pose (drive the held package to
+    # the drop spot, Save place here). PICK then carries each package there, lowers it the last
+    # few cm straight down, releases, and goes back to rest.
+    place_path = calib_dir() / "pick_place_pose.json"
+    st["place_q"] = (np.radians(json.loads(place_path.read_text())["arm_deg"])
+                     if place_path.is_file() else None)
 
     def record_flat():
         q = arm_q()
@@ -1561,6 +1571,7 @@ def cmd_pick(a):
                 st["flag"] = "ABORTED"
                 say("ABORTED: holding where it is", 1e9)
                 return False
+            mag.rearm_if_due()  # a pick-and-place runs past the firmware's 30 s cap in these loops
             publish(arm_q())
             if s_ >= 1.0:
                 time.sleep(0.4)
@@ -1593,6 +1604,7 @@ def cmd_pick(a):
                 st["flag"] = "ABORTED"
                 say("ABORTED: holding where it is", 1e9)
                 return False
+            mag.rearm_if_due()  # a pick-and-place runs past the firmware's 30 s cap in these loops
             publish(arm_q())
             if s_ >= 1.0:
                 time.sleep(0.2)
@@ -1746,9 +1758,15 @@ def cmd_pick(a):
               f"{planned:+.1f}), reach {np.linalg.norm(p_seat[:2]) * 100:.1f} cm, height {p_seat[2] * 100:.1f} cm")
         # lift at the pitch the wrist settled to: the taught one would twist the package on the way up
         if st["face"] == "top":
+            # as high as solves, at the settled tilt, else the planned one, else tilted further:
+            # at the top of the reach (-23 deg, a tall box) none of 12/9/6 cm solved straight up and
+            # the arm was left holding the package down on it (2026-11-15)
             up = None
-            for top_h in (HIGH_M,) + TOP_HIGH_CANDS_M[1:]:
-                up = straight(z_now, top_h, 0.01, pitch=settled) or straight(z_now, top_h, 0.01)
+            for top_h in (HIGH_M,) + TOP_HIGH_CANDS_M[1:] + (0.04, 0.03):
+                for p_ in (settled, None, (st["pitch_top"] or a.pitch_deg) - 6.0):
+                    up = straight(z_now, top_h, 0.01, pitch=p_)
+                    if up:
+                        break
                 if up:
                     break
         else:  # straight up off a side face, the box hanging from it
@@ -1990,6 +2008,50 @@ def cmd_pick(a):
         say("at rest. PICK when the package is in place", 20.0)
         return True
 
+    def save_place():
+        q = arm_q()
+        place_path.write_text(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                          "arm_deg": np.degrees(q).round(2).tolist()}, indent=1))
+        st["place_q"] = q
+        say(f"place pose saved (magnet at {np.round(kin.tool_point(q, hc.magnet_m) * 100, 1)} cm). "
+            "PICK now places there by itself", 20.0)
+
+    def do_place():
+        """Carry the held package to the place pose: a joint move to a few cm above it (tilt
+        kept), straight down onto it, magnet off, then rest. True if released there."""
+        q_pl = st["place_q"]
+        tool = kin.tool_point(q_pl, hc.magnet_m)
+        pitch = head_cam.face_pitch(kin.flange(q_pl)[:3, 2], head_cam.arm_radial(tool))
+        path = None
+        for h in (0.06, 0.04, 0.02):
+            pts, seed, ok = [], [q_pl], True
+            for hh in np.arange(0.0, h + 1e-9, 0.01)[::-1]:
+                r = head_cam.ik_down(kin, tool + [0, 0, hh], seed, lo, hi, hc.magnet_m, float(q_pl[4]),
+                                     tilt_tol_deg=3.0, pitch_deg=pitch)
+                if r is None:
+                    ok = False
+                    break
+                pts.append((hh, r[0]))
+                seed = [r[0]]
+            if ok:
+                path = pts
+                break
+        if path:  # above it, then down: the package doesn't swing into the drop spot's edge
+            if not move_to(path[0][1], "MOVING") or not move_path(path[1:] + [(0.0, q_pl)], "DESCENDING",
+                                                                  DESCEND_MPS):
+                return False
+        elif not move_to(q_pl, "MOVING"):
+            return False
+        if magnet_set(False) is not False:
+            say("placed, but the magnet did not confirm OFF: check it", 1e9)
+            st["flag"] = "ABORTED"
+            return False
+        time.sleep(0.3)
+        st["state"], st["flag"] = "lock", "HELD"
+        say("placed: back to rest", 8.0)
+        go_rest()
+        return True
+
     def save_rest():
         q = arm_q()
         rest_path.write_text(json.dumps({"time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -2097,6 +2159,7 @@ def cmd_pick(a):
                 st["flag"] = "ABORTED"
                 say("ABORTED: search stopped", 1e9)
                 return False
+            mag.rearm_if_due()  # a pick-and-place runs past the firmware's 30 s cap in these loops
             publish(arm_q())
             if s_ >= 1.0:
                 time.sleep(SEARCH_SETTLE_S)
@@ -2191,6 +2254,8 @@ def cmd_pick(a):
         if not do_go():
             return
         descend_and_pick()
+        if st["state"] == "holding" and st["place_q"] is not None:
+            do_place()
 
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
@@ -2313,6 +2378,10 @@ def cmd_pick(a):
                     cal_drop()
                 elif k == "H":
                     save_rest()
+                elif k == "P":
+                    save_place()
+                elif k == "n" and st["state"] == "holding" and st["place_q"] is not None:
+                    do_place()
                 elif k == "h" and st["state"] == "lock":
                     go_rest()
                 elif k == "u" and st["state"] == "at_hover" and st["plan"]:
