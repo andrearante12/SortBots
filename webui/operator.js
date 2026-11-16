@@ -47,7 +47,7 @@
   let selected = null;
   let tool = "select";
   let view3d = false; // main stage is the 3D point cloud
-  let stageView = "2d"; // "2d" map | "3d" cloud | "sim" (Isaac's own render, sim only)
+  let stageView = "2d"; // "2d" map | "3d" cloud | "sim" (Isaac's own render, sim only) | "drive" (real base, operator_drive.js)
   let waypoints = []; // [{name, x, y, yaw}], the server's copy — also the task endpoints
   let gateway = null; // {x, y}: the fleet gateway pin (comms overlay), server's copy
   let platform = null; // "sim" | "real", from serve.py; the Teleport tool is sim-only
@@ -973,6 +973,9 @@
     if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.target.closest && e.target.closest("input, select, textarea")) return;
     if (!selected || !open.has(selected)) return;
+    // The Drive view owns WASD for the real base (operator_drive.js): a key must never
+    // drive a ROS robot and the plugged-in one at once.
+    if (stageView === "drive") return;
     if (e.code === "Space") { e.preventDefault(); return driveRelease(selected); }
     const cmd = DRIVE_KEYS[e.key.toLowerCase()];
     if (cmd) { e.preventDefault(); driveStart(selected, cmd); }
@@ -1752,6 +1755,7 @@
       return;
     }
     if (e.target.closest && e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (stageView === "drive") return; // map tools have no map to act on
     const t = { v: "select", f: "wp", r: "gw", t: "tp" }[e.key.toLowerCase()];
     if (t && !(t === "tp" && platform !== "sim")) setTool(t);
   });
@@ -1769,6 +1773,7 @@
     if (v === true) v = "3d"; else if (v === false) v = "2d";
     if (v === "3d" && !window.sortbotsCloud) v = "2d";
     if (v === "sim" && platform !== "sim") v = "2d";
+    if (v === "drive" && !(window.sortbotsDrive && window.sortbotsDrive.available)) v = "2d";
     stageView = v; view3d = v === "3d";
     const onMap = v === "2d";
     for (const b of document.querySelectorAll("#view button")) b.classList.toggle("active", b.dataset.v === v);
@@ -1782,6 +1787,10 @@
       window.sortbotsCloud.show(); syncCloudRobots();
     } else if (cloudMounted) window.sortbotsCloud.hide();
     setSimView(v === "sim");
+    $("#driveview").hidden = v !== "drive";
+    $("#stage").classList.toggle("driving", v === "drive");
+    // operator_drive.js starts and stops its camera polls and gamepad loop on this.
+    dispatchEvent(new CustomEvent("sortbots:view", { detail: v }));
     if (onMap) { setTool(tool); dirty = true; }
     try { localStorage.setItem("sortbots.mapView", v); } catch (e) { /* this tab only */ }
   }

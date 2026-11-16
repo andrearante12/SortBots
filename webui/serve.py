@@ -60,6 +60,7 @@ from simtest import report as simtest_report
 from simtest import spec as simtest_spec
 from simtest import world as simtest_world
 from simtest_runner import SimtestRunner
+from drive_proxy import DriveProxy
 
 WEBUI_DIR = Path(__file__).resolve().parent
 DEMO_TASKS_CONFIG = WEBUI_DIR.parent / "configs" / "demo_tasks.yaml"
@@ -104,6 +105,18 @@ SESSIONS: session_mod.SessionManager | None = None
 # Scored test runs (scripts/simtest.py) — launched only in --control mode on
 # the sim platform, like sessions.
 TESTS: SimtestRunner | None = None
+
+# The Drive view's bridge to the real base and D435 (webui/drive_proxy.py). None unless
+# --drive: these routes move a physical robot, and this server has no authentication and
+# may be on a public Funnel URL (module docstring), so they are opt-in on the one machine
+# the robot is plugged into, and answer only a browser ON that machine (_drive_allowed).
+DRIVE: DriveProxy | None = None
+
+# Headers a reverse proxy adds. Tailscale Serve/Funnel connect from 127.0.0.1, so a
+# loopback peer alone does not prove the browser is local: a request that came through
+# one of them is refused by the drive routes.
+PROXY_HEADERS = ("X-Forwarded-For", "Forwarded", "X-Real-IP", "Tailscale-User-Login",
+                 "Tailscale-Funnel-Request")
 
 # sim | real — which platform's scenarios this console lists and can start.
 # Set by main() from --platform (default: session_mod.detect_platform()).
@@ -210,6 +223,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_test_report()
         elif route == "/api/tests/run":
             self._with_tests(self._serve_test_run)
+        elif route == "/api/drive":
+            self._serve_drive_state()
+        elif route == "/api/drive/frame":
+            self._with_drive(self._serve_drive_frame)
         elif route == "/":
             # The operator view is the only GUI (the per-robot dashboard,
             # index.html + app.js, was removed 2026-10-23).
@@ -246,8 +263,57 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_tests(self._start_test)
         elif route == "/api/tests/cancel":
             self._with_tests(lambda: self._serve_json(TESTS.cancel()))
+        elif route == "/api/drive/start":
+            self._with_drive(lambda: self._serve_json(DRIVE.start()))
+        elif route == "/api/drive/stop":
+            self._with_drive(lambda: self._serve_json(DRIVE.stop()))
+        elif route == "/api/drive/cmd":
+            self._with_drive(self._drive_cmd)
         else:
             self._serve_error(404, f"no such endpoint: {route}")
+
+    # -- Drive view (real base + D435, webui/drive_proxy.py) ----------------
+
+    def _drive_allowed(self) -> str | None:
+        """None if this request may drive the robot, else why not."""
+        if DRIVE is None:
+            return "drive is off: start serve.py with --drive on the machine the robot is plugged into"
+        if self.client_address[0] not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            return "drive answers only a browser on the robot's own machine (localhost)"
+        if any(self.headers.get(h) for h in PROXY_HEADERS):
+            return "drive is not available through a proxy or Funnel URL: open http://localhost:<port>/"
+        return None
+
+    def _with_drive(self, fn) -> None:
+        why = self._drive_allowed()
+        if why:
+            self._serve_error(403, why)
+            return
+        fn()
+
+    def _serve_drive_state(self):
+        why = self._drive_allowed()
+        if why:
+            self._serve_json({"enabled": False, "reason": why})
+            return
+        self._serve_json({"enabled": True, **DRIVE.state()})
+
+    def _serve_drive_frame(self):
+        jpeg = DRIVE.frame()
+        if jpeg is None:
+            self._serve_error(503, "no camera frame")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(jpeg)))
+        self.end_headers()
+        self.wfile.write(jpeg)
+
+    def _drive_cmd(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        self._serve_json(DRIVE.cmd(body.get("x", 0), body.get("y", 0), body.get("w", 0)))
 
     # -- config endpoints --------------------------------------------------
 
@@ -760,7 +826,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
-    global SESSIONS, PLATFORM, TESTS
+    global SESSIONS, PLATFORM, TESTS, DRIVE
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8081)
@@ -774,6 +840,11 @@ def main() -> None:
         "--control", action="store_true",
         help="enable the Scenarios tab's start/stop API (see this file's docstring)",
     )
+    parser.add_argument(
+        "--drive", action="store_true",
+        help="enable the Drive view: live D435 + gamepad driving of the real omni base "
+             "(scripts/drive_bridge.py in the lerobot env; localhost browsers only, docs/drive.md)",
+    )
     args = parser.parse_args()
 
     PLATFORM = args.platform or session_mod.detect_platform()
@@ -781,6 +852,8 @@ def main() -> None:
         SESSIONS = session_mod.SessionManager(PLATFORM)
         if PLATFORM == "sim":
             TESTS = SimtestRunner(session_mod.clean_env)
+    if args.drive:
+        DRIVE = DriveProxy()
 
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     mode = "control" if args.control else "read-only"
@@ -789,6 +862,9 @@ def main() -> None:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        if DRIVE is not None:
+            DRIVE.stop()  # wheels to 0, torque off, bus and camera released
 
 
 if __name__ == "__main__":

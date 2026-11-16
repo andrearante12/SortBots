@@ -79,6 +79,18 @@ window.fetch = (url, opts) => {
   if (u.startsWith('/api/tests/cancel')) { window.__testRun = { ...window.__testRun, running: false, exit: 130 }; return json(window.__testRun); }
   if (u.startsWith('/api/tests/results')) return json({ results: window.__testResults });
   if (u.startsWith('/api/tests/report')) return json({ markdown: '# crossing_yield\\nrecall 0.12' });
+  // The Drive view (operator_drive.js): a fake bridge, seeded from sessionStorage before
+  // a load because the page asks /api/drive as it loads. Never the real serve.py --drive.
+  if (u.startsWith('/api/drive')) {
+    if (window.__fakeDrive === undefined) window.__fakeDrive = JSON.parse(sessionStorage.getItem('__fakeDrive') || 'null');
+    const d = window.__fakeDrive;
+    if (!d) return json({ enabled: false, reason: 'drive is off' });
+    window.__drivePosts = window.__drivePosts || [];
+    if (u.startsWith('/api/drive/cmd')) { window.__drivePosts.push({ t: performance.now(), ...JSON.parse(opts.body) }); return json({ ok: true }); }
+    if (u.startsWith('/api/drive/start')) { Object.assign(d, d.onStart || {}, { running: true }); return json({ ok: true }); }
+    if (u.startsWith('/api/drive/stop')) { d.running = false; window.__driveStopped = true; return json({ ok: true }); }
+    return json(d);
+  }
   return realFetch(url, opts);
 };
 window.confirm = () => true;
@@ -208,6 +220,11 @@ async function main() {
       return cdpApi.send('Fetch.fulfillRequest', { requestId, responseCode: 200,
         responseHeaders: [{ name: 'Content-Type', value: 'application/javascript' }],
         body: Buffer.from(ROSLIB_STUB).toString('base64') });
+    }
+    if (request.url.includes('/api/drive/frame')) { // a 1x1 picture: the Drive view's camera
+      return cdpApi.send('Fetch.fulfillRequest', { requestId, responseCode: 200,
+        responseHeaders: [{ name: 'Content-Type', value: 'image/png' }],
+        body: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' });
     }
     if (request.url.includes('/snapshot') || request.url.includes('fonts.googleapis')) {
       return cdpApi.send('Fetch.failRequest', { requestId, errorReason: 'Failed' });
@@ -1186,6 +1203,69 @@ async function main() {
   check('3d: the chosen view survives a reload', await visible('#cloud'));
   await click('#view [data-v="2d"]'); await sleep(200);
   check('3d: back to 2D restores the map and tools', await visible('#map') && await visible('#tools') && !(await visible('#cloud')));
+
+  // -- Drive view: the real base + D435 over serve.py --drive (operator_drive.js) -------------
+  console.log('\n--- drive view ---');
+  await page.eval(`localStorage.clear(); sessionStorage.removeItem('__fakeDrive')`); await load();
+  check('drive: no Drive view unless serve.py offers it (--drive, localhost)', !(await visible('#view [data-v="drive"]')));
+  await page.eval(`sessionStorage.setItem('__fakeDrive', JSON.stringify({ enabled: true, running: false,
+    speed_levels: [{ xy_mps: 0.1, theta_dps: 30 }, { xy_mps: 0.2, theta_dps: 60 }, { xy_mps: 0.3, theta_dps: 90 }],
+    onStart: { camera: { ok: true, fps: 29.7, error: null }, base: { ok: false, error: 'wheel servos {9, 10, 11}: missing id 11', ids: { l: 9, b: 10, r: 11 }, port: '/dev/ttyACM0' } } }))`);
+  await load();
+  check('drive: offered when serve.py says this browser may drive', await visible('#view [data-v="drive"]'));
+  await click('#view [data-v="drive"]'); await sleep(300);
+  check('drive: the view swaps the map for the camera', await visible('#driveview') && !(await visible('#map')) && !(await visible('#tools')));
+  check('drive: not connected says so, and offers Connect', /Not connected/.test(await $text('#dv-msg')) && await visible('#dv-connect') && !(await visible('#dv-disconnect')));
+  check('drive: the map\'s "not running" overlay stays off the camera', !(await visible('#empty')) && !(await visible('#link-down')));
+  await click('#dv-connect'); await sleep(1300);
+  check('drive: Connect starts the bridge; Disconnect replaces it', await visible('#dv-disconnect') && !(await visible('#dv-connect')));
+  check('drive: camera frames are shown', /url\(/.test(await page.eval(`document.querySelector('#driveview .pic').style.backgroundImage`)) && /fps/.test(await $text('#dv-cam')));
+  check('drive: a wheel bus problem is spelled out, camera still up', /missing id 11/.test(await $text('#dv-err')) && await visible('#dv-err')
+        && (await page.eval(`document.getElementById('dv-base').className`)).includes('bad'), await $text('#dv-err'));
+  await shot('drive-view');
+  // A fake standard-mapping pad: axes [lx, ly, rx, ry], buttons by index (7 = RT, 12/13 = d-pad).
+  await page.eval(`window.__pad = { id: 'Xbox Wireless Controller (STANDARD GAMEPAD)', connected: true, mapping: 'standard',
+      axes: [0, -1, 0, 0], buttons: Array.from({ length: 17 }, () => ({ pressed: false, value: 0 })) };
+    Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => [window.__pad] });
+    window.__drivePosts = [];`);
+  await sleep(400);
+  check('drive: a stick without the RT deadman sends nothing', (await page.eval(`window.__drivePosts.length`)) === 0 && /Hold RT/.test(await $text('#dv-cmd')));
+  check('drive: the pad is named', /Xbox Wireless Controller/.test(await $text('#dv-pad')), await $text('#dv-pad'));
+  await page.eval(`window.__pad.buttons[7] = { pressed: true, value: 1 }; window.__drivePosts = []`); await sleep(500);
+  const dvDriving = await page.eval(`window.__drivePosts`);
+  check('drive: RT + left stick up drives forward at speed 1, ~20 Hz', dvDriving.length >= 6 && dvDriving.every((c) => c.x === 0.1 && c.y === 0 && c.w === 0), `${dvDriving.length} posts, last ${JSON.stringify(dvDriving.at(-1))}`);
+  check('drive: the readout shows the live command', /forward 0\.10/.test(await $text('#dv-cmd')) && (await page.eval(`document.getElementById('dv-live').classList.contains('on')`)));
+  await page.eval(`window.__pad.buttons[12] = { pressed: true, value: 1 }`); await sleep(150);
+  await page.eval(`window.__pad.buttons[12] = { pressed: false, value: 0 }`); await sleep(200);
+  check('drive: d-pad up is one speed level per press', (await page.eval(`window.__drivePosts.at(-1).x`)) === 0.2 && /Speed 2\/3/.test(await $text('#dv-level')));
+  await page.eval(`window.__pad.axes = [-1, 0, 0.5, 0]`); await sleep(150);
+  const dvStrafe = await page.eval(`window.__drivePosts.at(-1)`);
+  check('drive: left stick left strafes left, right stick right turns clockwise', dvStrafe.x === 0 && dvStrafe.y === 0.2 && dvStrafe.w < 0, JSON.stringify(dvStrafe));
+  await page.eval(`window.__pad.axes = [0.7, -0.7, 0, 0]`); await sleep(150);
+  const dvDiag = await page.eval(`window.__drivePosts.at(-1)`);
+  check('drive: a diagonal is no faster than straight', Math.hypot(dvDiag.x, dvDiag.y) <= 0.2 + 1e-3, JSON.stringify(dvDiag));
+  await page.eval(`window.__pad.buttons[7] = { pressed: false, value: 0 }`); await sleep(150);
+  const dvN1 = await page.eval(`window.__drivePosts.length`); await sleep(400);
+  const dvLast = await page.eval(`window.__drivePosts.at(-1)`);
+  check('drive: letting go of RT sends one stop, then nothing', dvLast.x === 0 && dvLast.y === 0 && dvLast.w === 0 && (await page.eval(`window.__drivePosts.length`)) === dvN1, `${JSON.stringify(dvLast)}`);
+  await page.eval(`Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => [] }); window.__drivePosts = []; window.__published.length = 0`);
+  await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'w', code: 'KeyW', text: 'w' }); await sleep(250);
+  const dvKeyed = await page.eval(`window.__drivePosts.at(-1)`);
+  await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'w', code: 'KeyW' }); await sleep(150);
+  check('drive: no pad, W drives forward while held and stops on release',
+        dvKeyed && dvKeyed.x > 0 && (await page.eval(`window.__drivePosts.at(-1).x`)) === 0, JSON.stringify(dvKeyed));
+  check('drive: WASD in the Drive view never reaches a ROS robot\'s cmd_vel', !(await page.eval(`window.__published.some((p) => /cmd_vel/.test(p.topic))`)));
+  await page.eval(`Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => [window.__pad] }); window.__pad.buttons[7] = { pressed: true, value: 1 }`);
+  await sleep(200);
+  await click('#view [data-v="2d"]'); await sleep(150);
+  const dvN2 = await page.eval(`window.__drivePosts.length`); await sleep(400);
+  check('drive: leaving the view stops driving, even with RT still held', (await page.eval(`window.__drivePosts.length`)) === dvN2
+        && (await page.eval(`window.__drivePosts.at(-1).x`)) === 0 && await visible('#map'));
+  await click('#view [data-v="drive"]'); await sleep(200);
+  await page.eval(`window.__pad.buttons[7] = { pressed: false, value: 0 }`); await sleep(150);
+  await click('#dv-disconnect'); await sleep(400);
+  check('drive: Disconnect stops the bridge', (await page.eval(`!!window.__driveStopped`)) && await visible('#dv-connect'));
+  await page.eval(`sessionStorage.removeItem('__fakeDrive'); localStorage.clear()`); await load();
 
   // -- light / dark: follows the system until the toggle pins a choice ------------------------
   console.log('\n--- theme ---');
