@@ -23,7 +23,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="${LEROBOT_PYTHON:-$HOME/miniconda3/envs/lerobot/bin/python}"
 # this Jetson has miniforge, not miniconda
 [[ -x "$PY" ]] || PY="$HOME/miniforge3/envs/lerobot/bin/python"
-PORT="${ARM_PORT:-/dev/ttyACM0}"
+# The arm+head board by its USB serial, not by enumeration order: plugging in the base board took
+# ttyACM0 and moved the arm to ttyACM1, and every tool then opened the base (2026-11-15). Override
+# with ARM_PORT; ARM_BOARD_SERIAL names a different board.
+ARM_BOARD_SERIAL="${ARM_BOARD_SERIAL:-5B91029024}"
+by_id=$(ls /dev/serial/by-id/*"${ARM_BOARD_SERIAL}"* 2>/dev/null | head -1 || true)
+PORT="${ARM_PORT:-${by_id:-/dev/ttyACM0}}"
+export ARM_PORT="$PORT"
 
 if [[ -n "${AMENT_PREFIX_PATH:-}" ]]; then
   echo "arm.sh: ROS is sourced in this shell; open a clean one (lerobot env and ROS must stay apart)" >&2

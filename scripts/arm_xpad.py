@@ -45,6 +45,7 @@ exists; --no-head runs the arm alone. --head-invert pan|tilt flips a stick direc
                   arm_cartesian.py --fk)       --invert J...  same idea in --joint mode
 """
 import argparse
+import os
 import logging
 import math
 import shutil
@@ -115,7 +116,7 @@ def cartesian_step(kin, q, target, inp, a, lo, hi, sign, dt, level):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default="/dev/ttyACM0")
+    ap.add_argument("--port", default=os.environ.get("ARM_PORT", "/dev/ttyACM0"))
     ap.add_argument("--id", default="sortbots_arm")
     ap.add_argument("--joint", action="store_true", help="joint-space instead of hand-space")
     ap.add_argument("--max-level", type=int, default=SUPPLY_3A_MAX_LEVEL, choices=range(1, len(LEVELS) + 1),

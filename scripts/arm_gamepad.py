@@ -19,6 +19,7 @@ present pose, so connecting never jerks. --dry-run prints targets, sends nothing
 use it first to check each joint's DIRECTION (flip with --invert NAME).
 """
 import argparse
+import os
 import time
 
 from evdev import InputDevice, ecodes as e, list_devices
@@ -43,7 +44,7 @@ def deadzone(v, flat=0.12):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default="/dev/ttyACM0")
+    ap.add_argument("--port", default=os.environ.get("ARM_PORT", "/dev/ttyACM0"))
     ap.add_argument("--id", default="sortbots_arm")
     ap.add_argument("--max-dps", type=float, default=30.0, help="degrees/s at full stick")
     ap.add_argument("--max-step", type=float, default=8.0, help="max degrees goal may lead present pos")

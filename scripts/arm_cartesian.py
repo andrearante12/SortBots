@@ -26,6 +26,7 @@ URDF: pass --flip JOINT (repeatable) and re-check with --fk. A target IK can't r
 (out of range / past a limit) is simply not taken, so the hand stops at the boundary.
 """
 import argparse
+import os
 import logging
 import math
 import time
@@ -47,7 +48,7 @@ START_LEVEL = 1  # index into LEVELS
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default="/dev/ttyACM0")
+    ap.add_argument("--port", default=os.environ.get("ARM_PORT", "/dev/ttyACM0"))
     ap.add_argument("--id", default="sortbots_arm")
     ap.add_argument("--speed", type=float, default=0.10, help="hand speed, m/s at full stick")
     ap.add_argument("--pitch-dps", type=float, default=45.0)

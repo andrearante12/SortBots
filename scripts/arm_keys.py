@@ -54,7 +54,7 @@ def read_keys(timeout):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default="/dev/ttyACM0")
+    ap.add_argument("--port", default=os.environ.get("ARM_PORT", "/dev/ttyACM0"))
     ap.add_argument("--id", default="sortbots_arm")
     ap.add_argument("--step", type=float, default=2.0, choices=STEPS, help="degrees per keypress")
     ap.add_argument("--max-step", type=float, default=8.0, help="max degrees goal may lead present pos")

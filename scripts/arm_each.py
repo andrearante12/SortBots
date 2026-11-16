@@ -18,6 +18,7 @@ clamped to the calibrated range. Which way "up" turns a joint is whatever the mo
 status line shows the angle so you can see it.
 """
 import argparse
+import os
 import logging
 import math
 import time
@@ -42,7 +43,7 @@ START_LEVEL = 1
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default="/dev/ttyACM0")
+    ap.add_argument("--port", default=os.environ.get("ARM_PORT", "/dev/ttyACM0"))
     ap.add_argument("--id", default="sortbots_arm")
     ap.add_argument("--dps", type=float, default=60.0, help="degrees/s at full stick, level x1.0")
     ap.add_argument("--max-step", type=float, default=20.0)
