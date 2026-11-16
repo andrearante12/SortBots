@@ -104,10 +104,10 @@ the camera. In `pick_place_smoke`:
 
 ## Hardware: magnet end effector
 
-`hardware/magnet_effector/` replaces the SO-101 gripper with a 5 V, 5 kg Adafruit
-3873 electromagnet on a spring-compliant plunger, with a microswitch to confirm
-seating. The coil needs a flyback diode and a MOSFET driver. The CAD is parametric
-CadQuery in its own venv:
+`hardware/magnet_effector/` replaces the SO-101 gripper with a 5 V, 5 kg electromagnet
+on a spring-compliant plunger, with a microswitch to confirm seating. The coil needs a
+flyback diode and a MOSFET driver; the real one is switched by an ESP32 (`docs/magnet.md`).
+The CAD is parametric CadQuery in its own venv:
 
 ```bash
 hardware/setup_cad.sh && sudo snap install freecad   # once
@@ -118,8 +118,26 @@ make cad-test
 ```
 
 Every dimension lives in `params.py`. Edit there, not in FreeCAD. Values marked
-**VERIFY** are datasheet guesses (magnet thread, lead stub). Measure them before
-printing. The upstream reference STEPs and their licence are listed in
+**VERIFY** are datasheet guesses. Measure them before printing.
+
+**The magnet** is a uxcell round holding electromagnet (Amazon, about $7): 5 V, Ø25 ×
+11 mm, 24 cm leads, 50 N peak ("5 kg"), pure-iron body. It mounts on one tapped hole in
+the centre of its back, **M4 × 6 mm deep, no screw supplied**: buy an M4 pan-head plus a
+split and a flat washer, which is what the counterbore is sized for (`bolt_head_*`,
+`washer_stack`). `make cad` prints the allowed screw length for the 6 mm thread. The
+design started on the Adafruit 3873 (Ø25 × 20 mm) and was changed to the uxcell
+listing on 2026-11-06. The listing doesn't give these, so they are still the 3873's
+and need measuring:
+
+- the coil current (5 V ÷ the coil's resistance) and the weight (`mass_g` is the
+  3873's 55.3 g; the uxcell is shorter and should weigh less),
+- the pole and potting diameters,
+- where the leads leave the body. The CAD assumes a side exit near the back, in a
+  stiff Ø3.5 stub 4 mm up from the back face. Check the real magnet and correct
+  `lead_z_from_back` and `lead_stub_d`, or the keeper slot won't fit.
+
+In the CAD tree the bought part is the `magnet_uxcell_5kg` group, beside `printed_parts`
+and `hardware`. The upstream reference STEPs and their licence are listed in
 `hardware/magnet_effector/reference/SOURCE.md`.
 
 ## ManiSkill arm track

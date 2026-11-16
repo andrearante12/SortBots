@@ -256,6 +256,34 @@
   #simview .sv-bar select { padding: 3px 6px; }
   #simview .sv-help { position: absolute; right: 12px; bottom: 10px; font-size: .76rem; color: #8b95a0; background: rgba(10,12,16,.6); padding: 3px 8px; border-radius: 5px; pointer-events: none; }
   @media (pointer: coarse) { #simview .sv-help { display: none; } }
+  /* The Drive view: the real robot's D435 + driving the omni base with a gamepad
+     (operator_drive.js). Dark letterbox like the Sim view: it is a camera picture. */
+  #driveview { position: absolute; inset: 0; background: #0a0c10; }
+  #driveview .pic { position: absolute; inset: 0; background: center / contain no-repeat; }
+  #driveview .msg { position: absolute; inset: 0; display: grid; place-items: center; padding: 0 24px; text-align: center; color: #8b95a0; font-size: .9rem; pointer-events: none; }
+  #driveview .msg:empty { display: none; }
+  #driveview .dv-bar { top: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 6px 10px; font-size: .84rem; }
+  #driveview .dv-bar .sp { flex: 1; }
+  #driveview .dv-st { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  #driveview .dv-st .dot { background: var(--faint); }
+  #driveview .dv-st.ok .dot { background: var(--go); }
+  #driveview .dv-st.bad .dot { background: var(--stop); }
+  #driveview .dv-st.warn .dot { background: var(--tape); }
+  #driveview .dv-err { bottom: 56px; left: 12px; right: calc(46% + 24px); padding: 8px 12px; font-size: .84rem; color: var(--warnink); background: var(--warnbg); border-color: var(--warnline); }
+  #driveview .dv-err p { margin: 0; } #driveview .dv-err p + p { margin-top: 4px; }
+  #driveview .dv-live { bottom: 12px; left: 12px; display: flex; gap: 14px; align-items: center; padding: 6px 10px; font-size: .84rem; }
+  #driveview .dv-live b { font-weight: 600; }
+  #driveview .dv-live.on { border-color: var(--go); box-shadow: 0 0 0 2px var(--go); }
+  #driveview .dv-boot { display: block; margin-top: 6px; font-size: .78rem; color: #6c7681; }
+  #driveview .dv-pickst { bottom: 56px; right: 12px; max-width: 46%; display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; font-size: .84rem; }
+  #driveview .dv-pickst b { font-weight: 600; }
+  #driveview .dv-pickst.moving { border-color: var(--tape); box-shadow: 0 0 0 2px var(--tape); }
+  #driveview .dv-pickst.aborted b { color: var(--stop); }
+  #driveview .dv-help { position: absolute; right: 12px; top: 60px; max-width: min(520px, 60%); font-size: .76rem; color: #c1c8cf; background: rgba(10,12,16,.7); padding: 6px 10px; border-radius: 6px; pointer-events: none; }
+  #driveview .dv-help kbd { font: inherit; font-weight: 600; color: #fff; }
+  @media (max-width: 760px) { #driveview .dv-help { display: none; } }
+  /* The map's overlays say nothing about the camera picture. */
+  #stage.driving #empty, #stage.driving #link-down { display: none !important; }
   #simview .note { position: absolute; left: 12px; bottom: 10px; font-size: .76rem; color: #8b95a0; background: rgba(10,12,16,.6); padding: 3px 8px; border-radius: 5px; }
   /* Sits on the always-dark 3D scene, so fixed colours rather than theme tokens. */
   #cloud .cloud-info { position: absolute; bottom: 14px; left: 14px; color: #8b95a0; font-size: .8rem; pointer-events: none; }
@@ -564,6 +592,7 @@
       <button data-v="2d" class="active" title="Occupancy map: tools, waypoints and routes">Map</button>
       <button data-v="3d" title="The fleet's 3D point cloud (/fleet/recon_cloud). Drag to orbit, scroll to zoom, right-drag to pan">3D cloud</button>
       <button data-v="sim" hidden title="What Isaac Sim actually renders: one camera on the whole floor (configs/sim_view.yaml). Rendered only while this view is open, so it costs nothing otherwise">Sim</button>
+      <button data-v="drive" hidden title="The real robot: its head camera, driving its base and pick and place from a gamepad (serve.py --drive, on the machine the robot is plugged into)">Robot</button>
     </div>
     <!-- Map tools live up here, not over the map: the map gets the whole stage. -->
     <div class="seg" id="tools" role="toolbar" aria-label="Map tools">
@@ -627,6 +656,25 @@
       <button type="button" class="btn small" id="sv-reset" title="Back to the default view (configs/sim_view.yaml)">Reset view</button>
     </div>
     <span class="sv-help" id="sv-help">Drag to orbit · right-drag or Shift to pan · scroll to zoom</span></div>
+  <!-- The Drive view: the real robot's D435 colour stream and gamepad driving of its omni
+       base, through serve.py --drive -> scripts/drive_bridge.py (operator_drive.js). -->
+  <div id="driveview" hidden><div class="pic"></div><span class="msg" id="dv-msg"></span>
+    <div class="float dv-bar" role="toolbar" aria-label="Drive">
+      <span class="dv-st" id="dv-cam" title="The D435's colour stream"><i class="dot"></i><span>Camera</span></span>
+      <span class="dv-st" id="dv-arm" title="The arm and its pick program (scripts/handeye.py), on the arm's own board"><i class="dot"></i><span>Arm</span></span>
+      <span class="dv-st" id="dv-base" title="The three wheel servos (configs/drive_base.yaml)"><i class="dot"></i><span>Wheels</span></span>
+      <span class="dv-st" id="dv-pad" title="A gamepad seen by this browser. Press any button on it if it is plugged in but not listed"><i class="dot"></i><span>No gamepad</span></span>
+      <span class="sp"></span>
+      <button type="button" class="btn small primary" id="dv-pick" hidden title="handeye pick's one button: find the package, pick it, carry it to the taught place spot, release, back to rest. Pad: A">Pick &amp; place</button>
+      <button type="button" class="btn small stop" id="dv-abort" hidden title="Stop the arm where it is (it holds). Pad: B">Abort</button>
+      <button type="button" class="btn small primary" id="dv-connect" title="Start the robot: with the arm plugged in, the arm's pick program too (camera, arm, magnet, base; pick and place on pad A; the arm moves to its rest pose as it starts). Without it, the camera and the wheels only">Start</button>
+      <button type="button" class="btn small stop" id="dv-disconnect" hidden title="Stop the robot: wheels stopped and freed, camera and boards released. With the arm running: magnet off and arm torque OFF (support the arm)">Stop</button>
+    </div>
+    <div class="float dv-err" id="dv-err" hidden></div>
+    <div class="float dv-live" id="dv-live" aria-live="polite"><span id="dv-level">Speed 1</span><span id="dv-cmd" class="muted">Hold RT to drive</span></div>
+    <div class="float dv-pickst" id="dv-pickst" hidden aria-live="polite"><b id="dv-pflag"></b> <span id="dv-ptitle"></span><span id="dv-pmsg" class="muted"></span></div>
+    <div class="dv-help" id="dv-help"><kbd>RT</kbd> hold to drive &middot; <kbd>left stick</kbd> move &amp; strafe &middot; <kbd>right stick</kbd> turn &middot; <kbd>d-pad &uarr;&darr;</kbd> speed<br><kbd>A</kbd> pick &amp; place &middot; <kbd>B</kbd> abort<br>No pad: hold <kbd>W A S D</kbd> to move, <kbd>Q E</kbd> to turn</div>
+  </div>
   <div class="float" id="comms-bar" hidden role="toolbar" aria-label="Comms model">
     <span id="cm-state" class="muted"></span>
     <span id="cm-hint" class="muted"></span>
@@ -652,7 +700,7 @@
     <p id="rc-err" hidden></p>
   </div>
   <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
-  <div id="empty" hidden><b id="empty-title">Simulation not running</b><span class="muted" id="empty-sub">Start the simulation to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><div class="empty-acts"><button class="btn primary" id="empty-go">Start simulation</button><button class="btn" id="empty-test">Run a test</button></div></div>
+  <div id="empty" hidden><b id="empty-title">Simulation not running</b><span class="muted" id="empty-sub">Start the simulation to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><div class="empty-acts"><button class="btn primary" id="empty-go">Start simulation</button><button class="btn" id="empty-test">Run a test</button><button class="btn" id="empty-robot" hidden title="The robot plugged into this machine: camera, driving, pick and place">Open the Robot view</button></div></div>
   <div id="toast" role="status"></div>
 </main>
 
@@ -820,5 +868,6 @@
 <script src="operator.js"></script>
 <script src="scenarios.js"></script>
 <script src="operator_tests.js"></script>
+<script src="operator_drive.js"></script>
 </body>
 </html>

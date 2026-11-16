@@ -1,0 +1,499 @@
+"""scripts/drive_bridge.py and webui/drive_proxy.py: the Drive view's wheel kinematics, the
+command watchdog, and serve.py's gate on the drive routes. No hardware: the bridge runs
+with its camera off and a serial port that does not exist, so nothing is ever opened."""
+import json
+import math
+import os
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import yaml
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "scripts"))
+sys.path.insert(0, str(REPO / "webui"))
+import drive_bridge as db  # noqa: E402
+from drive_proxy import DriveProxy  # noqa: E402
+
+CFG = db.load_config()
+
+
+def _cfg(tmp_path, **over):
+    cfg = {**CFG, "port": str(tmp_path / "no_such_tty"), "camera": {"enabled": False}, **over}
+    p = tmp_path / "drive.yaml"
+    p.write_text(yaml.safe_dump(cfg))
+    return cfg, str(p)
+
+
+# --------------------------------------------------------------------------- kinematics
+
+def test_rotation_turns_every_wheel_the_same_way():
+    raw = db.body_to_wheel_raw(0, 0, 1.0, CFG)
+    assert raw[0] == raw[1] == raw[2] > 0
+
+
+def test_forward_leaves_the_back_wheel_still_and_opposes_the_sides():
+    left, back, right = db.body_to_wheel_raw(0.2, 0, 0, CFG)
+    assert back == 0 and left == -right != 0
+
+
+def test_strafe_left_is_mostly_the_back_wheel():
+    left, back, right = db.body_to_wheel_raw(0, 0.2, 0, CFG)
+    assert abs(back) > abs(left) and left == right
+
+
+def test_matches_lerobot_lekiwi_where_it_is_installed():
+    # The lerobot env has the original; system python3 (the test runner) usually doesn't.
+    try:
+        from lerobot.robots.lekiwi.lekiwi import LeKiwi
+    except Exception:
+        return
+    for x, y, w in [(0.2, 0, 0), (0, 0.1, 0), (0.1, -0.2, 1.0), (0.3, 0.3, 3.0)]:
+        # LeKiwi takes the turn in deg/s, the bridge in rad/s; it only touches static helpers.
+        want = LeKiwi._body_to_wheel_raw(LeKiwi, x, y, math.degrees(w))
+        assert db.body_to_wheel_raw(x, y, w, CFG) == [want["base_left_wheel"], want["base_back_wheel"], want["base_right_wheel"]]
+
+
+def test_past_max_raw_all_wheels_scale_together():
+    raw = db.body_to_wheel_raw(5.0, 0, 0, CFG)
+    assert max(abs(r) for r in raw) <= CFG["max_raw"]
+    slow = db.body_to_wheel_raw(0.1, 0, 0, CFG)
+    assert raw[0] / raw[2] == slow[0] / slow[2]  # same direction of travel
+
+
+def test_clamp_keeps_a_diagonal_no_faster_than_straight_and_drops_junk():
+    x, y, w = db.clamp_cmd(1, 1, 99, 0.3, 1.0)
+    assert math.isclose(math.hypot(x, y), 0.3) and x == y and w == 1.0
+    assert db.clamp_cmd(float("nan"), "fast", None, 0.3, 1.0) == (0.0, 0.0, 0.0)
+    assert db.clamp_cmd(float("inf"), 0, -5, 0.3, 1.0) == (0.0, 0.0, -1.0)
+
+
+def test_limits_are_the_fastest_level():
+    xy, w = db.limits(CFG)
+    assert xy == CFG["speed_levels"][-1]["xy_mps"]
+    assert math.isclose(w, math.radians(CFG["speed_levels"][-1]["theta_dps"]))
+
+
+def test_ramp():
+    assert db.ramp(0, 1, 0.1) == 0.1 and db.ramp(0.95, 1, 0.1) == 1 and db.ramp(0, -1, 0.1) == -0.1
+
+
+# --------------------------------------------------------------------------- holders
+
+def test_holders_names_the_process_with_the_device_open(tmp_path):
+    dev = tmp_path / "ttyFAKE"
+    dev.write_text("")
+    with open(dev):
+        child = subprocess.Popen([sys.executable, "-c", f"f=open({str(dev)!r}); import time; time.sleep(30)"])
+        try:
+            for _ in range(50):
+                found = db.holders(str(dev))
+                if found:
+                    break
+                time.sleep(0.05)
+            assert [pid for pid, _ in found] == [child.pid]  # ourselves never counted
+            assert "time.sleep" in found[0][1]
+        finally:
+            child.kill()
+            child.wait()
+
+
+# --------------------------------------------------------------------------- watchdog
+
+class FakeBus:
+    def __init__(self):
+        self.writes = []
+
+    def write(self, raw):
+        self.writes.append((time.monotonic(), list(raw)))
+
+    def volts(self):
+        return 12.1
+
+
+def test_wheels_stop_after_the_watchdog_and_never_jump():
+    bridge = db.Bridge(CFG)
+    fake = FakeBus()
+    bridge.base.bus = True  # "open"; writes go to the fake
+    bridge.base.write, bridge.base.volts = fake.write, fake.volts
+    threading.Thread(target=bridge._control, daemon=True).start()
+    try:
+        t_end = time.monotonic() + 0.6
+        while time.monotonic() < t_end:  # held for 0.6 s at 20 Hz, like the page
+            bridge.handle({"op": "cmd", "x": 9, "y": 0, "w": 0}, None)
+            time.sleep(0.05)
+        moving = fake.writes[-1][1]
+        time.sleep(CFG["watchdog_s"] + 0.6)  # released: watchdog, then the ramp down
+    finally:
+        bridge.done.set()
+    assert moving != [0, 0, 0]
+    assert fake.writes[-1][1] == [0, 0, 0]
+    # clamped to the top level: never past its wheel speed
+    top = db.body_to_wheel_raw(CFG["speed_levels"][-1]["xy_mps"], 0, 0, CFG)
+    assert max(abs(r) for _, w in fake.writes for r in w) <= max(abs(r) for r in top)
+    # ramped: no tick changes a wheel by more than one accel step
+    step = db.body_to_wheel_raw(CFG["accel_mps2"] / db.CONTROL_HZ, 0, 0, CFG)
+    for (_, a), (_, b) in zip(fake.writes, fake.writes[1:]):
+        assert all(abs(p - q) <= abs(s) + 1 for p, q, s in zip(a, b, step))
+
+
+def test_a_lost_bus_is_reopened_stopped_and_the_old_command_not_replayed():
+    bridge = db.Bridge(CFG)
+    fake, opens = FakeBus(), []
+    state = {"fail": False}
+
+    def write(raw):
+        if state["fail"]:
+            state["fail"] = False
+            raise ConnectionError("port vanished")
+        fake.write(raw)
+
+    def reopen():
+        opens.append(time.monotonic())
+        bridge.base.bus = True
+        fake.write([0, 0, 0])  # Base.open writes Goal_Velocity 0 before anything else
+
+    bridge.base.bus = True
+    bridge.base.write, bridge.base.volts, bridge.base.open = write, fake.volts, reopen
+    threading.Thread(target=bridge._control, daemon=True).start()
+    try:
+        bridge.handle({"op": "cmd", "x": 0.3, "y": 0, "w": 0}, None)
+        time.sleep(0.1)
+        assert fake.writes[-1][1] != [0, 0, 0]  # moving
+        state["fail"] = True
+        time.sleep(0.3)  # the first retry is the very next tick
+        assert len(opens) == 1 and bridge.base_error is None
+        # From the reopen on: stopped, though the operator's last command asked for 0.3 m/s
+        # and is still within the watchdog of when it was sent.
+        assert all(w == [0, 0, 0] for t, w in fake.writes if t >= opens[0])
+    finally:
+        bridge.done.set()
+
+
+# --------------------------------------------------------------------------- proxy + bridge process
+
+def test_proxy_runs_the_bridge_without_hardware_and_reports_why(tmp_path):
+    _, cfg_path = _cfg(tmp_path)
+    proxy = DriveProxy(python=sys.executable, config=cfg_path, socket_path=str(tmp_path / "d.sock"))
+    try:
+        assert proxy.start()["ok"]
+        st = proxy.state()
+        assert st["running"] and not st["base"]["ok"] and "does not exist" in st["base"]["error"]
+        assert not st["camera"]["ok"] and "camera off" in st["camera"]["error"]
+        r = proxy.cmd(5, 0, 0)
+        assert r["ok"] and r["target"][0] == CFG["speed_levels"][-1]["xy_mps"]
+        assert proxy.frame() is None
+    finally:
+        proxy.stop()
+    assert not proxy.running() and not (tmp_path / "d.sock").exists()
+
+
+def test_bridge_exits_when_its_parent_goes(tmp_path):
+    _, cfg_path = _cfg(tmp_path)
+    sock = str(tmp_path / "d.sock")
+    p = subprocess.Popen([sys.executable, str(REPO / "scripts" / "drive_bridge.py"), "--config", cfg_path,
+                          "serve", "--socket", sock], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL)
+    try:
+        for _ in range(100):
+            if os.path.exists(sock):
+                break
+            time.sleep(0.05)
+        p.stdin.close()  # serve.py gone
+        assert p.wait(timeout=5) == 0
+    finally:
+        if p.poll() is None:
+            p.kill()
+
+
+# --------------------------------------------------------------------------- serve.py gate
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _serve(tmp_path, *extra):
+    _, cfg_path = _cfg(tmp_path)
+    port = _free_port()
+    env = {**os.environ, "SORTBOTS_LEROBOT_PYTHON": sys.executable, "SORTBOTS_DRIVE_CONFIG": cfg_path,
+           "SORTBOTS_SESSIONS_DIR": str(tmp_path / "sessions"),
+           "XDG_RUNTIME_DIR": str(tmp_path)}
+    p = subprocess.Popen([sys.executable, str(REPO / "webui" / "serve.py"), "--port", str(port),
+                          "--host", "127.0.0.1", "--platform", "real", *extra],
+                         env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = f"http://127.0.0.1:{port}"
+    for _ in range(100):
+        try:
+            urllib.request.urlopen(base + "/operator.html", timeout=1)
+            return p, base
+        except OSError:
+            time.sleep(0.1)
+    p.kill()
+    raise RuntimeError("serve.py did not start")
+
+
+def _get(url, headers=None):
+    return json.loads(urllib.request.urlopen(urllib.request.Request(url, headers=headers or {}), timeout=5).read())
+
+
+def _post(url, body, headers=None):
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", **(headers or {})})
+    try:
+        return 200, json.loads(urllib.request.urlopen(req, timeout=15).read())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read())
+
+
+def test_serve_without_drive_offers_nothing(tmp_path):
+    p, base = _serve(tmp_path)
+    try:
+        assert _get(base + "/api/drive")["enabled"] is False
+        assert _post(base + "/api/drive/cmd", {"x": 0.1})[0] == 403
+    finally:
+        p.kill()
+
+
+def test_serve_drive_refuses_proxied_requests_and_drives_local_ones(tmp_path):
+    p, base = _serve(tmp_path, "--drive")
+    try:
+        for h in ({"X-Forwarded-For": "1.2.3.4"}, {"Tailscale-Funnel-Request": "?1"}, {"Forwarded": "for=1.2.3.4"}):
+            assert _get(base + "/api/drive", h)["enabled"] is False
+            assert _post(base + "/api/drive/start", {}, h)[0] == 403
+            assert _post(base + "/api/drive/cmd", {"x": 0.1}, h)[0] == 403
+        assert _get(base + "/api/drive")["enabled"] is True
+        code, r = _post(base + "/api/drive/start", {})
+        assert code == 200 and r["ok"], r
+        st = _get(base + "/api/drive")
+        assert st["running"] and "does not exist" in st["base"]["error"]
+        code, r = _post(base + "/api/drive/cmd", {"x": 0.1, "y": 0, "w": 0})
+        assert code == 200 and r["ok"]
+        assert _post(base + "/api/drive/stop", {})[1]["ok"]
+        assert _get(base + "/api/drive")["running"] is False
+    finally:
+        p.terminate()
+        p.wait(timeout=10)
+
+
+# --------------------------------------------------------------------------- handeye pick backend
+
+def _handeye():
+    """The REAL handeye preview server (its /base, /state, /cmd) on a free port, or None where
+    handeye can't import (numpy and its siblings: the lerobot env has them)."""
+    try:
+        import handeye
+    except Exception:
+        return None, None
+    port = _free_port()
+    srv = handeye.start_preview_server(port)
+    return handeye, (srv, f"http://127.0.0.1:{port}")
+
+
+def test_handeye_base_input_is_clamped_and_stamped():
+    he, s = _handeye()
+    if he is None:
+        return
+    srv, url = s
+    try:
+        urllib.request.urlopen(url + "/base?x=5&y=5&w=99", timeout=2)
+        x, y, w = he.BASE_CMD["v"]
+        assert math.isclose(math.hypot(x, y), he.BASE_MAX_MPS) and w == he.BASE_MAX_RADPS
+        assert time.monotonic() - he.BASE_CMD["t"] < 1.0
+        for bad in ("x=nan", "x=inf", "x=fast"):
+            try:
+                urllib.request.urlopen(url + "/base?" + bad, timeout=2)
+                assert False, bad
+            except urllib.error.HTTPError as e:
+                assert e.code == 400
+    finally:
+        srv.shutdown()
+
+
+def test_proxy_goes_through_handeye_pick_when_it_runs(tmp_path, monkeypatch=None):
+    he, s = _handeye()
+    if he is None:
+        return
+    srv, url = s
+    import drive_proxy
+    old = drive_proxy.HANDEYE
+    drive_proxy.HANDEYE = url
+    try:
+        he.PICK_STATE.clear()
+        he.PICK_STATE.update(flag="HELD", state="lock", title="Pick: lock the target", msg="", base=True, place_set=True)
+        _, cfg_path = _cfg(tmp_path)
+        proxy = DriveProxy(python=sys.executable, config=cfg_path, socket_path=str(tmp_path / "d.sock"))
+        assert proxy.start() == {"ok": True, "backend": "handeye"} and not proxy.running()  # no bridge
+        st = proxy.state()
+        assert st["backend"] == "handeye" and st["base"]["ok"] and st["pick"]["flag"] == "HELD"
+        assert st["speed_levels"] == CFG["speed_levels"]
+        assert proxy.cmd(0.1, 0, 0.5)["ok"] and he.BASE_CMD["v"] == (0.1, 0.0, 0.5)
+        while not he.WEB_KEYS.empty():
+            he.WEB_KEYS.get_nowait()
+        assert proxy.pick()["ok"] and he.WEB_KEYS.get_nowait() == "o"  # one-button pick-and-place
+        assert proxy.abort()["ok"] and he.WEB_KEYS.get_nowait() == "c"  # a key: aborts a move
+    finally:
+        drive_proxy.HANDEYE = old
+        srv.shutdown()
+    # handeye gone: back to "not connected", and no pick to press
+    proxy2 = DriveProxy(python=sys.executable, config=cfg_path, socket_path=str(tmp_path / "e.sock"))
+    drive_proxy.HANDEYE = url
+    try:
+        assert proxy2.state()["running"] is False and not proxy2.pick()["ok"]
+    finally:
+        drive_proxy.HANDEYE = old
+
+
+FAKE_HANDEYE = r'''
+import http.server, json, os, sys, threading, time
+port, tty, xs = int(sys.argv[1]), os.isatty(0), []
+print("\x1b[Kfake handeye starting", flush=True)
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith("/state"):
+            b = json.dumps({"flag": "HELD", "tty": tty, "base": True}).encode()
+            self.send_response(200); self.end_headers(); self.wfile.write(b)
+        elif self.path.startswith("/cmd?k=x"):
+            xs.append(1); self.send_response(204); self.end_headers()
+        else:
+            self.send_response(404); self.end_headers()
+    def log_message(self, *a):
+        pass
+time.sleep(1.0)  # camera, magnet board, the move to rest
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+while len(xs) < 2:  # handeye's quit: x, then x again to confirm
+    print("\rHELD | magnet off\x1b[K", end="", flush=True); time.sleep(0.05)
+print("\nmagnet off, torque off", flush=True)
+'''
+
+
+def test_the_page_starts_handeye_pick_on_a_pty_and_stops_it_with_its_own_quit(tmp_path):
+    import drive_proxy
+    script = tmp_path / "fake_handeye.py"
+    script.write_text(FAKE_HANDEYE)
+    port = _free_port()
+    old = drive_proxy.HANDEYE, drive_proxy.HANDEYE_ARGV
+    drive_proxy.HANDEYE, drive_proxy.HANDEYE_ARGV = f"http://127.0.0.1:{port}", [sys.executable, str(script), str(port)]
+    _, cfg_path = _cfg(tmp_path)
+    proxy = DriveProxy(python=sys.executable, config=cfg_path, socket_path=str(tmp_path / "d.sock"))
+    try:
+        assert proxy.start_pick() == {"ok": True, "starting": True}
+        st = proxy.state()
+        assert st["pick_starting"] and not st["running"]
+        for _ in range(50):
+            st = proxy.state()
+            if st.get("backend") == "handeye":
+                break
+            time.sleep(0.1)
+        assert st["backend"] == "handeye" and st["pick_owned"] and st["pick"]["tty"] is True  # a real terminal
+        assert proxy.start_pick()["already"]  # a second press starts nothing
+        assert any("fake handeye starting" in l for l in proxy.pick_log)  # its output, ANSI stripped
+        assert not any("\x1b" in l for l in proxy.pick_log)
+        assert proxy.stop_pick()["ok"] and not proxy.pick_running()
+        assert proxy.pick_proc.returncode == 0  # it quit on its own two x's, no signal needed
+        assert any("torque off" in l for l in proxy.pick_log)
+    finally:
+        if proxy.pick_running():
+            proxy.pick_proc.kill()
+        drive_proxy.HANDEYE, drive_proxy.HANDEYE_ARGV = old
+
+
+def test_a_pick_that_cannot_start_says_why(tmp_path):
+    import drive_proxy
+    old = drive_proxy.HANDEYE, drive_proxy.HANDEYE_ARGV
+    drive_proxy.HANDEYE = f"http://127.0.0.1:{_free_port()}"
+    drive_proxy.HANDEYE_ARGV = ["bash", "-c", "echo 'arm.sh: /dev/x not found: is the board plugged in?'; exit 2"]
+    try:
+        _, cfg_path = _cfg(tmp_path)
+        proxy = DriveProxy(python=sys.executable, config=cfg_path, socket_path=str(tmp_path / "d.sock"))
+        r = proxy.start_pick()
+        assert r["ok"] is False and "code 2" in r["error"] and "board plugged in" in r["error"], r
+        assert "board plugged in" in proxy.state()["pick_error"]
+    finally:
+        drive_proxy.HANDEYE, drive_proxy.HANDEYE_ARGV = old
+
+
+# --------------------------------------------------------------------------- one Start: arm or not
+
+class _Robot:
+    """A proxy wired to a fake arm board (a file to delete = unplugging it), the fake handeye
+    and the hardware-free bridge config."""
+
+    def __init__(self, tmp_path, arm_plugged):
+        import drive_proxy
+        self.dp = drive_proxy
+        self.board = tmp_path / "usb-1a86_fake_arm_board"
+        if arm_plugged:
+            self.board.write_text("")
+        script = tmp_path / "fake_handeye.py"
+        script.write_text(FAKE_HANDEYE)
+        port = _free_port()
+        self.old = drive_proxy.HANDEYE, drive_proxy.HANDEYE_ARGV, drive_proxy.ARM_BOARD_GLOB
+        drive_proxy.HANDEYE = f"http://127.0.0.1:{port}"
+        drive_proxy.HANDEYE_ARGV = [sys.executable, str(script), str(port)]
+        drive_proxy.ARM_BOARD_GLOB = str(self.board)
+        _, cfg_path = _cfg(tmp_path)
+        self.proxy = DriveProxy(python=sys.executable, config=cfg_path, socket_path=str(tmp_path / "d.sock"))
+
+    def wait(self, pred, secs=15.0):
+        t = time.monotonic() + secs
+        while time.monotonic() < t:
+            st = self.proxy.state()
+            if pred(st):
+                return st
+            time.sleep(0.1)
+        return self.proxy.state()
+
+    def close(self):
+        p = self.proxy
+        if p.pick_running():
+            p.pick_proc.kill()
+        p.stop()
+        self.dp.HANDEYE, self.dp.HANDEYE_ARGV, self.dp.ARM_BOARD_GLOB = self.old
+
+
+def test_start_without_the_arm_drives_camera_and_wheels_and_says_so(tmp_path):
+    r = _Robot(tmp_path, arm_plugged=False)
+    try:
+        res = r.proxy.start_robot()
+        assert res["ok"] and res["mode"] == "drive" and not r.proxy.pick_running()
+        st = r.proxy.state()
+        assert st["running"] and st.get("backend") != "handeye" and st["arm_board"] is False
+        assert "isn't plugged in" in st["note"]
+        assert r.proxy.stop_robot()["ok"] and not r.proxy.running() and r.proxy.state()["note"] is None
+    finally:
+        r.close()
+
+
+def test_unplugging_the_arm_mid_pick_falls_back_to_driving(tmp_path):
+    r = _Robot(tmp_path, arm_plugged=True)
+    try:
+        assert r.proxy.start_robot()["mode"] == "arm"
+        assert r.wait(lambda s: s.get("backend") == "handeye")["backend"] == "handeye"
+        r.board.unlink()  # the arm's USB board goes away
+        st = r.wait(lambda s: s.get("running") and s.get("backend") != "handeye")
+        assert st["running"] and st.get("backend") != "handeye", st  # the drive-only bridge now
+        assert not r.proxy.pick_running() and r.proxy.pick_proc.returncode == 0  # its own quit
+        assert "unplugged" in st["note"] and st["arm_board"] is False
+    finally:
+        r.close()
+
+
+def test_the_operators_stop_with_the_arm_plugged_in_does_not_start_driving(tmp_path):
+    r = _Robot(tmp_path, arm_plugged=True)
+    try:
+        r.proxy.start_robot()
+        r.wait(lambda s: s.get("backend") == "handeye")
+        assert r.proxy.stop_robot()["ok"] and not r.proxy.pick_running()
+        time.sleep(1.0)
+        st = r.proxy.state()
+        assert not st["running"] and not r.proxy.running() and st["note"] is None
+    finally:
+        r.close()

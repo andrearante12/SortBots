@@ -33,6 +33,10 @@ platform:=real`. Runbook: `docs/real-robot.md`.
   `SORTBOTS_PLATFORM=real` has to be set there. `scripts/jetson.sh` sets it.
 - The container's DDS is localhost-only on purpose, so a desktop sim on the LAN
   can't cross-talk with `/robot_0/*`.
+- Driving it by hand and its one-button pick and place need no ROS: the operator
+  view's **Robot** view, `serve.py --drive` on the machine the robot is plugged
+  into (`docs/drive.md`). The arm's own tools (`scripts/arm.sh`, `handeye pick`)
+  run in the `lerobot` env; one process owns a servo board or the D435 at a time.
 
 ## Layout
 

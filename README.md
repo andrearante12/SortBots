@@ -75,6 +75,10 @@ scripts/sim_ctl.sh stop
 | [docs/testing.md](docs/testing.md) | offline checks, scored live tests (worlds, test cases, metrics) |
 | [docs/real-robot.md](docs/real-robot.md) | the Jetson + D435, SLAM offload, Gaussian splats |
 | [docs/manipulation.md](docs/manipulation.md) | magnet pick and place in the sim, the magnet end effector CAD, the ManiSkill arm track |
+| [docs/arm.md](docs/arm.md) | the physical SO-101 arm and pan/tilt head: lerobot setup, gamepad teleop |
+| [docs/head_camera.md](docs/head_camera.md) | calibrating the head D435 to the arm, and the real one-button pick and place (`handeye pick`) |
+| [docs/magnet.md](docs/magnet.md) | the real electromagnet's ESP32 driver and circuit |
+| [docs/drive.md](docs/drive.md) | the operator view's Robot view: live D435, gamepad driving of the omni base, pick and place on one button |
 | [docs/commsim.md](docs/commsim.md) | fleet radio mesh and task-protocol simulation, real routers |
 
 ## License
