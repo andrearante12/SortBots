@@ -189,6 +189,7 @@ class Camera:
                 if n is not None:
                     R = head_cam.align_z(R, n)
                 m["normal"] = [float(x) for x in R[:, 2]]
+                m["centre"], m["R"] = [float(x) for x in centre], R.tolist()
                 m["target_pt"] = [float(x) for x in
                                   np.asarray(centre) + R @ head_cam.target_in_marker(self.marker_m)]
             out[int(i)] = m
@@ -1361,6 +1362,29 @@ class CamWorker:
         self.cam.close()
 
 
+def consolidate(ents, marker_m):
+    """One target from several frames of one marker: the median centre and the median face
+    orientation first, THEN the target 6 cm out along the face. Per-frame targets carry the
+    per-frame depth-normal wobble times that lever arm: at a far, steep view they spread 20-27
+    mm and the lock refused a marker seen 20/20 (2026-11-15). -> (target, normal, centre spread
+    mm, normal spread deg), camera frame; None if no frame had an orientation."""
+    ents = [m for m in ents if m.get("R") is not None]
+    if not ents:
+        return None
+    C = np.array([m["centre"] for m in ents])
+    Rs = np.array([m["R"] for m in ents])
+    c = np.median(C, 0)
+    n = np.median(Rs[:, :, 2], 0)
+    n /= np.linalg.norm(n)
+    x = np.median(Rs[:, :, 0], 0)
+    x -= n * (x @ n)
+    x /= np.linalg.norm(x)
+    R = np.stack([x, np.cross(n, x), n], 1)
+    spread_c = float(np.median(np.linalg.norm(C - c, axis=1)) * 1000)
+    spread_n = float(np.degrees(np.median(np.arccos(np.clip(Rs[:, :, 2] @ n, -1, 1)))))
+    return c + R @ head_cam.target_in_marker(marker_m), n, spread_c, spread_n
+
+
 def cmd_pick(a):
     """Pick stage 1 plus hand driving, from the page's buttons and touchpad (or the keyboard):
     lock the package target, plan magnet-down poses with the calibrated arm, move HIGH_M above
@@ -1839,6 +1863,7 @@ def cmd_pick(a):
         """Lock marker a.marker_id's target from 10 frames. True if locked."""
         ents = worker.entries(a.marker_id, n=LOCK_FRAMES, timeout=6.0)
         pts = np.array([m["target_pt"] for m in ents]).reshape(-1, 3)
+        cons = consolidate(ents, a.marker_m) if len(ents) >= LOCK_MIN_FRAMES else None
         # The target's depth at head 32/69 jitters 3-5 mm frame to frame (median spread, 2026-11-13):
         # every frame agreeing within 4 mm refused most locks. The median of 20 frames is good to
         # ~1 mm, so: enough frames, the median of the ones near it, and a refusal only when the
@@ -1847,12 +1872,20 @@ def cmd_pick(a):
         dist = np.linalg.norm(pts - med, axis=1) if len(pts) else np.zeros(0)
         spread = float(np.median(dist) * 1000) if len(pts) else 0.0
         good = pts[dist <= max(0.004, 2.5 * spread / 1000)] if len(pts) else pts
+        if cons is not None:  # judged by the marker's own steadiness, not the lever-arm wobble
+            spread = cons[2]
         if len(pts) >= LOCK_MIN_FRAMES and spread <= LOCK_MAX_SPREAD_MM:
             hp = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
             T = hc.matrix(hp["head_pan"], hp["head_tilt"])
-            raw = (T @ np.append(np.median(good, 0), 1.0))[:3]
-            nrm = [m["normal"] for m in ents if m.get("normal") is not None]
-            n = T[:3, :3] @ np.median(nrm, 0) if nrm else np.array([0.0, 0.0, 1.0])
+            if cons is not None:
+                raw = (T @ np.append(cons[0], 1.0))[:3]
+                n = T[:3, :3] @ cons[1]
+                print(f"\nlock: centre spread {cons[2]:.1f} mm, face normal spread {cons[3]:.1f} deg "
+                      f"(per-frame targets {float(np.median(dist) * 1000):.1f} mm)")
+            else:
+                raw = (T @ np.append(np.median(good, 0), 1.0))[:3]
+                nrm = [m["normal"] for m in ents if m.get("normal") is not None]
+                n = T[:3, :3] @ np.median(nrm, 0) if nrm else np.array([0.0, 0.0, 1.0])
             n /= np.linalg.norm(n)
             face = classify_face(raw, n)
             if face is None:
@@ -1870,6 +1903,7 @@ def cmd_pick(a):
                 + "). Plan next")
             return True
         print(f"\nlock refused: {len(pts)} frames, median spread {spread:.1f} mm")
+        st["lock_why"] = "unseen" if len(pts) < LOCK_MIN_FRAMES else f"jitter {spread:.0f} mm"
         if len(pts) < LOCK_MIN_FRAMES:
             say(f"marker {a.marker_id} seen in only {len(pts)}/{LOCK_FRAMES} frames: move the arm clear of it", 20.0)
         else:
@@ -2108,8 +2142,12 @@ def cmd_pick(a):
             if ok:
                 return True
         st["flag"] = "HELD"
-        say(f"marker {a.marker_id} not seen from rest or from either side: is it in view, and not "
-            "covered by the arm?", 20.0)
+        if st.get("lock_why", "unseen") == "unseen":
+            say(f"marker {a.marker_id} not seen from rest or from either side: is it in view, and not "
+                "covered by the arm?", 20.0)
+        else:  # seen, but its target wouldn't hold still (2026-11-15: the page said "not seen")
+            say(f"marker {a.marker_id} seen, but its position wouldn't hold still ({st['lock_why']}): glare, or "
+                "too far/steep for the camera. Move the camera closer to it, or try again", 20.0)
         return False
 
     # Touch calibration samples from this page (2026-11-13), the same ones `capture --touch`
@@ -2128,6 +2166,9 @@ def cmd_pick(a):
         pts = np.array([m["target_pt"] for m in ms_])
         med = np.median(pts, 0)
         spread = float(np.median(np.linalg.norm(pts - med, axis=1)) * 1000)
+        cons = consolidate(ms_, a.marker_m)
+        if cons is not None:  # as the lock: orientation averaged first
+            med, spread = cons[0], cons[2]
         if spread > LOCK_MAX_SPREAD_MM:
             say(f"LOOK: the target jumps around ({spread:.1f} mm): glare? Try again", 20.0)
             return
