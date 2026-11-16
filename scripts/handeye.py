@@ -1112,6 +1112,10 @@ PICK_PITCH_DEG = -4.7
 # The approach comes in along the normal from SIDE_HIGH_M, stops at SIDE_HOVER_M, and presses
 # less than on a top face: it pushes the box away, not into the table.
 FACE_TOP_DEG, FACE_SIDE_DEG, SIDE_MAX_YAW_DEG = 35.0, 35.0, 12.0
+# Top-face approach heights, tried highest first: close to the base the arm holds the magnet
+# straight down only up to ~13 cm, so a fixed 12 cm approach refused a box 20 cm out that the
+# arm reached fine by hand (2026-11-15).
+TOP_HIGH_CANDS_M, TOP_HOVER_CANDS_M = (0.12, 0.09, 0.06), (0.05, 0.03, 0.02)
 SIDE_HIGH_M, SIDE_HOVER_M, SIDE_LIFT_M, SIDE_PRESS_MM = 0.06, 0.03, 0.08, 8.0
 WRIST_COMPLY_TORQUE = 100  # wrist_flex during the press: the magnet tilts flat on contact
 PRESS_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_flex")
@@ -1731,7 +1735,11 @@ def cmd_pick(a):
               f"{planned:+.1f}), reach {np.linalg.norm(p_seat[:2]) * 100:.1f} cm, height {p_seat[2] * 100:.1f} cm")
         # lift at the pitch the wrist settled to: the taught one would twist the package on the way up
         if st["face"] == "top":
-            up = straight(z_now, HIGH_M, 0.01, pitch=settled) or straight(z_now, HIGH_M, 0.01)
+            up = None
+            for top_h in (HIGH_M,) + TOP_HIGH_CANDS_M[1:]:
+                up = straight(z_now, top_h, 0.01, pitch=settled) or straight(z_now, top_h, 0.01)
+                if up:
+                    break
         else:  # straight up off a side face, the box hanging from it
             up = lift_path(p_seat, SIDE_LIFT_M, settled) or lift_path(p_seat, SIDE_LIFT_M, a.side_pitch_deg)
         if up is None:
@@ -1743,8 +1751,7 @@ def cmd_pick(a):
             st["state"] = "holding"
             return
         st["state"], st["flag"] = "holding", "HOLDING"
-        say(f"HOLDING: magnet on, {(HIGH_M if st['face'] == 'top' else SIDE_LIFT_M) * 100:.0f} cm up. "
-            "Drive to the drop spot, then Release", 1e9)
+        say("HOLDING: magnet on, lifted. Drive to the drop spot, then Release", 1e9)
 
     def aim_corrected(p, radial_m):
         """Shift a target along the horizontal line from the shoulder_pan axis through it:
@@ -1826,6 +1833,15 @@ def cmd_pick(a):
         between. True if all solvable inside the joint limits."""
         q_now = arm_q()
         locked, roll = st["locked"], float(q_now[4])
+        if st["face"] == "top":  # the highest approach that solves
+            for hv in TOP_HOVER_CANDS_M:
+                if face_ik(along(hv), seeds + [q_now], roll) is not None:
+                    st["hover_m"] = hv
+                    break
+            for hh in TOP_HIGH_CANDS_M:
+                if hh > st["hover_m"] and face_ik(along(hh), seeds + [q_now], roll) is not None:
+                    st["high_m"] = hh
+                    break
         hi_m, hv_m = st["high_m"], st["hover_m"]
         sols = {n: face_ik(along(dz), seeds + [q_now], roll)
                 for n, dz in (("high", hi_m), ("hover", hv_m), ("contact", 0.0))}
@@ -2136,7 +2152,10 @@ def cmd_pick(a):
                 return
         if not find_marker() or not lock_with_step_aside() or not do_plan():
             return
-        if st["face"] == "top" and not raise_clear():
+        # from rest (it just went there) the joint move starts above and behind: no raise first,
+        # which lifted toward an unreachable 'clear' height over a close box (2026-11-15)
+        at_rest = st["rest_q"] is not None and np.max(np.abs(arm_q() - st["rest_q"])) < math.radians(3)
+        if st["face"] == "top" and not at_rest and not raise_clear():
             return
         if not do_go():
             return
