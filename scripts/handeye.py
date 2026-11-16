@@ -270,8 +270,11 @@ WEB_ALLOWED = set(" fpguxadws!1234mkorhHltcznP")
 # resends it every 80 ms while a finger is down; JOG_FRESH_S without one and the arm stops, so a
 # lifted finger, a closed tab or a dropped connection can't leave the arm driving.
 JOG = {"v": {}, "t": 0.0}
-JOG_AXES = ("x", "y", "z", "t", "w", "hp", "ht")   # hand x/y/z, tool tilt, wrist; head pan/tilt
-ARM_JOG_AXES, HEAD_JOG_AXES = JOG_AXES[:5], JOG_AXES[5:]
+JOG_AXES = ("x", "y", "z", "t", "w", "hp", "ht", "j1", "j2", "j3", "j4", "j5")
+# hand x/y/z, tool tilt, wrist; head pan/tilt; one arm joint each (j1 shoulder_pan .. j5 wrist_roll),
+# for teaching poses the hand moves can't reach, e.g. a place spot (2026-11-15)
+ARM_JOG_AXES, HEAD_JOG_AXES, JOINT_JOG_AXES = JOG_AXES[:5], JOG_AXES[5:7], JOG_AXES[7:]
+JOINT_JOG_DPS = 30.0  # one joint, held button, at drive speed L2 (scaled by the speed buttons)
 HEAD_DPS = 25.0   # head speed at full camera-pad deflection, or a/d/w/s held (15 was slow on the pad)
 JOG_FRESH_S = 0.25
 
@@ -345,6 +348,9 @@ PREVIEW_PAGE = """<!doctype html><meta charset=utf-8><title>handeye capture</tit
 <style>
 /* full-window camera, every control a small translucent overlay on it (2026-11-13) */
 html,body{margin:0;height:100%;background:#000;color:#eee;font:13px/1.35 system-ui,sans-serif;overflow:hidden}
+/* dragging a pad selected the page's text, and the drag then went to the selection instead of
+   the pad (2026-11-15): nothing on this page is selectable or draggable */
+*{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}img{-webkit-user-drag:none;pointer-events:none}
 #img{position:fixed;inset:0}#img img{width:100%;height:100%;object-fit:contain;display:block}
 #side{position:fixed;inset:0;pointer-events:none}#side>div{pointer-events:auto}
 #top{position:absolute;top:8px;left:8px;max-width:44vw}
@@ -362,6 +368,8 @@ button.head,button.hold{background:rgba(60,60,60,.5)}
 #jog{position:absolute;left:8px;bottom:8px;background:rgba(0,0,0,.25);border-radius:8px;padding:6px}
 #jog .lbl{color:rgba(255,255,255,.6);font-size:10px;margin:2px 0 4px}#jog .row{margin:2px 0}
 #jog button{margin:0 4px 4px 0;padding:4px 8px;font-size:11px}
+.jr{display:flex;align-items:center}.jl{width:58px;color:rgba(255,255,255,.7);font-size:11px}
+.jr button{min-width:34px}
 #pad{position:relative;width:150px;height:150px;border-radius:10px;background:rgba(29,38,51,.35);touch-action:none;
   border:1px solid rgba(120,150,190,.4)}#zpad{position:relative;width:40px;height:150px;border-radius:10px;
   background:rgba(29,38,51,.35);touch-action:none;border:1px solid rgba(120,150,190,.4)}
@@ -391,6 +399,13 @@ tr.cur td{background:rgba(32,40,56,.7)}.go{font-size:13px;font-weight:600;color:
 <div class=ax style="right:4px;top:50%;transform:translateY(-50%)">right</div><div id=knob></div></div>
 <div id=zpad><div class=ax style="top:4px;left:50%;transform:translateX(-50%)">up</div>
 <div class=ax style="bottom:4px;left:50%;transform:translateX(-50%)">down</div><div id=zknob></div></div></div>
+<div class=row style="margin-top:6px"><button id=jtog data-x=1>joints &#9656;</button></div>
+<div id=joints style="display:none">
+<div class=jr><span class=jl>base</span><button class=hold data-j="j1" data-s="-1">&#8722;</button><button class=hold data-j="j1" data-s="1">+</button></div>
+<div class=jr><span class=jl>shoulder</span><button class=hold data-j="j2" data-s="-1">&#8722;</button><button class=hold data-j="j2" data-s="1">+</button></div>
+<div class=jr><span class=jl>elbow</span><button class=hold data-j="j3" data-s="-1">&#8722;</button><button class=hold data-j="j3" data-s="1">+</button></div>
+<div class=jr><span class=jl>wrist</span><button class=hold data-j="j4" data-s="-1">&#8722;</button><button class=hold data-j="j4" data-s="1">+</button></div>
+<div class=jr><span class=jl>roll</span><button class=hold data-j="j5" data-s="-1">&#8722;</button><button class=hold data-j="j5" data-s="1">+</button></div></div>
 <div class=row style="margin-top:6px"><span class=lbl>speed </span><button data-k="1">L1</button><button data-k="2">L2</button><button data-k="3">L3</button><button data-k="4">L4</button></div></div>
 <div id=cam style="display:none"><div class=lbl>camera:</div>
 <div id=cpad><div class=ax style="top:4px;left:50%;transform:translateX(-50%)">up</div>
@@ -410,15 +425,17 @@ function buttons(g){
     return '<div class=row>'+(row.label?'<div class=lbl>'+esc(row.label)+'</div>':'')+row.items.map(function(it){
       return '<button class="'+(it[2]||'')+'" data-k="'+it[1]+'">'+esc(it[0])+'</button>'}).join('')+'</div>'}).join('')}
 document.addEventListener('click',function(e){var t=e.target.closest('button[data-k]');if(t)send(t.dataset.k)});
-var J={x:0,y:0,z:0,t:0,w:0,hp:0,ht:0},jt=null;
-function jsend(){fetch('/jog?x='+J.x.toFixed(2)+'&y='+J.y.toFixed(2)+'&z='+J.z.toFixed(2)+'&t='+J.t+'&w='+J.w+'&hp='+J.hp.toFixed(2)+'&ht='+J.ht.toFixed(2)).catch(function(){})}
-function jlive(){return J.x||J.y||J.z||J.t||J.w||J.hp||J.ht}
+var JK=['x','y','z','t','w','hp','ht','j1','j2','j3','j4','j5'];
+function jzero(){var o={};JK.forEach(function(k){o[k]=0});return o}
+var J=jzero(),jt=null;
+function jsend(){fetch('/jog?'+JK.map(function(k){return k+'='+(+J[k]).toFixed(2)}).join('&')).catch(function(){})}
+function jlive(){return JK.some(function(k){return J[k]})}
 function jupdate(){if(jlive()){if(!jt){jsend();jt=setInterval(jsend,80)}}else{if(jt){clearInterval(jt);jt=null}jsend()}}
 function dragger(el,knob,f){
   function at(e){var r=el.getBoundingClientRect(),dx=(e.clientX-r.left)/r.width*2-1,dy=(e.clientY-r.top)/r.height*2-1;
     dx=Math.max(-1,Math.min(1,dx));dy=Math.max(-1,Math.min(1,dy));f(dx,dy);
     knob.style.left=((dx+1)/2*100)+'%';knob.style.top=((dy+1)/2*100)+'%';jupdate()}
-  el.addEventListener('pointerdown',function(e){el.setPointerCapture(e.pointerId);at(e)});
+  el.addEventListener('pointerdown',function(e){e.preventDefault();el.setPointerCapture(e.pointerId);at(e)});
   el.addEventListener('pointermove',function(e){if(el.hasPointerCapture(e.pointerId))at(e)});
   function end(){f(0,0);knob.style.left='50%';knob.style.top='50%';jupdate()}
   el.addEventListener('pointerup',end);el.addEventListener('pointercancel',end);el.addEventListener('lostpointercapture',end)}
@@ -428,9 +445,12 @@ window.addEventListener('load',function(){
   function sq(v){return Math.abs(v)<.08?0:Math.sign(v)*v*v}
   dragger(document.getElementById('cpad'),document.getElementById('cknob'),function(dx,dy){J.hp=-sq(dx);J.ht=-sq(dy)});
   document.querySelectorAll('#jog button.hold').forEach(function(b){
-    b.addEventListener('pointerdown',function(e){b.setPointerCapture(e.pointerId);J[b.dataset.j]=+b.dataset.s;jupdate()});
+    b.addEventListener('pointerdown',function(e){e.preventDefault();b.setPointerCapture(e.pointerId);J[b.dataset.j]=+b.dataset.s;jupdate()});
     ['pointerup','pointercancel','lostpointercapture'].forEach(function(n){b.addEventListener(n,function(){J[b.dataset.j]=0;jupdate()})})})});
-window.addEventListener('blur',function(){J={x:0,y:0,z:0,t:0,w:0,hp:0,ht:0};jupdate()});
+window.addEventListener('blur',function(){J=jzero();jupdate()});
+document.addEventListener('selectstart',function(e){e.preventDefault()});
+document.addEventListener('click',function(e){if(e.target.id==='jtog'){var d=document.getElementById('joints'),
+  o=d.style.display==='none';d.style.display=o?'block':'none';e.target.innerHTML=o?'joints &#9662;':'joints &#9656;'}});
 // keyboard: the terminal's keys, arrows/PageUp/PageDown drive like the touchpad (hold to move)
 var KEYJ={ArrowUp:['y',1],ArrowDown:['y',-1],ArrowLeft:['x',-1],ArrowRight:['x',1],PageUp:['z',1],PageDown:['z',-1],
   a:['hp',1],d:['hp',-1],w:['ht',1],s:['ht',-1]};
@@ -2290,7 +2310,24 @@ def cmd_pick(a):
                         8.0 if inside else 1e9)
             else:
                 st["head_t"] = time.monotonic()
-            if any(v.get(ax, 0.0) for ax in ARM_JOG_AXES):
+            if any(v.get(ax, 0.0) for ax in JOINT_JOG_AXES):
+                if not st["arm_held"]:
+                    hold(True)
+                    say("arm held for driving")
+                if st["jog_q"] is None:
+                    st["jog_q"] = np.clip(q_now, lo, hi)
+                    st["jog_t"] = time.monotonic()
+                dt = min(0.1, time.monotonic() - st["jog_t"])
+                st["jog_t"] = time.monotonic()
+                k_ = arm_xpad.LEVELS[st["level"]] / arm_xpad.LEVELS[1]
+                for i_, ax in enumerate(JOINT_JOG_AXES):
+                    st["jog_q"][i_] += math.radians(v.get(ax, 0.0) * JOINT_JOG_DPS * k_) * dt
+                st["jog_q"] = np.clip(st["jog_q"], lo, hi)
+                st["jog_target"] = kin.pose(st["jog_q"])
+                bus.sync_write("Goal_Position", dict(zip(ARM, np.degrees(st["jog_q"]))))
+                if st["state"] not in ("lock", "holding"):
+                    st["state"], st["plan"] = "lock", None
+            elif any(v.get(ax, 0.0) for ax in ARM_JOG_AXES):
                 if not st["arm_held"]:
                     hold(True)
                     say("arm held for driving")
