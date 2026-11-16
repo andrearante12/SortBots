@@ -435,10 +435,15 @@ def _serve_conn(bridge, conn):
             req = {}
         try:
             resp = bridge.handle(req if isinstance(req, dict) else {}, conn)
+            if resp is not None:
+                conn.sendall(json.dumps(resp).encode() + b"\n")
+        except (BrokenPipeError, ConnectionResetError, socket.timeout):
+            pass  # serve.py gave up waiting (its own timeout): nothing to answer
         except Exception as e:
-            resp = {"error": str(e)}
-        if resp is not None:
-            conn.sendall(json.dumps(resp).encode() + b"\n")
+            try:
+                conn.sendall(json.dumps({"error": str(e)}).encode() + b"\n")
+            except OSError:
+                pass
 
 
 def cmd_serve(a):
