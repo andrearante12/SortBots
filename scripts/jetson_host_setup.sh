@@ -58,6 +58,8 @@ SystemMaxUse=300M
 EOF
 systemd-tmpfiles --create --prefix /var/log/journal
 systemctl restart systemd-journald
+# A restart alone keeps writing to /run until the next boot; flush moves it now.
+journalctl --flush
 
 # 4 --------------------------------------------------------------------------
 systemctl enable NetworkManager-wait-online.service >/dev/null 2>&1 || true
