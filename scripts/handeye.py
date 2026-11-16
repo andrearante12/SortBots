@@ -2624,10 +2624,11 @@ def main(argv=None):
                     help=f"press depth into a side face, mm (default {SIDE_PRESS_MM:g}: it pushes the box away)")
     # -8 mm made up for a magnet that seated on one edge and slid out; with the taught pitch it
     # seats flat, and 0 still slid a little forward on the way down (2026-11-13): -3. With the
-    # compliant wrist and the averaged lock, -3 landed ~2 mm short toward the base (2026-11-15): -1
-    pk.add_argument("--radial-mm", type=float, default=-1.0,
+    # compliant wrist and the averaged lock, -3 landed ~2 mm short toward the base (2026-11-15): -1,
+    # and -1 still ~2 mm short the same evening (after the pan limit widening): +1
+    pk.add_argument("--radial-mm", type=float, default=1.0,
                     help="aim correction along the line from the arm base through the target, mm; "
-                         "negative = toward the base (default -1)")
+                         "negative = toward the base (default +1)")
     pk.add_argument("--head", type=float, nargs=2, metavar=("PAN", "TILT"), default=list(PICK_HEAD),
                     help=f"hold the head here (default {PICK_HEAD[0]:.0f}/{PICK_HEAD[1]:.0f}; "
                          f"HOME, the best-calibrated angle, is {HOME_HEAD[0]}/{HOME_HEAD[1]})")
