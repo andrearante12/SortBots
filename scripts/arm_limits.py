@@ -48,11 +48,14 @@ def to_deg(raw, mid):
 
 
 def open_bus(port, arm_id):
+    from lerobot.motors import SerialMotorsBus
     from lerobot.robots.so_follower import SOFollower, SOFollowerRobotConfig
     arm = SOFollower(SOFollowerRobotConfig(port=port, id=arm_id, use_degrees=True))
     if not arm.calibration:
         raise SystemExit(f"no arm calibration ({ARM_CAL}): run lerobot-calibrate first")
-    bus = arm.bus
+    # a bus of our own, as handeye.open_bus: arm.bus closed itself once `arm` was collected on
+    # return, and the first read failed "not connected" (2026-11-15)
+    bus = SerialMotorsBus(port=port, motors=dict(arm.bus.motors), calibration=dict(arm.calibration))
     bus.connect()
     if not bus.is_calibrated:
         bus.disconnect(disable_torque=False)
