@@ -43,6 +43,6 @@ camera:
   enabled: true
   width: 640
   height: 480
-  # Tried in order: a D435 on a USB 2 port can't do 30 fps at 640x480 (docs/jetson.md).
+  # Tried in order: a D435 on a USB 2 port can't do 30 fps at 640x480 (docs/real-robot.md).
   fps: [30, 15]
   jpeg_quality: 70

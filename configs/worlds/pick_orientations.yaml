@@ -1,0 +1,33 @@
+# A world layout (simtest/world.py has the full schema; pick_bench.yaml explains
+# packages). Laid out against the fleet_warehouse_test grid: robot_0's aisle is
+# free for x -9.7..-6.1, y 9..16.
+#
+# Four decks, four plates facing +y, +x, -x and -y. The arm can only approach
+# along the line from its shoulder, so a plate facing away from the robot means
+# the BASE has to come round to the plate's side: the robot docks from the north,
+# the east, the west and the south in turn. Each dock pose (nodes/pick_planner.py)
+# and the straight transits between them were checked against the grid and the
+# props with the layout helper described in docs/manipulation.md.
+
+name: pick_orientations
+title: Four packages, plates facing four ways
+description: >
+  Four 0.5 m decks (0.80 m high) down robot_0's aisle, each with a box whose magnet
+  plate faces a different way. Task order is pkg_0 (plate north, nearest the spawn)
+  then pkg_1 (east), pkg_2 (west), pkg_3 (south), which keeps every transit between
+  docks clear of the other decks.
+
+scenes: [nvidia]
+autostart: true
+
+props:
+  - {id: deck_n, shape: box, size: [0.5, 0.5, 0.80], pose: [-8.0, 10.0, 0.0]}
+  - {id: deck_w, shape: box, size: [0.5, 0.5, 0.80], pose: [-9.3, 12.4, 0.0]}
+  - {id: deck_e, shape: box, size: [0.5, 0.5, 0.80], pose: [-6.7, 13.4, 0.0]}
+  - {id: deck_s, shape: box, size: [0.5, 0.5, 0.80], pose: [-8.0, 15.4, 0.0]}
+
+packages:
+  - {id: pkg_0, label: plate north, pose: [-8.0, 10.15, 1.5708], z: 0.80, magnet_face: "+x"}
+  - {id: pkg_1, label: plate east,  pose: [-9.15, 12.4, 0.0],    z: 0.80, magnet_face: "+x"}
+  - {id: pkg_2, label: plate west,  pose: [-6.85, 13.4, 3.1416], z: 0.80, magnet_face: "+x"}
+  - {id: pkg_3, label: plate south, pose: [-8.0, 15.25, -1.5708], z: 0.80, magnet_face: "+x"}

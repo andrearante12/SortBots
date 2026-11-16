@@ -3,7 +3,7 @@
 # saved, and check that an entry is still intact.
 #
 # A library map lets a demo or test run start from an already-explored
-# warehouse instead of re-exploring for twenty minutes. See maps/README.md for
+# warehouse instead of re-exploring for twenty minutes. See docs/running.md for
 # the layout and scripts/maps_lib.py for the manifest schema.
 #
 # Usage:
@@ -185,7 +185,7 @@ cmd_save() {
   # the offload launch (sortbots_slam_workstation.launch.py) uses
   # ~/.ros/sortbots_<rid>_ws.db so a workstation that also runs sims can't
   # clobber its sim map, and the backup service writes <that path>.back, so
-  # the saver has to be told (tasks/slam_offload.md).
+  # the saver has to be told (tasks/slam_offload.md@6501799).
   local live="${live_path:-$HOME/.ros/sortbots_${rid}.db}"
 
   "$PY" "$MAPS_LIB" init "$name" \

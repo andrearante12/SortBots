@@ -1,0 +1,90 @@
+# A world layout (simtest/world.py has the full schema). See person_crossing.yaml
+# for how these coordinates were chosen.
+#
+# Static props are real colliders: a robot that drives into a crate stops
+# against it. Actors are NOT colliders (a scripted mover that shoved robots
+# around would make every run different) — touching one is caught by the
+# clearance metric instead. tests/simtest_world_test.py checks that no actor
+# here ever walks through a prop.
+
+name: warehouse_mixed
+title: Open floor — pallets, barrels, two people and a forklift
+description: >
+  The open floor south of robot_0's aisle, dressed with real warehouse props
+  (a pallet, plastic barrels, a tote, crates), crossed by a person at the
+  aisle mouth, a worker walking a loop around the clutter, and a forklift
+  working a lane along the west wall. For routes that need static and dynamic
+  avoidance in one run, and for demos.
+
+scenes: [nvidia]
+autostart: true
+
+props:
+  - id: crate_0
+    shape: box
+    size: [0.8, 0.6, 0.9]
+    pose: [-9.0, 5.2, 0.0]
+  - id: crate_1
+    shape: box
+    size: [1.2, 0.8, 1.1]
+    pose: [-10.0, 3.3, 0.0]
+  - id: tote_0
+    label: tote
+    shape: usd
+    ref: Isaac/Props/KLT_Bin/small_KLT_visual_collision.usd
+    footprint: [0.4, 0.3]
+    height: 0.15
+    pose: [-6.8, 4.0, 0.4]
+  - id: barrel_0
+    label: barrel
+    shape: usd
+    ref: Isaac/Environments/Simple_Warehouse/Props/SM_BarelPlastic_A_01.usd
+    radius: 0.3
+    height: 0.9
+    pose: [-10.0, 1.2]
+    color: [0.20, 0.35, 0.65]
+  - id: barrel_1
+    label: barrel
+    shape: usd
+    ref: Isaac/Environments/Simple_Warehouse/Props/SM_BarelPlastic_A_02.usd
+    radius: 0.3
+    height: 0.9
+    pose: [-9.2, 1.2]
+    color: [0.20, 0.35, 0.65]
+  - id: pallet_0
+    label: pallet
+    shape: usd
+    ref: Isaac/Props/Pallet/pallet.usd
+    footprint: [1.2, 1.0]
+    height: 0.15          # low: under the head camera's line of sight at close range
+    pose: [-7.5, 0.5, 0.0]
+    color: [0.62, 0.52, 0.36]
+
+actors:
+  - id: person_0
+    label: person
+    preset: person
+    path:
+      waypoints: [[-12.5, 6.8], [-6.0, 6.8]]
+      speed_mps: 1.1
+      mode: pingpong
+      dwell_s: 0.5
+  - id: worker_0
+    label: worker
+    preset: worker
+    path:
+      # A loop around the crates, clockwise from the north-west corner.
+      waypoints: [[-11.8, 4.5], [-8.0, 4.5], [-8.0, 2.2], [-11.8, 2.2]]
+      speed_mps: 0.7
+      mode: loop
+      start_at_s: 3.0
+  - id: forklift_0
+    label: forklift
+    preset: forklift
+    path:
+      # A lane along the west wall, anticlockwise: south on x = -14.3, back
+      # north on x = -13.0. Its 2.6 m body swings through the corners.
+      waypoints: [[-14.3, 7.5], [-14.3, 0.0], [-13.0, 0.0], [-13.0, 7.5]]
+      speed_mps: 1.5
+      mode: loop
+      dwell_s: 1.0

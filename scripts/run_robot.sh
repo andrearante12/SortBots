@@ -23,10 +23,10 @@
 #
 # --slam-role robot keeps only odometry, the live obstacle cloud and a ~2 Hz
 # compressed keyframe stream here; RTAB-Map mapping runs on the workstation
-# (launch/sortbots_slam_workstation.launch.py, tasks/slam_offload.md). The
+# (launch/sortbots_slam_workstation.launch.py, tasks/slam_offload.md@6501799). The
 # default `all` maps on the Jetson as before, at lower CPU priority.
 #
-# Not started, on purpose: Nav2, task_manager, scripted_pick and the explorer.
+# Not started, on purpose: Nav2, task_manager, magnet_pick and the explorer.
 # There is no base driver yet, so nothing would move; the dashboard's drive
 # pad publishes /<id>/cmd_vel into the void until nodes/base_driver.py exists.
 set -u
@@ -50,12 +50,12 @@ PIPELINE_PATTERNS=(realsense2_camera_node rtabmap_slam rgbd_odometry rtabmap_viz
                    controller_server planner_server smoother_server behavior_server \
                    bt_navigator waypoint_follower velocity_smoother lifecycle_manager \
                    collision_monitor component_container \
-                   task_manager.py scripted_pick.py explorer.py \
+                   task_manager.py scripted_pick.py magnet_pick.py explorer.py \
                    rtabmap_cloud_pump.py recon_cloud_relay.py \
                    map_merge.py static_transform_publisher \
                    fleet_radio.py fleet_tasks.py dynamic_obstacle_filter.py recon_cloud_merge.py \
                    depth_colorizer.py feature_overlay.py obstacle_cloud.py \
-                   obstacle_detector.py map_handoff.py rtabmap_sync \
+                   obstacle_detector.py package_detector.py map_handoff.py rtabmap_sync \
                    sortbots_bringup.launch.py)
 KEEP_CONSOLE=false
 
@@ -153,7 +153,7 @@ ROS_ENV="source '$ROS_SETUP'; \
   export FASTRTPS_DEFAULT_PROFILES_FILE='$REPO_ROOT/configs/dds/fastdds_large_shm.xml'"
 # ^ Fast DDS's default 512 KB shared-memory segment is smaller than one D435
 #   frame (1.2 MB), so every image fell back to fragmented UDP. On the bench
-#   (tasks/slam_offload.md) that delivered 1.6 Hz of 11.7 Hz published, and
+#   (tasks/slam_offload.md@6501799) that delivered 1.6 Hz of 11.7 Hz published, and
 #   odometry processed 23 of 832 frames. Unset it to compare.
 
 echo "[run_robot] launching RTAB-Map + RealSense D435 for $ROBOT_ID..."

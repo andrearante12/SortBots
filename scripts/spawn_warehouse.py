@@ -16,7 +16,8 @@ Both robots curve gently in the warehouse, each one publishing:
 
 plus, once for the whole sim (see _WorldRuntime):
 
-    /sim/ground_truth          std_msgs/String JSON, 10 Hz sim: true robot + actor poses
+    /sim/ground_truth          std_msgs/String JSON, 10 Hz sim: true robot + actor + package
+                                                     poses, and what the magnet holds
     /sim/world                 std_msgs/String JSON, latched: the --world layout
     /sim/view/rgb              sensor_msgs/Image, the operator view's "Sim" view
                                                      (configs/sim_view.yaml); ONLY while watched
@@ -30,15 +31,21 @@ and subscribing:
                                                      "follow": robot | null, "reset": true}: the
                                                      operator's Sim view heartbeat + camera moves
     /<robot>/cmd_vel           geometry_msgs/Twist  (--drive cmd_vel; holonomic x/y/yaw)
-    /<robot>/pick_cmd          std_msgs/String      ("attach"/"detach"; robot_0 only,
-                                                      see nodes/task_manager.py)
+    /<robot>/arm_joint_cmd     sensor_msgs/JointState (the six arm joints by name; robot_0
+                                                      only, from nodes/magnet_pick.py)
+    /<robot>/pick_cmd          std_msgs/String      ("attach" = magnet on, "detach" = off;
+                                                      robot_0 only, nodes/magnet_pick.py)
     /<robot>/head_cmd          sensor_msgs/JointState (head_pan_joint/head_tilt_joint
                                                       position targets, radians; robot_0 only)
+
+The magnet is simtest/magnet.py's MagnetSim, stepped every physics step (see
+_WorldRuntime.magnet_step): a package within capture range of the energized magnet
+face is snapped to it and rides the arm until the magnet is turned off.
 
 pick_cmd/head_cmd are plain rclpy subscribers, not OmniGraph — see
 `_start_extra_ros_subscribers`. `<robot>` ∈ {robot_0, robot_1}. From a
 separate shell with ROS 2 Jazzy
-in scope (or the bundled-lib env-var recipe in docs/isaac_sim_phase3.md),
+in scope (or the bundled-lib env-var recipe in docs/isaac_sim_phase3.md@6501799),
 `ros2 topic list` and `ros2 topic echo /robot_0/odom` confirm liveness.
 
 Use `--no-headless` for the GUI viewport (slow on hybrid graphics; the
@@ -97,20 +104,21 @@ D435_CONFIG = REPO_ROOT / "configs" / "sensors" / "d435.json"
 if os.environ.get("SORTBOTS_D435_CONFIG"):
     D435_CONFIG = Path(os.environ["SORTBOTS_D435_CONFIG"])
 MPU6050_CONFIG = REPO_ROOT / "configs" / "sensors" / "mpu6050.json"
-WAYPOINTS_CONFIG = REPO_ROOT / "configs" / "waypoints.yaml"
 ROBOTS_CONFIG = REPO_ROOT / "configs" / "robots.yaml"
 RESULT_FILE = os.environ.get(
     "ISAAC_SPAWN_WAREHOUSE_RESULT", "/tmp/isaac_spawn_warehouse_result.txt"
 )
 
-# Milestone 1 mock pick: the URDF link name of the first arm's gripper tip
-# (see third_party/XLeRobot/simulation/Maniskill/assets/xlerobot/xlerobot.urdf,
-# `Fixed_Jaw_tip`). Isaac's URDF importer parents links as flat children of
-# the articulation root (matches head_camera/imu path conventions above), so
-# this is `/World/<robot>/Fixed_Jaw_tip`. Single-robot (robot_0) scope only.
-GRIPPER_LINK = "Fixed_Jaw_tip"
-
-PACKAGE_SIZE_M = 0.08
+# The link the magnet effector mounts on: the first arm's `Fixed_Jaw`, the link motor 5
+# (wrist roll) turns (third_party/XLeRobot/simulation/Maniskill/assets/xlerobot/
+# xlerobot.urdf). The magnet's TCP is simtest.magnet.TCP_OFFSET_M from its origin along
+# the roll axis, not the stock jaw tip (`Fixed_Jaw_tip`, 97 mm out), which is the old
+# gripper's. Isaac's URDF importer parents links as flat children of the articulation
+# root (as with the head camera and IMU paths above), so this is
+# `/World/<robot>/Fixed_Jaw`. NOT yet confirmed against a live session: main() dumps
+# the robot's children at startup and says whether it resolved, so the first live run
+# settles it. Single-robot (robot_0) scope only.
+ARM_TCP_LINK = "Fixed_Jaw"
 
 # Height of the arm's shoulder (the `Rotation` joint) above base_link, summed
 # straight out of xlerobot.urdf: arm_base_joint z=+0.7600 then Rotation
@@ -173,45 +181,6 @@ def _load_sensor_configs():
     return d435, mpu
 
 
-def _load_station_props():
-    """Stations in waypoints.yaml that carry a `prop:` block.
-
-    Returns [(name, kind, x, y, yaw, prop), ...] in file order.
-
-    Replaces the old `_load_first_pickup_station()`, whose (x, y)-only return
-    couldn't carry the deck height the package z is now derived from. Extra
-    keys in waypoints.yaml are inert everywhere else: task_manager.Station
-    reads only kind/pose/dock_offset_m/dock_lateral_m, and the dashboard reads
-    only `kind`.
-    """
-    import yaml
-
-    # configs/waypoints.yaml was retired 2026-10-15 when stations merged into
-    # plain nav waypoints (nav-only tasks, no arm pick). A layout that still
-    # ships one gets its shelves; its absence just means no station props, same
-    # as --no-station-props — the package-placement fallback at the call site
-    # (and task_manager) handles an empty list.
-    if not WAYPOINTS_CONFIG.exists():
-        return []
-    with open(WAYPOINTS_CONFIG) as f:
-        stations = (yaml.safe_load(f) or {}).get("stations") or {}
-    out = []
-    for name, spec in stations.items():
-        prop = spec.get("prop")
-        if not prop:
-            continue
-        pose = spec["pose"]
-        out.append((
-            name,
-            spec["kind"],
-            float(pose["x"]),
-            float(pose["y"]),
-            float(pose.get("yaw", 0.0)),
-            prop,
-        ))
-    return out
-
-
 def _load_spawn_positions(scene: str) -> dict[str, tuple[float, float, float]]:
     """Fleet roster spawn poses for `scene`, in configs/robots.yaml order.
 
@@ -233,18 +202,6 @@ def _roster_size() -> int:
 
     with open(ROBOTS_CONFIG) as f:
         return len(yaml.safe_load(f)["robots"])
-
-
-def _package_z(deck_height_m: float) -> float:
-    """Package centre z so its bottom face rests on a deck at `deck_height_m`.
-
-    UsdGeom.Cube is origin-centred, so a size-S cube sitting on a surface at
-    height H has its centre at H + S/2. Derived rather than stored as a second
-    constant on purpose: the previous PACKAGE_HEIGHT_M = 0.85 literal had no
-    relationship to any geometry in the scene, and nothing would have told us
-    when it drifted.
-    """
-    return deck_height_m + PACKAGE_SIZE_M / 2.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -308,18 +265,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
-        "--no-station-props",
-        dest="station_props",
-        action="store_false",
-        help=(
-            "Skip the shelves authored at every configs/waypoints.yaml station "
-            "carrying a `prop:` block. Escape hatch for when a shelf lands "
-            "inside NVIDIA warehouse geometry — the station poses are estimates "
-            "and have never been confirmed against the real rack layout. The "
-            "package then spawns on the floor at the first pickup pose instead."
-        ),
-    )
-    p.add_argument(
         "--no-sim-view",
         dest="sim_view",
         action="store_false",
@@ -377,6 +322,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--half-res-cams",
+        action="store_true",
+        help=(
+            "Render every robot camera at 424x240 instead of the D435's "
+            "848x480: a quarter of the pixels to render, read back and "
+            "publish per camera. For larger fleets. Four idle robots on the "
+            "RTX 4070 laptop (render_every 2, lite_render): 0.40x -> 0.46x "
+            "real time, GPU 48%% -> 28%% (2026-10-24). It does not make six "
+            "full robots fit that machine: there the CPU is the limit, and "
+            "each camera got ~1 image/s wall-clock either way. Intrinsics "
+            "follow from the prim's focal length and aperture, so camera_info "
+            "stays consistent; SLAM gets fewer features per frame."
+        ),
+    )
+    p.add_argument(
         "--world",
         default=None,
         metavar="NAME",
@@ -395,6 +355,7 @@ args = parse_args()
 # Validate --world BEFORE SimulationApp: a typo'd name or a bad layout should
 # cost a second, not Isaac's 60 s startup plus an asset stream.
 WORLD = None
+CAMERA_ZERO = {}    # robot -> base_link -> camera_optical as measured with the head at 0
 if args.world:
     sys.path.insert(0, str(REPO_ROOT))
     from simtest import world as world_lib  # noqa: E402
@@ -665,6 +626,77 @@ def _base_to_prim_transform(stage, base_prim_path: str, child_prim_path: str):
     )
 
 
+EFFECTOR_BODY_RGB = (0.72, 0.74, 0.77)     # printed PETG
+EFFECTOR_MAGNET_RGB = (0.16, 0.17, 0.19)   # the electromagnet's steel
+
+
+def _fit_magnet_effector(robot_path: str) -> None:
+    """Swap the first arm's gripper for the magnet effector, as on the real robot.
+
+    The links stay: `Fixed_Jaw` is what simtest/magnet.py measures the TCP from, and the
+    importer's joints and the arm's dof order would all move if it went. What goes is what
+    the gripper LOOKS like and what it collides with, and the effector's own mesh (from
+    hardware/magnet_effector, simtest/stl.py) is authored on the link in its place. Visual
+    only, like the packages. The second arm has no magnet, so it keeps its gripper.
+
+    Before world.reset(), never after: taking colliders off a live articulation invalidates
+    its physics view, and the next joint read kills the sim ("Failed to get DOF positions
+    from backend", 2026-11-05)."""
+    import omni.usd
+    from pxr import UsdGeom, Vt
+
+    from build_warehouse import _bind, _make_color_material
+    from simtest import stl
+
+    stage = omni.usd.get_context().get_stage()
+    for link in ("Fixed_Jaw", "Moving_Jaw"):
+        prim = stage.GetPrimAtPath(f"{robot_path}/{link}")
+        children = [c.GetName() for c in prim.GetChildren()]
+        emit(f"  gripper {link}: children {children}")
+        for child in prim.GetChildren():
+            if child.GetName() == "visuals":
+                UsdGeom.Imageable(child).MakeInvisible()
+            elif child.GetName() == "collisions":
+                child.SetActive(False)
+    for name, path, rgb in (("body", stl.BODY_STL, EFFECTOR_BODY_RGB),
+                            ("magnet", stl.MAGNET_STL, EFFECTOR_MAGNET_RGB)):
+        tri = stl.to_link_frame(stl.read_stl(path))
+        mesh = UsdGeom.Mesh.Define(stage, f"{robot_path}/{ARM_TCP_LINK}/magnet_effector_{name}")
+        mesh.CreatePointsAttr(Vt.Vec3fArray.FromNumpy(tri.reshape(-1, 3).astype("float32")))
+        mesh.CreateFaceVertexCountsAttr([3] * len(tri))
+        mesh.CreateFaceVertexIndicesAttr(list(range(3 * len(tri))))
+        mesh.CreateSubdivisionSchemeAttr("none")
+        mesh.CreateDoubleSidedAttr(True)
+        _bind(mesh.GetPrim(), _make_color_material(stage, f"{robot_path}/EffectorLooks/{name}", rgb))
+    emit(f"  magnet effector mesh on {robot_path}/{ARM_TCP_LINK}")
+
+
+class _HeadTf:
+    """Keeps robot_0's base_link -> camera_optical true while the head moves.
+
+    The extrinsics graph republishes whatever its Tf0 node holds every tick, so this only
+    has to rewrite those two inputs. Without it the camera's TF stays at the zero pose
+    however far the head has tilted, and RTAB-Map, the obstacle clouds and the plate
+    detector all place their points wrongly. simtest/head.py has the geometry."""
+
+    INPUTS = "/World/robot_0/ExtrinsicsTfGraph/Tf0.inputs:"
+
+    def __init__(self, zero):
+        from simtest.head import HeadKin
+
+        self.kin, self.zero, self.last = HeadKin(), zero, (0.0, 0.0)
+
+    def update(self, pan: float, tilt: float) -> None:
+        if max(abs(pan - self.last[0]), abs(tilt - self.last[1])) < 1e-3:
+            return
+        import omni.graph.core as og
+
+        translation, rotation = self.kin.extrinsic(pan, tilt, self.zero)
+        og.Controller.set(og.Controller.attribute(f"{self.INPUTS}translation"), list(translation))
+        og.Controller.set(og.Controller.attribute(f"{self.INPUTS}rotation"), list(rotation))
+        self.last = (pan, tilt)
+
+
 def _orient_camera_to_ros(cam) -> None:
     """Apply a local rotation so the camera's USD axes align with ROS
     optical-frame convention (Z forward, X right, Y down).
@@ -729,7 +761,7 @@ def _look_at(eye, target):
     return Gf.Matrix4d().SetLookAt(Gf.Vec3d(*eye), Gf.Vec3d(*target), Gf.Vec3d(0, 0, 1)).GetInverse()
 
 
-def _spawn_sim_view(scene: str, build_graph):
+def _spawn_sim_view(scene: str, build_graph, view: dict | None = None):
     """The operator view's Sim camera: a look-at camera from configs/sim_view.yaml,
     and its (disabled) RGB graph. Returns {attr: the graph's `enabled` attribute path,
     path: the camera prim, eye, target: its default pose}, or None when the scene has
@@ -743,6 +775,7 @@ def _spawn_sim_view(scene: str, build_graph):
     if not sc:
         emit(f"  sim view: no camera for scene {scene!r} in {SIM_VIEW_CONFIG.name}")
         return None
+    sc = {**sc, **(view or {})}     # a world can aim it at what it is about
     stage = omni.usd.get_context().get_stage()
     path = "/World/sim_view_cam"
     cam = UsdGeom.Camera.Define(stage, path)
@@ -950,81 +983,39 @@ def _read_arm_cmd(robot_name: str):
     ])
 
 
-def _station_materials(stage):
-    """OmniPBR materials for the hand-built station props, made once.
-
-    Reuses the texture pipeline build_warehouse already has (the same
-    assets/textures/*.jpg the primitive scene uses). Without this the shelves
-    render flat white: _author_box makes UV-mapped geometry but binds nothing,
-    and UsdPreviewSurface doesn't render textures in Kit's RTX path anyway —
-    OmniPBR is the only thing that does here.
-
-    Returns {} if the textures aren't present (fetch_warehouse_textures.py was
-    never run), so a missing texture downgrades to untextured rather than
-    killing the spawn.
+def _set_op(xform, kind: str, value, suffix: str = ""):
+    """Author one xform op on a referenced prim at whatever precision the ASSET
+    already uses for it. ClearXformOpOrder() drops the order, not the
+    attributes: the NVIDIA characters ship `xformOp:rotateXYZ` as double3, and
+    AddRotateXYZOp()'s float default then raises "typeName 'double3' does not
+    match the requested precision" (first live run of a usd actor, 2026-11-06).
     """
-    from build_warehouse import TEXTURE_ROLES, TEXTURES_DIR, _make_texture_material
+    from pxr import Gf, UsdGeom
 
-    from pxr import UsdGeom
-
-    materials = {}
-    UsdGeom.Scope.Define(stage, "/World/StationLooks")
-    for role in ("shelves", "boxes"):
-        tex = TEXTURES_DIR / TEXTURE_ROLES[role]
-        if not tex.is_file():
-            continue
-        materials[role] = _make_texture_material(
-            stage, f"/World/StationLooks/{role}", tex
-        )
-    return materials
+    attr = xform.GetPrim().GetAttribute(f"xformOp:{kind}" + (f":{suffix}" if suffix else ""))
+    double = not (attr and attr.IsValid() and str(attr.GetTypeName()).startswith("float"))
+    prec = UsdGeom.XformOp.PrecisionDouble if double else UsdGeom.XformOp.PrecisionFloat
+    add = {"translate": xform.AddTranslateOp, "rotateXYZ": xform.AddRotateXYZOp,
+           "scale": xform.AddScaleOp}[kind]
+    op = add(prec, suffix) if suffix else add(prec)
+    op.Set((Gf.Vec3d if double else Gf.Vec3f)(*value))
+    return op
 
 
-def _spawn_shelf(stage, prim_path: str, x: float, y: float, yaw_rad: float,
-                 deck_height_m: float, size, materials=None):
-    """A deck slab on four legs, as static colliders, centred on (x, y).
+def _asset_url(ref: str):
+    """A ref relative to the Isaac asset root -> its full URL; an absolute
+    URL/filesystem path passes through. None when the root can't be resolved."""
+    if "://" in ref or ref.startswith("/"):
+        return ref
+    try:
+        from isaacsim.storage.native import get_assets_root_path
 
-    The NVIDIA warehouse has nothing this arm can pick from at a sane height,
-    and editing a streamed asset reference is not something we want to own. So
-    the demo brings its own shelf and places it at the station pose. See
-    `type: usd` in configs/waypoints.yaml for referencing a real NVIDIA prop
-    instead; this stays the offline/no-network fallback and is what the
-    primitive scene needs.
-
-    Reuses build_warehouse._author_box, which authors a UV-mapped Mesh rather
-    than a UsdGeom.Cube — Kit's RTX delegate won't generate UVs for a Cube, so
-    Cubes render flat grey. Static: CollisionAPI only, no RigidBodyAPI, so it
-    never moves and costs the solver nothing.
-    """
-    import math
-
-    from build_warehouse import _author_box, _bind
-
-    yaw_deg = math.degrees(yaw_rad)
-    sx, sy, sz = (float(v) for v in size)
-    materials = materials or {}
-
-    deck = _author_box(
-        stage, f"{prim_path}/Deck", (sx, sy, sz),
-        (x, y, deck_height_m - sz / 2.0), rotate_xyz=(0.0, 0.0, yaw_deg),
-    )
-    if "shelves" in materials:
-        _bind(deck, materials["shelves"])
-
-    leg = 0.05
-    leg_h = max(deck_height_m - sz, 0.01)
-    cos_y, sin_y = math.cos(yaw_rad), math.sin(yaw_rad)
-    inset_x = sx / 2.0 - leg
-    inset_y = sy / 2.0 - leg
-    for i, (ox, oy) in enumerate([(1, 1), (1, -1), (-1, 1), (-1, -1)]):
-        # Leg offsets are in the shelf's own frame, rotated into world by yaw.
-        lx = x + (ox * inset_x) * cos_y - (oy * inset_y) * sin_y
-        ly = y + (ox * inset_x) * sin_y + (oy * inset_y) * cos_y
-        leg_prim = _author_box(
-            stage, f"{prim_path}/Leg_{i}", (leg, leg, leg_h),
-            (lx, ly, leg_h / 2.0), rotate_xyz=(0.0, 0.0, yaw_deg),
-        )
-        if "shelves" in materials:
-            _bind(leg_prim, materials["shelves"])
+        root = get_assets_root_path()
+    except Exception:
+        root = None
+    if not root:
+        return None
+    return f"{root.rstrip('/')}/{ref.lstrip('/')}"
 
 
 def _spawn_usd_prop(stage, prim_path: str, x: float, y: float, yaw_rad: float,
@@ -1064,106 +1055,17 @@ def _spawn_usd_prop(stage, prim_path: str, x: float, y: float, yaw_rad: float,
     from isaacsim.core.utils.stage import add_reference_to_stage
     from pxr import Gf, UsdGeom
 
-    if "://" not in ref and not ref.startswith("/"):
-        try:
-            from isaacsim.storage.native import get_assets_root_path
-
-            root = get_assets_root_path()
-        except Exception:
-            root = None
-        if not root:
-            return False
-        ref = f"{root.rstrip('/')}/{ref.lstrip('/')}"
+    ref = _asset_url(ref)
+    if ref is None:
+        return False
 
     add_reference_to_stage(usd_path=ref, prim_path=prim_path)
     xform = UsdGeom.Xformable(stage.GetPrimAtPath(prim_path))
     xform.ClearXformOpOrder()
-    xform.AddTranslateOp().Set(Gf.Vec3d(float(x), float(y), float(z)))
-    xform.AddRotateXYZOp().Set(Gf.Vec3f(0.0, 0.0, float(math.degrees(yaw_rad))))
+    _set_op(xform, "translate", (float(x), float(y), float(z)))
+    _set_op(xform, "rotateXYZ", (0.0, 0.0, float(math.degrees(yaw_rad))))
     if scale != 1.0:
-        xform.AddScaleOp().Set(Gf.Vec3f(float(scale), float(scale), float(scale)))
-    return True
-
-
-def _spawn_package(stage, prim_path: str, x: float, y: float, z: float):
-    """A free Cube the mock pick teleports onto the gripper.
-
-    No rigid-body physics: the box only has to visibly ride the gripper and
-    stay put once released. `_place_package_on_surface` handles the release.
-    Real grasp physics is the successor to all of this — see that function.
-    """
-    from pxr import Gf, UsdGeom
-
-    cube = UsdGeom.Cube.Define(stage, prim_path)
-    cube.CreateSizeAttr(PACKAGE_SIZE_M)
-    xformable = UsdGeom.Xformable(cube)
-    xformable.ClearXformOpOrder()
-    xformable.AddTranslateOp().Set(Gf.Vec3d(x, y, z))
-
-
-def _sync_package_to_gripper(stage, robot_name: str, package_prim_path: str) -> bool:
-    """Teleport the package prim onto the gripper tip's current world pose.
-
-    Returns False (no-op) if the gripper link isn't found — e.g. `GRIPPER_LINK`
-    doesn't match the actual imported prim name, which nobody has confirmed
-    against a live session yet (see the `Fixed_Jaw_tip` comment above).
-    """
-    from pxr import Usd, UsdGeom
-
-    gripper_prim = stage.GetPrimAtPath(f"/World/{robot_name}/{GRIPPER_LINK}")
-    if not gripper_prim.IsValid():
-        return False
-    world_xform = UsdGeom.Xformable(gripper_prim).ComputeLocalToWorldTransform(
-        Usd.TimeCode.Default()
-    )
-    package_prim = stage.GetPrimAtPath(package_prim_path)
-    xformable = UsdGeom.Xformable(package_prim)
-    xformable.ClearXformOpOrder()
-    xformable.AddTransformOp().Set(world_xform)
-    return True
-
-
-def _place_package_on_surface(stage, package_prim_path: str, decks) -> bool:
-    """Drop the package onto whatever it's currently over. Called on release.
-
-    Without this the box freezes in mid-air wherever the gripper let go — the
-    single most obviously-fake moment in the demo. `decks` is
-    [(x, y, half_sx, half_sy, deck_z), ...] from the station props; if the
-    package's XY is over one it lands on that deck, otherwise on the floor.
-
-    Station-agnostic on purpose: it works for any dropoff, and for a release
-    part-way through a run, without spawn_warehouse needing to know which
-    station task_manager navigated to (it deliberately doesn't).
-
-    Authors a Translate, not a Transform, so the wrist rotation the gripper
-    baked into the package's transform is dropped and the box lands square.
-
-    Still a teleport, same honesty caveat as the attach side. The successor is
-    real physics: give the package RigidBodyAPI + CollisionAPI, keep
-    physics:kinematicEnabled true while held and clear it on release so it
-    actually falls. That is deliberately NOT on the demo path — it depends on
-    the shelf colliders being right, on the gripper not interpenetrating, and
-    on the Jaw drive, which at stiffness 100 / max_force 100 (vs the arm's
-    1000/1000, see configs/physics_overrides/xlerobot.json) cannot hold
-    anything at all.
-    """
-    from pxr import Gf, Usd, UsdGeom
-
-    package_prim = stage.GetPrimAtPath(package_prim_path)
-    if not package_prim.IsValid():
-        return False
-    xformable = UsdGeom.Xformable(package_prim)
-    world_xform = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-    pos = world_xform.ExtractTranslation()
-
-    rest_z = PACKAGE_SIZE_M / 2.0  # on the floor
-    for dx, dy, half_sx, half_sy, deck_z in decks:
-        if abs(pos[0] - dx) <= half_sx and abs(pos[1] - dy) <= half_sy:
-            rest_z = _package_z(deck_z)
-            break
-
-    xformable.ClearXformOpOrder()
-    xformable.AddTranslateOp().Set(Gf.Vec3d(float(pos[0]), float(pos[1]), rest_z))
+        _set_op(xform, "scale", (float(scale),) * 3)
     return True
 
 
@@ -1200,8 +1102,281 @@ def _author_world_shape(stage, path: str, item: dict, *, collider: bool):
                             (0.0, 0.0, item["height"] / 2.0), collider=collider)
 
 
-def _spawn_world(stage, w: dict) -> dict:
-    """Author a world's props and actors. Returns {actor_id: (translate_op, rotate_op)}.
+def _fallback_item(item: dict) -> dict:
+    """The primitive a usd item degrades to when its asset can't be referenced:
+    the SAME footprint the metrics score against (simtest/world.py PRESETS)."""
+    h = item["height"]
+    if item.get("fallback") == "cylinder" or ("radius" in item and item.get("fallback") != "box"):
+        from simtest import world as wl
+
+        return {**item, "shape": "cylinder", "radius": item.get("radius") or wl.half_extent(item)}
+    if "radius" in item:
+        r = item["radius"]
+        return {**item, "shape": "box", "size": (2 * r, 2 * r, h)}
+    fx, fy = item["footprint"]
+    return {**item, "shape": "box", "size": (fx, fy, h)}
+
+
+def _strip_physics(stage, root_path: str) -> int:
+    """Turn a referenced asset into a visual-only prop: no colliders, no rigid
+    bodies, no articulations, joints, cameras or graphs. Returns how many prims
+    were touched.
+
+    World actors must not be colliders (see _spawn_world), but the NVIDIA
+    characters, the forklift and the AMRs all ship physics — the robots even
+    ship sensors and OmniGraphs. Composing `*Enabled = false` overrides over
+    the reference is what PhysX honours; RemoveAPI on a referenced prim would
+    only remove the local opinion and leave the asset's. Instanceable
+    subtrees can't be authored on through their proxies, so they are made
+    un-instanceable first (visual cost: none, these are single copies).
+    """
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+    root = stage.GetPrimAtPath(root_path)
+    if not root.IsValid():
+        return 0
+    for prim in Usd.PrimRange(root):
+        if prim.IsInstanceable():
+            prim.SetInstanceable(False)
+    touched = 0
+    for prim in Usd.PrimRange(root):
+        tn = prim.GetTypeName()
+        if prim.HasAPI(UsdPhysics.CollisionAPI):
+            UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
+            touched += 1
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            UsdPhysics.RigidBodyAPI(prim).CreateRigidBodyEnabledAttr(False)
+            touched += 1
+        if prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+            UsdPhysics.ArticulationRootAPI(prim).CreateArticulationEnabledAttr(False)
+            touched += 1
+        if prim.IsA(UsdPhysics.Joint):
+            UsdPhysics.Joint(prim).CreateJointEnabledAttr(False)
+            touched += 1
+        # Sensors and graphs on a robot asset would publish, render or tick on
+        # their own; a scripted mover needs none of that. Deactivating keeps
+        # the asset's meshes (they are siblings, not children, of these).
+        if prim.IsA(UsdGeom.Camera) or tn.startswith("OmniGraph") or "Lidar" in tn \
+                or tn.startswith("Isaac") or tn.startswith("PhysxScene"):
+            prim.SetActive(False)
+            touched += 1
+    return touched
+
+
+# actor id -> {"rot", "trans", "frames", "stride_s", "phase", "idx"}: the
+# walkers _WorldRuntime.step poses every physics step. The stride is driven
+# from the WORLD clock, not baked into time samples on the USD timeline: a
+# 420 s bake froze every walker on its last pose once a live demo outlived it
+# (seen 2026-11-09 at sim t=5563 s), and the timeline knows nothing about the
+# actor dwelling or the world clock being paused/reset — so the legs walked
+# on the spot at every waypoint. Here the phase only advances while the actor
+# is actually moving, and loops forever.
+WALKERS: dict = {}
+
+
+def _find_skeleton(stage, under_path: str):
+    from pxr import Usd, UsdSkel
+
+    prim = stage.GetPrimAtPath(under_path)
+    if not prim.IsValid():
+        return None
+    for q in Usd.PrimRange(prim):
+        if q.IsA(UsdSkel.Skeleton):
+            return q
+    return None
+
+
+def _pose_walker(walker: dict, dt: float, moving: bool) -> None:
+    """Advance one walker's stride by dt seconds of world clock (only while it
+    moves) and author the matching pose if the frame changed."""
+    if moving and dt > 0.0:
+        walker["phase"] = (walker["phase"] + dt / walker["stride_s"]) % 1.0
+    frames = walker["frames"]
+    idx = int(walker["phase"] * len(frames)) % len(frames)
+    if idx == walker["idx"]:
+        return
+    walker["idx"] = idx
+    rot, trans = frames[idx]
+    walker["rot"].Set(rot)
+    if walker["trans"] is not None:
+        walker["trans"].Set(trans)
+
+
+# (character ref, clip) -> retargeted stride: two actors sharing both share
+# the work (a few hundred ms per stride).
+_STRIDE_CACHE: dict = {}
+
+
+def _spawn_walk_actor(stage, model: str, actor: dict) -> bool:
+    """A person/worker actor: a dressed NVIDIA character (the CC-rig *_new
+    characters) actually walking — one stride of Isaac's walk library
+    retargeted onto its skeleton (scripts/walk_retarget.py), looped off the
+    world clock by _WorldRuntime.step (see WALKERS). False when the asset
+    root is unreachable or the asset's structure isn't what we expect (the
+    caller falls back to a primitive)."""
+    # zlib.crc32, not hash(): PYTHONHASHSEED randomizes str hash() per
+    # process, so the same actor id would pick a different clip on every
+    # sim restart.
+    import zlib
+
+    from pxr import Sdf, Usd, UsdGeom, UsdSkel
+
+    import walk_retarget as wr
+
+    names = tuple(wr.WALK_CLIPS)
+    clip_name = names[zlib.crc32(actor["id"].encode()) % len(names)]
+    window = wr.WALK_CLIPS[clip_name]
+    ref, src_url, clip_url = (_asset_url(r) for r in (
+        actor["ref"], wr.WALK_SRC_SKEL, wr.WALK_SRC_CLIP.format(clip_name)))
+    if None in (ref, src_url, clip_url):
+        return False
+    # `model` must be DEFINED as an Xform, not left as the typeless ancestor
+    # Define(char_path) would create: the renderer ignores xform ops on an
+    # untyped prim, so yaw_offset_deg and z silently never applied (live
+    # 2026-11-09 the walker faced 90 deg off its path; plain usd actors get
+    # their typed model prim from add_reference_to_stage).
+    UsdGeom.Xform.Define(stage, model)
+    char_path = f"{model}/character"
+    # Referenced DIRECTLY, not through isaacsim's add_reference_to_stage: for
+    # an asset whose upAxis/metersPerUnit differ from the stage, that helper
+    # hands it to omni.metrics.assembler, whose change listener re-adds its
+    # own up-axis correction on every resync — on top of ours (2026-11-09:
+    # the Y-up mannequin rendered upside down). These characters are Z-up
+    # metres like the stage, but a plain reference composes exactly what we
+    # author either way.
+    UsdGeom.Xform.Define(stage, char_path).GetPrim().GetReferences().AddReference(ref)
+    skel_prim = _find_skeleton(stage, char_path)
+    if skel_prim is None:
+        emit(f"  world actor {actor['id']}: no Skeleton in {actor['ref']} — falling back")
+        return False
+    key = (actor["ref"], clip_name)
+    if key not in _STRIDE_CACHE:
+        try:
+            src_stage, clip_stage = Usd.Stage.Open(src_url), Usd.Stage.Open(clip_url)
+            src_skel = next(UsdSkel.Skeleton(q) for q in src_stage.Traverse()
+                            if q.IsA(UsdSkel.Skeleton))
+            clip = UsdSkel.Animation(clip_stage.GetDefaultPrim())
+            _STRIDE_CACHE[key] = wr.retarget_stride(src_skel, clip, window,
+                                                    UsdSkel.Skeleton(skel_prim))
+        except Exception as exc:   # asset moved/changed shape: a primitive still scores
+            emit(f"  world actor {actor['id']}: retargeting {clip_name} failed ({exc}) — "
+                 f"falling back")
+            return False
+    frames, clip_stride_s, seam = _STRIDE_CACHE[key]
+    anim_path = f"{model}/WalkAnim"
+    anim = UsdSkel.Animation.Define(stage, anim_path)
+    anim.CreateJointsAttr(UsdSkel.Skeleton(skel_prim).GetJointsAttr().Get())
+    rot0, trans0, scales = frames[0]
+    rot_attr = anim.CreateRotationsAttr(rot0)
+    trans_attr = anim.CreateTranslationsAttr(trans0)
+    anim.CreateScalesAttr(scales)
+    UsdSkel.BindingAPI.Apply(skel_prim)
+    UsdSkel.BindingAPI(skel_prim).CreateAnimationSourceRel().SetTargets([Sdf.Path(anim_path)])
+    # Play the stride at the actor's own speed so the feet keep pace with the
+    # floor instead of sliding (clips walk 1.0-1.16 m/s).
+    speed = float((actor.get("path") or {}).get("speed_mps") or 0.0)
+    rate = min(2.0, max(0.5, speed / window[2])) if speed > 0 else 1.0
+    WALKERS[actor["id"]] = {"rot": rot_attr, "trans": trans_attr,
+                            "frames": [(r, t) for r, t, _s in frames],
+                            "stride_s": clip_stride_s / rate, "phase": 0.0, "idx": 0}
+
+    xf = UsdGeom.Xformable(stage.GetPrimAtPath(model))
+    xf.ClearXformOpOrder()
+    _set_op(xf, "translate", (0.0, 0.0, float(actor["z"])))
+    _set_op(xf, "rotateXYZ", (0.0, 0.0, float(actor["yaw_offset_deg"])))
+    if actor["scale"] != 1.0:
+        _set_op(xf, "scale", (float(actor["scale"]),) * 3)
+    ox, oy = actor["origin_offset"]
+    if ox or oy:
+        _set_op(xf, "translate", (float(ox), float(oy), 0.0), suffix="origin")
+    n = _strip_physics(stage, model)
+    emit(f"  world actor {actor['id']}: {actor['ref']} walk={clip_name} retargeted, "
+         f"stride {clip_stride_s / rate:.2f}s at rate {rate:.2f} (seam {seam:.4f}), "
+         f"physics stripped on {n} prim(s)")
+    return True
+
+
+def _spawn_usd_actor(stage, path: str, actor: dict) -> bool:
+    """Reference a usd actor's asset under its Xform. The parent Xform keeps
+    the translate/rotate ops _WorldRuntime.step drives; the model sits in a
+    child with the asset's own yaw offset, floor offset and scale, so turning
+    the asset to face its direction of travel never touches the kinematics.
+    False when the asset root is unreachable (the caller falls back)."""
+    from pxr import UsdGeom
+
+    model = f"{path}/model"
+    if actor.get("anim") == "walk_cycle":
+        return _spawn_walk_actor(stage, model, actor)
+    if not _spawn_usd_prop(stage, model, 0.0, 0.0, 0.0, ref=actor["ref"], scale=1.0):
+        return False
+    xf = UsdGeom.Xformable(stage.GetPrimAtPath(model))
+    xf.ClearXformOpOrder()
+    # Ops compose right to left: lift, then face the heading, then (innermost,
+    # in the model's own frame) move its body centre onto the actor's pose.
+    _set_op(xf, "translate", (0.0, 0.0, float(actor["z"])))
+    _set_op(xf, "rotateXYZ", (0.0, 0.0, float(actor["yaw_offset_deg"])))
+    if actor["scale"] != 1.0:
+        _set_op(xf, "scale", (float(actor["scale"]),) * 3)
+    ox, oy = actor["origin_offset"]
+    if ox or oy:
+        _set_op(xf, "translate", (float(ox), float(oy), 0.0), suffix="origin")
+    n = _strip_physics(stage, model)
+    emit(f"  world actor {actor['id']}: {actor['ref']} (physics stripped on {n} prim(s), "
+         f"yaw offset {actor['yaw_offset_deg']:.0f} deg)")
+    return True
+
+
+TABLE_TOP_M, TABLE_LEG_M, TABLE_LEG_INSET_M = 0.04, 0.05, 0.03
+TABLE_LEG_RGB = (0.16, 0.17, 0.19)
+
+
+def _author_table(stage, path: str, prop: dict, materials: dict) -> None:
+    """A table's looks for a box prop: its top in the prop's colour on four legs, filling the
+    same volume. Visual only, so the pick's geometry is the box's, as it always was."""
+    from build_warehouse import _author_box, _bind
+
+    sx, sy, sz = prop["size"]
+    top = _author_box(stage, f"{path}/table_top", (sx, sy, TABLE_TOP_M), (0.0, 0.0, sz - TABLE_TOP_M / 2),
+                      collider=False)
+    _bind(top, _world_color_material(stage, materials, prop["color"]))
+    legs = _world_color_material(stage, materials, TABLE_LEG_RGB)
+    h = sz - TABLE_TOP_M
+    dx, dy = sx / 2 - TABLE_LEG_INSET_M - TABLE_LEG_M / 2, sy / 2 - TABLE_LEG_INSET_M - TABLE_LEG_M / 2
+    for i, (ax, ay) in enumerate(((1, 1), (1, -1), (-1, 1), (-1, -1))):
+        _bind(_author_box(stage, f"{path}/table_leg{i}", (TABLE_LEG_M, TABLE_LEG_M, h),
+                          (ax * dx, ay * dy, h / 2), collider=False), legs)
+
+
+def _author_quads(stage, path: str, quads: list):
+    """One mesh of flat four-cornered faces, seen from both sides, nothing to collide with."""
+    from pxr import UsdGeom
+
+    mesh = UsdGeom.Mesh.Define(stage, path)
+    mesh.CreatePointsAttr([tuple(float(v) for v in p) for q in quads for p in q])
+    mesh.CreateFaceVertexCountsAttr([4] * len(quads))
+    mesh.CreateFaceVertexIndicesAttr(list(range(4 * len(quads))))
+    mesh.CreateSubdivisionSchemeAttr("none")
+    mesh.CreateDoubleSidedAttr(True)
+    return mesh.GetPrim()
+
+
+def _author_marker(stage, path: str, pkg: dict, materials: dict) -> None:
+    """The ArUco marker on a package's plate, as children of the package so it rides along."""
+    from build_warehouse import _bind
+    from simtest import aruco
+
+    size, face = pkg["size"], pkg["magnet_face"]
+    _bind(_author_quads(stage, f"{path}/marker_backing", [aruco.backing(size, face)]),
+          _world_color_material(stage, materials, (0.95, 0.95, 0.95)))
+    _bind(_author_quads(stage, f"{path}/marker_cells", aruco.dark_cells(size, face, pkg["marker"])),
+          _world_color_material(stage, materials, (0.01, 0.01, 0.01)))
+    emit(f"  world package {pkg['id']}: ArUco marker {pkg['marker']}")
+
+
+def _spawn_world(stage, w: dict) -> tuple[dict, dict]:
+    """Author a world's props, actors and packages.
+
+    Returns ({actor_id: (translate_op, rotate_op)}, {package_id: (translate_op, rotate_op)}).
 
     Props are static colliders (CollisionAPI, no RigidBodyAPI — they never move
     and cost the solver nothing), so a robot that drives into a crate stops.
@@ -1211,8 +1386,13 @@ def _spawn_world(stage, w: dict) -> dict:
     would make the robot's trajectory depend on contact solver details and
     turn a fixed-path test into a different run every time. Contact with an
     actor is scored from ground truth instead (simtest clearance metric).
-    Moved by authoring their parent Xform's ops each physics step — the same
-    USD-attribute route the mock-pick package already rides on.
+    Moved by authoring their parent Xform's ops each physics step.
+
+    Packages are visual only too, and for a stronger reason: the magnet SNAPS them
+    (simtest/magnet.py, scripts/_magnet_runtime.py), so nothing may push a package around but
+    that. Each is an Xform at (x, y, BOTTOM z) with the cardboard body and, on the
+    magnet's face, the near-black plate the camera looks for
+    (simtest.world.plate_geometry). They are moved by writing the Xform's two ops.
     """
     import math
 
@@ -1227,14 +1407,16 @@ def _spawn_world(stage, w: dict) -> dict:
         path = f"{WORLD_ROOT}/props/{prop['id']}"
         x, y, yaw = prop["pose"]
         if prop["shape"] == "usd":
-            ok = _spawn_usd_prop(stage, path, x, y, yaw, ref=prop["ref"], scale=prop["scale"])
+            ok = _spawn_usd_prop(stage, path, x, y, yaw + math.radians(prop["yaw_offset_deg"]),
+                                 ref=prop["ref"], scale=prop["scale"], z=prop["z"])
             if not ok:
                 # Asset root unreachable: keep the obstacle where the metrics
-                # think it is, as a plain box of the declared footprint.
-                emit(f"  world prop {prop['id']}: asset root unreachable, using a box")
-                fx, fy = prop["footprint"]
-                prop = {**prop, "shape": "box", "size": (fx, fy, prop["height"])}
+                # think it is, as a primitive of the declared footprint.
+                emit(f"  world prop {prop['id']}: asset root unreachable, using a primitive")
+                prop = _fallback_item(prop)
             else:
+                if not prop["collider"]:
+                    _strip_physics(stage, path)
                 emit(f"  world prop {prop['id']}: {prop['ref']} at ({x}, {y})")
                 continue
         xf = UsdGeom.Xform.Define(stage, path)
@@ -1243,6 +1425,9 @@ def _spawn_world(stage, w: dict) -> dict:
         xf.AddRotateXYZOp().Set(Gf.Vec3f(0.0, 0.0, math.degrees(yaw)))
         geom = _author_world_shape(stage, path, prop, collider=prop["collider"])
         _bind(geom, _world_color_material(stage, materials, prop["color"]))
+        if prop.get("style") == "table":
+            UsdGeom.Imageable(geom).MakeInvisible()     # the box stays as the collider
+            _author_table(stage, path, prop, materials)
         emit(f"  world prop {prop['id']}: {prop['shape']} at ({x}, {y})")
 
     actors = {}
@@ -1252,12 +1437,55 @@ def _spawn_world(stage, w: dict) -> dict:
         xf.ClearXformOpOrder()
         t_op = xf.AddTranslateOp()
         r_op = xf.AddRotateXYZOp()
-        geom = _author_world_shape(stage, path, actor, collider=False)
-        _bind(geom, _world_color_material(stage, materials, actor["color"]))
+        shape = actor
+        if actor["shape"] == "usd" and not _spawn_usd_actor(stage, path, actor):
+            emit(f"  world actor {actor['id']}: asset root unreachable, using a primitive")
+            shape = _fallback_item(actor)
+        if shape["shape"] != "usd":
+            geom = _author_world_shape(stage, path, shape, collider=False)
+            _bind(geom, _world_color_material(stage, materials, actor["color"]))
         actors[actor["id"]] = (t_op, r_op)
-        emit(f"  world actor {actor['id']}: {actor['shape']}, {actor['path']['mode']} over "
+        emit(f"  world actor {actor['id']}: {shape['shape']}, {actor['path']['mode']} over "
              f"{len(actor['path']['waypoints'])} waypoints at {actor['path']['speed_mps']} m/s")
-    return actors
+
+    from build_warehouse import _author_box
+    from simtest import world as world_lib
+
+    packages = {}
+    for pkg in w["packages"]:
+        path = f"{WORLD_ROOT}/packages/{pkg['id']}"
+        x, y, yaw = pkg["pose"]
+        sx, sy, sz = pkg["size"]
+        xf = UsdGeom.Xform.Define(stage, path)
+        xf.ClearXformOpOrder()
+        t_op = xf.AddTranslateOp()
+        r_op = xf.AddRotateXYZOp()
+        t_op.Set(Gf.Vec3d(x, y, pkg["z"]))
+        r_op.Set(Gf.Vec3f(0.0, 0.0, math.degrees(yaw)))
+        body = _author_box(stage, f"{path}/body", (sx, sy, sz), (0.0, 0.0, sz / 2.0),
+                           collider=False)
+        _bind(body, _world_color_material(stage, materials, pkg["color"]))
+        psize, pcentre = world_lib.plate_geometry(pkg["size"], pkg["magnet_face"])
+        plate = _author_box(stage, f"{path}/plate", psize, pcentre, collider=False)
+        _bind(plate, _world_color_material(stage, materials, world_lib.PLATE_COLOR))
+        if pkg["marker"] is not None:
+            _author_marker(stage, path, pkg, materials)
+        packages[pkg["id"]] = (t_op, r_op)
+        emit(f"  world package {pkg['id']}: {sx}x{sy}x{sz} at ({x}, {y}) z={pkg['z']} "
+             f"plate on {pkg['magnet_face']}")
+    for mark in w["marks"]:
+        # Paint: 2 mm proud of the surface so it can't z-fight it, and nothing to hit.
+        path = f"{WORLD_ROOT}/marks/{mark['id']}"
+        x, y, yaw = mark["pose"]
+        xf = UsdGeom.Xform.Define(stage, path)
+        xf.ClearXformOpOrder()
+        xf.AddTranslateOp().Set(Gf.Vec3d(x, y, mark["z"]))
+        xf.AddRotateXYZOp().Set(Gf.Vec3f(0.0, 0.0, math.degrees(yaw)))
+        paint = _author_box(stage, f"{path}/paint", (*mark["size"], 0.002), (0.0, 0.0, 0.001),
+                            collider=False)
+        _bind(paint, _world_color_material(stage, materials, mark["color"]))
+        emit(f"  world mark {mark['id']}: {mark['size']} at ({x}, {y}) z={mark['z']}")
+    return actors, packages
 
 
 class _WorldRuntime:
@@ -1294,11 +1522,15 @@ class _WorldRuntime:
         self._String = String
         self.world = w
         self.actor_ops = actor_ops
+        self.walk_wt = 0.0   # world clock the walkers were last posed at (see WALKERS)
         self.spawn = spawn_positions
         self.running = bool(w and w["autostart"])
         self.wt = 0.0                 # world clock, seconds
         self.last_sim = None
         self.pending: list[str] = []
+        self.magnet_rt = None   # scripts/_magnet_runtime.MagnetRuntime, set by main() when there are packages
+        self.head_indices = None   # robot_0's [pan, tilt] dof indices, set by main()
+        self.arm_indices = None    # ... and the arm's, in ARM_JOINT_NAMES order
 
         self.node = Node("sim_world")
         latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL,
@@ -1327,7 +1559,7 @@ class _WorldRuntime:
         """/sim/world: the static half — what to draw, and the shapes the
         metrics use. Footprints via simtest.world so both agree exactly."""
         if not self.world:
-            return {"world": None, "props": [], "actors": []}
+            return {"world": None, "props": [], "actors": [], "packages": [], "marks": []}
         from simtest import world as wl
 
         def common(i):
@@ -1339,8 +1571,16 @@ class _WorldRuntime:
             "props": [{**common(p), "footprint": wl.prop_footprint(p)}
                       for p in self.world["props"]],
             "actors": [{**common(a), "radius": a.get("radius"),
-                        "size": a.get("size"), "path": list(a["path"]["waypoints"]),
+                        "size": a.get("size"), "footprint": a.get("footprint"),
+                        "path": list(a["path"]["waypoints"]),
                         "mode": a["path"]["mode"]} for a in self.world["actors"]],
+            # Static facts only: where a package IS lives in /sim/ground_truth.
+            "packages": [{"id": p["id"], "label": p["label"], "size": list(p["size"]),
+                          "color": list(p["color"]), "magnet_face": p["magnet_face"], "marker": p["marker"],
+                          "z": p["z"]} for p in self.world["packages"]],
+            "marks": [{"id": m["id"], "label": m["label"], "size": list(m["size"]),
+                       "pose": list(m["pose"]), "color": list(m["color"])}
+                      for m in self.world["marks"]],
         }
 
     def _on_cmd(self, msg) -> None:
@@ -1480,6 +1720,8 @@ class _WorldRuntime:
         if self.running and self.last_sim is not None:
             self.wt += max(0.0, sim_t - self.last_sim)
         self.last_sim = sim_t
+        if self.magnet_rt is not None and robots:
+            self.magnet_rt.step(robots)
         if not self.actor_ops:
             return
         import math
@@ -1487,11 +1729,16 @@ class _WorldRuntime:
         from pxr import Gf
         from simtest import world as wl
 
+        walk_dt = max(0.0, self.wt - self.walk_wt)
+        self.walk_wt = self.wt
         for actor in self.world["actors"]:
             p = wl.pose_at(actor["path"], self.wt)
             t_op, r_op = self.actor_ops[actor["id"]]
             t_op.Set(Gf.Vec3d(p["x"], p["y"], 0.0))
             r_op.Set(Gf.Vec3f(0.0, 0.0, math.degrees(p["yaw"])))
+            walker = WALKERS.get(actor["id"])
+            if walker is not None:
+                _pose_walker(walker, walk_dt, p["moving"])
 
     def tick(self, sim_t: float, robots: dict) -> None:
         """Every GROUND_TRUTH_EVERY steps: take commands, publish ground truth."""
@@ -1523,6 +1770,13 @@ class _WorldRuntime:
             out["robots"][name] = {"x": round(sx + float(q[0]), 4),
                                    "y": round(sy + float(q[1]), 4),
                                    "yaw": round(yaw, 4)}
+            if name == "robot_0" and self.head_indices is not None:
+                # Where the head IS, for the operator view's readout; the only robot with
+                # a head_cmd subscriber.
+                pan_i, tilt_i = self.head_indices
+                out["head"] = {name: {"pan": round(float(q[pan_i]), 4), "tilt": round(float(q[tilt_i]), 4)}}
+                # The arm's measured joints: what the pick controller checks a move against.
+                out["arm"] = {name: [round(float(q[i]), 4) for i in self.arm_indices]}
         if self.world:
             from simtest import world as wl
 
@@ -1530,6 +1784,14 @@ class _WorldRuntime:
                 p = wl.pose_at(actor["path"], self.wt)
                 out["actors"][actor["id"]] = {k: (round(v, 4) if isinstance(v, float) else v)
                                               for k, v in p.items()}
+            if self.world["packages"]:
+                if self.magnet_rt is not None:
+                    out["packages"], out["magnet"] = self.magnet_rt.truth()
+                else:       # no magnet (robot_0 not spawned): they simply stay put
+                    out["packages"] = {p["id"]: {"x": p["pose"][0], "y": p["pose"][1],
+                                                 "z": p["z"], "yaw": p["pose"][2],
+                                                 "held_by": None}
+                                       for p in self.world["packages"]}
         self.gt_pub.publish(self._String(data=self._json.dumps(out)))
         # Latched is not enough for the dashboard: rosbridge picks a
         # subscription's QoS when the FIRST browser subscribes, and the console
@@ -1565,6 +1827,8 @@ def main() -> int:
     emit(f"  lite_render={args.lite_render}")
 
     d435, mpu = _load_sensor_configs()
+    if args.half_res_cams:
+        d435 = dict(d435, width=d435["width"] // 2, height=d435["height"] // 2)
     emit(f"  d435: {d435['width']}x{d435['height']}@{d435['fps']}Hz")
     emit(f"  mpu6050: {mpu['publish_rate_hz']}Hz publish, mount={mpu['mount_offset_m']}")
 
@@ -1599,6 +1863,8 @@ def main() -> int:
             world, name, pos, xlerobot_usd, d435, mpu
         )
         robots[name] = (robot, cam, cam_path, imu_path)
+        if name == "robot_0":
+            _fit_magnet_effector(f"/World/{name}")
         emit(f"  spawned {name} at {pos}, cam={cam_path}, imu={imu_path}")
 
     # 3rd-person chase camera for the first N robots (configs/robots.yaml
@@ -1663,6 +1929,7 @@ def main() -> int:
             stage, f"/World/{name}/base_link", optical_path
         )
         emit(f"  {name} base->optical t={base_to_camera[0]} q={base_to_camera[1]}")
+        CAMERA_ZERO[name] = base_to_camera
         build_robot_graphs(
             robot_prim_path=f"/World/{name}",
             chassis_subpath="base_link",
@@ -1694,101 +1961,53 @@ def main() -> int:
     sim_view = None
     if args.sim_view:
         try:
-            sim_view = _spawn_sim_view(args.scene, build_view_camera_graph)
+            sim_view = _spawn_sim_view(args.scene, build_view_camera_graph, WORLD and WORLD["view"])
         except Exception as exc:  # cosmetic: never fail a run over it
             emit(f"  sim view camera skipped: {exc}")
 
-    # Station props + the mock pick package (robot_0 only). Every station in
-    # configs/waypoints.yaml carrying a `prop:` block gets a shelf authored at
-    # its pose, and the package starts resting on the first pickup station's
-    # deck — so the scene the robot navigates to actually has something at a
-    # reachable height to pick from. `nodes/task_manager.py` attaches/detaches
-    # the package via a plain rclpy pick_cmd subscriber (see
-    # _start_extra_ros_subscribers); the same node carries head_cmd.
-    package_prim_path = None
+    # robot_0's plain rclpy subscribers: pick_cmd (the magnet on/off) and head_cmd; see
+    # _start_extra_ros_subscribers. The magnet itself is _magnet_runtime.MagnetRuntime, built below once
+    # the world's packages exist.
     extra_ros_node, pick_cmd_state, head_cmd_state = None, None, None
-    decks = []
     if "robot_0" in robots:
-        props = _load_station_props() if args.station_props else []
-        station_materials = _station_materials(stage) if props else {}
-        for name, kind, sx, sy, syaw, prop in props:
-            ptype = prop.get("type", "shelf")
-            deck_h = float(prop["deck_height_m"])
-            size = prop.get("size", [0.90, 0.40, 0.06])
-            prim = f"/World/station_{name}"
-
-            if ptype == "usd":
-                ok = _spawn_usd_prop(
-                    stage, prim, sx, sy, syaw,
-                    ref=prop["ref"],
-                    scale=float(prop.get("scale", 1.0)),
-                    z=float(prop.get("z", 0.0)),
-                )
-                if ok:
-                    emit(f"  usd prop for {name} ({kind}) at ({sx}, {sy}): {prop['ref']}")
-                else:
-                    # Asset root unreachable (offline / no Nucleus). Falling
-                    # back keeps the pick geometry intact — the demo still
-                    # works, it just looks like a white slab again.
-                    emit(f"  usd prop for {name} unreachable, falling back to built-in shelf")
-                    _spawn_shelf(stage, prim, sx, sy, syaw, deck_h, size, station_materials)
-            elif ptype == "shelf":
-                _spawn_shelf(stage, prim, sx, sy, syaw, deck_h, size, station_materials)
-                emit(f"  shelf for {name} ({kind}) at ({sx}, {sy}) deck_z={deck_h}")
-            else:
-                emit(f"  station {name}: unknown prop type {ptype!r}, skipped")
-                continue
-
-            # deck_height_m is the pick height whatever the prop looks like,
-            # so the release footprint is the same either way.
-            decks.append((sx, sy, float(size[0]) / 2.0, float(size[1]) / 2.0, deck_h))
-
-        pickup = next((p for p in props if p[1] == "pickup"), None)
-        package_prim_path = "/World/package_0"
-        pkg_pose = None
-        if pickup is not None:
-            _, _, pkg_x, pkg_y, _, pkg_prop = pickup
-            pkg_pose = (pkg_x, pkg_y, _package_z(float(pkg_prop["deck_height_m"])))
-        elif WAYPOINTS_CONFIG.exists():
-            # No prop'd pickup station (e.g. --no-station-props) but a stations
-            # file is present: fall back to the first pickup pose with the box
-            # on the floor, so the mock pick still has something to grab.
-            import yaml
-
-            stations = (yaml.safe_load(WAYPOINTS_CONFIG.read_text()) or {}).get("stations") or {}
-            first = next((s for s in stations.values() if s.get("kind") == "pickup"), None)
-            if first is not None:
-                pkg_pose = (float(first["pose"]["x"]), float(first["pose"]["y"]),
-                            PACKAGE_SIZE_M / 2.0)
-        # else: stations retired (nav-only tasks, 2026-10-15) — there is no pick,
-        # so no package to spawn. The mock-pick subscribers below are harmless
-        # with nothing to grab; task_manager never sends a pick request now.
-        if pkg_pose is not None:
-            pkg_x, pkg_y, pkg_z = pkg_pose
-            _spawn_package(stage, package_prim_path, pkg_x, pkg_y, pkg_z)
-            emit(f"  package_0 spawned at ({pkg_x}, {pkg_y}, {pkg_z:.3f})")
-
         extra_ros_node, pick_cmd_state, head_cmd_state = _start_extra_ros_subscribers("robot_0")
         emit("  pick_cmd/head_cmd rclpy subscriber started")
+        if WORLD and WORLD["head"]:
+            head_cmd_state.update(WORLD["head"])
+            emit(f"  head starts at {WORLD['head']} (the world's head:)")
 
-        # GRIPPER_LINK has never been confirmed against a live session, and
-        # _sync_package_to_gripper fails silently when it's wrong. Dump the
-        # articulation's children once so the real link names are in the log
-        # forever, and say up front whether the one we want resolves.
-        gripper_path = f"/World/robot_0/{GRIPPER_LINK}"
-        if stage.GetPrimAtPath(gripper_path).IsValid():
-            emit(f"  gripper link OK: {gripper_path}")
+        # The magnet's link has never been confirmed against a live session (nor was the
+        # gripper tip it replaces). The TCP is computed from the joint positions, not read
+        # from this prim, so a miss here does not stop it working, but a world with
+        # packages cross-checks the two on the first step (MagnetRuntime), and the real
+        # link names stay in the log forever.
+        tcp_path = f"/World/robot_0/{ARM_TCP_LINK}"
+        if stage.GetPrimAtPath(tcp_path).IsValid():
+            emit(f"  arm tcp link OK: {tcp_path}")
         else:
             names = [p.GetName() for p in stage.GetPrimAtPath("/World/robot_0").GetChildren()]
-            emit(f"  WARNING: gripper link {gripper_path} NOT FOUND — the mock "
-                 f"pick will silently do nothing. /World/robot_0 children: {names}")
+            emit(f"  WARNING: arm link {tcp_path} NOT FOUND (the magnet's FK does not need it, "
+                 f"but the FK-vs-USD cross-check will be skipped). "
+                 f"/World/robot_0 children: {names}")
 
-    actor_ops = {}
+    actor_ops, package_ops = {}, {}
     if WORLD is not None:
         emit(f"  world={WORLD['name']}: {len(WORLD['props'])} prop(s), "
-             f"{len(WORLD['actors'])} actor(s), autostart={WORLD['autostart']}")
-        actor_ops = _spawn_world(stage, WORLD)
+             f"{len(WORLD['actors'])} actor(s), {len(WORLD['packages'])} package(s), "
+             f"autostart={WORLD['autostart']}")
+        actor_ops, package_ops = _spawn_world(stage, WORLD)
     world_rt = _WorldRuntime(WORLD, actor_ops, spawn_positions, sim_view)
+    if package_ops:
+        if pick_cmd_state is None:
+            emit("  WARNING: the world has packages but robot_0 is not spawned: no magnet, "
+                 "they stay where they are")
+        else:
+            from _magnet_runtime import MagnetRuntime
+
+            world_rt.magnet_rt = MagnetRuntime(
+                stage, WORLD, package_ops, pick_cmd_state, "robot_0", spawn_positions["robot_0"],
+                emit=emit, arm_link=ARM_TCP_LINK, arm_joints=ARM_JOINT_NAMES)
+            emit(f"  magnet effector up: {world_rt.magnet_rt.describe()}")
     emit("  /sim/ground_truth + /sim/world publishers started")
 
     # Global /clock publisher so external ROS 2 nodes can `use_sim_time:=true`.
@@ -1831,13 +2050,12 @@ def main() -> int:
         head_joint_indices = _dof_indices(dof_names, HEAD_JOINT_NAMES)
         emit(f"  arm_joint_indices={arm_joint_indices} head_joint_indices={head_joint_indices}")
 
+    world_rt.head_indices, world_rt.arm_indices = head_joint_indices, arm_joint_indices
+    head_tf = _HeadTf(CAMERA_ZERO["robot_0"]) if extra_ros_node is not None and "robot_0" in CAMERA_ZERO else None
+
     dt = 1.0 / 60.0
     n_steps = None if args.forever else int(args.duration / dt)
     step = 0
-    # Last pick_cmd message acted on, so "detach" fires once per message
-    # rather than every tick (see the release block below).
-    last_pick_seq = pick_cmd_state["seq"] if pick_cmd_state else 0
-    warned_gripper = False
     while simulation_app.is_running():
         if n_steps is not None and step >= n_steps:
             break
@@ -1901,27 +2119,11 @@ def main() -> int:
                             joint_indices=np.array(head_joint_indices),
                         )
                     )
-        if package_prim_path is not None:
-            # "attach" is level-triggered: state["data"] holds the last
-            # message, so re-teleporting every tick is idempotent, not a
-            # repeated trigger — that's what makes the box ride the gripper.
-            if pick_cmd_state["data"] == "attach":
-                if not _sync_package_to_gripper(stage, "robot_0", package_prim_path):
-                    # Returns False when GRIPPER_LINK doesn't resolve. Logged
-                    # once rather than every tick; the startup check above
-                    # already warned, this catches a mid-run regression.
-                    if not warned_gripper:
-                        emit("  WARNING: _sync_package_to_gripper found no "
-                             f"/World/robot_0/{GRIPPER_LINK} — package not following")
-                        warned_gripper = True
-            # "detach" is edge-triggered: releasing is a one-shot event, so it
-            # fires only on a NEW message. Level-triggering it would re-drop
-            # the box onto the deck every tick and pin it there.
-            elif (pick_cmd_state["data"] == "detach"
-                  and pick_cmd_state["seq"] != last_pick_seq):
-                _place_package_on_surface(stage, package_prim_path, decks)
-                emit("  package released")
-            last_pick_seq = pick_cmd_state["seq"]
+                    if head_tf is not None:
+                        q_head = robot.get_joint_positions()[head_joint_indices]
+                        head_tf.update(float(q_head[0]), float(q_head[1]))
+        # (The magnet is stepped inside world_rt.step below: it needs the arm's pose AFTER
+        # the commands above landed, and the packages moved before the frame is rendered.)
         # Physics every step, pixels only every --render-every steps (default
         # 1 = every step, the original behaviour). Rendering is ~85% of the
         # per-step cost here — physics alone benches at 1.20x real time versus

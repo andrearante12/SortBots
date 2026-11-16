@@ -28,6 +28,7 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchD
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
+    EnvironmentVariable,
     LaunchConfiguration,
     PathJoinSubstitution,
     PythonExpression,
@@ -139,7 +140,7 @@ GRID_ARGS = (
 #   RGBD/LinearUpdate, RGBD/AngularUpdate  0.1 -> 0.05  a node is added every
 #       5 cm / ~3 deg instead of 10 cm / ~6 deg, so slow walks still lay down
 #       a dense cloud instead of one sparse slice per 10 cm (tasks/
-#       real_perception_plan.md L4).
+#       real_perception_plan.md@6501799 L4).
 #   Rtabmap/DetectionRate  1 -> 2 Hz  the cap that otherwise throttles the
 #       node rate regardless of the two thresholds above.
 #   Grid/RangeMax  5.0 -> 4.0  D435 depth is noisy past ~4 m and Grid/3D ray
@@ -175,13 +176,32 @@ def generate_launch_description():
 
     # Mapping on the robot itself yields the CPU to odometry and the live
     # obstacle cloud: on the Orin Nano the three compete, and the bench
-    # (tasks/slam_offload.md) measured obstacle latency p99 going from 16 ms to
+    # (tasks/slam_offload.md@6501799) measured obstacle latency p99 going from 16 ms to
     # 170-220 ms when RTAB-Map shared an unpinned CPU budget with them.
     # Real robot mapping on itself only — sim has a whole desktop to spare,
     # and a workstation running slam_role:=workstation has nothing to yield to.
+    #
+    # And every RTAB-Map runs with glibc capped at a few malloc arenas. It
+    # runs ~950 threads, and by default glibc gives each thread that contends
+    # on the heap its own arena (up to 8 per core, 256 here), each holding its
+    # own freed-but-unreturned memory. Measured 2026-10-24 with scripts/
+    # mem_probe.py, two robots exploring to sim t=300 s (explore_fleet): 3.4
+    # and 4.2 GB RSS by default, 1.25 and 1.3 GB with MALLOC_ARENA_MAX=2, from
+    # the same ~293 map nodes. The pipeline's peak fell from 14.3 to 9.3 GB of
+    # its 16 GB fence. Median time per update was 270/307 ms against 289/322,
+    # so no slower. Most of what looked like a 7 MB-per-node map was the
+    # allocator, and it's what ran two exploring robots out of memory in ~30
+    # min (configs/scenarios/fleet_demo.yaml).
+    # SORTBOTS_RTABMAP_MALLOC_ARENAS overrides it; 0 means the glibc default.
     slam_prefix = PythonExpression([
+        "' '.join(p for p in (",
+        "'env MALLOC_ARENA_MAX=' + '", EnvironmentVariable("SORTBOTS_RTABMAP_MALLOC_ARENAS",
+                                                           default_value="2"),
+        "' if '", EnvironmentVariable("SORTBOTS_RTABMAP_MALLOC_ARENAS", default_value="2"),
+        "' not in ('', '0') else '', ",
         "'nice -n 10' if '", camera_odometry, "'.lower() in ('true', '1') and '",
-        slam_role, "' == 'all' else ''",
+        slam_role, "' == 'all' else '',",
+        ") if p)",
     ])
 
     # RTAB-Map takes --delete_db_on_start as a flag inside `args`, so it can't
@@ -323,7 +343,7 @@ def generate_launch_description():
             "slam_role",
             default_value="all",
             description=(
-                "Where SLAM runs (tasks/slam_offload.md). all: odometry AND "
+                "Where SLAM runs (tasks/slam_offload.md@6501799). all: odometry AND "
                 "RTAB-Map mapping on this machine (sim, and the robot until a "
                 "workstation is in the loop). robot: only what must be on the "
                 "robot — odometry plus a compressed RGB-D keyframe stream "
@@ -510,7 +530,7 @@ def generate_launch_description():
                 # Frame-to-frame, not the default frame-to-map: no local feature
                 # map to match against and update, so each frame is cheaper and
                 # odometry keeps more of the camera's frames on a CPU-bound Orin.
-                # Bench (tasks/slam_offload.md, TUM pioneer_slam at 2x speed,
+                # Bench (tasks/slam_offload.md@6501799, TUM pioneer_slam at 2x speed,
                 # Jetson CPU budget, 3 runs each): 6.6 -> 9.9 Hz, odometry ATE
                 # 2.4 -> 1.3 m, SLAM ATE 2.6 -> 0.7 m. At 1x speed SLAM ATE is
                 # unchanged (0.19 m); short-window drift is ~1-2 points higher.

@@ -1,5 +1,5 @@
 """Workstation half of offloaded SLAM: RTAB-Map for a real robot whose
-Jetson runs `slam_role:=robot` (tasks/slam_offload.md).
+Jetson runs `slam_role:=robot` (tasks/slam_offload.md@6501799).
 
 The robot keeps everything time-critical — the D435 driver, visual odometry,
 the live obstacle cloud — and sends only a rate-capped compressed RGB-D
@@ -7,7 +7,7 @@ keyframe stream (/<id>/rgbd_image/compressed, ~2 Hz) plus its /<id>/odom.
 This machine runs the expensive part: RTAB-Map's graph, loop closure, Grid/3D
 ray tracing and the reconstruction clouds. Its database
 (~/.ros/sortbots_<id>_ws.db) is what `scripts/maps.sh save` and then the
-splat worker (splat/, docs/splat.md) train the Gaussian splat from — already
+splat worker (splat/, docs/real-robot.md) train the Gaussian splat from — already
 on this machine, so no `--from <jetson>` fetch is needed.
 
     # robot (Jetson container):  scripts/run_robot.sh --slam-role robot
@@ -16,7 +16,7 @@ on this machine, so no `--from <jetson>` fetch is needed.
 
 Both ends must see each other's DDS traffic: the robot's default
 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST keeps it private, so set
-ROS_STATIC_PEERS to the other machine's address on both (docs/jetson.md).
+ROS_STATIC_PEERS to the other machine's address on both (docs/real-robot.md).
 
 Uses the real-robot RTAB-Map parameters (camera_odometry:=true selects them;
 slam_role:=workstation keeps odometry itself off this machine).

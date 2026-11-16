@@ -1,0 +1,26 @@
+# A world layout (simtest/world.py has the full schema). See person_crossing.yaml
+# for how these coordinates were chosen.
+
+name: amr_head_on
+title: Aisle — another robot coming head-on
+description: >
+  A warehouse AMR (the iw_hub asset: low, ~1 m long) drives down the west
+  half of robot_0's aisle toward it on the same line a person walks in
+  person_head_on, and back. It never yields: it is a scripted mover, not a
+  Nav2 peer (peer_crossing has the reactive case). Low and long is what the
+  obstacle detector finds hardest to call "moving"; the tracker's large-mover
+  rule is what this world exercises.
+
+scenes: [nvidia]
+autostart: true
+
+actors:
+  - id: amr_0
+    label: AMR
+    preset: amr
+    path:
+      waypoints: [[-8.8, 16.0], [-8.8, 9.0]]
+      speed_mps: 0.8
+      mode: pingpong
+      start_at_s: 0.0
+      dwell_s: 1.0

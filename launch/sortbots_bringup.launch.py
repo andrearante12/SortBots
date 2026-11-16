@@ -63,7 +63,7 @@ docker/jetson's container) adds the RealSense driver per robot
 (sortbots_realsense.launch.py, which publishes the sim's camera topic names),
 switches RTAB-Map to visual odometry with no IMU wait, and anchors each robot
 with its `real` spawn entry in configs/robots.yaml. Everything else is the
-same graph. run_robot.sh also turns Nav2/task_manager/scripted_pick off,
+same graph. run_robot.sh also turns Nav2/task_manager/magnet_pick off,
 because without a base driver there is nothing for them to move.
 """
 import os
@@ -75,6 +75,7 @@ from launch.actions import (
     GroupAction,
     IncludeLaunchDescription,
     OpaqueFunction,
+    TimerAction,
 )
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -123,8 +124,13 @@ def _make_per_robot_actions(
     platform_cfg,
     slam_role_cfg,
     shared_map_cfg,
+    robot_stagger_cfg,
+    perception_cfg,
 ):
     primary_robot_id = robot_id_cfg.perform(context)
+    perception = perception_cfg.perform(context)
+    if perception not in ("camera", "oracle"):
+        raise ValueError(f"perception:={perception!r} — expected camera or oracle")
     raw = robot_ids_cfg.perform(context).strip()
     robot_ids = [r.strip() for r in raw.split(",") if r.strip()] if raw else [primary_robot_id]
     platform = platform_cfg.perform(context)
@@ -150,9 +156,11 @@ def _make_per_robot_actions(
     shared = as_bool(shared_map_cfg) and len(robot_ids) > 1
     localize_only = as_bool(localization)
     primary_spawn = _spawn_pose(scene, primary_robot_id)
+    stagger_s = float(robot_stagger_cfg.perform(context))
 
     actions = []
-    for rid in robot_ids:
+    for idx, rid in enumerate(robot_ids):
+        first = len(actions)
         # Anchors this robot's SLAM into the shared world frame: RTAB-Map
         # publishes its OWN map at <rid>/map (sortbots_rtabmap_robot.launch.py
         # sets map_frame_id), starting from wherever its odom happened to
@@ -196,19 +204,20 @@ def _make_per_robot_actions(
             ],
             output="screen",
         ))
-        if platform == "real":
-            actions.append(ExecuteProcess(
-                cmd=[
-                    "python3",
-                    os.path.join(REPO_ROOT, "nodes", "feature_overlay.py"),
-                    "--robot-id", rid,
-                ],
-                output="screen",
-            ))
+        # Both platforms: RTAB-Map's keypoints on real hardware, an ORB stand-in
+        # on camera/rgb in sim (no odom_info there). On demand either way.
+        actions.append(ExecuteProcess(
+            cmd=[
+                "python3",
+                os.path.join(REPO_ROOT, "nodes", "feature_overlay.py"),
+                "--robot-id", rid,
+            ] + ([] if platform == "real" else ["--sim"]),
+            output="screen",
+        ))
 
         # Obstacles in front of the robot, from geometry rather than frame
         # differencing: clusters in base_link plus a `moving` flag from odom
-        # tracks (docs/obstacle_detection.md). Every platform — it reads raw
+        # tracks (docs/architecture.md). Every platform — it reads raw
         # camera/depth, so it doesn't depend on the depth filter below, and the
         # sensors view draws its boxes over the head camera.
         actions.append(ExecuteProcess(
@@ -219,6 +228,20 @@ def _make_per_robot_actions(
             ],
             output="screen",
         ))
+        # The magnet plates in front of the robot, in the map frame (/<id>/packages):
+        # what the pick controller aims at in `perception:=camera`. Sim only for now:
+        # the real arm has no magnet yet (hardware/magnet_effector's URDF link is still
+        # to do) and the Orin Nano's CPU budget is spoken for. Idle cost in the sim is
+        # one HSV threshold per frame at 10 Hz.
+        if platform != "real":
+            actions.append(ExecuteProcess(
+                cmd=[
+                    "python3",
+                    os.path.join(REPO_ROOT, "nodes", "package_detector.py"),
+                    "--robot-id", rid, "--platform", platform,
+                ],
+                output="screen",
+            ))
         # Live obstacles from raw depth, at camera rate, in base_link: what is
         # in front of the robot NOW, independent of odometry and SLAM (and of
         # where SLAM runs). Real robot only for now — sim's Nav2 reads the
@@ -358,17 +381,20 @@ def _make_per_robot_actions(
             condition=IfCondition(task_manager),
         ))
 
-        # The other half of the dispatch loop: task_manager publishes
-        # pick_request and blocks on pick_result, so without this every task
-        # stalls in PICKING until PICK_TIMEOUT_SEC. Primary robot only —
-        # spawn_warehouse.py only applies arm commands to robot_0, so starting
-        # it for a secondary robot would publish into a void.
+        # The other half of a PACKAGE task (task_manager.py): it publishes pick_request
+        # and waits on pick_result while the magnet pick controller finds the plate,
+        # docks, reaches, picks and places. Nothing is asked of it by a plain
+        # pickup/dropoff or goto task, which are still nav-only. Primary robot only:
+        # spawn_warehouse.py only applies arm commands to robot_0, so starting it for a
+        # secondary robot would publish into a void. (The launch argument is still
+        # called `scripted_pick`: it predates the magnet effector and nothing else
+        # passes it; scripted_pick.py itself is now only the --play iteration tool.)
         if rid == primary_robot_id:
             actions.append(ExecuteProcess(
                 cmd=[
                     "python3",
-                    os.path.join(REPO_ROOT, "nodes", "scripted_pick.py"),
-                    "--robot-id", rid,
+                    os.path.join(REPO_ROOT, "nodes", "magnet_pick.py"),
+                    "--robot-id", rid, "--perception", perception,
                 ],
                 output="screen",
                 condition=IfCondition(scripted_pick),
@@ -402,11 +428,24 @@ def _make_per_robot_actions(
             ]
         actions.append(GroupAction(condition=IfCondition(explore), actions=explorers))
 
+        # Each robot's stack starts robot_stagger_s after the previous one's.
+        # All at once, six robots meant ~140 processes importing, discovering
+        # each other over DDS and walking Nav2's lifecycle together: load
+        # average 178 on 32 threads (2026-10-24), and Nav2 lifecycle managers
+        # timed out on bt_navigator/controller_server and aborted: 1 robot's
+        # Nav2 in one run, 2 in the next. Staggered by 8 s: 0, then 1. It
+        # softens the spike but doesn't make six full stacks fit a 32-thread
+        # laptop. Four come up either way.
+        if idx and stagger_s > 0:
+            mine = actions[first:]
+            del actions[first:]
+            actions.append(TimerAction(period=idx * stagger_s, actions=mine))
+
     # Fleet gateway: takes /fleet/task_request, announces, keeps
     # /fleet/task_board. Once per bringup, like the operator's laptop it stands
     # in for. Sim only: a real robot's bringup is one of several on the mesh,
     # and each starting a gateway would put several wire-id-0 senders on
-    # /fleet/tasks. The real gateway is the laptop (commsim/hw/README.md).
+    # /fleet/tasks. The real gateway is the laptop (docs/commsim.md).
     if platform != "real":
         actions.append(ExecuteProcess(
             cmd=["python3", os.path.join(REPO_ROOT, "nodes", "fleet_tasks.py"), "--gateway",
@@ -423,6 +462,13 @@ def _make_per_robot_actions(
             "python3",
             os.path.join(REPO_ROOT, "nodes", "map_merge.py"),
             "--robot-ids", ",".join(robot_ids),
+            # Every spawn stays inside /map even before its robot maps
+            # anything — see spawn_margin_m in configs/map_merge.yaml. One
+            # `--keep-in=` token: as a separate argument, a negative first x
+            # ("-7.15,...") parses as an option and map_merge exits at
+            # startup, leaving every costmap without a map (2026-10-25).
+            "--keep-in=" + ";".join(
+                f"{x},{y}" for x, y, _ in (_spawn_pose(scene, rid) for rid in robot_ids)),
             # Required, not cosmetic: this node rebroadcasts a TF edge onto
             # /tf (see its own _tick()), so its clock must agree with the
             # rest of the sim-time-stamped tree — see nodes/map_merge.py's
@@ -464,8 +510,30 @@ def generate_launch_description():
     platform = LaunchConfiguration("platform")
     slam_role = LaunchConfiguration("slam_role")
     shared_map = LaunchConfiguration("shared_map")
+    robot_stagger_s = LaunchConfiguration("robot_stagger_s")
+    perception = LaunchConfiguration("perception")
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "perception",
+            default_value="camera",
+            description=(
+                "What the magnet pick controller aims at: `camera` (the head "
+                "camera's plate detections, nodes/package_detector.py) or `oracle` "
+                "(the simulator's ground truth for the requested package; sim only, "
+                "a diagnostic that separates perception failures from dock or arm "
+                "ones)."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "robot_stagger_s",
+            default_value="8.0",
+            description=(
+                "Seconds between one robot's stack starting and the next's (wall "
+                "clock). Staggering keeps a large fleet's startup from timing out "
+                "Nav2's lifecycle managers; 0 starts every robot at once."
+            ),
+        ),
         DeclareLaunchArgument(
             "shared_map",
             default_value="false",
@@ -549,10 +617,10 @@ def generate_launch_description():
             "scripted_pick",
             default_value="true",
             description=(
-                "Start nodes/scripted_pick.py, which answers task_manager's "
-                "pick_request by playing back configs/arm_poses.yaml. Primary "
-                "robot only. Set false to drive the arm purely from the "
-                "dashboard's arm pad."
+                "Start nodes/magnet_pick.py, which answers task_manager's "
+                "pick_request for a package task: find the magnet plate, dock, "
+                "reach, pick, place. Primary robot only. (The name predates the "
+                "magnet effector; nodes/scripted_pick.py is no longer launched.)"
             ),
         ),
         DeclareLaunchArgument(
@@ -597,7 +665,7 @@ def generate_launch_description():
                 "only): odometry, live obstacles and a compressed keyframe "
                 "stream; mapping runs on a workstation via "
                 "launch/sortbots_slam_workstation.launch.py. See "
-                "tasks/slam_offload.md."
+                "tasks/slam_offload.md@6501799."
             ),
         ),
         DeclareLaunchArgument(
@@ -640,6 +708,8 @@ def generate_launch_description():
                 explore, explore_autostart, robot_id, robot_ids, scene, platform,
                 slam_role,
                 shared_map,
+                robot_stagger_s,
+                perception,
             ],
         ),
     ])

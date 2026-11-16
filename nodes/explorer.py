@@ -12,7 +12,7 @@ task_manager.py's _on_explore_status / _on_dispatch).
 
 Frontier detection needs REAL free space in `/map` to work at all — see
 launch/sortbots_rtabmap_robot.launch.py's GRID_ARGS (Grid/RayTracing) and
-docs/running.md's "Occupancy-grid tuning" section. Without it `/map` stays
+the GRID_ARGS comments in launch/sortbots_rtabmap_robot.launch.py. Without it `/map` stays
 almost entirely unknown and this node has nothing real to chase.
 
 Multi-robot: by default this node plans against /map — nodes/map_merge.py's

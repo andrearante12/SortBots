@@ -15,13 +15,13 @@ file, but `global_frame` appears 4 times here wanting 3 DIFFERENT outcomes
 (one per-robot rewrite, three left as the shared `map` frame) — a key-name
 match would stomp all four identically.
 
-Run after RTAB-Map is already publishing (see docs/isaac_sim_phase4.md),
+Run after RTAB-Map is already publishing (see docs/isaac_sim_phase4.md@6501799),
 from a shell with system ROS 2 Jazzy sourced (NOT the Isaac venv):
 
     source /opt/ros/jazzy/setup.bash
     ros2 launch ./launch/sortbots_nav2.launch.py robot_id:=robot_0
 
-Requires (installed by the docs/quickstart.md ROS 2 step):
+Requires (installed by the docs/setup.md ROS 2 step):
     sudo apt install ros-jazzy-navigation2 ros-jazzy-nav2-bringup \\
         ros-jazzy-depth-image-proc
 """

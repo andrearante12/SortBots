@@ -1,5 +1,5 @@
 # Gaussian-splat trainer (splat/, scripts/splat.sh). Its own env, never mixed
-# with lerobot, the Isaac venv, or system ROS 2 — see docs/splat.md.
+# with lerobot, the Isaac venv, or system ROS 2 — see docs/real-robot.md.
 #
 # Python 3.10 + torch 2.4/cu124 is not arbitrary: it is the newest combination
 # gsplat publishes PREBUILT wheels for (docs.gsplat.studio/whl). Anything else

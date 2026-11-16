@@ -76,3 +76,15 @@ def test_depth_to_metres_encodings():
     m = np.full((2, 3), 2.5, dtype=np.float32).tobytes()
     assert np.allclose(dc.depth_to_metres(m, "32FC1", 2, 3), 2.5)
     assert dc.depth_to_metres(mm, "rgb8", 2, 3) is None
+
+
+def test_orb_payload_tracks_a_shifted_frame():
+    import cv2
+    rng = np.random.default_rng(0)
+    img = cv2.GaussianBlur(rng.integers(0, 255, (240, 320), dtype=np.uint8), (0, 0), 2.0)
+    p0, st = fo.orb_payload(None, img, stamp=0.0)
+    assert p0["features"] > 20 and p0["inliers"] == 0
+    p1, _ = fo.orb_payload(st, np.roll(img, 6, axis=1), stamp=0.2)
+    assert p1["w"] == 320 and p1["h"] == 240
+    assert p1["matches"] > 10 and p1["inliers"] > 10
+    assert any(pt[3] == fo.INLIER for pt in p1["pts"])

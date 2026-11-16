@@ -1,0 +1,58 @@
+# A world layout (simtest/world.py has the full schema; pick_bench.yaml the package notes).
+# Numbers from: scripts/pick_layout.py package --deck -6.30 11.32 0.36 0.9 0.95 --normal 180 --lateral -0.167
+
+name: pick_table
+title: A target block on a table straight ahead of robot_0, and a marked area beside it
+description: >
+  A table directly in front of robot_0's spawn pose, with a box on it whose magnet
+  plate faces the robot, on the arm's line, so the pick is a straight 0.47 m forward
+  and no turn. The robot spawns where it does (configs/robots.yaml has no per-world
+  start), so the table came to the robot.
+
+  This is as close as the camera lets a table be. The head camera is 1.24 m up with a
+  21.6 degree vertical half-FOV, and the racks east of the aisle stop at x = -6, which
+  leaves 1.15 m. At 0.95 m high the plate is 0.74 m from the lens and all of it is in view
+  from the first frame; at 0.90 m its lower edge is already out of frame, and at the
+  dock itself (0.27 m) no plate on any reachable table is visible.
+
+  The marked area is paint: place_block sets the block down on it. It reaches the table's
+  front edge because the block has to: the chassis stops short of a full-height table, so a
+  plate further back than the edge is out of the arm's reach.
+
+  The head starts tilted down so the table stays in frame up to the dock, and the Sim
+  view starts on the table.
+
+scenes: [nvidia]
+autostart: true
+
+# Radians, tilt > 0 looks down. Set from the operator view's Head sliders.
+head: {pan: 0.0, tilt: 0.5}
+
+# In the aisle, up and to the side of the robot and the table.
+view:
+  eye: [-8.2, 13.0, 3.0]
+  target: [-6.6, 11.4, 0.9]
+
+props:
+  - id: table
+    shape: box
+    size: [0.36, 0.9, 0.95]
+    pose: [-6.30, 11.32, 0.0]
+    style: table                    # a top on four legs; the collider is still this whole box
+    color: [0.42, 0.28, 0.17]       # the top, wood
+
+packages:
+  - id: pkg_0
+    label: target block
+    size: [0.14, 0.14, 0.10]
+    pose: [-6.43, 11.487, 3.1416]   # the plate is at x = -6.50, facing the robot
+    z: 0.95                         # bottom of the box = top of the table
+    magnet_face: "+x"
+    marker: 0                       # the ArUco id on its plate: which package, and which side
+
+marks:
+  - id: drop_zone
+    label: drop zone
+    size: [0.24, 0.22]
+    pose: [-6.36, 11.12, 0.0]       # from the table's front edge, where the block has to go
+    z: 0.95

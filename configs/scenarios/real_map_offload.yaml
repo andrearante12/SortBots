@@ -10,7 +10,7 @@ description: >
   workstation — start launch/sortbots_slam_workstation.launch.py there first,
   with the Jetson container started as SORTBOTS_WORKSTATION=<workstation ip>
   scripts/jetson.sh console. The map and reconstruction panels show the
-  workstation's map. See tasks/slam_offload.md.
+  workstation's map. See tasks/slam_offload.md@6501799.
 
 platform: real
 status: ready

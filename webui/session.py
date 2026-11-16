@@ -298,12 +298,18 @@ RUN_FLAGS = {
     # /clock, odom and TF drop below Nav2's 20 Hz controller in sim time.
     "render_every": _omit_at(1, _int_range("--render-every", 1, 4)),
     "lite_render": _switch("--lite-render", when=True),
+    "half_res_cams": _switch("--half-res-cams", when=True),
     "teleop": _switch("--teleop", when=True),
     "localize": _switch("--localize", when=True),
     "resume": _switch("--resume", when=True),
     "explore": _switch("--explore", when=True),
     "map": _map_path("--map"),
     "world": _world_name("--world"),
+    # What the magnet pick controller aims at (nodes/magnet_pick.py): `camera` is the
+    # head camera's plate detections, `oracle` the simulator's ground truth (a sim-only
+    # diagnostic that separates perception failures from dock/arm ones). Stock value
+    # emits no flag, so every existing scenario's argv is unchanged.
+    "perception": _omit_at("camera", _choice("--perception", {"camera", "oracle"})),
 }
 
 RUN_DEFAULTS = {
@@ -316,12 +322,14 @@ RUN_DEFAULTS = {
     "chase_cam_robots": None,
     "render_every": 1,
     "lite_render": False,
+    "half_res_cams": False,
     "teleop": False,
     "localize": False,
     "resume": False,
     "explore": False,
     "map": None,
     "world": None,
+    "perception": "camera",
 }
 
 
@@ -335,7 +343,7 @@ REAL_RUN_FLAGS = {
     "resume": RUN_FLAGS["resume"],
     "map": RUN_FLAGS["map"],
     # all = map on the Jetson; robot = map on the workstation from the robot's
-    # keyframe stream (tasks/slam_offload.md). Real-only: sim has no Jetson.
+    # keyframe stream (tasks/slam_offload.md@6501799). Real-only: sim has no Jetson.
     "slam_role": _choice("--slam-role", {"all", "robot"}),
 }
 
@@ -469,30 +477,37 @@ def load_scenarios() -> list[dict]:
     `error` string rather than being dropped — a silently missing scenario is
     much harder to debug than a card that says why it won't load.
     """
-    out = []
-    for path in sorted(SCENARIO_DIR.glob("*.yaml")):
-        try:
-            with open(path) as f:
-                out.append(_validate(path, yaml.safe_load(f)))
-        except (ScenarioError, yaml.YAMLError, OSError) as exc:
-            out.append({
-                "name": path.stem,
-                "title": path.stem,
-                "description": "",
-                "status": "invalid",
-                "platform": None,
-                "run": {},
-                "overrides": [],
-                "capture": {"bag": False},
-                "error": f"{path.name}: {exc}",
-            })
-    return out
+    return [_load_one(path) for path in sorted(SCENARIO_DIR.glob("*.yaml"))]
+
+
+def _load_one(path: Path) -> dict:
+    """One scenario file, validated: or the `invalid` card that says why not."""
+    try:
+        with open(path) as f:
+            return _validate(path, yaml.safe_load(f))
+    except (ScenarioError, yaml.YAMLError, OSError) as exc:
+        return {
+            "name": path.stem,
+            "title": path.stem,
+            "description": "",
+            "status": "invalid",
+            "platform": None,
+            "run": {},
+            "overrides": [],
+            "capture": {"bag": False},
+            "error": f"{path.name}: {exc}",
+        }
 
 
 def get_scenario(name: str) -> dict:
-    for scenario in load_scenarios():
-        if scenario["name"] == name:
-            return scenario
+    # A scenario's name must equal its file's stem (_validate enforces it), so the one
+    # wanted can be read directly. Scanning every file here made resolving a single
+    # test case cost a parse of ALL the scenarios, and listing the Tests tab quadratic
+    # in the number of tests (0.9 s for a dozen, pure-python YAML).
+    if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        path = SCENARIO_DIR / f"{name}.yaml"
+        if path.is_file():
+            return _load_one(path)
     raise ScenarioError(f"no such scenario: {name!r}")
 
 
@@ -548,14 +563,14 @@ def apply_overrides(scenario: dict, overrides: dict | None) -> dict:
 
 CONFIG_SIM_KEYS = {"scene", "robots", "map", "mode", "explore", "waypoints",
                    "headless", "chase_cam", "chase_cam_robots", "teleop", "bag", "demo",
-                   "render_every", "lite_render", "world"}
+                   "render_every", "lite_render", "half_res_cams", "world"}
 CONFIG_REAL_KEYS = {"map", "mode", "waypoints", "bag", "demo"}
 CONFIG_KEYS = {"sim": CONFIG_SIM_KEYS, "real": CONFIG_REAL_KEYS}
 CONFIG_DEFAULTS = {
     "scene": "nvidia", "robots": 1, "map": "new", "mode": "extend",
     "explore": True, "waypoints": "map", "headless": True, "chase_cam": False,
     "chase_cam_robots": 1, "teleop": False, "bag": False, "demo": False,
-    "render_every": 1, "lite_render": False, "world": "none",
+    "render_every": 1, "lite_render": False, "half_res_cams": False, "world": "none",
 }
 MODES = ("extend", "readonly")
 
@@ -620,6 +635,7 @@ def config_to_run(config: dict, platform: str = "sim") -> dict:
         # Range-checked by build_argv below (1..4), like every other key.
         run["render_every"] = cfg["render_every"]
         run["lite_render"] = _as_bool(cfg["lite_render"])
+        run["half_res_cams"] = _as_bool(cfg["half_res_cams"])
         if run["chase_cam"]:
             run["chase_cam_robots"] = int(cfg["chase_cam_robots"])
         run["world"] = None if cfg["world"] in (None, "", "none") else str(cfg["world"])
@@ -658,7 +674,8 @@ def run_to_config(run: dict, platform: str = "sim", bag: bool = False) -> dict:
     if platform == "sim":
         cfg["scene"] = run.get("scene", "nvidia")
         cfg["robots"] = int(run.get("robots") or 1)
-        for key in ("explore", "headless", "chase_cam", "teleop", "lite_render"):
+        for key in ("explore", "headless", "chase_cam", "teleop", "lite_render",
+                    "half_res_cams"):
             cfg[key] = bool(run.get(key, RUN_DEFAULTS[key]))
         cfg["render_every"] = int(run.get("render_every") or 1)
         cfg["chase_cam_robots"] = int(run.get("chase_cam_robots") or 1)
@@ -686,6 +703,8 @@ def describe_config(cfg: dict, platform: str = "sim") -> str:
             bits.append(f"render every {int(full['render_every'])}")
         if _as_bool(full["lite_render"]):
             bits.append("lite render")
+        if _as_bool(full["half_res_cams"]):
+            bits.append("half-res cameras")
         if full.get("world") not in (None, "", "none"):
             bits.append(f"world: {full['world']}")
     # Waypoints are an Advanced setting: only mention a non-default choice
@@ -964,6 +983,21 @@ def load_map_blocking(name: str, robot_id: str = "robot_0") -> dict:
 _PIPELINE_PATTERNS = ("spawn_warehouse.py", "sortbots_bringup.launch.py")
 
 
+MEM_GUARD_REPORT = Path("/tmp/sortbots_mem_guard.json")
+
+
+def mem_guard_reason(since: float) -> str | None:
+    """Why scripts/mem_guard.py stopped the run, if it did and since `since`."""
+    try:
+        report = json.loads(MEM_GUARD_REPORT.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(report, dict) or report.get("stopped_at", 0) < since:
+        return None
+    top = ", ".join(f"{k} {mb} MB" for k, mb in (report.get("top") or [])[:3])
+    return f"stopped by the memory guard: {report.get('reason')}" + (f" (largest: {top})" if top else "")
+
+
 def pipeline_alive() -> bool:
     """Is a sim pipeline up right now?
 
@@ -1055,6 +1089,7 @@ class SessionManager:
             if session["state"] == "running" and not self._pipeline_alive_cached():
                 self._session["state"] = "exited"
                 self._session["error"] = self._session.get("error") or \
+                    mem_guard_reason(session["started_at"]) or \
                     "pipeline is no longer running (stopped outside the dashboard?)"
                 self._persist()
                 session = dict(self._session)

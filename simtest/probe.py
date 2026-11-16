@@ -49,6 +49,8 @@ from simtest import metrics as metrics_lib  # noqa: E402
 MAP_EVERY_S = 5.0       # sim seconds between recorded /map samples
 EXPLORE_EVERY_S = 1.0
 DYN_EVERY_S = 0.2       # 5 Hz per robot
+TRK_EVERY_S = 0.2       # 5 Hz per robot: obstacle_tracks publishes at 10
+DETECT_EVERY_S = 0.5    # 2 Hz per robot
 DYN_VOXEL_M = 0.1
 DYN_MAX_POINTS = 300
 GOAL_TERMINAL = {"succeeded", "aborted", "rejected", "canceled", "timeout"}
@@ -127,8 +129,23 @@ class ProbeCore:
             self.emit({"s": "start", "t": 0.0, "sim": round(self.t0, 4),
                        "wall": round(time.monotonic() - (self.wall0 or time.monotonic()), 2)})
         if self.t0 is not None:
-            self.emit({"s": "gt", "t": round(gt["t"] - self.t0, 4), "wt": gt["wt"],
-                       "robots": gt["robots"], "actors": gt["actors"]})
+            ev = {"s": "gt", "t": round(gt["t"] - self.t0, 4), "wt": gt["wt"],
+                  "robots": gt["robots"], "actors": gt["actors"]}
+            # Only worlds with packages carry these, so the events of every other
+            # test (and every run recorded before packages existed) stay as they were.
+            for key in ("packages", "magnet"):
+                if gt.get(key):
+                    ev[key] = gt[key]
+            self.emit(ev)
+
+    def on_packages(self, rid: str, obj: dict) -> None:
+        """/<rid>/packages from nodes/package_detector.py (or the oracle): the plates
+        it sees. Throttled to 2 Hz; the metric only needs to know it saw them."""
+        if self.t0 is None or self.throttled(f"detect:{rid}", DETECT_EVERY_S):
+            return
+        keep = ("x", "y", "z", "nx", "ny", "nz", "conf")
+        plates = [{k: p[k] for k in keep if k in p} for p in obj.get("plates", [])]
+        self.emit({"s": "detect", "rid": rid, "plates": plates})
 
     def on_map(self, grid) -> None:
         self.have["map"] = True
@@ -139,6 +156,13 @@ class ProbeCore:
 
     def on_task(self, rid: str, obj: dict) -> None:
         tid = obj.get("task_id")
+        rejected = obj.get("rejected")
+        if isinstance(rejected, dict):
+            # task_manager turned the dispatch away (unknown waypoint, bad leg). The
+            # status carries the REJECTED task's id under `rejected`, not at the top, so
+            # without this the task sat at "sent" and the run waited out its sim_s cap.
+            tid = rejected.get("task_id")
+            obj = {**obj, "task_id": tid, "state": "FAILED", "reason": rejected.get("reason")}
         for t in self.tasks.values():
             if t["robot"] == rid and t.get("task_id") == tid:
                 t["state"] = obj.get("state")
@@ -268,6 +292,21 @@ class ProbeCore:
         return self.ms.score()
 
 
+def dispatch_body(t: dict) -> dict:
+    """The /<rid>/dispatch_task JSON for one resolved task. A plain delivery is
+    exactly what it has always been; a package task adds the package id and where
+    it has to come to rest, and its legs may be pose dicts or null ("no Nav2 leg,
+    the pick controller docks on its own": nodes/task_manager.py)."""
+    body = {"pickup": t["pickup"], "dropoff": t["dropoff"], "task_id": t["task_id"]}
+    if t.get("package"):
+        body["package"] = t["package"]
+        body["place"] = t["place"] and {k: t["place"][k] for k in ("x", "y", "z", "yaw")}
+        body["size"], body["face"], body["at"] = t["size"], t["face"], t["at"]
+        if t.get("marker") is not None:
+            body["marker"] = t["marker"]
+    return body
+
+
 # ---------------------------------------------------------------------------
 # ROS wiring
 # ---------------------------------------------------------------------------
@@ -331,6 +370,9 @@ def run(variant_path: Path, out_dir: Path, startup_timeout: float) -> int:
                                          functools.partial(self._on_json, "task", rid), 10)
                 self.create_subscription(String, f"/{rid}/explore_status",
                                          functools.partial(self._on_json, "explore", rid), 10)
+                if "detect" in streams:
+                    self.create_subscription(String, f"/{rid}/packages",
+                                             functools.partial(self._on_json, "packages", rid), 10)
                 if any(g["robot"] == rid for g in resolved["goals"]):
                     self.nav[rid] = ActionClient(self, NavigateToPose, f"/{rid}/navigate_to_pose")
                 if any(t["robot"] == rid for t in resolved["tasks"]):
@@ -339,8 +381,11 @@ def run(variant_path: Path, out_dir: Path, startup_timeout: float) -> int:
                     self.create_subscription(PointCloud2, f"/{rid}/dynamic_obstacles",
                                              functools.partial(self._on_dyn, rid),
                                              qos_profile_sensor_data)
+                if "trk" in streams:
+                    self.create_subscription(String, f"/{rid}/obstacle_tracks",
+                                             functools.partial(self._on_trk, rid), 10)
             self.tf = None
-            if "dyn" in streams:
+            if "dyn" in streams or "trk" in streams:
                 import tf2_ros
 
                 self.tf_buffer = tf2_ros.Buffer()
@@ -369,7 +414,8 @@ def run(variant_path: Path, out_dir: Path, startup_timeout: float) -> int:
                 return
             if not isinstance(obj, dict):
                 return
-            (core.on_task if kind == "task" else core.on_explore)(rid, obj)
+            {"task": core.on_task, "explore": core.on_explore,
+             "packages": core.on_packages}[kind](rid, obj)
 
         def _on_dyn(self, rid, m):
             if core.t0 is None or core.throttled(f"dyn:{rid}", DYN_EVERY_S):
@@ -398,6 +444,69 @@ def run(variant_path: Path, out_dir: Path, startup_timeout: float) -> int:
                 world = pts.astype(np.float64) @ R.T + np.array([t.x, t.y, t.z])
                 xy = _voxel_xy(world, DYN_VOXEL_M, DYN_MAX_POINTS)
             core.emit({"s": "dyn", "rid": rid, "pts": xy})
+
+        def _tf2d(self, frame, stamp):
+            """map <- frame as a 2-D (R 2x2, t 2, yaw) at the stamp, else latest, else None."""
+            from rclpy.time import Time
+
+            for when in (Time.from_msg(stamp), Time()):
+                try:
+                    tr = self.tf_buffer.lookup_transform("map", frame, when)
+                    break
+                except Exception:  # noqa: BLE001 — extrapolation etc.
+                    tr = None
+            if tr is None:
+                return None
+            q, t = tr.transform.rotation, tr.transform.translation
+            yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+            c, s_ = math.cos(yaw), math.sin(yaw)
+            return np.array([[c, -s_], [s_, c]]), np.array([t.x, t.y]), yaw
+
+        def _on_trk(self, rid, m):
+            """Tracks into the map frame. Positions, predictions and velocities are
+            in the detector's world_frame (odom; base_link when it had no odom TF),
+            so one map <- world_frame transform places them all — through the
+            robot's own localization, like `dyn`, so SLAM error shows up here too."""
+            if core.t0 is None or core.throttled(f"trk:{rid}", TRK_EVERY_S):
+                return
+            try:
+                p = json.loads(m.data)
+            except ValueError:
+                return
+            frame = p.get("world_frame") or p.get("frame")
+            if not frame:
+                return
+            from builtin_interfaces.msg import Time as TimeMsg
+
+            st = p.get("stamp") or 0.0
+            stamp = TimeMsg(sec=int(st), nanosec=int((st - int(st)) * 1e9))
+            tf = self._tf2d(frame, stamp)
+            if tf is None:
+                return
+            Rm, tm, _yaw = tf
+
+            def pt(xy):
+                v = Rm @ np.array([xy[0], xy[1]]) + tm
+                return [round(float(v[0]), 3), round(float(v[1]), 3)]
+            tracks = []
+            for o in p.get("obstacles") or []:
+                pos = o.get("pos_w")
+                if pos is None:
+                    continue
+                vel = Rm @ np.array(o.get("vel") or [0.0, 0.0])
+                cov = o.get("cov")
+                if cov:
+                    C = np.array([[cov[0], cov[1]], [cov[1], cov[2]]])
+                    C = Rm @ C @ Rm.T
+                    cov = [round(float(C[0, 0]), 4), round(float(C[0, 1]), 4),
+                           round(float(C[1, 1]), 4)]
+                tracks.append({"id": o.get("track_id"), "moving": bool(o.get("moving")),
+                               "hits": o.get("hits", 0), "pos": pt(pos),
+                               "vel": [round(float(vel[0]), 3), round(float(vel[1]), 3)],
+                               "cov": cov,
+                               "pred": [[h, *pt((x, y))] for h, x, y in (o.get("pred") or [])],
+                               "extent_m": o.get("extent_m"), "height_m": o.get("height_m")})
+            core.emit({"s": "trk", "rid": rid, "stamp": st, "tracks": tracks})
 
         # -- goals ------------------------------------------------------------
         def send_goal(self, g):
@@ -449,10 +558,9 @@ def run(variant_path: Path, out_dir: Path, startup_timeout: float) -> int:
             for g in core.timed_out_goals():
                 self.timeout_goal(g)
             for t in core.due_tasks():
-                body = {"pickup": t["pickup"], "dropoff": t["dropoff"], "task_id": t["task_id"]}
+                body = dispatch_body(t)
                 self.dispatch[t["robot"]].publish(String(data=json.dumps(body)))
-                core.emit({"s": "dispatch", "rid": t["robot"], "task_id": t["task_id"],
-                           "pickup": t["pickup"], "dropoff": t["dropoff"]})
+                core.emit({"s": "dispatch", "rid": t["robot"], **body})
                 log(f"task {t['task_id']} -> {t['robot']}")
 
     rclpy.init()
