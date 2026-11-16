@@ -20,8 +20,11 @@
 #     sat off the tailnet ~2 min after Wi-Fi was already up.
 #  5. sortbots-net-watchdog.timer: every minute, re-up Wi-Fi if it's down,
 #     restart tailscaled if it has been offline two checks running.
-#  6. sortbots-console.service: `scripts/jetson.sh console` at boot as the
-#     repo's owner, so http://<jetson>:8081/ is up without anyone logging in.
+#  6. sortbots-console.service: `scripts/jetson.sh update` then `console` at
+#     boot as the repo's owner, so http://<jetson>:8081/ is up — running
+#     current main — without anyone logging in. A failed update (no network,
+#     uncommitted changes, diverged) is logged and skipped: the console still
+#     starts on whatever is checked out.
 #  7. The checkout is shared by every user (all in the owner's group), but
 #     without setgid dirs each user's new files land in THEIR group: 247 of
 #     liam's files were unwritable to andre, and a branch switch half-applied
@@ -58,6 +61,8 @@ SystemMaxUse=300M
 EOF
 systemd-tmpfiles --create --prefix /var/log/journal
 systemctl restart systemd-journald
+# A restart alone keeps writing to /run until the next boot; flush moves it now.
+journalctl --flush
 
 # 4 --------------------------------------------------------------------------
 systemctl enable NetworkManager-wait-online.service >/dev/null 2>&1 || true
@@ -125,9 +130,14 @@ Type=oneshot
 RemainAfterExit=yes
 User=$OWNER
 WorkingDirectory=$REPO_ROOT
+# network-online is only "an interface has an address": GitHub can still be
+# unreachable for a few seconds after eduroam associates, so wait up to 90 s
+# for it before updating. '-' = a failed update never blocks the console.
+ExecStartPre=-/bin/bash -c 'for i in \$\$(seq 30); do git -C $REPO_ROOT ls-remote -q origin HEAD >/dev/null 2>&1 && exec $REPO_ROOT/scripts/jetson.sh update; sleep 3; done; echo "update skipped: origin unreachable"'
 ExecStart=$REPO_ROOT/scripts/jetson.sh console
 ExecStop=$REPO_ROOT/scripts/jetson.sh stop
-TimeoutStartSec=120
+# Long enough for an update that rebuilds the image (docker/jetson changed).
+TimeoutStartSec=40min
 [Install]
 WantedBy=multi-user.target
 EOF

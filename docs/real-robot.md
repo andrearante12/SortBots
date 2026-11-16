@@ -39,8 +39,11 @@ sudo scripts/jetson_host_setup.sh     # once; rerun after it changes
 It makes Wi-Fi retry forever with power save off, keeps the journal across
 reboots, holds tailscaled until the network is up, adds a watchdog (Wi-Fi and
 Tailscale, every 30 s), and installs `sortbots-console.service`, which runs
-`jetson.sh console` at boot. The dashboard is up about 2 minutes after power-on
-with nobody logged in. Also disable key expiry for the Jetson in the Tailscale
+`jetson.sh update` then `jetson.sh console` at boot. Every boot runs current
+`main`. If the update can't run (no network, uncommitted changes), the console
+starts on the code already checked out. The dashboard is up about 2 minutes
+after power-on with nobody logged in, longer if `docker/jetson/` changed and the
+image rebuilds. Also disable key expiry for the Jetson in the Tailscale
 admin console, or it falls off the tailnet when the key expires.
 
 **Updating the code:** the Jetson's checkout is a deploy copy of `main`, only
