@@ -30,6 +30,35 @@ scripts/jetson.sh status | shell | logs | stop
 Open `http://jetson-orin.<tailnet>.ts.net:8081/` and start `real_map_fresh`. Move
 the robot slowly: fast turns and blank walls lose visual odometry.
 
+**Unattended (survives reboots and power cuts):** once the Wi-Fi profile works,
+
+```bash
+sudo scripts/jetson_host_setup.sh     # once; rerun after it changes
+```
+
+It makes Wi-Fi retry forever with power save off, keeps the journal across
+reboots, holds tailscaled until the network is up, adds a watchdog (Wi-Fi and
+Tailscale, every 30 s), and installs `sortbots-console.service`, which runs
+`jetson.sh console` at boot. The dashboard is up about 2 minutes after power-on
+with nobody logged in. Also disable key expiry for the Jetson in the Tailscale
+admin console, or it falls off the tailnet when the key expires.
+
+**Updating the code:** the Jetson's checkout is a deploy copy of `main`, only
+ever fast-forwarded:
+
+```bash
+scripts/jetson.sh update          # pull main, rebuild the image if docker/jetson changed, restart the console
+scripts/jetson.sh update BRANCH   # same, for a branch under test
+```
+
+It refuses if the checkout has uncommitted changes or has diverged from origin.
+Develop elsewhere and push. Don't commit on the Jetson.
+
+**No network:** with the USB-C port plugged into a laptop, the Jetson is at
+`ssh andre@192.168.55.1`. If eduroam rejects the saved password (`error 691` in
+`journalctl -u wpa_supplicant`), store the new one:
+`sudo nmcli con modify eduroam 802-1x.password "$(read -rsp 'password: ' p; echo "$p")"`.
+
 **Differences from the sim:**
 
 - `use_sim_time:=false`.
