@@ -2,18 +2,17 @@
 # view (webui/operator_drive.js -> serve.py --drive -> scripts/drive_bridge.py).
 # Read by scripts/drive_bridge.py; serve.py only passes the path along.
 
-# The servo bus board the three wheel servos are chained on. XLeRobot puts them on a
-# second board (its bus 2, with the right arm); ours shares the arm's board until
-# there is a second one, so this is usually the arm's port.
-port: /dev/ttyACM0
+# The wheels' own servo board, by USB serial: plugging it in renumbered the arm's board
+# from ttyACM0 to ttyACM1 (2026-11-15), so a ttyACM path names whichever came up first.
+# Same board as scripts/base.py on the arm branch (BASE_BOARD_SERIAL).
+port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79016064-if00
 
-# Wheel servo ids. XLeRobot numbers them 7/8/9, but on this bus 7 and 8 are already the
-# head's pan/tilt (docs/arm.md), so ours start at 9. Check what is really on the bus
-# with `scripts/drive_bridge.py scan` and set a new servo with `drive_bridge.py setup`.
+# Wheel servo ids: XLeRobot's own 7/8/9. They don't clash with the head's 7/8, which are on
+# the arm's board. `scripts/drive_bridge.py scan` lists what answers.
 wheels:
-  base_left_wheel: 9
-  base_back_wheel: 10
-  base_right_wheel: 11
+  base_left_wheel: 7
+  base_back_wheel: 8
+  base_right_wheel: 9
 
 # XLeRobot / LeKiwi base geometry (lerobot's lekiwi.py _body_to_wheel_raw).
 wheel_radius_m: 0.05
