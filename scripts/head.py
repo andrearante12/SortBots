@@ -17,9 +17,16 @@ Setup has to be one servo alone because every new STS3215 ships as id 1 at 1 Mba
 same id as the arm's shoulder_pan: with the arm still chained, the id write would go to both.
 The arm process and this one cannot hold /dev/ttyACM0 at the same time.
 """
+import os
+
+# One BLAS thread, set before numpy loads: the hand-eye tools do thousands of tiny matrix ops (per-
+# frame plane fits, the arm solver), and OpenBLAS's default of a thread per core spun ~9 cores
+# on them, starving the 50 Hz control loop: slow, jerky moves (2026-11-15).
+for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+
 import argparse
 import json
-import os
 import select
 import sys
 import termios

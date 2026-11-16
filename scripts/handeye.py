@@ -73,6 +73,7 @@ class Camera:
         import cv2
         import pyrealsense2 as rs
         self.cv2, self.rs, self.marker_m = cv2, rs, marker_m
+        self.want = None  # marker ids that get the depth plane fit + target; None = all
         cfg = rs.config()
         cfg.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
         cfg.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
@@ -175,7 +176,9 @@ class Camera:
                  "pnp_pt": [float(t) for t in tvec.ravel()] if ok else None, "size_px": size_px,
                  "normal": None, "target_pt": None}
             centre = dpt if dpt is not None else m["pnp_pt"]
-            if ok and centre is not None:
+            # the depth plane fit is the expensive part: only for the marker being used (pick sets
+            # `want`); the package's other markers are only drawn
+            if ok and centre is not None and (self.want is None or int(i) in self.want):
                 R = cv2.Rodrigues(rvec)[0]
                 # Fit the face's plane halfway to the target, not round the marker: the package's
                 # marker sits near a corner of its face, so a box round it takes in the table
@@ -1388,6 +1391,7 @@ def cmd_pick(a):
     if magnet is None:
         print("no magnet: running without the magnet button")
     cam = Camera(marker_m=a.marker_m)
+    cam.want = {a.marker_id}
     bus, head_cal = open_bus(a.port, a.arm_id, a.head_id)
     lo, hi = arm_limits(bus)
     hold_head_at(bus, head_cal, *a.head)
