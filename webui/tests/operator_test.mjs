@@ -87,10 +87,14 @@ window.fetch = (url, opts) => {
     if (!d) return json({ enabled: false, reason: 'drive is off' });
     window.__drivePosts = window.__drivePosts || [];
     if (u.startsWith('/api/drive/cmd')) { window.__drivePosts.push({ t: performance.now(), ...JSON.parse(opts.body) }); return json({ ok: true }); }
-    if (u.startsWith('/api/drive/start')) { Object.assign(d, d.onStart || {}, { running: true }); return json({ ok: true }); }
-    if (u.startsWith('/api/drive/stop')) { d.running = false; window.__driveStopped = true; return json({ ok: true }); }
-    if (u.startsWith('/api/drive/pick/start')) { window.__pickStarted = true; Object.assign(d, { pick_starting: true, pick_log: ['loading the camera'] }); return json({ ok: true, starting: true }); }
-    if (u.startsWith('/api/drive/pick/stop')) { window.__pickStopped = true; Object.assign(d, { running: false, backend: undefined, pick: undefined }); return json({ ok: true }); }
+    if (u.startsWith('/api/drive/robot/start')) {
+      if (d.arm_board) { window.__pickStarted = true; Object.assign(d, { pick_starting: true, pick_log: ['loading the camera'] }); return json({ ok: true, starting: true, mode: 'arm' }); }
+      Object.assign(d, d.onStart || {}, { running: true, note: "The arm isn't plugged in: camera and wheels only." }); return json({ ok: true, mode: 'drive' });
+    }
+    if (u.startsWith('/api/drive/robot/stop')) {
+      if (d.backend === 'handeye' || d.pick_starting) window.__pickStopped = true; else window.__driveStopped = true;
+      Object.assign(d, { running: false, backend: undefined, pick: undefined, pick_starting: false, note: null }); return json({ ok: true });
+    }
     if (u.startsWith('/api/drive/pick') || u.startsWith('/api/drive/abort')) { (window.__drivePicks = window.__drivePicks || []).push(u.split('/').pop()); return json({ ok: true }); }
     return json(d);
   }
@@ -1211,7 +1215,7 @@ async function main() {
   console.log('\n--- drive view ---');
   await page.eval(`localStorage.clear(); sessionStorage.removeItem('__fakeDrive')`); await load();
   check('drive: no Drive view unless serve.py offers it (--drive, localhost)', !(await visible('#view [data-v="drive"]')));
-  await page.eval(`sessionStorage.setItem('__fakeDrive', JSON.stringify({ enabled: true, running: false,
+  await page.eval(`sessionStorage.setItem('__fakeDrive', JSON.stringify({ enabled: true, running: false, arm_board: false,
     speed_levels: [{ xy_mps: 0.1, theta_dps: 30 }, { xy_mps: 0.2, theta_dps: 60 }, { xy_mps: 0.3, theta_dps: 90 }],
     onStart: { camera: { ok: true, fps: 29.7, error: null }, base: { ok: false, error: 'wheel servos {9, 10, 11}: missing id 11', ids: { l: 9, b: 10, r: 11 }, port: '/dev/ttyACM0' } } }))`);
   await load();
@@ -1226,11 +1230,12 @@ async function main() {
   await click('#view [data-v="2d"]'); await sleep(200);
   await click('#view [data-v="drive"]'); await sleep(300);
   check('drive: the view swaps the map for the camera', await visible('#driveview') && !(await visible('#map')) && !(await visible('#tools')));
-  check('drive: not connected says so, and offers Connect', /Not connected/.test(await $text('#dv-msg')) && await visible('#dv-connect') && !(await visible('#dv-disconnect')));
-  check('drive: Start arm & pick is offered beside Drive only', await visible('#dv-start-pick') && !(await visible('#dv-stop-pick')));
+  check('drive: not started says so, offers one Start, and the arm light says it is unplugged', /Not started/.test(await $text('#dv-msg')) && /no arm plugged in/.test(await $text('#dv-msg'))
+        && await visible('#dv-connect') && !(await visible('#dv-disconnect')) && /No arm/.test(await $text('#dv-arm')), await $text('#dv-msg'));
   check('drive: the map\'s "not running" overlay stays off the camera', !(await visible('#empty')) && !(await visible('#link-down')));
   await click('#dv-connect'); await sleep(1300);
-  check('drive: Connect starts the bridge; Disconnect replaces it', await visible('#dv-disconnect') && !(await visible('#dv-connect')));
+  check('drive: no arm: Start drives the camera and wheels in the same view, without asking, and says why', await visible('#dv-disconnect') && !(await visible('#dv-connect'))
+        && await visible('#driveview') && /arm isn't plugged in/.test(await $text('#dv-err')), await $text('#dv-err'));
   check('drive: camera frames are shown', /url\(/.test(await page.eval(`document.querySelector('#driveview .pic').style.backgroundImage`)) && /fps/.test(await $text('#dv-cam')));
   check('drive: a wheel bus problem is spelled out, camera still up', /missing id 11/.test(await $text('#dv-err')) && await visible('#dv-err')
         && (await page.eval(`document.getElementById('dv-base').className`)).includes('bad'), await $text('#dv-err'));
@@ -1276,18 +1281,18 @@ async function main() {
   await click('#view [data-v="drive"]'); await sleep(200);
   await page.eval(`window.__pad.buttons[7] = { pressed: false, value: 0 }`); await sleep(150);
   await click('#dv-disconnect'); await sleep(400);
-  check('drive: Disconnect stops the bridge', (await page.eval(`!!window.__driveStopped`)) && await visible('#dv-connect'));
+  check('drive: Stop stops it (no arm: no question asked)', (await page.eval(`!!window.__driveStopped`)) && await visible('#dv-connect'));
   await page.eval(`window.__pad.buttons[0] = { pressed: true, value: 1 }`); await sleep(150);
   await page.eval(`window.__pad.buttons[0] = { pressed: false, value: 0 }`); await sleep(150);
-  check('drive: A without the arm running says what it needs, and sends nothing', /Start arm/.test(await $text('#dv-err'))
+  check('drive: A without the arm running says what it needs, and sends nothing', /needs the arm/.test(await $text('#dv-err'))
         && !(await page.eval(`(window.__drivePicks || []).length`)) && !(await visible('#dv-pick')), await $text('#dv-err'));
   // handeye pick running: it owns the hardware, the view goes through it, A is pick-and-place.
   await page.eval(`sessionStorage.setItem('__fakeDrive', JSON.stringify({ enabled: true, running: true, backend: 'handeye',
     speed_levels: [{ xy_mps: 0.1, theta_dps: 30 }, { xy_mps: 0.2, theta_dps: 60 }, { xy_mps: 0.3, theta_dps: 90 }],
     camera: { ok: true }, base: { ok: true }, pick: { flag: 'HELD', state: 'lock', title: 'Pick: lock the target', msg: '', place_set: true } }))`);
   await load(); await click('#view [data-v="drive"]'); await sleep(400);
-  check('drive (handeye): Pick & place and Abort offered, no Connect/Disconnect', await visible('#dv-pick') && await visible('#dv-abort')
-        && !(await visible('#dv-connect')) && !(await visible('#dv-disconnect')));
+  check('drive (handeye): Pick & place, Abort and Stop offered, no Start', await visible('#dv-pick') && await visible('#dv-abort')
+        && !(await visible('#dv-connect')) && await visible('#dv-disconnect'));
   check('drive (handeye): the pick\'s state is shown', /HELD/.test(await $text('#dv-pickst')) && /lock the target/.test(await $text('#dv-pickst')), await $text('#dv-pickst'));
   await shot('drive-view-handeye');
   await page.eval(`window.__pad = { id: 'Xbox Wireless Controller (STANDARD GAMEPAD)', connected: true, mapping: 'standard', axes: [0, 0, 0, 0],
@@ -1300,22 +1305,26 @@ async function main() {
   check('drive (handeye): pad B aborts', (await page.eval(`window.__drivePicks.at(-1)`)) === 'abort');
   await page.eval(`window.__pad.buttons[1] = { pressed: false, value: 0 }; window.__fakeDrive.pick = { flag: 'DESCENDING', state: 'planned', title: 'Pick: plan ready', msg: 'descending' }`);
   await sleep(800);
-  check('drive (handeye): Stop arm is offered', await visible('#dv-stop-pick'));
+  check('drive (handeye): the arm light is on', (await page.eval(`document.getElementById('dv-arm').className`)).includes('ok'));
+  check('drive (handeye): Stop is offered', await visible('#dv-disconnect'));
   await page.eval(`window.confirm = () => false`);
-  await click('#dv-stop-pick'); await sleep(200);
+  await click('#dv-disconnect'); await sleep(200);
   check('drive (handeye): Stop arm asks first (torque goes off), and a No stops nothing', !(await page.eval(`!!window.__pickStopped`)));
   await page.eval(`window.confirm = () => true`);
   check('drive (handeye): while the arm moves the status is marked and Pick is greyed out', (await page.eval(`document.getElementById('dv-pickst').classList.contains('moving')`))
         && (await page.eval(`document.getElementById('dv-pick').disabled`)));
-  await click('#dv-stop-pick'); await sleep(600);
-  check('drive (handeye): Stop arm (confirmed) quits the pick; Start arm is back', (await page.eval(`!!window.__pickStopped`)) && await visible('#dv-start-pick'));
+  await click('#dv-disconnect'); await sleep(600);
+  check('drive (handeye): Stop (confirmed) quits the pick; Start is back', (await page.eval(`!!window.__pickStopped`)) && await visible('#dv-connect'));
+  await page.eval(`window.__fakeDrive.arm_board = true`); await sleep(700);
+  check('drive: arm plugged in: the light and the message say Start runs the pick', /Arm/.test(await $text('#dv-arm')) && !/No arm/.test(await $text('#dv-arm'))
+        && /pick program/.test(await $text('#dv-msg')), await $text('#dv-msg'));
   await page.eval(`window.confirm = () => false`);
-  await click('#dv-start-pick'); await sleep(200);
+  await click('#dv-connect'); await sleep(200);
   check('drive: Start arm asks first (the arm moves to rest), and a No starts nothing', !(await page.eval(`!!window.__pickStarted`)));
   await page.eval(`window.confirm = () => true`);
-  await click('#dv-start-pick'); await sleep(900);
+  await click('#dv-connect'); await sleep(900);
   check('drive: Start arm starts the pick and shows it booting', (await page.eval(`!!window.__pickStarted`)) && /Starting the arm/.test(await $text('#dv-msg'))
-        && /loading the camera/.test(await $text('#dv-msg')) && !(await visible('#dv-start-pick')) && await visible('#dv-stop-pick'), await $text('#dv-msg'));
+        && /loading the camera/.test(await $text('#dv-msg')) && !(await visible('#dv-connect')) && await visible('#dv-disconnect'), await $text('#dv-msg'));
   await page.eval(`sessionStorage.removeItem('__fakeDrive'); localStorage.clear()`); await load();
 
   // -- light / dark: follows the system until the toggle pins a choice ------------------------

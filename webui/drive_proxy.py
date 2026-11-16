@@ -18,9 +18,14 @@ The operator can also START it from the Drive view (start_pick). handeye pick is
 program (raw keyboard mode on stdin, a status line it rewrites), so it runs on a pseudo-terminal
 whose master this process holds and drains; its output becomes the view's log. Stopping it is its
 own quit (`x` twice: torque goes off), so the page asks the operator to support the arm first.
+
+One Start for both (start_robot): the arm's board plugged in -> handeye pick; not -> the drive-only
+bridge, same view. And if the arm's board goes away while the pick runs (unplugged, or dropped off
+USB), the pick is quit and the bridge started in its place, so the base can still be driven.
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import pty
@@ -49,6 +54,9 @@ PICK_KEY, ABORT_KEY = "o", "c"
 # ROS-sourced env. SORTBOTS_HANDEYE_CMD (a JSON argv) replaces it in the tests.
 HANDEYE_ARGV = json.loads(os.environ["SORTBOTS_HANDEYE_CMD"]) if os.environ.get("SORTBOTS_HANDEYE_CMD") \
     else ["bash", str(REPO / "scripts" / "arm.sh"), "head", "handeye", "pick"]
+# The arm+head board by its USB serial (scripts/arm.sh's ARM_BOARD_SERIAL): present = the arm is plugged in.
+ARM_BOARD_GLOB = "/dev/serial/by-id/*" + os.environ.get("ARM_BOARD_SERIAL", "5B91029024") + "*"
+ARM_GONE_CHECKS = 2  # the board missing this many 0.5 s checks in a row: a re-enumeration blip is shorter
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 
@@ -65,6 +73,8 @@ class DriveProxy:
         self.lock = threading.Lock()
         self.pick_proc: subprocess.Popen | None = None
         self.pick_log: deque[str] = deque(maxlen=LOG_LINES)
+        self.stopping_pick = False  # the operator's Stop, not a crash: no fallback to driving
+        self.note: str | None = None  # why the view changed mode by itself (the arm went away)
 
     # -- lifecycle -------------------------------------------------------------------------
 
@@ -153,6 +163,49 @@ class DriveProxy:
         except (OSError, ValueError, AttributeError):
             return []
 
+    @staticmethod
+    def arm_board() -> bool:
+        return bool(glob.glob(ARM_BOARD_GLOB))
+
+    def start_robot(self) -> dict:
+        """The view's one Start: the arm and its pick if the arm's board is plugged in, else the
+        camera and the wheels only."""
+        self.note = None
+        if self.handeye_state() is not None or self.pick_running() or self.running():
+            return {"ok": True, "already": True}
+        if self.arm_board():
+            return {**self.start_pick(), "mode": "arm"}
+        r = self.start()
+        if r.get("ok"):
+            self.note = "The arm isn't plugged in: camera and wheels only."
+        return {**r, "mode": "drive"}
+
+    def stop_robot(self) -> dict:
+        self.note = None
+        if self.pick_running() or self.handeye_state() is not None:
+            return self.stop_pick()
+        return self.stop()
+
+    def _watch_pick(self, proc: subprocess.Popen) -> None:
+        """While our pick runs: the arm's board gone -> quit it. After it exits on its own (not the
+        operator's Stop) with the arm gone -> the drive-only bridge, so the base still drives."""
+        gone = 0
+        while proc.poll() is None:
+            gone = 0 if self.arm_board() else gone + 1
+            if gone >= ARM_GONE_CHECKS and not self.stopping_pick:
+                self.log.append("[drive] the arm's board went away: quitting the pick")
+                self._quit_pick(proc)
+                break
+            time.sleep(0.5)
+        proc.wait()
+        if self.stopping_pick or self.arm_board():
+            return  # stopped on purpose, or it crashed with the arm there: show why, don't hide it
+        # The note first: the page must never see the view switch mode with no reason given.
+        self.note = "The arm was unplugged: the pick stopped, camera and wheels only now."
+        r = self.start()
+        if not r.get("ok"):
+            self.note = f"The arm was unplugged and driving did not start: {r.get('error')}"
+
     def pick_running(self) -> bool:
         return self.pick_proc is not None and self.pick_proc.poll() is None
 
@@ -179,6 +232,8 @@ class DriveProxy:
             finally:
                 os.close(slave)
             threading.Thread(target=self._pump_pty, args=(master,), daemon=True).start()
+            self.stopping_pick = False
+            threading.Thread(target=self._watch_pick, args=(self.pick_proc,), daemon=True).start()
         time.sleep(0.5)  # arm.sh's own refusals (board unplugged, no permission) come back at once
         if not self.pick_running():
             return {"ok": False, "error": self._pick_death_note()}
@@ -209,13 +264,21 @@ class DriveProxy:
     def stop_pick(self) -> dict:
         """handeye's own quit (`x` twice: magnet off, base stopped, torque off), then signals if it
         doesn't go. Only a pick this process started is signalled; one from a terminal gets the keys."""
+        self.stopping_pick = True
+        proc = self.pick_proc
+        if proc is None or proc.poll() is not None:
+            return {"ok": self._quit_keys() or proc is not None}
+        return {"ok": self._quit_pick(proc)}
+
+    def _quit_keys(self) -> bool:
         answered = self._handeye("/cmd?k=x") is not None
         if answered:
             time.sleep(0.3)
             self._handeye("/cmd?k=x")
-        proc = self.pick_proc
-        if proc is None or proc.poll() is not None:
-            return {"ok": answered or proc is not None}
+        return answered
+
+    def _quit_pick(self, proc: subprocess.Popen) -> bool:
+        self._quit_keys()
         for sig, wait in ((None, 8.0), (signal.SIGINT, 5.0), (signal.SIGKILL, 3.0)):
             if sig is not None:
                 try:
@@ -227,7 +290,7 @@ class DriveProxy:
                 break
             except subprocess.TimeoutExpired:
                 continue
-        return {"ok": proc.poll() is not None}
+        return proc.poll() is not None
 
     def pick(self) -> dict:
         if self.running():
@@ -258,6 +321,9 @@ class DriveProxy:
             return None
 
     def state(self) -> dict:
+        return {**self._state(), "arm_board": self.arm_board(), "note": self.note}
+
+    def _state(self) -> dict:
         out = {"running": self.running(), "log": list(self.log)[-8:]}
         if not out["running"]:
             hs = self.handeye_state()

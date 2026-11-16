@@ -580,15 +580,14 @@
   <div id="driveview" hidden><div class="pic"></div><span class="msg" id="dv-msg"></span>
     <div class="float dv-bar" role="toolbar" aria-label="Drive">
       <span class="dv-st" id="dv-cam" title="The D435's colour stream"><i class="dot"></i><span>Camera</span></span>
+      <span class="dv-st" id="dv-arm" title="The arm and its pick program (scripts/handeye.py), on the arm's own board"><i class="dot"></i><span>Arm</span></span>
       <span class="dv-st" id="dv-base" title="The three wheel servos (configs/drive_base.yaml)"><i class="dot"></i><span>Wheels</span></span>
       <span class="dv-st" id="dv-pad" title="A gamepad seen by this browser. Press any button on it if it is plugged in but not listed"><i class="dot"></i><span>No gamepad</span></span>
       <span class="sp"></span>
       <button type="button" class="btn small primary" id="dv-pick" hidden title="handeye pick's one button: find the package, pick it, carry it to the taught place spot, release, back to rest. Pad: A">Pick &amp; place</button>
       <button type="button" class="btn small stop" id="dv-abort" hidden title="Stop the arm where it is (it holds). Pad: B">Abort</button>
-      <button type="button" class="btn small primary" id="dv-start-pick" title="Start the arm's pick program (scripts/arm.sh head handeye pick): camera, arm, magnet and base, with pick and place on pad A. The arm moves to its rest pose as it starts">Start arm &amp; pick</button>
-      <button type="button" class="btn small" id="dv-connect" title="Camera and wheels only, at full frame rate, no arm. Only one program can own them: the arm's pick has to be stopped first">Drive only</button>
-      <button type="button" class="btn small stop" id="dv-stop-pick" hidden title="Quit the arm's pick program: magnet off, base stopped, arm torque OFF (support the arm)">Stop arm</button>
-      <button type="button" class="btn small" id="dv-disconnect" hidden title="Stop the wheels, free them and release the camera and the servo bus">Disconnect</button>
+      <button type="button" class="btn small primary" id="dv-connect" title="Start the robot: with the arm plugged in, the arm's pick program too (camera, arm, magnet, base; pick and place on pad A; the arm moves to its rest pose as it starts). Without it, the camera and the wheels only">Start</button>
+      <button type="button" class="btn small stop" id="dv-disconnect" hidden title="Stop the robot: wheels stopped and freed, camera and boards released. With the arm running: magnet off and arm torque OFF (support the arm)">Stop</button>
     </div>
     <div class="float dv-err" id="dv-err" hidden></div>
     <div class="float dv-live" id="dv-live" aria-live="polite"><span id="dv-level">Speed 1</span><span id="dv-cmd" class="muted">Hold RT to drive</span></div>

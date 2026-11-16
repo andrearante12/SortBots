@@ -418,3 +418,82 @@ def test_a_pick_that_cannot_start_says_why(tmp_path):
         assert "board plugged in" in proxy.state()["pick_error"]
     finally:
         drive_proxy.HANDEYE, drive_proxy.HANDEYE_ARGV = old
+
+
+# --------------------------------------------------------------------------- one Start: arm or not
+
+class _Robot:
+    """A proxy wired to a fake arm board (a file to delete = unplugging it), the fake handeye
+    and the hardware-free bridge config."""
+
+    def __init__(self, tmp_path, arm_plugged):
+        import drive_proxy
+        self.dp = drive_proxy
+        self.board = tmp_path / "usb-1a86_fake_arm_board"
+        if arm_plugged:
+            self.board.write_text("")
+        script = tmp_path / "fake_handeye.py"
+        script.write_text(FAKE_HANDEYE)
+        port = _free_port()
+        self.old = drive_proxy.HANDEYE, drive_proxy.HANDEYE_ARGV, drive_proxy.ARM_BOARD_GLOB
+        drive_proxy.HANDEYE = f"http://127.0.0.1:{port}"
+        drive_proxy.HANDEYE_ARGV = [sys.executable, str(script), str(port)]
+        drive_proxy.ARM_BOARD_GLOB = str(self.board)
+        _, cfg_path = _cfg(tmp_path)
+        self.proxy = DriveProxy(python=sys.executable, config=cfg_path, socket_path=str(tmp_path / "d.sock"))
+
+    def wait(self, pred, secs=15.0):
+        t = time.monotonic() + secs
+        while time.monotonic() < t:
+            st = self.proxy.state()
+            if pred(st):
+                return st
+            time.sleep(0.1)
+        return self.proxy.state()
+
+    def close(self):
+        p = self.proxy
+        if p.pick_running():
+            p.pick_proc.kill()
+        p.stop()
+        self.dp.HANDEYE, self.dp.HANDEYE_ARGV, self.dp.ARM_BOARD_GLOB = self.old
+
+
+def test_start_without_the_arm_drives_camera_and_wheels_and_says_so(tmp_path):
+    r = _Robot(tmp_path, arm_plugged=False)
+    try:
+        res = r.proxy.start_robot()
+        assert res["ok"] and res["mode"] == "drive" and not r.proxy.pick_running()
+        st = r.proxy.state()
+        assert st["running"] and st.get("backend") != "handeye" and st["arm_board"] is False
+        assert "isn't plugged in" in st["note"]
+        assert r.proxy.stop_robot()["ok"] and not r.proxy.running() and r.proxy.state()["note"] is None
+    finally:
+        r.close()
+
+
+def test_unplugging_the_arm_mid_pick_falls_back_to_driving(tmp_path):
+    r = _Robot(tmp_path, arm_plugged=True)
+    try:
+        assert r.proxy.start_robot()["mode"] == "arm"
+        assert r.wait(lambda s: s.get("backend") == "handeye")["backend"] == "handeye"
+        r.board.unlink()  # the arm's USB board goes away
+        st = r.wait(lambda s: s.get("running") and s.get("backend") != "handeye")
+        assert st["running"] and st.get("backend") != "handeye", st  # the drive-only bridge now
+        assert not r.proxy.pick_running() and r.proxy.pick_proc.returncode == 0  # its own quit
+        assert "unplugged" in st["note"] and st["arm_board"] is False
+    finally:
+        r.close()
+
+
+def test_the_operators_stop_with_the_arm_plugged_in_does_not_start_driving(tmp_path):
+    r = _Robot(tmp_path, arm_plugged=True)
+    try:
+        r.proxy.start_robot()
+        r.wait(lambda s: s.get("backend") == "handeye")
+        assert r.proxy.stop_robot()["ok"] and not r.proxy.pick_running()
+        time.sleep(1.0)
+        st = r.proxy.state()
+        assert not st["running"] and not r.proxy.running() and st["note"] is None
+    finally:
+        r.close()

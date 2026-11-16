@@ -269,6 +269,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_drive(lambda: self._serve_json(DRIVE.stop()))
         elif route == "/api/drive/cmd":
             self._with_drive(self._drive_cmd)
+        elif route == "/api/drive/robot/start":
+            self._with_drive(lambda: self._serve_json(DRIVE.start_robot()))
+        elif route == "/api/drive/robot/stop":
+            self._with_drive(lambda: self._serve_json(DRIVE.stop_robot()))
         elif route == "/api/drive/pick/start":
             self._with_drive(lambda: self._serve_json(DRIVE.start_pick()))
         elif route == "/api/drive/pick/stop":

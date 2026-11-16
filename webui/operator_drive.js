@@ -9,8 +9,9 @@
 //   POST /api/drive/start    open the camera and the wheel servos (scripts/drive_bridge.py)
 //   POST /api/drive/stop     wheels to 0, torque off, both released
 //   POST /api/drive/cmd      {x, y, w}: m/s forward, m/s left, rad/s counter-clockwise
-//   POST /api/drive/pick/start  start handeye pick (on a pty, webui/drive_proxy.py)
-//   POST /api/drive/pick/stop   its own quit: magnet off, base stopped, arm torque OFF
+//   POST /api/drive/robot/start the view's one Start: handeye pick if the arm's board is plugged
+//                               in, else the drive-only bridge (webui/drive_proxy.py start_robot)
+//   POST /api/drive/robot/stop  either one's stop (the pick's: magnet off, arm torque OFF)
 //   POST /api/drive/pick     handeye pick's one button: pick, carry, place, back to rest
 //   POST /api/drive/abort    stop the arm where it is
 //
@@ -135,7 +136,7 @@
   // -- pick and place (handeye pick) ---------------------------------------------------------
   const handeye = () => !!(st && st.running && st.backend === "handeye");
   async function pick() {
-    if (!handeye()) { note = { text: "Pick & place needs the arm: press Start arm & pick", until: Date.now() + 8000 }; render(); return; }
+    if (!handeye()) { note = { text: st && st.running ? "Pick & place needs the arm: plug it in, then Stop and Start" : "Pick & place needs the arm running: press Start with the arm plugged in", until: Date.now() + 8000 }; render(); return; }
     stopNow(); // the base stops before the arm moves (handeye stops it too)
     const r = await post("/api/drive/pick");
     if (r && r.ok === false) note = { text: r.error || "pick refused", until: Date.now() + 8000 };
@@ -157,9 +158,14 @@
     const running = !!(st && st.running);
     const he = handeye();
     const starting = !!(st && st.pick_starting);
-    $("#dv-connect").hidden = $("#dv-start-pick").hidden = running || starting;
-    $("#dv-disconnect").hidden = !running || he; // the pick has its own Stop arm
-    $("#dv-stop-pick").hidden = !he && !starting;
+    $("#dv-connect").hidden = running || starting;
+    $("#dv-disconnect").hidden = !running && !starting;
+    // The arm: running (the pick owns it), plugged in but not started, or not plugged in at all.
+    const armIn = !!(st && st.arm_board);
+    setSt($("#dv-arm"), he || starting ? (he ? true : null) : armIn ? null : false,
+      he ? "Arm" : starting ? "Arm starting" : armIn ? "Arm" : "No arm",
+      he ? "The arm's pick program is running: A picks and places" : armIn ? "The arm is plugged in: Start runs its pick program too"
+        : "The arm's board isn't plugged in: Start drives the camera and wheels only");
     $("#dv-pick").hidden = $("#dv-abort").hidden = !he;
     const ps = $("#dv-pickst"), pk = (st && st.pick) || {};
     ps.hidden = !he;
@@ -180,7 +186,7 @@
       base.ok && base.volts ? `Wheels ${base.volts.toFixed(1)} V` : base.ok && he ? "Wheels (handeye)" : "Wheels",
       `The three wheel servos${ids ? ` (ids ${ids} on ${base.port})` : ""}, configs/drive_base.yaml`);
     if (note && Date.now() > note.until) note = null;
-    const errs = [note && note.text, st && st.error, st && st.pick_error, running && cam.error, running && base.error].filter(Boolean);
+    const errs = [note && note.text, st && st.note, st && st.error, st && st.pick_error, running && cam.error, running && base.error].filter(Boolean);
     const err = $("#dv-err");
     err.hidden = !errs.length;
     err.replaceChildren(...errs.map((t) => { const p = document.createElement("p"); p.textContent = t; return p; }));
@@ -194,7 +200,11 @@
       boot.textContent = (st.pick_log || []).slice(-1)[0] || "";
       msg.append(boot);
       view.querySelector(".pic").style.backgroundImage = "";
-    } else if (!running) { msg.textContent = "Not connected. Start arm & pick for the full robot, or Drive only for the camera and wheels."; view.querySelector(".pic").style.backgroundImage = ""; }
+    } else if (!running) {
+      msg.textContent = st && st.arm_board === false ? "Not started. Start opens the camera and the wheels (no arm plugged in)."
+        : "Not started. Start runs the arm's pick program: camera, arm, magnet and wheels.";
+      view.querySelector(".pic").style.backgroundImage = "";
+    }
     else if (!cam.ok && !view.querySelector(".pic").style.backgroundImage) msg.textContent = cam.error ? "No camera picture" : "Starting the camera…";
   }
   async function refresh() {
@@ -232,38 +242,27 @@
   }
   addEventListener("sortbots:view", (e) => setOpen(e.detail === "drive"));
 
+  // One Start, one Stop. serve.py picks the mode (drive_proxy.start_robot): the arm plugged in
+  // runs its pick program, otherwise the camera and the wheels only.
   $("#dv-connect").addEventListener("click", async () => {
+    if (st && st.arm_board && !confirm("Start the arm? It moves to its rest pose as soon as the program starts: keep clear of it.")) return;
     const b = $("#dv-connect");
-    b.disabled = true; b.textContent = "Connecting…";
-    const r = await post("/api/drive/start");
-    b.disabled = false; b.textContent = "Connect";
+    b.disabled = true; b.textContent = "Starting…";
+    const r = await post("/api/drive/robot/start");
+    b.disabled = false; b.textContent = "Start";
+    if (r && r.ok === false) note = { text: r.error || "the robot did not start", until: Date.now() + 15000 };
     await refresh();
-    if (r && r.ok === false && r.error) { st = { ...(st || {}), error: r.error }; render(); }
     frames(open);
-  });
-  $("#dv-start-pick").addEventListener("click", async () => {
-    if (!confirm("Start the arm? It moves to its rest pose as soon as the program starts: keep clear of it.")) return;
-    const b = $("#dv-start-pick");
-    b.disabled = true;
-    const r = await post("/api/drive/pick/start");
-    b.disabled = false;
-    if (r && r.ok === false) note = { text: r.error || "the arm's pick did not start", until: Date.now() + 15000 };
-    refresh();
-  });
-  $("#dv-stop-pick").addEventListener("click", async () => {
-    if (!confirm("Support the arm: its torque goes OFF when the pick program stops, and the magnet lets go. Stop it?")) return;
-    held.clear(); stopNow();
-    const b = $("#dv-stop-pick");
-    b.disabled = true; b.textContent = "Stopping…";
-    await post("/api/drive/pick/stop");
-    b.disabled = false; b.textContent = "Stop arm";
-    refresh();
   });
   $("#dv-pick").addEventListener("click", pick);
   $("#dv-abort").addEventListener("click", abort);
   $("#dv-disconnect").addEventListener("click", async () => {
+    if ((handeye() || (st && st.pick_starting)) && !confirm("Support the arm: its torque goes OFF when the pick program stops, and the magnet lets go. Stop it?")) return;
     held.clear(); stopNow();
-    await post("/api/drive/stop");
+    const b = $("#dv-disconnect");
+    b.disabled = true; b.textContent = "Stopping…";
+    await post("/api/drive/robot/stop");
+    b.disabled = false; b.textContent = "Stop";
     refresh();
   });
 
