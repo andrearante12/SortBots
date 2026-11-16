@@ -9,6 +9,10 @@
 #   scripts/jetson.sh logs      # follow the console's output
 #   scripts/jetson.sh stop      # stop the robot pipeline, the console, the container
 #   scripts/jetson.sh status    # container + camera + console at a glance
+#   scripts/jetson.sh update    # pull main (fast-forward), rebuild if needed, restart the console
+#
+# On boot the console is started by sortbots-console.service, which
+# scripts/jetson_host_setup.sh installs (once, with sudo).
 #
 # Then open http://<jetson>:8081/ (the console prints the tailnet URL when the
 # host has tailscale) and start a scenario from the Scenarios tab — on the
@@ -192,9 +196,52 @@ case "${1:-}" in
     fi
     ;;
 
+  update)
+    # The Jetson's checkout is a deploy copy of BRANCH (default main): only
+    # ever fast-forwarded, never merged into, so an update can't leave it
+    # half-merged with nobody at a keyboard to fix it. Uncommitted tracked
+    # changes block it — the machine is shared, and a switch or pull would
+    # otherwise carry someone's edits along or refuse halfway.
+    branch="${2:-${SORTBOTS_BRANCH:-main}}"
+    cd "$REPO_ROOT" || exit 1
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+      echo "ERROR: uncommitted changes in $REPO_ROOT — commit or stash them first:"
+      git status --short --untracked-files=no
+      exit 1
+    fi
+    old=$(git rev-parse HEAD)
+    git fetch origin "$branch" || exit 1
+    if [[ "$(git branch --show-current)" != "$branch" ]]; then
+      echo "[jetson] switching $(git branch --show-current) -> $branch"
+      git switch "$branch" 2>/dev/null || git switch -c "$branch" --track "origin/$branch" || exit 1
+    fi
+    git merge --ff-only "origin/$branch" || {
+      echo "ERROR: local $branch has diverged from origin/$branch; not touching it."; exit 1; }
+    new=$(git rev-parse HEAD)
+    if [[ "$old" == "$new" ]]; then
+      echo "[jetson] already at $(git log --oneline -1)"
+    else
+      echo "[jetson] $(git log --oneline -1)"
+    fi
+    # git lfs (maps/) only if the host has it; the console doesn't need it.
+    git lfs version >/dev/null 2>&1 && git lfs pull origin >/dev/null 2>&1 || true
+    if [[ "$old" != "$new" ]] && ! git diff --quiet "$old" "$new" -- docker/jetson; then
+      echo "[jetson] docker/jetson changed — rebuilding $IMAGE"
+      docker build -t "$IMAGE" "$REPO_ROOT/docker/jetson" || exit 1
+    fi
+    # Restart only what was running: the new code is on disk, but the
+    # container's processes still run the old. A stopped console stays stopped.
+    if running; then
+      "$0" stop && "$0" console
+    fi
+    ;;
+
   *)
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
     [[ -z "${1:-}" || "${1:-}" == "-h" || "${1:-}" == "--help" ]] && exit 0
     exit 2
     ;;
-esac
+# `update` rewrites this very file mid-run, and bash reads scripts as it goes:
+# exiting on the same line as esac means nothing after the parsed case is ever
+# read from the (possibly new) file.
+esac; exit $?
