@@ -2079,13 +2079,17 @@ def cmd_pick(a):
         kept), straight down onto it, magnet off, then rest. True if released there."""
         q_pl = st["place_q"]
         tool = kin.tool_point(q_pl, hc.magnet_m)
-        pitch = head_cam.face_pitch(kin.flange(q_pl)[:3, 2], head_cam.arm_radial(tool))
+        # The hand keeps the place pose's own angle on the way down (a taught drop behind the
+        # base had it 49 deg off vertical), inside the full calibrated range: the drop was driven
+        # to the elbow's end, past the planner's 2 deg margin (2026-11-15).
+        axis = kin.flange(q_pl)[:3, 2]
+        lo_f, hi_f = lo - math.radians(2.5), hi + math.radians(2.5)
         path = None
         for h in (0.06, 0.04, 0.02):
             pts, seed, ok = [], [q_pl], True
             for hh in np.arange(0.0, h + 1e-9, 0.01)[::-1]:
-                r = head_cam.ik_down(kin, tool + [0, 0, hh], seed, lo, hi, hc.magnet_m, float(q_pl[4]),
-                                     tilt_tol_deg=3.0, pitch_deg=pitch)
+                r = head_cam.ik_down(kin, tool + [0, 0, hh], seed, lo_f, hi_f, hc.magnet_m, float(q_pl[4]),
+                                     tilt_tol_deg=3.0, axis=axis)
                 if r is None:
                     ok = False
                     break
@@ -2094,11 +2098,35 @@ def cmd_pick(a):
             if ok:
                 path = pts
                 break
-        if path:  # above it, then down: the package doesn't swing into the drop spot's edge
-            if not move_to(path[0][1], "MOVING") or not move_path(path[1:] + [(0.0, q_pl)], "DESCENDING",
-                                                                  DESCEND_MPS):
-                return False
-        elif not move_to(q_pl, "MOVING"):
+        # via rest: two known moves instead of one joint swing from the pick to wherever the place
+        # is (behind the base, over the camera mast's side) with the package hanging
+        if st["rest_q"] is not None and not move_to(st["rest_q"], "MOVING"):
+            return False
+        if not path:
+            # The angle can't be kept (the taught drop behind the base had elbow AND wrist at their
+            # ends: 2 cm of straight lift at most, 2026-11-15): the highest pose straight above it
+            # with the angle free, then a short joint move down. None at all: refuse, never a blind
+            # joint swing from rest onto a spot at table height.
+            def res(x, hh):
+                qq = np.array([*x, q_pl[4]])
+                pen = np.concatenate([np.maximum(0, lo_f[:4] - x), np.maximum(0, x - hi_f[:4])]) * 5
+                return np.concatenate([kin.tool_point(qq, hc.magnet_m) - (tool + [0, 0, hh]),
+                                       0.01 * (x - q_pl[:4]), pen])
+            for h in (0.06, 0.04, 0.03, 0.02, 0.015):
+                x, _ = head_cam._lm(lambda x_, hh=h: res(x_, hh), q_pl[:4].copy(), iters=200)
+                q_pre = np.array([*x, q_pl[4]])
+                if (np.all(q_pre >= lo_f) and np.all(q_pre <= hi_f) and
+                        np.linalg.norm(kin.tool_point(q_pre, hc.magnet_m) - tool - [0, 0, h]) < 0.003):
+                    path = [(h, q_pre)]
+                    break
+        if not path:
+            say("can't approach the place pose from above (it is at the arm's joint limits): drive the "
+                "package there and Release by hand, or teach a place away from the limits", 1e9)
+            return False
+        if path[0][0] < 0.04:
+            print(f"\nplace: only {path[0][0] * 100:.1f} cm of room above the place pose (joint limits)")
+        if not move_to(path[0][1], "MOVING") or not move_path(path[1:] + [(0.0, q_pl)], "DESCENDING",
+                                                              DESCEND_MPS):
             return False
         if magnet_set(False) is not False:
             say("placed, but the magnet did not confirm OFF: check it", 1e9)
