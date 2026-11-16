@@ -22,10 +22,9 @@ Safety, in the order it bites:
 - serve.py holds this process's stdin. EOF on it (serve.py gone, however it died) stops the
   wheels and exits, so the bridge is never orphaned holding a moving base.
 - One process owns a servo bus and the D435 at a time. Both are checked BEFORE opening, and
-  a holder is named (pid + command) instead of opened under it: the arm's own tools
-  (scripts/head.py handeye, arm.sh pad) share the arm's board with the wheels.
-- Only the wheel ids are ever written. The arm and head on the same bus are never touched,
-  so an arm left holding a pose keeps holding it.
+  a holder is named (pid + command) instead of opened under it: `handeye pick` opens the
+  same camera and the wheels' board (it backs the base off the table to place).
+- Only the wheel ids are ever written, so any other servo on the board is left as it was.
 """
 import os
 
@@ -184,7 +183,7 @@ def busy_message(what, held):
 # ----------------------------------------------------------------------------- hardware
 
 class Base:
-    """The three wheel servos, in velocity mode, on a bus they may share with the arm."""
+    """The three wheel servos, in velocity mode, on their own board (configs/drive_base.yaml)."""
 
     def __init__(self, cfg):
         self.cfg = cfg
