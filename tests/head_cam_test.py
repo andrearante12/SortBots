@@ -146,3 +146,24 @@ def test_ik_down_pitch_leans_the_flange_axis_toward_the_base():
     rad = p[:2] / np.linalg.norm(p[:2])
     assert abs(np.degrees(np.arctan2(z[:2] @ rad, z[2])) + 4.0) < 0.5
     assert np.linalg.norm(k.tool_point(trim[0], H.MAGNET_FACE_M) - p) < 0.002
+
+
+def test_ik_down_lies_the_magnet_flat_on_a_side_face_that_faces_the_arm():
+    k = SO101Kin(offsets=np.radians([0, -7, -1.5, -13, 0]))
+    lo = np.radians([-105, -105, -95, -105, -170.0]); hi = -lo
+    seeds = [np.radians([0, l_, e_, w_, 0]) for l_ in (-40, 0, 30, 60) for e_ in (-60, 0, 40, 80)
+             for w_ in (-60, -20, 20)]
+    rad = np.array([0.8, -0.6])
+    p = np.array([H.PAN_AXIS_X_M + 0.24 * rad[0], 0.24 * rad[1], 0.08])  # a box standing 24 cm out
+    n = np.array([-rad[0], -rad[1], 0.0])                           # its marked side facing the base
+    sol = H.ik_down(k, p, seeds, lo, hi, axis=n, pitch_deg=3.0)
+    assert sol is not None
+    q = sol[0]
+    assert np.linalg.norm(k.tool_point(q, H.MAGNET_FACE_M) - p) < 0.002
+    assert abs(H.face_pitch(k.flange(q)[:3, 2], rad, n) - 3.0) < 0.5
+    # the top face is the same call with no axis: face_pitch agrees with the old formula
+    up = H.face_normal_trimmed(rad, None, -4.7)
+    assert abs(H.face_pitch(up, rad) + 4.7) < 1e-9
+    # a side turned 30 deg away from the arm can't take the magnet flat
+    turned = np.array([-np.cos(0.52) * rad[0] + np.sin(0.52) * rad[1], -np.cos(0.52) * rad[1] - np.sin(0.52) * rad[0], 0])
+    assert H.ik_down(k, p, seeds, lo, hi, axis=turned) is None

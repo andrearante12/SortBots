@@ -938,7 +938,10 @@ def cmd_solve(a):
     # Touch samples all have the tool pointing down, so the magnet's length and the camera's
     # height trade off exactly: fit it only if some samples had the tool at other angles. Picks
     # approach the same way with the same length, so the error cancels there.
-    all_touch = all(s.get("kind") == "touch" for s in samples)
+    # ...which is only true while every sample has the magnet pointing down: side-face touches
+    # (magnet level, 2026-11-15) separate the two, so then the length is fitted.
+    all_touch = all(s.get("kind") == "touch" for s in samples) and all(
+        kin.flange(np.radians(s["arm_deg"]))[2, 2] > math.cos(math.radians(30)) for s in samples)
     if all_touch and not a.fixed_magnet:
         print(f"touch samples only: magnet length held at {a.magnet_m * 1000:.1f} mm (--magnet-m)")
     fit_off = not a.no_offsets and len(samples) >= 15
@@ -1090,7 +1093,7 @@ HOME_HEAD = (90.4, 60.7)   # the head angle most of the 2026-11-12 calibration w
 # pick's default view, set from the working setup (2026-11-13). It is OUTSIDE the range the
 # 2026-11-12 calibration covers (pan ~70..110): a hover there was 1.3 cm off. Add touch samples at
 # this angle and re-solve before relying on it; the page warns while it's outside.
-PICK_HEAD = (32.0, 70.0)
+PICK_HEAD = (9.0, 57.0)  # 2026-11-15: sees top and standing (side-marked) boxes in front of the arm
 MAGNET_REARM_S, MAGNET_ON_S = 10.0, 30   # as arm_xpad: re-arm well inside the firmware's 30 s cap
 HIGH_M, HOVER_M = 0.12, 0.05
 # Stage 2: the calibration's height is good to ~1 cm, so the last centimetre is a gentle press with
@@ -1102,6 +1105,14 @@ PRESS_TORQUE, FULL_TORQUE = 350, 1000   # Torque_Limit, 0..1000 (= % x 10)
 # settled at -4.1..-6.3 over a dozen picks at 15-27 cm reach (2026-11-13), so -4.7 leaves it
 # little to correct. `r` still records taught poses; the startup line shows their mean.
 PICK_PITCH_DEG = -4.7
+# Side faces (2026-11-15: boxes standing on end, marker and circle on a vertical side). The arm
+# has 5 joints, so the magnet can only lie flat on a face whose normal is in the arm's vertical
+# plane: a face turned more than SIDE_MAX_YAW_DEG from facing the base is refused. A face is
+# "top" within FACE_TOP_DEG of up and "side" within FACE_SIDE_DEG of level; between is refused.
+# The approach comes in along the normal from SIDE_HIGH_M, stops at SIDE_HOVER_M, and presses
+# less than on a top face: it pushes the box away, not into the table.
+FACE_TOP_DEG, FACE_SIDE_DEG, SIDE_MAX_YAW_DEG = 35.0, 35.0, 12.0
+SIDE_HIGH_M, SIDE_HOVER_M, SIDE_LIFT_M, SIDE_PRESS_MM = 0.06, 0.03, 0.08, 8.0
 WRIST_COMPLY_TORQUE = 100  # wrist_flex during the press: the magnet tilts flat on contact
 PRESS_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_flex")
 GRIP_WAIT_S = 0.5
@@ -1344,6 +1355,10 @@ def cmd_pick(a):
     path = calib_dir() / "handeye_samples.json"
     samples = json.loads(path.read_text()) if path.is_file() else []
     seeds = [np.radians(s["arm_deg"]) for s in samples]
+    # side-face start poses: the touches are mostly magnet-down, and a level approach is a
+    # different fold of the arm that the solver doesn't find from those
+    side_seeds = [np.radians([0, l_, e_, w_, 0]) for l_ in (-40, 0, 30, 60) for e_ in (-60, 0, 40, 80)
+                  for w_ in (-60, -20, 20)]
     # the head range the calibration was fitted over: outside it the camera pose is extrapolated
     hd = np.array([s["head_deg"] for s in samples]) if samples else np.array([[a.head[0], a.head[1]]])
     cal_lo, cal_hi = hd.min(0) - 3.0, hd.max(0) + 3.0
@@ -1377,6 +1392,7 @@ def cmd_pick(a):
     st = {
           "arm_held": False, "quit_armed": False, "locked": None, "plan": None, "state": "lock",
           "flag": "FREE", "level": 1, "jog_q": None, "jog_target": None, "jog_ok": True,
+          "face": "top", "axis": np.array([0.0, 0.0, 1.0]), "high_m": HIGH_M, "hover_m": HOVER_M,
           "msg": f"arm free: move it clear of the package, then Lock target (marker {a.marker_id})",
           "until": time.monotonic() + 1e9}
 
@@ -1439,9 +1455,15 @@ def cmd_pick(a):
     # the pitch error the planner has to take out.
     flat_path = calib_dir() / "pick_flat_poses.json"
     flat_poses = json.loads(flat_path.read_text()) if flat_path.is_file() else []
-    taught = [r["model_pitch_deg"] for r in flat_poses if abs(r["model_pitch_deg"]) < 15.0]
+    taught = [r["model_pitch_deg"] for r in flat_poses
+              if r.get("face", "top") == "top" and abs(r["model_pitch_deg"]) < 15.0]
+    side_taught = [r["model_pitch_deg"] for r in flat_poses
+                   if r.get("face") == "side" and abs(r["model_pitch_deg"]) < 20.0]
+    if a.side_pitch_deg is None:  # until a constant is earned, like the top's -4.7: the taught mean
+        a.side_pitch_deg = float(np.mean(side_taught)) if side_taught else 0.0
     print(f"magnet-down pitch {a.pitch_deg:+.1f} deg" + (f" (taught flat poses: {len(taught)}, mean "
-          f"{np.mean(taught):+.1f})" if taught else ""))
+          f"{np.mean(taught):+.1f})" if taught else "") + f"; side-face pitch {a.side_pitch_deg:+.1f} deg "
+          f"({len(side_taught)} taught)")
 
     def down_ik(target, seeds_, roll):
         return head_cam.ik_down(kin, target, seeds_, lo, hi, hc.magnet_m, roll, pitch_deg=a.pitch_deg)
@@ -1456,20 +1478,24 @@ def cmd_pick(a):
         q = arm_q()
         F = kin.flange(q)
         tool = kin.tool_point(q, hc.magnet_m)
-        radial = tool[:2] / max(1e-6, np.linalg.norm(tool[:2]))
+        radial = head_cam.arm_radial(tool)
         z = F[:3, 2]  # flange +z: straight up when the magnet points straight down
-        pitch = math.degrees(math.atan2(float(z[:2] @ radial), float(z[2])))
-        side = math.degrees(math.atan2(float(z[0] * -radial[1] + z[1] * radial[0]), float(z[2])))
+        # on a side face (magnet level, 2026-11-15) the pitch is from level toward the base
+        face = "top" if z[2] > math.cos(math.radians(45)) else "side"
+        ref = None if face == "top" else np.array([-radial[0], -radial[1], 0.0])
+        pitch = head_cam.face_pitch(z, radial, ref)
+        side = math.degrees(math.atan2(float(z[0] * -radial[1] + z[1] * radial[0]),
+                                       float(z[2] if face == "top" else z[:2] @ -radial)))
         rec = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "arm_deg": np.degrees(q).round(2).tolist(),
                "head_deg": [round(head_goal["head_pan"], 2), round(head_goal["head_tilt"], 2)],
                "tool_m": tool.round(4).tolist(), "reach_m": round(float(np.linalg.norm(tool[:2])), 4),
-               "model_pitch_deg": round(pitch, 2), "model_side_deg": round(side, 2),
+               "face": face, "model_pitch_deg": round(pitch, 2), "model_side_deg": round(side, 2),
                "locked_m": None if st["locked"] is None else np.asarray(st["locked"]).round(4).tolist(),
                "arm_held": st["arm_held"]}
         flat_poses.append(rec)
         flat_path.write_text(json.dumps(flat_poses, indent=1))
-        say(f"flat pose {len(flat_poses)} saved: reach {rec['reach_m'] * 100:.1f} cm, the model reads the "
-            f"magnet {pitch:+.1f} deg off vertical (pitch, + = magnet face turned toward the base), {side:+.1f} deg sideways", 20.0)
+        say(f"{face} flat pose {len(flat_poses)} saved: reach {rec['reach_m'] * 100:.1f} cm, the model reads the "
+            f"magnet {pitch:+.1f} deg off the face's normal (pitch), {side:+.1f} deg sideways", 20.0)
         print(f"\nflat pose: {rec}")
 
     def magnet_set(on):
@@ -1528,17 +1554,18 @@ def cmd_pick(a):
                 return True
             time.sleep(0.02)
 
-    def move_path(zq, label, mps, z_ref=None):
-        """One continuous move from where the arm is through the (z, q) poses of straight(),
-        timed by height at `mps`, eased only at the two ends. Any key or STOP aborts and holds.
-        True if it arrived."""
+    def move_path(zq, label, mps):
+        """One continuous move from where the arm is through the (key, q) poses of straight(),
+        timed by the magnet's travel (the model's) at `mps`, eased only at the two ends: down,
+        sideways along a face's normal, or up, alike. Any key or STOP aborts and holds. True if
+        it arrived."""
         if not zq:
             return True
         q0 = arm_q()
-        z0 = float(kin.tool_point(q0, hc.magnet_m)[2] - (st["locked"][2] if z_ref is None else z_ref))
-        zs = np.array([z0] + [z for z, _ in zq])
-        qs = np.degrees(np.array([q0] + [q for _, q in zq]))
-        cum = np.concatenate([[0.0], np.cumsum(np.abs(np.diff(zs)))])
+        qr = [q0] + [q for _, q in zq]
+        pts = np.array([kin.tool_point(q, hc.magnet_m) for q in qr])
+        qs = np.degrees(np.array(qr))
+        cum = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))])
         dur = max(0.5, cum[-1] / mps)
         st["flag"] = label
         t0 = time.monotonic()
@@ -1569,24 +1596,51 @@ def cmd_pick(a):
         bus.sync_write("Goal_Position", bus.sync_read("Present_Position", ARM, num_retry=2))
 
     def model_pitch(q):
-        """The magnet axis's lean in the arm model, deg, the sign of --pitch-deg."""
+        """The magnet axis's lean from the locked face's normal in the arm model, deg, the sign
+        of --pitch-deg (for the top face: from straight up)."""
         F, tool = kin.flange(q), kin.tool_point(q, hc.magnet_m)
-        rad = tool[:2] / max(1e-6, np.linalg.norm(tool[:2]))
-        return math.degrees(math.atan2(float(F[:3, 2][:2] @ rad), float(F[2, 2])))
+        return head_cam.face_pitch(F[:3, 2], head_cam.arm_radial(tool), st["axis"])
+
+    def face_ik(target, seeds_, roll, pitch=None, tol=None):
+        """Magnet flat on the locked face at `target`: top faces through down_ik (the taught
+        -4.7), side faces along st["axis"] at --side-pitch-deg, seeded with side poses too."""
+        if st["face"] == "top" and pitch is None and tol is None:
+            return down_ik(target, seeds_, roll)
+        side = st["face"] == "side"
+        return head_cam.ik_down(kin, target, list(seeds_) + (side_seeds if side else []), lo, hi, hc.magnet_m,
+                                roll, tilt_tol_deg=tol or 2.0,
+                                pitch_deg=(a.side_pitch_deg if side else a.pitch_deg) if pitch is None else pitch,
+                                axis=st["axis"] if side else None)
+
+    def along(d):
+        """The point d metres out from the locked target along its face's normal."""
+        return st["locked"] + st["axis"] * d
 
     def straight(z_from, z_to, step, pitch=None):
-        """(z, q) magnet-down poses from z_from to z_to above the locked target (excl. the start),
-        at the taught pitch, or `pitch` (deg)."""
+        """(d, q) poses with the magnet flat to the face, from d = z_from to z_to out along its
+        normal from the locked target (excl. the start), at the taught pitch, or `pitch` (deg)."""
         qs, seed = [], [arm_q()]
         n = max(1, int(round(abs(z_to - z_from) / step)))
         for i in range(1, n + 1):
             z = z_from + (z_to - z_from) * i / n
-            r = (down_ik(st["locked"] + [0, 0, z], seed, float(seed[0][4])) if pitch is None else
-                 head_cam.ik_down(kin, st["locked"] + [0, 0, z], seed, lo, hi, hc.magnet_m,
-                                  float(seed[0][4]), tilt_tol_deg=3.0, pitch_deg=pitch))
+            r = face_ik(along(z), seed, float(seed[0][4]), pitch=pitch, tol=3.0 if pitch is not None else None)
             if r is None:
                 return None
             qs.append((z, r[0]))
+            seed = [r[0]]
+        return qs
+
+    def lift_path(p0, height, pitch):
+        """(h, q) poses lifting the magnet straight up from p0 by `height`, its axis held at the
+        face's normal turned by `pitch`: a side pick lifts up, not back along the normal."""
+        qs, seed = [], [arm_q()]
+        n = max(1, int(round(height / 0.01)))
+        for i in range(1, n + 1):
+            h = height * i / n
+            r = face_ik(p0 + np.array([0.0, 0.0, h]), seed, float(seed[0][4]), pitch=pitch, tol=3.0)
+            if r is None:
+                return None
+            qs.append((h, r[0]))
             seed = [r[0]]
         return qs
 
@@ -1599,10 +1653,11 @@ def cmd_pick(a):
         freeze, full torque, lift straight up to HIGH_M. Any abort holds; an abort never switches
         the magnet off, so a package that's caught stays caught."""
         h_on = a.magnet_on_mm / 1000.0
-        down = straight(HOVER_M, CONTACT_ABOVE_M, 0.01)
-        press = straight(CONTACT_ABOVE_M, -a.press_mm / 1000.0, 0.004)
+        press_mm = a.side_press_mm if st["face"] == "side" else a.press_mm
+        down = straight(st["hover_m"], CONTACT_ABOVE_M, 0.01)
+        press = straight(CONTACT_ABOVE_M, -press_mm / 1000.0, 0.004)
         if down is None or press is None:
-            say("the descent isn't solvable straight down from here", 1e9)
+            say(f"the approach to the {st['face']} face isn't solvable from here", 1e9)
             return
         on = False
         # one continuous move to the magnet-on height, on, the rest in one more; the press the same
@@ -1668,12 +1723,17 @@ def cmd_pick(a):
             freeze()
             torque_limit(FULL_TORQUE)
         q_seat = arm_q()
-        z_now = float(kin.tool_point(q_seat, hc.magnet_m)[2] - st["locked"][2])
+        p_seat = kin.tool_point(q_seat, hc.magnet_m)
+        z_now = float((p_seat - st["locked"]) @ st["axis"])
         settled = model_pitch(q_seat)
-        print(f"\nseated: magnet pitch {settled:+.1f} deg in the model (planned {a.pitch_deg:+.1f}), "
-              f"reach {np.linalg.norm(kin.tool_point(q_seat, hc.magnet_m)[:2]) * 100:.1f} cm")
+        planned = a.side_pitch_deg if st["face"] == "side" else a.pitch_deg
+        print(f"\nseated ({st['face']} face): magnet pitch {settled:+.1f} deg in the model (planned "
+              f"{planned:+.1f}), reach {np.linalg.norm(p_seat[:2]) * 100:.1f} cm, height {p_seat[2] * 100:.1f} cm")
         # lift at the pitch the wrist settled to: the taught one would twist the package on the way up
-        up = straight(z_now, HIGH_M, 0.01, pitch=settled) or straight(z_now, HIGH_M, 0.01)
+        if st["face"] == "top":
+            up = straight(z_now, HIGH_M, 0.01, pitch=settled) or straight(z_now, HIGH_M, 0.01)
+        else:  # straight up off a side face, the box hanging from it
+            up = lift_path(p_seat, SIDE_LIFT_M, settled) or lift_path(p_seat, SIDE_LIFT_M, a.side_pitch_deg)
         if up is None:
             say("magnet ON and holding, but the lift isn't solvable straight up: drive it up by hand", 1e9)
             st["state"], st["flag"] = "holding", "HOLDING"
@@ -1683,7 +1743,8 @@ def cmd_pick(a):
             st["state"] = "holding"
             return
         st["state"], st["flag"] = "holding", "HOLDING"
-        say("HOLDING: magnet on, 12 cm up. Drive to the drop spot, then Release", 1e9)
+        say(f"HOLDING: magnet on, {(HIGH_M if st['face'] == 'top' else SIDE_LIFT_M) * 100:.0f} cm up. "
+            "Drive to the drop spot, then Release", 1e9)
 
     def aim_corrected(p, radial_m):
         """Shift a target along the horizontal line from the shoulder_pan axis through it:
@@ -1695,9 +1756,33 @@ def cmd_pick(a):
             return p
         return p + np.array([*(d / n * radial_m), 0.0])
 
+    def classify_face(p, n):
+        """("top", up) or ("side", the normal turned into the arm's plane), or None (and why on
+        the page) for a slanted face or a side face not facing the arm."""
+        elev = math.degrees(math.asin(max(-1.0, min(1.0, float(n[2])))))
+        if elev >= 90.0 - FACE_TOP_DEG:
+            return "top", np.array([0.0, 0.0, 1.0])
+        if abs(elev) > FACE_SIDE_DEG:
+            say(f"the marked face is slanted ({elev:.0f} deg up): only a top or a side face can be picked", 20.0)
+            return None
+        rad = head_cam.arm_radial(p)
+        nh = n[:2] / max(1e-6, np.linalg.norm(n[:2]))
+        yaw = math.degrees(math.acos(max(-1.0, min(1.0, float(nh @ -rad)))))
+        if yaw > SIDE_MAX_YAW_DEG:
+            say(f"the marked side faces {yaw:.0f} deg away from the arm (max {SIDE_MAX_YAW_DEG:.0f}): turn the box "
+                "so that side faces the arm's base", 20.0)
+            return None
+        # into the arm's vertical plane (the only normals 5 joints can lie flat on), keeping its tilt
+        ax = np.array([-rad[0] * math.cos(math.radians(elev)), -rad[1] * math.cos(math.radians(elev)),
+                       math.sin(math.radians(elev))])
+        if yaw > 4.0:
+            print(f"\nside face {yaw:.0f} deg off the arm's plane: approaching square to the arm instead")
+        return "side", ax
+
     def do_lock():
         """Lock marker a.marker_id's target from 10 frames. True if locked."""
-        pts = np.array(worker.targets(a.marker_id, n=LOCK_FRAMES, timeout=6.0)).reshape(-1, 3)
+        ents = worker.entries(a.marker_id, n=LOCK_FRAMES, timeout=6.0)
+        pts = np.array([m["target_pt"] for m in ents]).reshape(-1, 3)
         # The target's depth at head 32/69 jitters 3-5 mm frame to frame (median spread, 2026-11-13):
         # every frame agreeing within 4 mm refused most locks. The median of 20 frames is good to
         # ~1 mm, so: enough frames, the median of the ones near it, and a refusal only when the
@@ -1708,13 +1793,25 @@ def cmd_pick(a):
         good = pts[dist <= max(0.004, 2.5 * spread / 1000)] if len(pts) else pts
         if len(pts) >= LOCK_MIN_FRAMES and spread <= LOCK_MAX_SPREAD_MM:
             hp = bus.sync_read("Present_Position", list(headmod.HEAD), num_retry=2)
-            raw = (hc.matrix(hp["head_pan"], hp["head_tilt"]) @ np.append(np.median(good, 0), 1.0))[:3]
-            st["locked"] = aim_corrected(raw, a.radial_mm / 1000.0)
+            T = hc.matrix(hp["head_pan"], hp["head_tilt"])
+            raw = (T @ np.append(np.median(good, 0), 1.0))[:3]
+            nrm = [m["normal"] for m in ents if m.get("normal") is not None]
+            n = T[:3, :3] @ np.median(nrm, 0) if nrm else np.array([0.0, 0.0, 1.0])
+            n /= np.linalg.norm(n)
+            face = classify_face(raw, n)
+            if face is None:
+                return False
+            st["face"], st["axis"] = face
+            top = st["face"] == "top"
+            st["high_m"], st["hover_m"] = (HIGH_M, HOVER_M) if top else (SIDE_HIGH_M, SIDE_HOVER_M)
+            # the radial aim correction was tuned on top picks (the magnet sliding as it seats)
+            st["locked"] = aim_corrected(raw, a.radial_mm / 1000.0) if top else raw
             st["state"], st["plan"] = "lock", None
             if st["flag"] in ("PLANNED", "ABORTED", "HOVERING", "LOOKING"):
                 st["flag"] = "HELD" if st["arm_held"] else "FREE"
-            say(f"LOCKED target {np.round(st['locked'] * 100, 1)} cm ({len(good)}/{len(pts)} frames, spread "
-                f"{spread:.1f} mm; aim {a.radial_mm:+.0f} mm radial). Plan next")
+            say(f"LOCKED {st['face']} face, target {np.round(st['locked'] * 100, 1)} cm ({len(good)}/{len(pts)} "
+                f"frames, spread {spread:.1f} mm" + (f"; aim {a.radial_mm:+.0f} mm radial" if top else "")
+                + "). Plan next")
             return True
         print(f"\nlock refused: {len(pts)} frames, median spread {spread:.1f} mm")
         if len(pts) < LOCK_MIN_FRAMES:
@@ -1729,25 +1826,29 @@ def cmd_pick(a):
         between. True if all solvable inside the joint limits."""
         q_now = arm_q()
         locked, roll = st["locked"], float(q_now[4])
-        sols = {n: down_ik(locked + [0, 0, dz], seeds + [q_now], roll)
-                for n, dz in (("high", HIGH_M), ("hover", HOVER_M), ("contact", 0.0))}
+        hi_m, hv_m = st["high_m"], st["hover_m"]
+        sols = {n: face_ik(along(dz), seeds + [q_now], roll)
+                for n, dz in (("high", hi_m), ("hover", hv_m), ("contact", 0.0))}
         bad = [n for n, v_ in sols.items() if v_ is None]
         if bad:
-            say(f"NOT reachable straight down: {', '.join(bad)}. Move the package closer to the arm", 20.0)
+            say(f"{st['face']} face NOT reachable with the magnet flat: {', '.join(bad)}. "
+                + ("Move the package closer to the arm" if st["face"] == "top" else
+                   "A side face needs to be ~20-30 cm from the base and facing it"), 20.0)
             return False
         steps, seed = [], [sols["high"][0]]
-        for dz in np.arange(HIGH_M - 0.01, HOVER_M - 1e-6, -0.01):
-            r = down_ik(locked + [0, 0, dz], seed, roll)
+        for dz in np.arange(hi_m - 0.01, hv_m - 1e-6, -0.01):
+            r = face_ik(along(dz), seed, roll)
             if r is None:
                 break
             steps.append((float(dz), r[0]))
             seed = [r[0]]
-        if len(steps) < round((HIGH_M - HOVER_M) / 0.01):
-            say("descent path not solvable straight down: move the package", 20.0)
+        if len(steps) < round((hi_m - hv_m) / 0.01):
+            say("approach path not solvable with the magnet flat: move the package", 20.0)
             return False
         st["plan"], st["state"], st["flag"] = {"high": sols["high"][0], "steps": steps}, "planned", "PLANNED"
         span = max(abs(np.degrees(sols["high"][0] - q_now)))
-        say(f"PLAN ok: {span:.0f} deg joint move to 12 cm above, then down to 5 cm. GO when ready", 1e9)
+        say(f"PLAN ok ({st['face']} face): {span:.0f} deg joint move to {hi_m * 100:.0f} cm out, then in to "
+            f"{hv_m * 100:.0f} cm. GO when ready", 1e9)
         return True
 
     def do_go():
@@ -1759,9 +1860,9 @@ def cmd_pick(a):
             ok = move_path(st["plan"]["steps"], "DESCENDING", DESCEND_MPS)
         if ok:
             st["state"], st["flag"] = "at_hover", "HOVERING"
-            err = (kin.tool_point(arm_q(), hc.magnet_m) - (st["locked"] + [0, 0, HOVER_M])) * 1000
-            say(f"HOVERING 5 cm above the target (arm model: {np.linalg.norm(err):.0f} mm off its goal). "
-                "Is the magnet centred over the circle?", 1e9)
+            err = (kin.tool_point(arm_q(), hc.magnet_m) - along(st["hover_m"])) * 1000
+            say(f"HOVERING {st['hover_m'] * 100:.0f} cm off the {st['face']} face (arm model: "
+                f"{np.linalg.norm(err):.0f} mm off its goal). Is the magnet centred on the circle?", 1e9)
         else:
             st["state"] = "lock"
         return ok
@@ -1782,8 +1883,7 @@ def cmd_pick(a):
             # magnet roughly down, as after a pick: SO101Kin.ik folds there and refused the lift
             # (2026-11-13, a second PICK from 1 cm above the package), so the flange-axis solver,
             # at the pitch the hand has now, in one continuous move
-            rad = tool[:2] / max(1e-6, np.linalg.norm(tool[:2]))
-            pitch = math.degrees(math.atan2(float(F[:3, 2][:2] @ rad), float(F[2, 2])))
+            pitch = head_cam.face_pitch(F[:3, 2], head_cam.arm_radial(tool))
             path, seed = [], [q]
             n = max(1, int(math.ceil((need - tool[2]) / 0.01)))
             for i in range(1, n + 1):
@@ -1795,7 +1895,7 @@ def cmd_pick(a):
                 path.append((z, r[0]))
                 seed = [r[0]]
             if path:  # as high as it solves: near the top of the reach straight-down runs out
-                if not move_path(path, "MOVING", LIFT_MPS, z_ref=0.0):
+                if not move_path(path, "MOVING", LIFT_MPS):
                     return False
                 if path[-1][0] >= need - 1e-6:
                     return True
@@ -2036,7 +2136,7 @@ def cmd_pick(a):
                 return
         if not find_marker() or not lock_with_step_aside() or not do_plan():
             return
-        if not raise_clear():
+        if st["face"] == "top" and not raise_clear():
             return
         if not do_go():
             return
@@ -2283,6 +2383,10 @@ def main(argv=None):
                          f"(default {PICK_PITCH_DEG})")
     # -8 mm made up for a magnet that seated on one edge and slid out; with the taught pitch it
     # seats flat, and 0 still slid a little forward on the way down (2026-11-13): -3
+    pk.add_argument("--side-pitch-deg", type=float, default=None,
+                    help="pitch for side faces (default: the mean of the side flat poses recorded with r, else 0)")
+    pk.add_argument("--side-press-mm", type=float, default=SIDE_PRESS_MM,
+                    help=f"press depth into a side face, mm (default {SIDE_PRESS_MM:g}: it pushes the box away)")
     pk.add_argument("--radial-mm", type=float, default=-3.0,
                     help="aim correction along the line from the arm base through the target, mm; "
                          "negative = toward the base (default -3)")

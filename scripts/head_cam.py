@@ -262,8 +262,36 @@ def align_z(R, n):
 DOWN_W = 0.2  # metres of position error one radian of tool tilt is worth in ik_down
 
 
+def arm_radial(p):
+    """Horizontal unit vector from the shoulder_pan axis to p: the arm's vertical plane through
+    p contains it. The pan axis sits PAN_AXIS_X_M in front of base_link's origin, so measuring
+    from the origin tilted a side face's normal out of that plane and nothing solved for a box
+    off to the side (2026-11-15)."""
+    d = np.array([p[0] - PAN_AXIS_X_M, p[1]], float)
+    return d / max(1e-9, float(np.linalg.norm(d)))
+
+
+def face_normal_trimmed(rad, axis=None, pitch_deg=0.0):
+    """`axis` (default straight up) turned by pitch_deg about t = z x rad, the horizontal axis
+    square to the arm's vertical plane through the target (rad: horizontal unit vector, base ->
+    target). For the top face that gives [sin p * rad, cos p], + = magnet face toward the base."""
+    n = np.array([0.0, 0.0, 1.0]) if axis is None else np.asarray(axis, float) / np.linalg.norm(axis)
+    t = np.cross([0.0, 0.0, 1.0], [rad[0], rad[1], 0.0])
+    p = math.radians(pitch_deg)
+    return n * math.cos(p) + np.cross(t, n) * math.sin(p) + t * float(t @ n) * (1 - math.cos(p))
+
+
+def face_pitch(flange_z, rad, axis=None):
+    """flange_z's signed angle from `axis` (default up) about t = z x rad, deg: the inverse of
+    face_normal_trimmed, for recording a pose taught flat on a face."""
+    n = np.array([0.0, 0.0, 1.0]) if axis is None else np.asarray(axis, float) / np.linalg.norm(axis)
+    t = np.cross([0.0, 0.0, 1.0], [rad[0], rad[1], 0.0])
+    z = np.asarray(flange_z, float)
+    return math.degrees(math.atan2(float(np.cross(n, z) @ t), float(n @ z)))
+
+
 def ik_down(kin, face_target, seeds, lo, hi, magnet_m=MAGNET_FACE_M, roll=0.0,
-            pos_tol_m=0.002, tilt_tol_deg=2.0, pitch_deg=0.0):
+            pos_tol_m=0.002, tilt_tol_deg=2.0, pitch_deg=0.0, axis=None):
     """Robot angles (radians, 5) that put the magnet face on `face_target` (base_link, m) with
     the tool pointing straight down, inside [lo, hi], or None. SO101Kin.ik works on the wrist ->
     tip elevation, which folds at straight down (-90 deg) and stalls there (the same fold that
@@ -273,11 +301,14 @@ def ik_down(kin, face_target, seeds, lo, hi, magnet_m=MAGNET_FACE_M, roll=0.0,
     through the base and the target, + = magnet face turned toward the base: the model's
     "straight down" is not the real one, and a magnet flat on the package read -3.6 deg in the
     model (2026-11-13, taught by hand); "down" then means that measured flat. Returns (q,
-    position error m, tilt deg from that axis) of the best fit."""
+    position error m, tilt deg from that axis) of the best fit.
+
+    `axis`: the face's outward normal (base_link) for a face that isn't the top one: the magnet
+    then presses flat against it, flange z along it (2026-11-15, boxes standing on end, marker on
+    a side). The pitch turns it about the same horizontal axis, square to the arm's plane. A
+    5-DOF arm can only reach normals lying in that plane, so the solve refuses the rest."""
     face_target = np.asarray(face_target, float)
-    rad = face_target[:2] / max(1e-9, float(np.linalg.norm(face_target[:2])))
-    p = math.radians(pitch_deg)
-    up = np.array([math.sin(p) * rad[0], math.sin(p) * rad[1], math.cos(p)])
+    up = face_normal_trimmed(arm_radial(face_target), axis, pitch_deg)
 
     def res(q4):
         F = kin.flange(np.array([*q4, roll]))

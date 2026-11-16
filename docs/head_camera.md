@@ -233,6 +233,32 @@ Each sample is added to `handeye_samples.json` as soon as it is taken. **Cancel 
 discards a look, and **Drop last sample [z]** removes the last sample taken in this session.
 Then run `scripts/arm.sh head handeye solve` and restart `pick` to load the new model.
 
+### Side faces (boxes standing on end)
+
+When the marker and circle are on a vertical side, `pick` comes in sideways. Lock reads the
+face's direction from depth, so this needs no setting:
+
+- **Top face:** within 35 deg of up. The pick works as before.
+- **Side face:** within 35 deg of level, and facing the arm's base within 12 deg. The arm has
+  5 joints, so the magnet can only lie flat on a face whose normal is in the arm's vertical
+  plane. A side turned further away is refused with the angle shown.
+- **Anything in between** is refused.
+
+A side pick:
+
+1. Approaches along the face's normal from 6 cm out.
+2. Stops 3 cm from the face.
+3. Switches the magnet on 10 mm from the face.
+4. Presses `--side-press-mm` (default 8 mm) with the wrist soft.
+5. Lifts 8 cm straight up.
+
+The face has to be about 20-25 cm from the pan axis (closer at greater height).
+
+Side-face flat poses (`r` with the magnet held flat on a side) are stored with `"face":
+"side"`. Their mean is the side pitch until `--side-pitch-deg` is given. Side-face touch
+samples are taken with the same LOOK/TOUCH buttons. They also let `solve` fit the magnet
+length, which magnet-down touches alone cannot separate from the camera height.
+
 ## Diagnostics
 
 | Command | Use |
