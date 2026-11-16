@@ -1440,6 +1440,15 @@ def cmd_pick(a):
             magnet = None
     if magnet is None:
         print("no magnet: running without the magnet button")
+    # The omni base on its own board (scripts/base.py): optional. The place backs it away from the
+    # table so the carried package clears the table edge, and drives it back after (2026-11-15).
+    base = None
+    if a.base_back_cm:
+        try:
+            import base as base_mod
+            base = base_mod.Base()
+        except Exception as e:
+            print(f"no base: {e} (placing without backing off)")
     cam = Camera(marker_m=a.marker_m)
     cam.want = {a.marker_id}
     bus, head_cal = open_bus(a.port, a.arm_id, a.head_id)
@@ -2153,6 +2162,11 @@ def cmd_pick(a):
             if ok:
                 path = pts
                 break
+        backed = False
+        if base is not None:  # away from the table first: the swung package hit its edge
+            if not drive_base(-a.base_back_cm / 100.0):
+                return False
+            backed = True
         # via rest: two known moves instead of one joint swing from the pick to wherever the place
         # is (behind the base, over the camera mast's side) with the package hanging
         if st["rest_q"] is not None and not move_to(st["rest_q"], "MOVING"):
@@ -2191,7 +2205,23 @@ def cmd_pick(a):
         st["state"], st["flag"] = "lock", "HELD"
         say("placed: back to rest", 8.0)
         go_rest()
+        if backed:
+            drive_base(a.base_back_cm / 100.0)
+            st["flag"] = "HELD"
         return True
+
+    def drive_base(dist_m):
+        """The base dist_m straight (+ forward), the page live; any key stops it. True if done."""
+        st["flag"] = "MOVING"
+
+        def tick():
+            mag.rearm_if_due()
+            publish(arm_q())
+        ok = base.move(dist_m, should_stop=lambda: bool(read_keys(0.0)), tick=tick)
+        if not ok:
+            st["flag"] = "ABORTED"
+            say("ABORTED: base stopped", 1e9)
+        return ok
 
     def save_rest():
         q = arm_q()
@@ -2579,7 +2609,8 @@ def cmd_pick(a):
         # aborted with the arm still under torque (2026-11-13)
         for step in (lambda: termios.tcsetattr(fd, termios.TCSADRAIN, old),
                      lambda: mag.magnet and mag.magnet.off(), lambda: mag.magnet and mag.magnet.close(),
-                     worker.stop, lambda: torque_limit(FULL_TORQUE), lambda: bus.disconnect(disable_torque=True)):
+                     worker.stop, lambda: base and base.close(),
+                     lambda: torque_limit(FULL_TORQUE), lambda: bus.disconnect(disable_torque=True)):
             try:
                 step()
             except BaseException as e:
@@ -2667,6 +2698,9 @@ def main(argv=None):
     pk.add_argument("--press-torque", type=int, default=PRESS_TORQUE,
                     help=f"Torque_Limit of lift/elbow/wrist during the press, 0..1000 (default {PRESS_TORQUE}): "
                          "how hard it pushes; --press-mm is how far")
+    pk.add_argument("--base-back-cm", type=float, default=15.0,
+                    help="placing: back the base this far away from the table first, forward again after "
+                         "(default 15; 0 = don't use the base)")
     pk.add_argument("--lift-tilt-deg", type=float, default=LIFT_TILT_DEG,
                     help=f"after a top pick: lift {LIFT_PRE_M * 100:.1f} cm, then tilt the wrist this far the "
                          f"'wrist up' way before the rest of the lift (default {LIFT_TILT_DEG:g}; 0 = straight up)")
