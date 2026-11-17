@@ -118,6 +118,26 @@
            padding: 3px 8px; border: 1px solid var(--line); border-radius: 99px; margin-left: -6px; cursor: default; }
   #build.stale { color: var(--warnink); background: var(--warnbg); border-color: var(--warnline); }
   @media (max-width: 1100px) { #build { max-width: 120px; } }
+  #platform-chip { display: inline-flex; align-items: center; gap: 7px; padding: 4px 10px; margin-left: -6px;
+                   font: 600 .74rem/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; }
+  #platform-chip .dot { width: 8px; height: 8px; border-radius: 50%; }
+  #platform-chip[data-platform="real"] { color: var(--go); border-color: var(--go); }
+  #platform-chip[data-platform="real"] .dot { background: var(--go); }
+  #platform-chip[data-platform="sim"] { color: var(--info); border-color: var(--info); }
+  #platform-chip[data-platform="sim"] .dot { background: var(--info); }
+  #platform-pop { position: fixed; top: 54px; left: 150px; z-index: 6; width: 360px; max-width: calc(100vw - 24px);
+                  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px var(--shadow); padding: 12px; }
+  #platform-pop h3 { margin: 0 0 8px; font-size: .9rem; }
+  #platform-pop ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+  #platform-pop .console { display: grid; grid-template-columns: auto 1fr; column-gap: 10px; align-items: baseline;
+                           padding: 8px 10px; border-radius: 8px; color: var(--ink); text-decoration: none; }
+  #platform-pop a.console:hover { background: var(--hover2); }
+  #platform-pop .console.here { background: var(--sel); }
+  #platform-pop .console b { grid-row: span 2; font: 600 .7rem ui-monospace, monospace; letter-spacing: .06em; }
+  #platform-pop .console[data-platform="real"] b { color: var(--go); }
+  #platform-pop .console[data-platform="sim"] b { color: var(--info); }
+  #platform-pop .console .url { font-size: .76rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #platform-pop .hint { margin: 8px 0 0; font-size: .8rem; color: var(--muted); }
   #alarms { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
   #alarms .dot { background: var(--faint); }
   #alarms.on { color: var(--stop); border-color: var(--stopb); font-weight: 600; }
@@ -215,6 +235,64 @@
   .cam .drive button.held { background: rgba(255,255,255,.9); color: #15191e; }
   .cam .drive [data-drive="stop"] { color: #ff8a80; }
   @media (pointer: coarse) { .cam .drive { grid-template-columns: repeat(3, 36px); } .cam .drive button { width: 36px; height: 32px; font-size: .9rem; } }
+  /* The pick's phase and note in Arm mode (operator.js syncPickLine), under the mode switch. */
+  .cam .pickline { position: absolute; top: 36px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 24px);
+                   display: flex; gap: 8px; align-items: baseline; padding: 4px 10px; border-radius: 6px;
+                   background: rgba(10,12,16,.72); color: #e6ebf0; font: .7rem/1.3 system-ui, sans-serif; }
+  .cam .pickline[hidden] { display: none; }
+  .cam .pickline b { font: 700 .66rem ui-monospace, monospace; letter-spacing: .04em; white-space: nowrap; }
+  .cam .pickline span { overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .cam .pickline[data-tone="busy"] b { color: #f2b705; }
+  .cam .pickline[data-tone="ok"] b { color: #34c47c; }
+  .cam .pickline[data-tone="bad"] b { color: #ff7a6e; }
+  .cam .pickline[data-tone="warn"] b { color: #f0c36a; }
+  /* Drive / Head / Arm: which pad is over the picture (operator.js applyPadMode). */
+  .cam .padmode { position: absolute; top: 6px; left: 50%; transform: translateX(-50%); display: flex; padding: 2px; gap: 2px;
+                  border-radius: 7px; background: rgba(10,12,16,.6); border: 1px solid rgba(255,255,255,.18); }
+  .cam .padmode[hidden], .cam .padmode button[hidden], .cam .drive[hidden] { display: none; }
+  .cam .padmode button { height: 22px; padding: 0 10px; border: 0; border-radius: 5px; background: transparent; color: #c8d0d8;
+                         font: 600 .66rem system-ui, sans-serif; cursor: pointer; }
+  .cam .padmode button:hover { background: rgba(255,255,255,.12); }
+  .cam .padmode button.on { background: rgba(255,255,255,.9); color: #15191e; }
+  /* Head pad: the drive pad's mirror on the right (operator.js wireHeadPad). Raised clear
+     of the feed's corner label (Camera / Depth). */
+  .cam .headpad { position: absolute; right: 6px; bottom: 30px; display: grid; grid-template-columns: repeat(3, 26px); gap: 3px;
+                  opacity: .75; transition: opacity .15s; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .cam .headpad[hidden] { display: none; }
+  .cam:hover .headpad, .cam .headpad.on { opacity: 1; }
+  .cam .headpad button { width: 26px; height: 24px; padding: 0; border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65);
+                         color: #e6ebf0; font-size: .72rem; line-height: 1; touch-action: none; }
+  .cam .headpad button:hover { background: rgba(10,12,16,.85); }
+  .cam .headpad button.held { background: rgba(255,255,255,.9); color: #15191e; }
+  .cam .headpad [data-headpad="center"] { font-size: .6rem; }
+  @media (pointer: coarse) { .cam .headpad { grid-template-columns: repeat(3, 36px); } .cam .headpad button { width: 36px; height: 32px; font-size: .9rem; } }
+  /* Arm touchpad, bottom-centre between the drive and head pads (operator.js wireArmPad):
+     handeye.py's page, shrunk onto the tile. A 2D pad for the hand, a tall one for height,
+     then wrist up/down, the speed level, Magnet and Pick. */
+  .cam .armpad { position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); display: flex; gap: 6px; align-items: flex-end;
+                 opacity: .8; transition: opacity .15s; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .cam .armpad[hidden] { display: none; }
+  .cam:hover .armpad { opacity: 1; }
+  .cam .armpad .tp { position: relative; border-radius: 9px; background: rgba(29,38,51,.4); border: 1px solid rgba(120,150,190,.45); touch-action: none; cursor: grab; }
+  .cam .armpad .tp.on { background: rgba(29,38,51,.6); cursor: grabbing; }
+  .cam .armpad .tp.hand { width: 104px; height: 104px; }
+  .cam .armpad .tp.z { width: 30px; height: 104px; }
+  .cam .armpad .knob { position: absolute; left: 50%; top: 50%; width: 20px; height: 20px; border-radius: 50%; background: rgba(74,144,226,.85);
+                       transform: translate(-50%, -50%); pointer-events: none; }
+  .cam .armpad .ax { position: absolute; font: normal .58rem system-ui, sans-serif; color: rgba(170,190,210,.75); pointer-events: none; }
+  .cam .armpad .ax.t { top: 3px; left: 50%; transform: translateX(-50%); } .cam .armpad .ax.b { bottom: 3px; left: 50%; transform: translateX(-50%); }
+  .cam .armpad .ax.l { left: 3px; top: 50%; transform: translateY(-50%); } .cam .armpad .ax.r { right: 3px; top: 50%; transform: translateY(-50%); }
+  .cam .armpad .side { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
+  .cam .armpad [data-arm-act="rest"] { grid-column: 1 / -1; }
+  .cam .armpad .lv { grid-column: 1 / -1; display: flex; gap: 2px; }
+  .cam .armpad button { height: 22px; padding: 0 7px; border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65);
+                        color: #e6ebf0; font: 600 .64rem system-ui, sans-serif; line-height: 1; touch-action: none; white-space: nowrap; }
+  .cam .armpad .lv button { flex: 1; padding: 0 4px; }
+  .cam .armpad button:hover { background: rgba(10,12,16,.85); }
+  .cam .armpad button.held, .cam .armpad button.sel { background: rgba(255,255,255,.9); color: #15191e; }
+  .cam .armpad [data-arm-act="magnet"].on { background: rgba(242,183,5,.9); color: #15191e; border-color: rgba(242,183,5,1); }
+  .cam .armpad [data-arm-act="pick"] { color: #8fd3a8; }
+  @media (pointer: coarse) { .cam .armpad .tp.hand { width: 120px; height: 120px; } .cam .armpad .tp.z { width: 36px; height: 120px; } .cam .armpad button { height: 28px; } }
   .more .cam canvas.feat { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .featbtn { position: absolute; top: 6px; left: 6px; background: rgba(10,12,16,.6); border: 1px solid transparent; color: #c3cad2; font-size: .72rem; padding: 3px 9px; border-radius: 6px; }
   .featbtn.on { background: rgba(61,220,132,.9); color: #15191e; font-weight: 600; }
@@ -584,6 +662,14 @@
        checked out on the host, so say so. Amber when the server code is older than the
        checkout and a console restart is needed. -->
   <span id="build" hidden></span>
+  <!-- SIM or REAL: what this console's drive pad and Stop all act on (serve.py /api/consoles).
+       Its menu jumps to the other consoles, one per backend machine. -->
+  <button class="btn" id="platform-chip" hidden aria-haspopup="true" aria-expanded="false"><span class="dot"></span><span id="platform-label"></span></button>
+  <div id="platform-pop" hidden role="dialog" aria-label="Consoles">
+    <h3>Consoles</h3>
+    <ul id="platform-list"></ul>
+    <p id="platform-none" class="hint">No other console is configured. Add one to <code>configs/consoles.yaml</code>.</p>
+  </div>
   <!-- Map / 3D cloud / Sim picks what the stage shows. How the session was started
        (mapping vs. a premapped, read-only map) is the session chip's tooltip: it was a
        header tile until 2026-10-24, squeezed to an unreadable "MODE" at laptop widths. -->

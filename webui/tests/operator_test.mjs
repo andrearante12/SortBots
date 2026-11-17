@@ -65,6 +65,7 @@ window.fetch = (url, opts) => {
   }
   if (u.startsWith('/api/session') && !u.startsWith('/api/session/') && window.__fakeSession) return json(window.__fakeSession);
   if (u.startsWith('/api/version') && window.__fakeVersion) return json(window.__fakeVersion);
+  if (u.startsWith('/api/consoles') && window.__fakeConsoles) return json(window.__fakeConsoles);
   if (u.startsWith('/api/robots') && window.__fakeRobots) return json({ default: window.__fakeRobots[0], robots: window.__fakeRobots });
   // Stop all's dialog: record, never stop anything real.
   if ((u.startsWith('/api/session/stop') || u.startsWith('/api/session/finish')) && opts && opts.method === 'POST') {
@@ -1240,6 +1241,31 @@ async function main() {
   check('branch: amber, with the restart command, when the server code is older than the checkout',
         await page.eval(`document.getElementById('build').classList.contains('stale') && /systemctl --user restart sortbots-console/.test(document.getElementById('build').title)`));
   await page.eval(`window.__fakeVersion = null; window.__operator.loadVersion()`); await sleep(200);
+
+  // -- SIM / REAL chip and the console menu -----------------------------------------------------------
+  console.log('\n--- platform chip ---');
+  await waitFor(async () => /\S/.test(await $text('#platform-label')), { what: 'the platform chip', tries: 20 });
+  check('platform: the header says SIM on a sim console', (await visible('#platform-chip')) && (await $text('#platform-label')) === 'SIM');
+  await page.eval(`window.__fakeConsoles = { platform: 'real', consoles: [
+    { name: 'Jetson', url: location.origin + '/', platform: 'real' },
+    { name: 'Workstation', url: 'http://workstation.example:8081/', platform: 'sim' }] }; window.__operator.loadConsoles()`);
+  await sleep(200);
+  check('platform: REAL, in the go colour, on the robot\\'s console',
+        (await $text('#platform-label')) === 'REAL' && await page.eval(`document.getElementById('platform-chip').dataset.platform === 'real'`));
+  await page.eval(`document.getElementById('platform-chip').click()`); await sleep(100);
+  check('platform: the menu opens and marks this page, linking only the other console',
+        (await visible('#platform-pop')) && await page.eval(`(() => {
+          const here = document.querySelector('#platform-list .console.here'), links = [...document.querySelectorAll('#platform-list a.console')];
+          return here && /this page/.test(here.textContent) && links.length === 1 && links[0].href === 'http://workstation.example:8081/' && document.getElementById('platform-none').hidden;
+        })()`));
+  await page.eval(`document.body.click()`); await sleep(100);
+  check('platform: a click elsewhere closes the menu', !(await visible('#platform-pop')));
+  await page.eval(`window.__fakeConsoles = null; window.__operator.loadConsoles()`); await sleep(200);
+
+  // -- the real base's status: say why the pad doesn't move it --------------------------------------
+  await page.eval(`window.__emit('/robot_0/base_status', { data: JSON.stringify({ state: 'busy', message: 'The wheel board is in use by pid 42 (drive_bridge.py)' }) })`);
+  await sleep(150);
+  check('base: a busy wheel board is toasted with its holder', /base busy.*pid 42/.test(await page.eval(`document.body.innerText`)));
 
   // -- phones ---------------------------------------------------------------------------------------
   console.log('\n--- phone ---');

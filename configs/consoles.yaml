@@ -1,0 +1,11 @@
+# The operator consoles, one per backend machine: the header's SIM/REAL chip lists them
+# so the page can jump between the real robot and the simulation (webui/serve.py
+# /api/consoles). Each console serves only its own platform; this is just the menu.
+# Tailnet names, so any device signed in to Tailscale can open them.
+consoles:
+  - name: Jetson, real robot
+    url: http://jetson-orin.tail0d28f9.ts.net:8081/
+    platform: real
+  - name: Workstation, Isaac sim
+    url: http://workstation.tail0d28f9.ts.net:8081/
+    platform: sim

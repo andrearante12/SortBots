@@ -1,0 +1,54 @@
+# The arm's servo board on the real robot: the SO-101 arm (ids 1-5) and the pan/tilt head
+# (7/8), driven over ROS by nodes/arm_driver.py. Not the Robot view's tools (head.py,
+# handeye.py), which open the same board themselves: one process at a time.
+
+# By USB serial, as everywhere else: plugging the base's board in renumbers this one.
+port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B91029024-if00
+
+head:
+  # The repo copy is the source of truth (scripts/calibration.sh installs it for lerobot).
+  calibration: configs/calibration/robots/sortbots_head/sortbots_head.json
+  # /<id>/head_cmd is in the sim's convention (xlerobot.urdf radians, tilt > 0 looks down);
+  # head.py's degrees are 0 at the calibrated centre. These signs map one onto the other.
+  # Checked live 2026-11-16: tilt as is; pan was mirrored (left on the pad turned it right).
+  pan_sign: -1.0
+  tilt_sign: 1.0
+  # Software slew on the goal: a slider flick must not slam the camera across its range.
+  # 90 felt sluggish on the head pad (2026-11-16).
+  max_dps: 150.0
+  # The SO-101 follower's gains, which head.py keys already runs the head on.
+  pid: {p: 16, i: 0, d: 32}
+  # Degrees inside each calibrated stop that a goal may reach (head.py limits()).
+  margin_deg: 2.0
+
+arm:
+  calibration: configs/calibration/robots/so_follower/sortbots_arm.json
+  # handeye.py's touchpad speeds (its jog_cfg) at full deflection, times the speed level's
+  # multiplier (L1..L4 = 0.25 / 0.5 / 0.75 / 1.0). It starts at L2: the hand 5 cm/s.
+  hand_mps: 0.10
+  tilt_dps: 45.0
+  roll_dps: 90.0
+  # Cap on any joint's goal speed (times the level): IK near the folded pose asks for big swings.
+  joint_dps: 150.0
+  level: 1
+  # The pad re-sends at 10 Hz while held; nothing for this long and the hand stops.
+  watchdog_s: 0.5
+  pid: {p: 16, i: 0, d: 32}
+  margin_deg: 2.0
+
+magnet:
+  port_glob: /dev/serial/by-id/usb-Silicon_Labs_CP2102*
+  # "on" asks the firmware for on_s (its own cap is 30 s) and is re-sent every rearm_s while
+  # wanted, so a dead process lets go within on_s (handeye.py's rearm_if_due).
+  on_s: 30
+  rearm_s: 10
+
+# The one-button pick (scripts/pick_core.py PickConfig); anything not set here keeps handeye's
+# default.
+pick:
+  # handeye backs the base 15 cm off the table before swinging over the place pose. 0: no
+  # wheels needed, the place goes straight to rest and over (2026-11-16, base board not fitted).
+  base_back_cm: 0
+  # Aim correction along the line from the arm's base through the target, + = away from the
+  # robot. handeye's +1 mm landed ~2 mm short on the first ROS picks (2026-11-16): +3.
+  radial_mm: 3.0

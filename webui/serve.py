@@ -160,6 +160,28 @@ def _read_comms_gateways() -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
+CONSOLES_FILE = Path(__file__).resolve().parent.parent / "configs" / "consoles.yaml"
+
+
+def _load_consoles(path: Path | None = None) -> list[dict]:
+    """configs/consoles.yaml: one entry per backend machine, for the header's SIM/REAL menu.
+    Entries without a name, an http(s) url and a sim/real platform are dropped: the page
+    turns each into a link."""
+    try:
+        raw = yaml.safe_load((path or CONSOLES_FILE).read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return []
+    out = []
+    for c in raw.get("consoles") or []:
+        if not isinstance(c, dict):
+            continue
+        name, url, plat = c.get("name"), c.get("url"), c.get("platform")
+        if isinstance(name, str) and isinstance(url, str) and url.startswith(("http://", "https://")) \
+                and plat in session_mod.PLATFORMS:
+            out.append({"name": name, "url": url, "platform": plat})
+    return out
+
+
 def _load_comms_gateway() -> dict:
     return {"platform": PLATFORM, "gateway": _read_comms_gateways().get(PLATFORM)}
 
@@ -230,6 +252,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_splat_config()
         elif route == "/api/comms_gateway":
             self._serve_json(_load_comms_gateway())
+        elif route == "/api/consoles":
+            self._serve_json({"platform": PLATFORM, "consoles": _load_consoles()})
         elif route == "/api/version":
             now = _git_state()
             self._serve_json({**now, "started": _STARTED,

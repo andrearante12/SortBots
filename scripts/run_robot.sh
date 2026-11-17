@@ -27,8 +27,8 @@
 # default `all` maps on the Jetson as before, at lower CPU priority.
 #
 # Not started, on purpose: Nav2, task_manager, magnet_pick and the explorer.
-# There is no base driver yet, so nothing would move; the dashboard's drive
-# pad publishes /<id>/cmd_vel into the void until nodes/base_driver.py exists.
+# nodes/base_driver.py drives the wheels from /<id>/cmd_vel (the dashboard's
+# drive pad), capped at configs/drive_base.yaml's ros.speed_level.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,6 +56,7 @@ PIPELINE_PATTERNS=(realsense2_camera_node rtabmap_slam rgbd_odometry rtabmap_viz
                    fleet_radio.py fleet_tasks.py dynamic_obstacle_filter.py recon_cloud_merge.py \
                    depth_colorizer.py feature_overlay.py obstacle_cloud.py \
                    obstacle_detector.py package_detector.py map_handoff.py rtabmap_sync \
+                   base_driver.py arm_driver.py \
                    sortbots_bringup.launch.py)
 KEEP_CONSOLE=false
 
@@ -75,6 +76,11 @@ stop_pipeline() {
     pkill -9 -f "$p" 2>/dev/null || true
   done
   sleep 1
+  # An STS3215 keeps its last speed: a base_driver that only died to the -9 above
+  # (it releases the wheels on SIGINT, but a hung one wouldn't) leaves the base
+  # rolling. Zero the wheels now that nothing holds their board. Skips a board
+  # the Robot view's drive bridge holds; that one has its own watchdog.
+  python3 "$REPO_ROOT/nodes/base_driver.py" --stop 2>&1 | sed 's/^/  /' || true
   # SIGKILLed Fast DDS participants never unlink their shared-memory segments
   # (16 MB each with configs/dds/fastdds_large_shm.xml), and /dev/shm is RAM —
   # the Orin's 8 GB, shared with the GPU. On the bench, 1,058 leaked segments

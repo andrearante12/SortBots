@@ -18,7 +18,15 @@ phone ──:8081/:9090/:8080──▶ Jetson ─ docker sortbots-jetson:jazzy
 1. Add yourself to the docker group, and check `docker info | grep nvidia`.
 2. Install the RealSense udev rules (`99-realsense-libusb.rules`).
 3. Plug the D435 into a USB **3** port. `lsusb -t` must show `5000M`; at 480M the
-   driver falls back to 640×480@15.
+   driver falls back to 640×480@15. Put the arm, base and magnet serial boards
+   on the **USB-A** ports too. **Never boot with a device on the USB-C port.**
+   With a serial board on USB-C, the port comes up in host mode and the Jetson
+   hangs in early boot. This was seen 2026-11-16: the kernel stopped 12.7 s in,
+   right after `cdc_acm 1-1`. Hot-plugging the arm board into USB-C after boot
+   worked in a controlled test, so USB-C is usable if the board is unplugged
+   before every reboot or power-on. The USB-C driver also logs
+   `VDD_5V0_SYS: Underflow of regulator enable count` on unplug, so treat that
+   port as fragile. Its normal use is the laptop recovery cable.
 4. Set the power mode: `sudo nvpmodel -m 2 && sudo jetson_clocks`.
 
 ```bash
@@ -39,15 +47,13 @@ sudo scripts/jetson_host_setup.sh     # once; rerun after it changes
 It makes Wi-Fi retry forever with power save off, keeps the journal across
 reboots, holds tailscaled until the network is up, adds a watchdog (Wi-Fi and
 Tailscale, every 30 s), and installs `sortbots-console.service`, which runs
-`jetson.sh update` then `jetson.sh console` at boot. Every boot runs current
-`main`. If the update can't run (no network, uncommitted changes), the console
-starts on the code already checked out. The dashboard is up about 2 minutes
-after power-on with nobody logged in, longer if `docker/jetson/` changed and the
-image rebuilds. Also disable key expiry for the Jetson in the Tailscale
+`jetson.sh console` at boot. A boot never pulls: the Jetson comes back on the
+branch and commit it was running, so a power blip can't swap a branch under test
+for `main`. The dashboard is up about a minute after power-on with nobody logged
+in. Also disable key expiry for the Jetson in the Tailscale
 admin console, or it falls off the tailnet when the key expires.
 
-**Updating the code:** the Jetson's checkout is a deploy copy of `main`, only
-ever fast-forwarded:
+**Updating the code** is by hand only. The checkout is only ever fast-forwarded:
 
 ```bash
 scripts/jetson.sh update          # pull main, rebuild the image if docker/jetson changed, restart the console
