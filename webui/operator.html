@@ -235,6 +235,18 @@
   .cam .drive button.held { background: rgba(255,255,255,.9); color: #15191e; }
   .cam .drive [data-drive="stop"] { color: #ff8a80; }
   @media (pointer: coarse) { .cam .drive { grid-template-columns: repeat(3, 36px); } .cam .drive button { width: 36px; height: 32px; font-size: .9rem; } }
+  /* Head pad: the drive pad's mirror on the right (operator.js wireHeadPad). Raised clear
+     of the feed's corner label (Camera / Depth). */
+  .cam .headpad { position: absolute; right: 6px; bottom: 30px; display: grid; grid-template-columns: repeat(3, 26px); gap: 3px;
+                  opacity: .75; transition: opacity .15s; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .cam .headpad[hidden] { display: none; }
+  .cam:hover .headpad, .cam .headpad.on { opacity: 1; }
+  .cam .headpad button { width: 26px; height: 24px; padding: 0; border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65);
+                         color: #e6ebf0; font-size: .72rem; line-height: 1; touch-action: none; }
+  .cam .headpad button:hover { background: rgba(10,12,16,.85); }
+  .cam .headpad button.held { background: rgba(255,255,255,.9); color: #15191e; }
+  .cam .headpad [data-headpad="center"] { font-size: .6rem; }
+  @media (pointer: coarse) { .cam .headpad { grid-template-columns: repeat(3, 36px); } .cam .headpad button { width: 36px; height: 32px; font-size: .9rem; } }
   .more .cam canvas.feat { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .featbtn { position: absolute; top: 6px; left: 6px; background: rgba(10,12,16,.6); border: 1px solid transparent; color: #c3cad2; font-size: .72rem; padding: 3px 9px; border-radius: 6px; }
   .featbtn.on { background: rgba(61,220,132,.9); color: #15191e; font-weight: 600; }

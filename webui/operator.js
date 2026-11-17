@@ -1132,6 +1132,11 @@
         <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
         <button type="button" data-drive="rot-left" aria-label="Rotate left">&#8634;</button><button type="button" data-drive="back" aria-label="Back">&#9660;</button><button type="button" data-drive="rot-right" aria-label="Rotate right">&#8635;</button>
+      </div>
+      <div class="headpad" role="group" aria-label="Aim the head" title="Aim the head: hold an arrow; the dot centres it" hidden>
+        <span></span><button type="button" data-headpad="up" aria-label="Look up">&#9650;</button><span></span>
+        <button type="button" data-headpad="left" aria-label="Look left">&#9664;</button><button type="button" data-headpad="center" aria-label="Centre the head">&#9679;</button><button type="button" data-headpad="right" aria-label="Look right">&#9654;</button>
+        <span></span><button type="button" data-headpad="down" aria-label="Look down">&#9660;</button><span></span>
       </div>`;
     const perc = document.createElement("div");
     perc.className = "perc"; perc.hidden = true;
@@ -1145,6 +1150,7 @@
           mode: camDefault, timers: {}, token: 0, headAt: -Infinity, headSent: 0, features: false, featSub: null, featData: null, featAt: -Infinity };
     cams.set(id, c);
     wireHead(id, c);
+    wireHeadPad(id, c, el.querySelector(".headpad"));
     syncCamButtons(c);
     wireDrivePad(id, el.querySelector(".drive"));
     return c;
@@ -1169,6 +1175,43 @@
       if (performance.now() - c.headSent >= 1000 / HEAD_HZ) send();
     });
     c.head.addEventListener("change", send); // the last position, whatever the rate limit dropped
+    c.headSend = send;
+  }
+  // The head pad over the camera's bottom-right (the drive pad's mirror): hold an arrow to
+  // look that way, the dot centres. It moves the sliders, which stay the one source of what
+  // is sent, so a pad press and a drag can't disagree. Tilt > 0 looks down, pan > 0 left.
+  const HEAD_PAD_RAD_S = 0.6, HEAD_PAD_DIR = { up: ["tilt", -1], down: ["tilt", 1], left: ["pan", 1], right: ["pan", -1] };
+  function wireHeadPad(id, c, pad) {
+    c.headPad = pad;
+    const setAxis = (key, rad) => {
+      const inp = c.head.querySelector(`[data-head="${key}"]`);
+      inp.value = Math.max(Number(inp.min), Math.min(Number(inp.max), rad));
+      c.head.querySelector(`[data-head-out="${key}"]`).textContent = headText(Number(inp.value));
+    };
+    let timer = null, last = 0;
+    const stop = (b) => { clearInterval(timer); timer = null; if (b) b.classList.remove("held"); c.headSend(); };
+    for (const b of pad.querySelectorAll("[data-headpad]")) {
+      const cmd = b.dataset.headpad;
+      b.addEventListener("pointerdown", (e) => {
+        e.preventDefault(); e.stopPropagation(); b.setPointerCapture(e.pointerId);
+        c.headAt = performance.now();
+        if (cmd === "center") { setAxis("pan", 0); setAxis("tilt", 0); c.headSend(); return; }
+        const [key, sign] = HEAD_PAD_DIR[cmd];
+        b.classList.add("held"); last = performance.now(); clearInterval(timer);
+        timer = setInterval(() => {
+          const now = performance.now(), dt = (now - last) / 1000; last = now;
+          c.headAt = now;
+          setAxis(key, Number(c.head.querySelector(`[data-head="${key}"]`).value) + sign * HEAD_PAD_RAD_S * dt);
+          c.headSend();
+        }, 1000 / HEAD_HZ);
+      });
+      const up = () => { if (timer) stop(b); };
+      b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up); b.addEventListener("lostpointercapture", up);
+      b.addEventListener("click", (e) => e.stopPropagation()); // not a card click
+    }
+    let fade = null;
+    pad.addEventListener("pointerdown", () => { pad.classList.add("on"); clearTimeout(fade); });
+    pad.addEventListener("pointerup", () => { clearTimeout(fade); fade = setTimeout(() => pad.classList.remove("on"), 3000); });
   }
   function syncHeads() {
     for (const [id, c] of cams) {
@@ -1177,6 +1220,7 @@
       const real = r && r.head && typeof r.head.pan === "number" && performance.now() - r.headAt < 3000 ? r.head : null;
       const h = (worldTruth && worldTruth.head && worldTruth.head[id]) || real;
       c.head.hidden = !h;
+      if (c.headPad) c.headPad.hidden = !h;
       if (!h || performance.now() - c.headAt < HEAD_HANDS_OFF_MS) continue; // not under the operator's hand
       for (const [key] of HEAD_AXES) {
         c.head.querySelector(`[data-head="${key}"]`).value = h[key];
