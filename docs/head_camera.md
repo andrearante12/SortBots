@@ -10,9 +10,23 @@ magnet there". That needs four things right, calibrated in this order:
 | 3. Camera + arm offsets | where the camera is for any pan/tilt; the arm's joint-zero offsets | `arm.sh head handeye capture` then `solve` | `sortbots_head/sortbots_head_camera.json`, `so_follower/sortbots_arm_kin_offsets.json` |
 | 4. Verify | nothing; reads the result | `arm.sh head handeye check` | |
 
-Everything runs on the laptop in the `lerobot` conda env, from `~/SortBots` on the
-`physical_hardware/robotic_arm` branch, in a shell **without ROS sourced**. One process owns
-the servo port at a time: quit `arm.sh pad` before any of this, and vice versa.
+Everything runs in the `lerobot` conda env, on whichever machine the robot is plugged into
+(the laptop, or the Jetson: see `docs/real-robot.md`), in a shell **without ROS sourced**. One
+process owns the servo port at a time: quit `arm.sh pad` before any of this, and vice versa.
+
+**You don't have to redo any of this on a new machine.** The current calibration (every file
+in the table, plus the taught rest, place and flat poses and the touch samples) is committed in
+`configs/calibration/robots/`. The tools still read it from `~/.cache/...`, so put it there:
+
+```bash
+scripts/calibration.sh status    # repo vs this machine: same / differs / missing
+scripts/calibration.sh install   # repo -> ~/.cache/...; a differing file is backed up first
+scripts/calibration.sh save      # after recalibrating anything: ~/.cache/... -> repo, then commit
+```
+
+The files describe the hardware (servo zeros, the camera's fit to the arm, the taught poses),
+not the computer. Recalibrate a servo or move the camera and they change: `save` and commit,
+or the next machine drives the robot on stale numbers.
 
 **Redo stage 3 after redoing stage 1 or 2**: recalibrating a servo moves its zero, and the
 camera fit and the joint offsets are relative to those zeros.
