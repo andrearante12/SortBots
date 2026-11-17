@@ -1153,18 +1153,13 @@
         <button type="button" data-headpad="left" aria-label="Look left">&#9664;</button><button type="button" data-headpad="center" aria-label="Centre the head">&#9679;</button><button type="button" data-headpad="right" aria-label="Look right">&#9654;</button>
         <span></span><button type="button" data-headpad="down" aria-label="Look down">&#9660;</button><span></span>
       </div>
-      <div class="armpad" role="group" aria-label="Move the arm" title="Move the arm's hand: hold a button (it stops when you let go)" hidden>
-        <div class="xy">
-          <span></span><button type="button" data-arm="out" aria-label="Reach out" title="Reach out">&#9650;</button><span></span>
-          <button type="button" data-arm="left" aria-label="Swing left" title="Swing left">&#9664;</button><button type="button" data-arm="stop" aria-label="Stop the arm" title="Stop">&#9632;</button><button type="button" data-arm="right" aria-label="Swing right" title="Swing right">&#9654;</button>
-          <span></span><button type="button" data-arm="in" aria-label="Pull in" title="Pull in">&#9660;</button><span></span>
-        </div>
-        <div class="zz">
-          <button type="button" data-arm="up" aria-label="Hand up" title="Hand up">&#10514;</button><button type="button" data-arm="tilt-up" aria-label="Tilt the tool up" title="Tilt the tool up">&#8599;</button><button type="button" data-arm="roll-left" aria-label="Roll the wrist left" title="Roll the wrist left">&#8634;</button>
-          <button type="button" data-arm="down" aria-label="Hand down" title="Hand down">&#10515;</button><button type="button" data-arm="tilt-down" aria-label="Tilt the tool down" title="Tilt the tool down">&#8600;</button><button type="button" data-arm="roll-right" aria-label="Roll the wrist right" title="Roll the wrist right">&#8635;</button>
-        </div>
-        <div class="acts">
-          <button type="button" data-arm-act="magnet" aria-label="Magnet on or off" title="Magnet on / off">Magnet</button><button type="button" data-arm-act="pick" aria-label="Pick and place" title="One-button pick and place">Pick</button>
+      <div class="armpad" role="group" aria-label="Move the arm" hidden>
+        <div class="tp hand" title="Drag to move the hand: up = away, down = toward, left / right; let go and it stops"><i class="ax t">away</i><i class="ax b">toward</i><i class="ax l">left</i><i class="ax r">right</i><b class="knob"></b></div>
+        <div class="tp z" title="Drag up / down to raise / lower the hand"><i class="ax t">up</i><i class="ax b">down</i><b class="knob"></b></div>
+        <div class="side">
+          <button type="button" data-wf="1" title="Wrist up (hold)">wrist &#8593;</button><button type="button" data-wf="-1" title="Wrist down (hold)">wrist &#8595;</button>
+          <div class="lv" role="group" aria-label="Arm speed"><button type="button" data-lv="0">L1</button><button type="button" data-lv="1">L2</button><button type="button" data-lv="2">L3</button><button type="button" data-lv="3">L4</button></div>
+          <button type="button" data-arm-act="magnet" title="Magnet on / off">Magnet</button><button type="button" data-arm-act="pick" title="One-button pick and place">Pick</button>
         </div>
       </div>`;
     const perc = document.createElement("div");
@@ -1330,36 +1325,52 @@
   // at 10 Hz while held, the deadman, and a stop the moment nothing is held. Several held
   // buttons add up (out + up = diagonal), like the drive pad. Magnet toggles; Pick asks the
   // pick node for the one-button pick and place.
-  const ARM_HZ = 10, ARM_AXES = {
-    out: ["out", 1], in: ["out", -1], left: ["left", 1], right: ["left", -1], up: ["up", 1], down: ["up", -1],
-    "tilt-up": ["tilt", 1], "tilt-down": ["tilt", -1], "roll-left": ["roll", 1], "roll-right": ["roll", -1],
-  };
+  // handeye.py's touchpad (its page, 2026-11-13): a 2D pad for the hand (up = away, right =
+  // clockwise from above) and a tall one for height, proportional to how far the finger is from
+  // the centre, re-sent every 80 ms while a finger is down and zeroed when it lifts.
+  const ARM_SEND_MS = 80, ARM_DEAD = 0.08;
   const armCmd = (id, cmd) => publishString(`/${id}/arm_cmd`, JSON.stringify(cmd));
   function wireArmPad(id, c, pad) {
     c.armPad = pad;
-    const held = new Set();
-    let timer = null;
-    const jog = () => {
-      const j = { out: 0, left: 0, up: 0, tilt: 0, roll: 0 };
-      for (const k of held) { const [axis, sign] = ARM_AXES[k]; j[axis] += sign; }
-      armCmd(id, { jog: j });
+    const J = { out: 0, left: 0, up: 0, tilt: 0, wf: 0, roll: 0 };
+    let timer = null, level = null;
+    const live = () => Object.values(J).some((v) => v);
+    const send = () => armCmd(id, level == null ? { jog: { ...J } } : { jog: { ...J }, level });
+    const update = () => {
+      if (live()) { if (!timer) { send(); timer = setInterval(send, ARM_SEND_MS); } }
+      else { if (timer) { clearInterval(timer); timer = null; } armCmd(id, { stop: true }); }
     };
-    const release = (b) => {
-      if (b) { held.delete(b.dataset.arm); b.classList.remove("held"); }
-      if (!held.size) { clearInterval(timer); timer = null; armCmd(id, { stop: true }); } else jog();
-    };
-    for (const b of pad.querySelectorAll("[data-arm]")) {
-      const k = b.dataset.arm;
-      b.addEventListener("pointerdown", (e) => {
-        e.preventDefault(); e.stopPropagation(); b.setPointerCapture(e.pointerId);
-        if (k === "stop") { held.clear(); pad.querySelectorAll(".held").forEach((x) => x.classList.remove("held")); return release(null); }
-        held.add(k); b.classList.add("held"); jog();
-        if (!timer) timer = setInterval(jog, 1000 / ARM_HZ);
-      });
-      const up = () => { if (held.has(k)) release(b); };
-      b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up); b.addEventListener("lostpointercapture", up);
-      b.addEventListener("click", (e) => e.stopPropagation()); // not a card click
+    const dz = (v) => (Math.abs(v) < ARM_DEAD ? 0 : v);
+    function dragger(el, f) {
+      const knob = el.querySelector(".knob");
+      const at = (e) => {
+        const r = el.getBoundingClientRect();
+        const dx = Math.max(-1, Math.min(1, (e.clientX - r.left) / r.width * 2 - 1));
+        const dy = Math.max(-1, Math.min(1, (e.clientY - r.top) / r.height * 2 - 1));
+        f(dx, dy);
+        knob.style.left = `${(dx + 1) * 50}%`; knob.style.top = `${(dy + 1) * 50}%`;
+        update();
+      };
+      const end = () => { f(0, 0); knob.style.left = "50%"; knob.style.top = "50%"; update(); };
+      el.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); el.setPointerCapture(e.pointerId); el.classList.add("on"); at(e); });
+      el.addEventListener("pointermove", (e) => { if (el.hasPointerCapture(e.pointerId)) at(e); });
+      for (const n of ["pointerup", "pointercancel", "lostpointercapture"]) el.addEventListener(n, () => { el.classList.remove("on"); end(); });
+      el.addEventListener("click", (e) => e.stopPropagation()); // not a card click
     }
+    dragger(pad.querySelector(".tp.hand"), (dx, dy) => { J.out = dz(-dy); J.left = dz(-dx); });
+    dragger(pad.querySelector(".tp.z"), (dx, dy) => { J.up = dz(-dy); });
+    for (const b of pad.querySelectorAll("[data-wf]")) {
+      b.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); b.setPointerCapture(e.pointerId); b.classList.add("held"); J.wf = Number(b.dataset.wf); update(); });
+      for (const n of ["pointerup", "pointercancel", "lostpointercapture"]) b.addEventListener(n, () => { b.classList.remove("held"); J.wf = 0; update(); });
+      b.addEventListener("click", (e) => e.stopPropagation());
+    }
+    for (const b of pad.querySelectorAll("[data-lv]")) b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      level = Number(b.dataset.lv);
+      armCmd(id, { jog: { ...J }, level }); // takes effect now, even with no finger down
+      pad.querySelectorAll("[data-lv]").forEach((x) => x.classList.toggle("sel", x === b));
+    });
+    addEventListener("blur", () => { for (const k in J) J[k] = 0; update(); });
     pad.querySelector('[data-arm-act="magnet"]').addEventListener("click", (e) => {
       e.stopPropagation();
       const r = robots.get(id), m = r && r.arm && r.arm.magnet;
@@ -1385,6 +1396,7 @@
       const r = robots.get(id), a = r && r.arm && performance.now() - r.armAt < 3000 ? r.arm : null;
       c.armPad.hidden = !a;
       if (!a) continue;
+      if (typeof a.level === "number") c.armPad.querySelectorAll("[data-lv]").forEach((x) => x.classList.toggle("sel", Number(x.dataset.lv) === a.level));
       const mag = c.armPad.querySelector('[data-arm-act="magnet"]');
       const on = a.magnet && a.magnet.board === "ON";
       mag.classList.toggle("on", !!on);

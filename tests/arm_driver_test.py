@@ -281,7 +281,7 @@ def test_joint_speed_is_capped():
     q0 = arm.q.copy()
     arm.command({"out": 1, "up": 1, "left": 1, "tilt": 1}, 0.0)
     arm.tick(bus, 0.0, DT)
-    assert max(abs(a - b) for a, b in zip(arm.q, q0)) <= arm.joint_rps * DT + 1e-9
+    assert max(abs(a - b) for a, b in zip(arm.q, q0)) <= arm.joint_rps * ad.LEVELS[arm.level] * DT + 1e-9
 
 
 def test_arm_calibration_mismatch_refused():
@@ -349,3 +349,23 @@ def test_magnet_on_rearm_and_off_on_close(monkeypatch):
     assert all(c in ("ping", "on 30", "off") for c in esp.cmds)
     mag.close()
     assert not esp.on and esp.cmds[-1] == "off"                    # never left on
+
+
+def test_wrist_flex_and_level():
+    arm, bus = make_arm(present_deg=READY)
+    arm.engage(bus)
+    p0 = arm.kin.pose(arm.q)[3]
+    run_arm(arm, bus, 0.0, 0.5, jog={"wf": 1})
+    assert arm.kin.pose(arm.q)[3] > p0                     # "wrist up" raises the tool pitch
+    arm2, bus2 = make_arm(present_deg=READY)
+    arm2.engage(bus2)
+    arm2.command({"up": 1}, 0.0, level=0)
+    z0 = arm2.kin.pose(arm2.q)[2]
+    run_arm(arm2, bus2, 0.0, 1.0, jog={"up": 1})
+    slow = arm2.kin.pose(arm2.q)[2] - z0
+    arm3, bus3 = make_arm(present_deg=READY)
+    arm3.engage(bus3)
+    arm3.command({"up": 1}, 0.0, level=3)
+    z0 = arm3.kin.pose(arm3.q)[2]
+    run_arm(arm3, bus3, 0.0, 1.0, jog={"up": 1})
+    assert arm3.kin.pose(arm3.q)[2] - z0 > 2 * slow        # L4 is 4x L1, joint-capped

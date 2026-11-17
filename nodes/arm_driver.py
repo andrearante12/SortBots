@@ -11,9 +11,10 @@ and a servo board takes one owner: anything that moves either goes through here.
                                               same message the operator view's sliders send
     /<id>/head_state  std_msgs/String (JSON)  {"pan", "tilt"} radians where the head IS,
                                               "held", and "state"/"message" when it can't move
-    /<id>/arm_cmd     std_msgs/String (JSON)  {"jog": {"out","left","up","tilt","roll"}} each
-                                              -1..1, re-sent at ~10 Hz while a pad button is
-                                              held (the deadman); {"magnet": "on"|"off"};
+    /<id>/arm_cmd     std_msgs/String (JSON)  {"jog": {"out","left","up","tilt","wf","roll"},
+                                              "level": 0..3}: each axis -1..1 (proportional, the
+                                              touchpad's deflection), re-sent every ~80 ms while a
+                                              finger is down (the deadman); {"magnet": "on"|"off"};
                                               {"stop": true}
     /<id>/arm_state   std_msgs/String (JSON)  "engaged", "state"/"message", "pose" (the tip in
                                               base_link: x, y, z m, pitch rad), "magnet"
@@ -84,7 +85,9 @@ HELD_READ_TIMEOUT_S = 0.015  # a reply takes ~0.4 ms when it comes
 PEEK_SETTLE_S, PEEK_TIMEOUT_S = 0.03, 0.05
 HEAD_JOINTS = {"head_pan_joint": "head_pan", "head_tilt_joint": "head_tilt"}
 ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
-JOG_AXES = ("out", "left", "up", "tilt", "roll")
+JOG_AXES = ("out", "left", "up", "tilt", "wf", "roll")
+# handeye.py's speed buttons L1..L4 (arm_xpad.LEVELS' first four), multiplying the base speeds.
+LEVELS = (0.25, 0.5, 0.75, 1.0)
 TORQUE_LIMIT = (48, 2)  # RAM, 0..1000; handeye.py cuts it for the press and restores 1000
 
 
@@ -360,10 +363,12 @@ class Arm:
         a = cfg["arm"]
         self.cal = a["cal"]
         self.ids = {j: int(self.cal[j]["id"]) for j in ARM_JOINTS}
-        self.hand_mps = float(a.get("hand_mps", 0.05))
-        self.tilt_rps = math.radians(float(a.get("tilt_dps", 22.5)))
-        self.roll_rps = math.radians(float(a.get("roll_dps", 45.0)))
-        self.joint_rps = math.radians(float(a.get("joint_dps", 75.0)))
+        # handeye.py's jog_cfg, scaled by the speed level (default L2, x0.5: positioning, not racing)
+        self.hand_mps = float(a.get("hand_mps", 0.10))
+        self.tilt_rps = math.radians(float(a.get("tilt_dps", 45.0)))
+        self.roll_rps = math.radians(float(a.get("roll_dps", 90.0)))
+        self.joint_rps = math.radians(float(a.get("joint_dps", 150.0)))
+        self.level = max(0, min(len(LEVELS) - 1, int(a.get("level", 1))))
         self.watchdog_s = float(a.get("watchdog_s", 0.5))
         self.pid = a.get("pid") or {"p": 16, "i": 0, "d": 32}
         margin = float(a.get("margin_deg", 2.0))
@@ -384,7 +389,12 @@ class Arm:
         self.goal_sent_at = -1e9
         self.state, self.message = "idle", ""
 
-    def command(self, jog: dict, now: float):
+    def command(self, jog: dict, now: float, level=None):
+        if level is not None:
+            try:
+                self.level = max(0, min(len(LEVELS) - 1, int(level)))
+            except (TypeError, ValueError):
+                pass
         clean = {}
         for k in JOG_AXES:
             try:
@@ -459,16 +469,29 @@ class Arm:
             return
         moving = now - self.jog_at <= self.watchdog_s and any(self.jog.values())
         if moving:
-            j = self.jog
+            # arm_xpad.cartesian_step, which handeye.py's touchpad drives (that module imports
+            # evdev at the top, which the robot container doesn't have, hence the copy).
+            j, k = self.jog, LEVELS[self.level]
+            if j["wf"]:
+                # direct wrist_flex. Which way "up" is depends on the motor sign: probe it at the
+                # zero pose, NOT at q (tool pitch peaks with the magnet straight down, so a probe
+                # at q flips sign there and the wrist dithered in place, live 2026-11-10).
+                ref = np.zeros(5)
+                probe = ref.copy()
+                probe[3] += 1e-3
+                up = 1.0 if self.kin.pose(probe)[3] > self.kin.pose(ref)[3] else -1.0
+                self.q = self.q.copy()
+                self.q[3] = min(self.hi[3], max(self.lo[3], self.q[3] + up * j["wf"] * self.tilt_rps * k * dt))
+                self.target = self.kin.pose(self.q)   # the hand moves with the joint
             x, y, z, pitch = self.target
             r, th = math.hypot(x, y), math.atan2(y, x)
-            r = max(0.03, r + j["out"] * self.hand_mps * dt)
-            th += j["left"] * self.hand_mps * dt / max(r, 0.08)   # left = counter-clockwise from above
-            z += j["up"] * self.hand_mps * dt
-            pitch += j["tilt"] * self.tilt_rps * dt
+            r = max(0.03, r + j["out"] * self.hand_mps * k * dt)
+            th += j["left"] * self.hand_mps * k * dt / max(r, 0.08)   # left = counter-clockwise from above
+            z += j["up"] * self.hand_mps * k * dt
+            pitch += j["tilt"] * self.tilt_rps * k * dt
             cand = np.array([r * math.cos(th), r * math.sin(th), z, pitch])
             q_try = self.q.copy()
-            q_try[4] = min(self.hi[4], max(self.lo[4], q_try[4] + j["roll"] * self.roll_rps * dt))
+            q_try[4] = min(self.hi[4], max(self.lo[4], q_try[4] + j["roll"] * self.roll_rps * k * dt))
             q_new, ok = self.kin.ik(cand, q_try, self.lo, self.hi)
             if not ok:
                 # can't hold the tool tilt here (wrist_flex on a stop): put the HAND first and
@@ -477,7 +500,7 @@ class Arm:
                 if ok:
                     cand[3] = self.kin.pose(q_new)[3]
             if ok:
-                cap = self.joint_rps * dt
+                cap = self.joint_rps * k * dt
                 if np.any(np.abs(q_new - self.q) > cap + 1e-9):
                     q_new = self.q + np.clip(q_new - self.q, -cap, cap)
                     cand = self.kin.pose(q_new)
@@ -507,6 +530,7 @@ class Arm:
         if self.pose is not None and now - self.pose_at <= POSE_STALE_S:
             x, y, z, p = (float(v) for v in self.pose)
             s["pose"] = {"x": round(x, 4), "y": round(y, 4), "z": round(z, 4), "pitch": round(p, 4)}
+        s["level"] = self.level
         return s
 
 
@@ -661,7 +685,7 @@ def run_node(robot_id: str, cfg: dict):
             return
         now = time.monotonic()
         if arm is not None and isinstance(cmd.get("jog"), dict):
-            arm.command(cmd["jog"], now)
+            arm.command(cmd["jog"], now, cmd.get("level"))
             if head.bus is None and now >= head.next_open:
                 head._open(now)          # the arm shares the head's board: open it for both
         if cmd.get("stop") and arm is not None:

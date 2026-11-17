@@ -23,13 +23,14 @@ head:
 
 arm:
   calibration: configs/calibration/robots/so_follower/sortbots_arm.json
-  # The operator view's arm pad, at arm_cartesian.py's second speed level (x0.5 of its
-  # defaults): the hand moves 5 cm/s, the tool tilts 22.5 deg/s, the wrist rolls 45 deg/s.
-  hand_mps: 0.05
-  tilt_dps: 22.5
-  roll_dps: 45.0
-  # Cap on any joint's goal speed: IK near the folded pose asks for big swings per tick.
-  joint_dps: 75.0
+  # handeye.py's touchpad speeds (its jog_cfg) at full deflection, times the speed level's
+  # multiplier (L1..L4 = 0.25 / 0.5 / 0.75 / 1.0). It starts at L2: the hand 5 cm/s.
+  hand_mps: 0.10
+  tilt_dps: 45.0
+  roll_dps: 90.0
+  # Cap on any joint's goal speed (times the level): IK near the folded pose asks for big swings.
+  joint_dps: 150.0
+  level: 1
   # The pad re-sends at 10 Hz while held; nothing for this long and the hand stops.
   watchdog_s: 0.5
   pid: {p: 16, i: 0, d: 32}

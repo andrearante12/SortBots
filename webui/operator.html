@@ -247,25 +247,32 @@
   .cam .headpad button.held { background: rgba(255,255,255,.9); color: #15191e; }
   .cam .headpad [data-headpad="center"] { font-size: .6rem; }
   @media (pointer: coarse) { .cam .headpad { grid-template-columns: repeat(3, 36px); } .cam .headpad button { width: 36px; height: 32px; font-size: .9rem; } }
-  /* Arm pad, bottom-centre between the drive and head pads (operator.js wireArmPad): a 3x3
-     for reach/swing, a 3x2 for up-down / tool tilt / wrist roll, then Magnet and Pick. */
-  .cam .armpad { position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); display: grid;
-                 grid-template-columns: auto auto; grid-template-rows: auto auto; gap: 3px 8px;
-                 opacity: .75; transition: opacity .15s; touch-action: none; user-select: none; -webkit-user-select: none; }
+  /* Arm touchpad, bottom-centre between the drive and head pads (operator.js wireArmPad):
+     handeye.py's page, shrunk onto the tile. A 2D pad for the hand, a tall one for height,
+     then wrist up/down, the speed level, Magnet and Pick. */
+  .cam .armpad { position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); display: flex; gap: 6px; align-items: flex-end;
+                 opacity: .8; transition: opacity .15s; touch-action: none; user-select: none; -webkit-user-select: none; }
   .cam .armpad[hidden] { display: none; }
-  .cam:hover .armpad, .cam .armpad.on { opacity: 1; }
-  .cam .armpad .xy { display: grid; grid-template-columns: repeat(3, 26px); gap: 3px; }
-  .cam .armpad .zz { display: grid; grid-template-columns: repeat(3, 26px); grid-auto-rows: 24px; gap: 3px; align-self: center; }
-  .cam .armpad .acts { grid-column: 1 / -1; display: flex; gap: 3px; justify-content: center; }
-  .cam .armpad button { width: 26px; height: 24px; padding: 0; border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65);
-                        color: #e6ebf0; font-size: .72rem; line-height: 1; touch-action: none; }
-  .cam .armpad .acts button { width: auto; padding: 0 9px; font-size: .7rem; font-weight: 600; }
+  .cam:hover .armpad { opacity: 1; }
+  .cam .armpad .tp { position: relative; border-radius: 9px; background: rgba(29,38,51,.4); border: 1px solid rgba(120,150,190,.45); touch-action: none; cursor: grab; }
+  .cam .armpad .tp.on { background: rgba(29,38,51,.6); cursor: grabbing; }
+  .cam .armpad .tp.hand { width: 104px; height: 104px; }
+  .cam .armpad .tp.z { width: 30px; height: 104px; }
+  .cam .armpad .knob { position: absolute; left: 50%; top: 50%; width: 20px; height: 20px; border-radius: 50%; background: rgba(74,144,226,.85);
+                       transform: translate(-50%, -50%); pointer-events: none; }
+  .cam .armpad .ax { position: absolute; font: normal .58rem system-ui, sans-serif; color: rgba(170,190,210,.75); pointer-events: none; }
+  .cam .armpad .ax.t { top: 3px; left: 50%; transform: translateX(-50%); } .cam .armpad .ax.b { bottom: 3px; left: 50%; transform: translateX(-50%); }
+  .cam .armpad .ax.l { left: 3px; top: 50%; transform: translateY(-50%); } .cam .armpad .ax.r { right: 3px; top: 50%; transform: translateY(-50%); }
+  .cam .armpad .side { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
+  .cam .armpad .lv { grid-column: 1 / -1; display: flex; gap: 2px; }
+  .cam .armpad button { height: 22px; padding: 0 7px; border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65);
+                        color: #e6ebf0; font: 600 .64rem system-ui, sans-serif; line-height: 1; touch-action: none; white-space: nowrap; }
+  .cam .armpad .lv button { flex: 1; padding: 0 4px; }
   .cam .armpad button:hover { background: rgba(10,12,16,.85); }
-  .cam .armpad button.held { background: rgba(255,255,255,.9); color: #15191e; }
-  .cam .armpad [data-arm="stop"] { color: #ff8a80; }
+  .cam .armpad button.held, .cam .armpad button.sel { background: rgba(255,255,255,.9); color: #15191e; }
   .cam .armpad [data-arm-act="magnet"].on { background: rgba(242,183,5,.9); color: #15191e; border-color: rgba(242,183,5,1); }
   .cam .armpad [data-arm-act="pick"] { color: #8fd3a8; }
-  @media (pointer: coarse) { .cam .armpad .xy, .cam .armpad .zz { grid-template-columns: repeat(3, 34px); } .cam .armpad button { width: 34px; height: 30px; } }
+  @media (pointer: coarse) { .cam .armpad .tp.hand { width: 120px; height: 120px; } .cam .armpad .tp.z { width: 36px; height: 120px; } .cam .armpad button { height: 28px; } }
   .more .cam canvas.feat { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .featbtn { position: absolute; top: 6px; left: 6px; background: rgba(10,12,16,.6); border: 1px solid transparent; color: #c3cad2; font-size: .72rem; padding: 3px 9px; border-radius: 6px; }
   .featbtn.on { background: rgba(61,220,132,.9); color: #15191e; font-weight: 600; }
