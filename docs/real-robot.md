@@ -38,6 +38,13 @@ scripts/jetson.sh status | shell | logs | stop
 Open `http://jetson-orin.<tailnet>.ts.net:8081/` and start `real_map_fresh`. Move
 the robot slowly: fast turns and blank walls lose visual odometry.
 
+**Power-on order:** the battery feeds the Jetson and the servo boards together. Switch on the
+**servo boards first**, wait 3–5 s, then the **Jetson**. Both at once, the servos' inrush sags the
+supply while the Jetson boots, and the boot sometimes hangs: a UEFI firmware call that never
+returns (`Workqueue: efi_rts_wq` in the kernel log), Tailscale stuck behind it, the robot alive
+but unreachable (seen 2026-11-16). Shutting down: Rest, then the Jetson, then the servo boards.
+A separate regulator or a delay relay for the Jetson would remove the ordering rule.
+
 **Unattended (survives reboots and power cuts):** once the Wi-Fi profile works,
 
 ```bash
