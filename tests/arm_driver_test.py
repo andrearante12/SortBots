@@ -54,7 +54,7 @@ class FakeBus:
 
 def make(**kw):
     bus = FakeBus(CFG["head"]["cal"], **kw)
-    return ad.Head(CFG, opener=lambda port: bus, holders_of=lambda port: []), bus
+    return ad.Head(CFG, opener=lambda port, **kw: bus, holders_of=lambda port: []), bus
 
 
 def test_opens_on_first_command_and_torque_on_at_current_pose():
@@ -84,11 +84,11 @@ def test_slew_and_clamp():
 def test_tilt_sign_maps_the_sim_convention():
     cfg = {**CFG, "head": {**CFG["head"], "tilt_sign": -1.0}}
     bus = FakeBus(cfg["head"]["cal"])
-    head = ad.Head(cfg, opener=lambda port: bus, holders_of=lambda port: [])
+    head = ad.Head(cfg, opener=lambda port, **kw: bus, holders_of=lambda port: [])
     head.command({"head_tilt_joint": math.radians(10)}, 0.0)
     assert head.target["head_tilt"] == pytest.approx(-10)
-    head.pos = {"head_pan": 0.0, "head_tilt": -10.0}
-    assert head.status()["tilt"] == pytest.approx(math.radians(10), abs=1e-4)
+    head.pos, head.pos_at = {"head_pan": 0.0, "head_tilt": -10.0}, 0.0
+    assert head.status(now=0.0)["tilt"] == pytest.approx(math.radians(10), abs=1e-4)
 
 
 def test_mismatched_calibration_is_refused():
@@ -100,7 +100,7 @@ def test_mismatched_calibration_is_refused():
 
 def test_busy_board_never_opened():
     bus = FakeBus(CFG["head"]["cal"])
-    head = ad.Head(CFG, opener=lambda port: bus, holders_of=lambda port: [(99, "python handeye.py pick")])
+    head = ad.Head(CFG, opener=lambda port, **kw: bus, holders_of=lambda port: [(99, "python handeye.py pick")])
     head.command({"head_pan_joint": 0.1}, 0.0)
     assert head.state == "busy" and "99" in head.message and not bus.open_
 
@@ -122,17 +122,27 @@ def test_peek_reads_position_without_torque_or_holding():
     head, bus = make(present={"head_pan": 2100})
     head.poll(0.0)
     assert head.bus is None and not bus.open_ and not bus.writes
-    assert head.status()["pan"] == pytest.approx(math.radians(ft.raw_to_deg(2100, 567, 3412)), abs=1e-4)
+    assert head.status(now=0.0)["pan"] == pytest.approx(math.radians(ft.raw_to_deg(2100, 567, 3412)), abs=1e-4)
     head.poll(0.5)                 # rate-limited: no second peek inside PEEK_S
     bus.regs[7][ft.PRESENT_POSITION] = 1989
     head.poll(0.6)
-    assert head.status()["pan"] != pytest.approx(0, abs=1e-3)
+    assert head.status(now=0.6)["pan"] != pytest.approx(0, abs=1e-3)
     head.poll(1.1)
-    assert head.status()["pan"] == pytest.approx(0, abs=1e-2)
+    assert head.status(now=1.1)["pan"] == pytest.approx(0, abs=1e-2)
+
+
+def test_failed_peek_keeps_the_last_pose_until_stale():
+    head, bus = make(present={"head_pan": 2100})
+    head.poll(0.0)
+    good = head.status(now=0.0)["pan"]
+    del bus.regs[7]                # the board stops answering
+    head.poll(1.1)
+    assert head.status(now=1.1)["pan"] == good          # a failed peek doesn't blank it
+    assert "pan" not in head.status(now=ad.POSE_STALE_S + 0.1)
 
 
 def test_peek_skips_a_held_board():
     bus = FakeBus(CFG["head"]["cal"])
-    head = ad.Head(CFG, opener=lambda port: bus, holders_of=lambda port: [(7, "handeye")])
+    head = ad.Head(CFG, opener=lambda port, **kw: bus, holders_of=lambda port: [(7, "handeye")])
     head.poll(0.0)
     assert head.pos is None and not bus.open_

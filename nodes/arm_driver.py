@@ -46,6 +46,10 @@ CONTROL_HZ = 50
 STATE_HZ = 5
 RETRY_OPEN_S = 2.0
 PEEK_S = 1.0  # while not holding the board: read where the head is this often, torque untouched
+POSE_STALE_S = 5.0  # a pose older than this isn't reported (a failed peek keeps the last one)
+# Every other peek failed live (2026-11-16): the first read right after opening the port went
+# unanswered. A short settle after open, and a longer reply wait than the 20 ms default.
+PEEK_SETTLE_S, PEEK_TIMEOUT_S = 0.03, 0.05
 HEAD_JOINTS = {"head_pan_joint": "head_pan", "head_tilt_joint": "head_tilt"}
 
 
@@ -88,12 +92,13 @@ class Head:
         self.max_dps = float(h.get("max_dps", 90.0))
         self.pid = h.get("pid") or {"p": 16, "i": 0, "d": 32}
         self.lim = head_limits(self.cal, float(h.get("margin_deg", 2.0)))
-        self.opener = opener or (lambda port: ft.Bus(port))
+        self.opener = opener or (lambda port, timeout_s=0.02: ft.Bus(port, timeout_s=timeout_s))
         self.holders_of = holders_of
         self.bus = None
         self.target = None      # degrees, where the operator wants it
         self.goal = None        # degrees, slewed toward target, what was last sent
         self.pos = None         # degrees, last read
+        self.pos_at = -1e9
         self.next_open = 0.0
         self.next_peek = 0.0
         self.state, self.message = "idle", ""
@@ -172,6 +177,7 @@ class Head:
             bus.write(sid, ft.TORQUE_ENABLE, 1)
             bus.write(sid, ft.LOCK, 1)
         self.pos, self.goal = pos, dict(pos)
+        self.pos_at = time.monotonic()
         # An axis the first command didn't name stays where it is.
         self.target = {**pos, **(self.target or {})}
 
@@ -208,7 +214,7 @@ class Head:
             self._peek(now)
             return
         try:
-            self.pos = self._read(self.bus)
+            self.pos, self.pos_at = self._read(self.bus), now
         except (OSError, ft.BusError) as e:
             self._lost(now, f"arm board read failed: {e}")
 
@@ -221,12 +227,13 @@ class Head:
         self.next_peek = now + PEEK_S
         if self.holders_of(self.port):
             return
-        bus = self.opener(self.port)
+        bus = self.opener(self.port, timeout_s=PEEK_TIMEOUT_S)
         try:
             bus.open()
-            self.pos = self._read(bus)
+            time.sleep(PEEK_SETTLE_S)
+            self.pos, self.pos_at = self._read(bus), now
         except (OSError, ft.BusError):
-            self.pos = None
+            pass  # keep the last pose; status() drops it once it is POSE_STALE_S old
         finally:
             try:
                 bus.close()
@@ -257,9 +264,10 @@ class Head:
             bus.close()
         self.state = "idle"
 
-    def status(self):
+    def status(self, now=None):
+        now = time.monotonic() if now is None else now
         s = {"held": self.bus is not None, "state": self.state, "message": self.message}
-        if self.pos:
+        if self.pos and now - self.pos_at <= POSE_STALE_S:
             s["pan"] = round(self.to_rad("head_pan", self.pos["head_pan"]), 4)
             s["tilt"] = round(self.to_rad("head_tilt", self.pos["head_tilt"]), 4)
         return s

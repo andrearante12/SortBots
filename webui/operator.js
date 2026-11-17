@@ -709,7 +709,11 @@
       let h;
       try { h = JSON.parse(msg.data); } catch (e) { return; }
       const was = r.head && r.head.state;
-      r.head = h; r.headAt = performance.now();
+      // A report without a pose (arm_driver couldn't read one this time) keeps the last pose:
+      // blanking it hid the sliders and the head pad every other second (2026-11-16).
+      if (typeof h.pan !== "number" && r.head && typeof r.head.pan === "number") { h.pan = r.head.pan; h.tilt = r.head.tilt; }
+      else if (typeof h.pan === "number") r.headAt = performance.now();
+      r.head = h;
       if ((h.state === "busy" || h.state === "error") && h.state !== was) toast(`${nameOf(id)}: head ${h.state}. ${h.message || ""}`);
       syncHeads();
     });
