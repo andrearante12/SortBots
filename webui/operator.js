@@ -1143,6 +1143,7 @@
       <button type="button" class="featbtn" data-cam-features aria-pressed="false" title="Show the visual features RTAB-Map is tracking (green = inlier driving the pose, amber = matched to the map, grey = detected only)">Features</button>
       <span class="featstat"></span>
       <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button><button type="button" data-cam-mode="split" title="Camera and depth, stacked">Split</button></div>
+      <div class="padmode" role="tablist" aria-label="What the pad controls" hidden><button type="button" data-padmode="drive" role="tab">Drive</button><button type="button" data-padmode="head" role="tab">Head</button><button type="button" data-padmode="arm" role="tab">Arm</button></div>
       <div class="drive" role="group" aria-label="Drive by hand" title="Drive by hand: hold an arrow. Keys W/A/S/D move, Q/E rotate, Space stops (they drive the robot in control)">
         <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
@@ -1176,6 +1177,7 @@
     wireHead(id, c);
     wireHeadPad(id, c, el.querySelector(".headpad"));
     wireArmPad(id, c, el.querySelector(".armpad"));
+    wirePadMode(id, c, el);
     syncCamButtons(c);
     wireDrivePad(id, el.querySelector(".drive"));
     return c;
@@ -1245,7 +1247,8 @@
       const real = r && r.head && typeof r.head.pan === "number" && performance.now() - r.headAt < 3000 ? r.head : null;
       const h = (worldTruth && worldTruth.head && worldTruth.head[id]) || real;
       c.head.hidden = !h;
-      if (c.headPad) c.headPad.hidden = !h;
+      c.hasHead = !!h;
+      applyPadMode(c);
       if (!h || performance.now() - c.headAt < HEAD_HANDS_OFF_MS) continue; // not under the operator's hand
       for (const [key] of HEAD_AXES) {
         c.head.querySelector(`[data-head="${key}"]`).value = h[key];
@@ -1394,7 +1397,8 @@
     for (const [id, c] of cams) {
       if (!c.armPad) continue;
       const r = robots.get(id), a = r && r.arm && performance.now() - r.armAt < 3000 ? r.arm : null;
-      c.armPad.hidden = !a;
+      c.hasArm = !!a;
+      applyPadMode(c);
       if (!a) continue;
       if (typeof a.level === "number") c.armPad.querySelectorAll("[data-lv]").forEach((x) => x.classList.toggle("sel", Number(x.dataset.lv) === a.level));
       const mag = c.armPad.querySelector('[data-arm-act="magnet"]');
@@ -1402,6 +1406,37 @@
       mag.classList.toggle("on", !!on);
       mag.textContent = on ? "Magnet ON" : "Magnet";
     }
+  }
+
+  // -- one pad at a time over the camera: Drive / Head / Arm (2026-11-16: all three at once
+  // covered the picture). Head and Arm are offered only when that hardware reports in
+  // (head_state / arm_state, or the sim's head); the choice is remembered per browser.
+  const PAD_MODE_KEY = "sortbots.padMode";
+  function wirePadMode(id, c, el) {
+    c.padModeEl = el.querySelector(".padmode");
+    c.drivePad = el.querySelector(".drive");
+    try { c.padMode = localStorage.getItem(PAD_MODE_KEY) || "drive"; } catch (e) { c.padMode = "drive"; }
+    for (const b of c.padModeEl.querySelectorAll("[data-padmode]")) b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      c.padMode = b.dataset.padmode;
+      try { localStorage.setItem(PAD_MODE_KEY, c.padMode); } catch (err) { /* per-page only */ }
+      applyPadMode(c);
+    });
+    applyPadMode(c);
+  }
+  function applyPadMode(c) {
+    if (!c.padModeEl) return;
+    const can = { drive: true, head: !!c.hasHead, arm: !!c.hasArm };
+    const mode = can[c.padMode] ? c.padMode : "drive";
+    for (const b of c.padModeEl.querySelectorAll("[data-padmode]")) {
+      b.hidden = !can[b.dataset.padmode];
+      b.classList.toggle("on", b.dataset.padmode === mode);
+      b.setAttribute("aria-selected", String(b.dataset.padmode === mode));
+    }
+    c.padModeEl.hidden = !(can.head || can.arm);   // drive alone: nothing to switch
+    c.drivePad.hidden = mode !== "drive";
+    if (c.headPad) c.headPad.hidden = mode !== "head";
+    if (c.armPad) c.armPad.hidden = mode !== "arm";
   }
 
   // Keys drive the robot in control (the open card clicked into last), from anywhere on

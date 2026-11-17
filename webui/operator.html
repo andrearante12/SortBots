@@ -235,6 +235,14 @@
   .cam .drive button.held { background: rgba(255,255,255,.9); color: #15191e; }
   .cam .drive [data-drive="stop"] { color: #ff8a80; }
   @media (pointer: coarse) { .cam .drive { grid-template-columns: repeat(3, 36px); } .cam .drive button { width: 36px; height: 32px; font-size: .9rem; } }
+  /* Drive / Head / Arm: which pad is over the picture (operator.js applyPadMode). */
+  .cam .padmode { position: absolute; top: 6px; left: 50%; transform: translateX(-50%); display: flex; padding: 2px; gap: 2px;
+                  border-radius: 7px; background: rgba(10,12,16,.6); border: 1px solid rgba(255,255,255,.18); }
+  .cam .padmode[hidden], .cam .padmode button[hidden], .cam .drive[hidden] { display: none; }
+  .cam .padmode button { height: 22px; padding: 0 10px; border: 0; border-radius: 5px; background: transparent; color: #c8d0d8;
+                         font: 600 .66rem system-ui, sans-serif; cursor: pointer; }
+  .cam .padmode button:hover { background: rgba(255,255,255,.12); }
+  .cam .padmode button.on { background: rgba(255,255,255,.9); color: #15191e; }
   /* Head pad: the drive pad's mirror on the right (operator.js wireHeadPad). Raised clear
      of the feed's corner label (Camera / Depth). */
   .cam .headpad { position: absolute; right: 6px; bottom: 30px; display: grid; grid-template-columns: repeat(3, 26px); gap: 3px;
