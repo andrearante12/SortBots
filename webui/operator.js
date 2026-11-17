@@ -678,7 +678,7 @@
       id, color: COLORS[robots.size % COLORS.length], pose: null, linkAt: -Infinity, plan: [],
       explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity, queueDepth: 0,
       nav: null, seenStamp: {}, odom: null, odomAt: -Infinity,
-      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity, head: null, headAt: -Infinity, arm: null, armAt: -Infinity,
+      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity, head: null, headAt: -Infinity, arm: null, armAt: -Infinity, mode: null,
     };
     robots.set(id, r);
     // Kept so removeRobot can drop them when a run leaves this robot out.
@@ -727,6 +727,18 @@
       if (a.magnet && a.magnet.state === "error" && wasMag !== "error") toast(`${nameOf(id)}: ${a.magnet.message}`);
       if (a.note) toast(`${nameOf(id)}: ${a.note}`);
       syncArmPads();
+    });
+    // Nav / manipulation (arm_driver): every page follows the robot's mode, so the pad in front
+    // is the one that mode is for. Head stays as the operator picked it.
+    sub(`/${id}/robot_mode`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
+      let m;
+      try { m = JSON.parse(msg.data); } catch (e) { return; }
+      const was = r.mode && r.mode.mode, wasNote = r.mode && r.mode.note;
+      r.mode = m;
+      if (m.note && m.note !== wasNote) toast(`${nameOf(id)}: ${m.note}`);
+      const c = cams.get(id);
+      if (c && m.mode !== was && c.padMode !== "head") { c.padMode = m.mode === "manip" ? "arm" : "drive"; applyPadMode(c); }
+      if (c) syncPickLine(c);
     });
     sub(`/${id}/pick_status`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
       try { r.pick = JSON.parse(msg.data); } catch (e) { /* keep the last one */ }
@@ -1145,7 +1157,7 @@
       <button type="button" class="featbtn" data-cam-features aria-pressed="false" title="Show the visual features RTAB-Map is tracking (green = inlier driving the pose, amber = matched to the map, grey = detected only)">Features</button>
       <span class="featstat"></span>
       <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button><button type="button" data-cam-mode="split" title="Camera and depth, stacked">Split</button></div>
-      <div class="padmode" role="tablist" aria-label="What the pad controls" hidden><button type="button" data-padmode="drive" role="tab">Drive</button><button type="button" data-padmode="head" role="tab">Head</button><button type="button" data-padmode="arm" role="tab">Arm</button></div>
+      <div class="padmode" role="tablist" aria-label="What the pad controls" hidden><button type="button" data-padmode="drive" role="tab" title="Nav mode: drive the base, mapping runs">Nav</button><button type="button" data-padmode="head" role="tab" title="Aim the head">Head</button><button type="button" data-padmode="arm" role="tab" title="Manipulation mode: the arm, pick and rest; mapping pauses">Manip</button></div>
       <div class="drive" role="group" aria-label="Drive by hand" title="Drive by hand: hold an arrow. Keys W/A/S/D move, Q/E rotate, Space stops (they drive the robot in control)">
         <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
@@ -1434,6 +1446,10 @@
       e.stopPropagation();
       c.padMode = b.dataset.padmode;
       try { localStorage.setItem(PAD_MODE_KEY, c.padMode); } catch (err) { /* per-page only */ }
+      // Nav and Manip are the ROBOT's mode (arm_driver pauses mapping in manipulation); Head
+      // only changes the pad. Without an arm there is no mode to set (the sim, a bare base).
+      const robotMode = { drive: "nav", arm: "manip" }[c.padMode];
+      if (robotMode && c.hasArm) publishString(`/${id}/robot_mode_cmd`, JSON.stringify({ mode: robotMode }));
       applyPadMode(c);
     });
     applyPadMode(c);
@@ -1458,12 +1474,13 @@
   const PICK_PHASE_TONE = { FAILED: "bad", ABORTED: "bad", BUSY: "warn", PLACED: "ok", PICKED: "ok", REST: "ok", IDLE: "" };
   function syncPickLine(c) {
     if (!c.pickLine) return;
-    const r = c.robotId && robots.get(c.robotId), p = r && r.pick;
+    const r = c.robotId && robots.get(c.robotId), p = r && r.pick, m = r && r.mode;
     const show = c.padMode === "arm" && c.hasArm && p && p.phase;
     c.pickLine.hidden = !show;
     if (!show) return;
+    const mapping = m && m.mode === "manip" ? (m.mapping === "paused" ? " · mapping paused" : m.mapping === "unavailable" ? "" : " · pausing mapping…") : "";
     c.pickLine.querySelector("b").textContent = p.phase;
-    c.pickLine.querySelector("span").textContent = p.note || "";
+    c.pickLine.querySelector("span").textContent = (p.note || "") + mapping;
     c.pickLine.dataset.tone = PICK_PHASE_TONE[p.phase] ?? (p.busy ? "busy" : "");
   }
 

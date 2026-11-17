@@ -24,6 +24,13 @@ and a servo board takes one owner: anything that moves either goes through here.
                                               {"cmd": "cancel"} holds the arm where it is
     /<id>/pick_status  std_msgs/String (JSON, latched) phase/busy/note/result, the keys the
                                               sim's magnet_pick.py publishes
+    /<id>/robot_mode_cmd std_msgs/String (JSON) {"mode": "nav" | "manip"}
+    /<id>/robot_mode   std_msgs/String (JSON)  {"mode", "mapping": running|paused|unavailable}
+
+Nav and manipulation are robot states. Manipulation pauses RTAB-Map's mapping (a full core on
+the Orin, 2026-11-16, and the robot isn't exploring while it picks); nav resumes it on the same
+map. Odometry runs in both: the place backs the base off, and the robot must stay localized.
+A pick or rest switches to manipulation by itself; nav is refused while one runs.
 
 During a pick the pads are paused (their goal re-sends would fight it) and any arm pad touch
 aborts it, as any key did on handeye's page. An abort holds the arm and never drops the magnet.
@@ -825,9 +832,60 @@ def run_node(robot_id: str, cfg: dict):
         pick_status("STARTING", "going to rest" if action == "rest" else "pick and place", busy=True)
         pick["thread"].start()
 
+    # -- nav / manipulation mode --------------------------------------------------------------
+    from std_srvs.srv import Empty
+    pause_cli = node.create_client(Empty, f"/{robot_id}/rtabmap/pause")
+    resume_cli = node.create_client(Empty, f"/{robot_id}/rtabmap/resume")
+    mode_pub = node.create_publisher(String, f"/{robot_id}/robot_mode", latched)
+    mode = {"mode": "nav", "mapping": "unknown", "applied": None, "note": ""}
+
+    def publish_mode():
+        mode_pub.publish(String(data=json.dumps({k: mode[k] for k in ("mode", "mapping", "note")})))
+
+    def apply_mode():
+        """Make RTAB-Map match the mode. Re-run every second, so a mapping node that restarted,
+        or wasn't up yet when the mode was set, ends up paused or running as it should."""
+        want = "paused" if mode["mode"] == "manip" else "running"
+        if mode["applied"] == want:
+            return
+        cli = pause_cli if want == "paused" else resume_cli
+        if not cli.service_is_ready():
+            if mode["mapping"] != "unavailable":
+                mode["mapping"] = "unavailable"
+                publish_mode()
+            return
+        mode["applied"] = want   # one call in flight at a time; a failure clears it to retry
+
+        def done(fut):
+            if fut.exception() is None:
+                mode["mapping"] = want
+                log.info(f"mapping {want} ({mode['mode']} mode)")
+            else:
+                mode["applied"] = None
+            publish_mode()
+        cli.call_async(Empty.Request()).add_done_callback(done)
+
+    def set_mode(m):
+        if m not in ("nav", "manip"):
+            return
+        if m == "nav" and pick["thread"] is not None:
+            mode["note"] = "a pick is running: nav mode once it's done (or touch the arm pad to stop it)"
+            return publish_mode()
+        mode["note"] = ""
+        if m != mode["mode"]:
+            mode["mode"], mode["applied"] = m, None
+            log.info(f"{m} mode")
+        apply_mode()
+        publish_mode()
+
+    node.create_subscription(String, f"/{robot_id}/robot_mode_cmd",
+                             lambda msg: set_mode((_json(msg.data) or {}).get("mode")), 10)
+    publish_mode()
+
     def on_pick_request(msg):
         cmd = _json(msg.data) or {}
         if cmd.get("cmd") in ("auto", "rest"):
+            set_mode("manip")
             start_pick(cmd["cmd"])
         elif cmd.get("cmd") in ("cancel", "stop", "abort"):
             pick["abort"].set()
@@ -901,6 +959,8 @@ def run_node(robot_id: str, cfg: dict):
         # that subscribes later, so without this the operator view never saw the pick (2026-11-16).
         if pick["last"] is not None and now - last.get("pick_pub", 0.0) >= 1.0:
             pick_pub.publish(pick["last"])
+            apply_mode()
+            publish_mode()       # latched too, but rosbridge doesn't replay it to a late page
             last["pick_pub"] = now
         if pick["thread"] is not None:
             return                     # the pick reads the board itself
