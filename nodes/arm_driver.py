@@ -18,6 +18,14 @@ and a servo board takes one owner: anything that moves either goes through here.
                                               {"stop": true}
     /<id>/arm_state   std_msgs/String (JSON)  "engaged", "state"/"message", "pose" (the tip in
                                               base_link: x, y, z m, pitch rad), "magnet"
+    /<id>/pick_request std_msgs/String (JSON) {"cmd": "auto"} the one-button pick and place
+                                              (scripts/pick_core.py, handeye.py's PICK);
+                                              {"cmd": "cancel"} holds the arm where it is
+    /<id>/pick_status  std_msgs/String (JSON, latched) phase/busy/note/result, the keys the
+                                              sim's magnet_pick.py publishes
+
+During a pick the pads are paused (their goal re-sends would fight it) and any arm pad touch
+aborts it, as any key did on handeye's page. An abort holds the arm and never drops the magnet.
 
 The arm jogs the HAND, not joints: scripts/arm_cartesian.py's teleop (radial / around the
 base / up-down / tool tilt / wrist roll, damped-least-squares IK in so101_kin, joint speed
@@ -560,6 +568,17 @@ class Magnet:
         self.want = "on" if on else "off"
         self.q.put(self.want)
 
+    def ask(self, cmd, timeout=3.0):
+        """Run cmd ("on" / "off" / "status") on the magnet thread and wait for it: the pick
+        needs the board's own answer. -> "ON" / "OFF", or None when the board can't say."""
+        if cmd in ("on", "off"):
+            self.want = cmd
+        done = threading.Event()
+        self.q.put((cmd, done))
+        if not done.wait(timeout) or self.state == "error":
+            return None
+        return self.board
+
     def close(self):
         """Switch off, then stop the thread. Called on shutdown: the magnet never stays on."""
         if self.fd is not None or self.want == "on":
@@ -645,6 +664,9 @@ class Magnet:
                 cmd = "on"  # re-arm
             if cmd is None:
                 break
+            done = None
+            if isinstance(cmd, tuple):
+                cmd, done = cmd
             try:
                 self._do(cmd)
                 self.state, self.message = "ok", ""
@@ -652,11 +674,22 @@ class Magnet:
                 self._close_fd()
                 self.board = None
                 self.state, self.message = "error", f"magnet: {e}"
-            next_rearm = time.monotonic() + self.rearm_s if (cmd == "on" and self.want == "on") else None
+            if done is not None:
+                done.set()
+            if cmd in ("on", "off"):
+                next_rearm = time.monotonic() + self.rearm_s if (cmd == "on" and self.want == "on") else None
         self._close_fd()
 
     def status(self):
         return {"want": self.want, "board": self.board, "state": self.state, "message": self.message}
+
+
+def _json(text):
+    try:
+        v = json.loads(text)
+    except ValueError:
+        return None
+    return v if isinstance(v, dict) else None
 
 
 def run_node(robot_id: str, cfg: dict):
@@ -684,6 +717,11 @@ def run_node(robot_id: str, cfg: dict):
         if not isinstance(cmd, dict):
             return
         now = time.monotonic()
+        if pick["thread"] is not None:
+            # handeye's page: any key aborts a pick. A pad touch or the stop button does here.
+            if (isinstance(cmd.get("jog"), dict) and any(cmd["jog"].values())) or cmd.get("stop"):
+                pick["abort"].set()
+            return
         if arm is not None and isinstance(cmd.get("jog"), dict):
             arm.command(cmd["jog"], now, cmd.get("level"))
             if head.bus is None and now >= head.next_open:
@@ -698,6 +736,108 @@ def run_node(robot_id: str, cfg: dict):
                 magnet.set(cmd["magnet"] == "on")
 
     arm_msg = {"note": ""}
+
+    # -- the one-button pick (nodes/pick_ros.py around scripts/pick_core.py) ------------------
+    from rclpy.qos import (DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data)
+    from geometry_msgs.msg import Twist
+    from sensor_msgs.msg import CameraInfo, Image
+    latched = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL, reliability=ReliabilityPolicy.RELIABLE)
+    pick_pub = node.create_publisher(String, f"/{robot_id}/pick_status", latched)
+    vel_pub = node.create_publisher(Twist, f"/{robot_id}/cmd_vel", 10)
+    base_state = {"st": None}
+    node.create_subscription(String, f"/{robot_id}/base_status",
+                             lambda m: base_state.__setitem__("st", _json(m.data)), 10)
+    pick = {"thread": None, "abort": threading.Event(), "subs": [], "done": False, "robot": None}
+
+    def pick_status(phase, note="", busy=False, **extra):
+        mag = magnet.board if magnet else None
+        msg = {"phase": phase, "busy": busy, "mode": "manipulation" if busy else "idle", "marker": 10,
+               "note": note, "cmd": "auto", "target": None, "magnet": extra.pop("magnet", mag), **extra}
+        pick_pub.publish(String(data=json.dumps(msg, default=str)))
+
+    pick_status("IDLE", "ready" if (arm and magnet) else "no arm or magnet configured")
+
+    def publish_vel(x):
+        t = Twist()
+        t.linear.x = float(x)
+        vel_pub.publish(t)
+
+    def start_pick():
+        import pick_core
+        import pick_ros
+        if pick["thread"] is not None:
+            return pick_status("BUSY", "a pick is already running", busy=True)
+        if arm is None or magnet is None:
+            return pick_status("FAILED", "the pick needs the arm and the magnet (configs/arm_board.yaml)")
+        now = time.monotonic()
+        if head.bus is None:
+            head._open(now)
+        if head.bus is None:
+            return pick_status("FAILED", f"arm board not available: {head.message}")
+        if pick["robot"] is None:
+            try:
+                pick["robot"] = pick_core.load_robot()
+            except (OSError, RuntimeError, ValueError) as e:
+                return pick_status("FAILED", f"calibration: {e}")
+        kin, hc, poses = pick["robot"]
+        io = pick_ros.BusArmIO(head.bus, head.cal, arm.cal)
+        cam = pick_ros.RosCamera(io)
+        pick["subs"] = [
+            node.create_subscription(Image, f"/{robot_id}/camera/rgb", cam.on_rgb, qos_profile_sensor_data),
+            node.create_subscription(Image, f"/{robot_id}/camera/depth", cam.on_depth, qos_profile_sensor_data),
+            node.create_subscription(CameraInfo, f"/{robot_id}/camera/camera_info", cam.on_info, qos_profile_sensor_data),
+        ]
+        abort = pick["abort"]
+        base = pick_ros.CmdVelBase(publish_vel, lambda: base_state["st"], abort)
+
+        def report(phase, text, **extra):
+            busy = phase in pick_core.PickCore.MOVING_FLAGS or phase in ("HELD", "LOCKED", "PLANNED", "HOVERING", "HOLDING")
+            pick_status(phase, text, busy=True if pick["thread"] else busy, **{k: v for k, v in extra.items() if k in ("state", "magnet")})
+
+        core = pick_core.PickCore(io, cam, pick_ros.MagnetIO(magnet), base, kin, hc, poses, abort=abort, report=report)
+
+        def run():
+            result, note = "failed", ""
+            try:
+                core.start()
+                result = core.auto_pick()
+            except Exception as e:   # the thread must always end in a status, never silently
+                note = f"{type(e).__name__}: {e}"
+                log.error(f"pick crashed: {note}")
+            pick_status(result.upper(), note or result, busy=False, result=result)
+            pick["done"] = True
+
+        pick["done"] = False
+        pick["thread"] = threading.Thread(target=run, daemon=True)
+        log.info("pick: starting")
+        pick_status("STARTING", "pick and place", busy=True)
+        pick["thread"].start()
+
+    def on_pick_request(msg):
+        cmd = _json(msg.data) or {}
+        if cmd.get("cmd") == "auto":
+            start_pick()
+        elif cmd.get("cmd") in ("cancel", "stop", "abort"):
+            pick["abort"].set()
+
+    node.create_subscription(String, f"/{robot_id}/pick_request", on_pick_request, 10)
+
+    def pick_finished():
+        """Back from a pick: drop the camera, and let the pads continue from where the arm and
+        head ARE (the pick moved them), so the next pad touch never snaps them back."""
+        for sub in pick["subs"]:
+            node.destroy_subscription(sub)
+        pick["subs"], pick["thread"] = [], None
+        if head.bus is not None:
+            try:
+                pos = head._read(head.bus)
+                head.pos, head.goal, head.target = pos, dict(pos), dict(pos)
+                if arm is not None:
+                    q = arm._read_q(head.bus)
+                    arm.q, arm.target, arm.engaged = arm._clip(q), arm.kin.pose(arm._clip(q)), True
+                    arm.state = "holding"
+            except (OSError, ft.BusError):
+                pass
     node.create_subscription(JointState, f"/{robot_id}/head_cmd", on_head, 10)
     node.create_subscription(String, f"/{robot_id}/arm_cmd", on_arm, 10)
     head_pub = node.create_publisher(String, f"/{robot_id}/head_state", 10)
@@ -719,6 +859,10 @@ def run_node(robot_id: str, cfg: dict):
         now = time.monotonic()
         dt = min(0.1, now - last["t"])
         last["t"] = now
+        if pick["thread"] is not None:
+            if pick["done"]:
+                pick_finished()
+            return                     # the pick owns the arm and head while it runs
         head.tick(now, dt)
         if arm is not None:
             if head.bus is None:
@@ -741,6 +885,8 @@ def run_node(robot_id: str, cfg: dict):
 
     def on_state():
         now = time.monotonic()
+        if pick["thread"] is not None:
+            return                     # the pick reads the board itself
         head.poll(now)
         head_pub.publish(String(data=json.dumps(head.status())))
         if arm is not None:
@@ -759,7 +905,11 @@ def run_node(robot_id: str, cfg: dict):
              + (", magnet" if magnet else "") + f" on {head.port}")
 
     def shutdown():
-        # Magnet off first, then close the board with everything HOLDING (torque stays on).
+        # A running pick holds where it is first; then magnet off, then close the board with
+        # everything HOLDING (torque stays on).
+        if pick["thread"] is not None:
+            pick["abort"].set()
+            pick["thread"].join(timeout=3)
         if magnet is not None:
             magnet.close()
         head.release(limp=False)

@@ -15,9 +15,11 @@ are answered by a status frame `ff ff <id> <len> <error> <data...> <checksum>`.
 """
 from __future__ import annotations
 
+import functools
 import os
 import select
 import termios
+import threading
 import time
 
 BAUD = 1_000_000
@@ -135,12 +137,23 @@ class BusError(RuntimeError):
     pass
 
 
+def _locked(fn):
+    @functools.wraps(fn)
+    def wrapper(self, *a, **kw):
+        with self.lock:
+            return fn(self, *a, **kw)
+    return wrapper
+
+
 class Bus:
-    """One servo board's serial port. Not thread-safe: one caller at a time."""
+    """One servo board's serial port. Every exchange holds `lock`, so two threads (arm_driver's
+    control loop and a running pick) can share one board without interleaving frames: a reply
+    must be read by the thread that asked for it."""
 
     def __init__(self, port: str, timeout_s: float = 0.02):
         self.port, self.timeout_s = port, timeout_s
         self.fd = None
+        self.lock = threading.RLock()
 
     def open(self):
         fd = os.open(self.port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
@@ -192,6 +205,7 @@ class Bus:
                 if got is not None:
                     return got
 
+    @_locked
     def write(self, servo_id: int, reg: tuple[int, int], value: int, retries: int = 2):
         for attempt in range(retries + 1):
             try:
@@ -202,6 +216,7 @@ class Bus:
                 if attempt == retries:
                     raise
 
+    @_locked
     def read(self, servo_id: int, reg: tuple[int, int], sign_bit: int | None = None,
              retries: int = 2) -> int:
         for attempt in range(retries + 1):
@@ -215,10 +230,12 @@ class Bus:
                 if attempt == retries:
                     raise
 
+    @_locked
     def sync_velocity(self, raw_by_id: dict[int, int]):
         """Goal_Velocity to several servos in one unanswered broadcast frame."""
         self._send(sync_velocity_frame(raw_by_id))
 
+    @_locked
     def sync_write(self, reg: tuple[int, int], values: dict[int, int], sign_bit: int | None = None):
         self._send(sync_write_frame(reg, values, sign_bit))
 

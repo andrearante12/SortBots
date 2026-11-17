@@ -119,7 +119,7 @@ def servos():
 
 
 def test_open_sets_velocity_mode_once_and_torque_on(servos, monkeypatch):
-    monkeypatch.setattr(ft.Bus, "__init__", lambda self, port, timeout_s=0.2: (setattr(self, "port", port), setattr(self, "timeout_s", 0.2), setattr(self, "fd", None))[-1])
+    monkeypatch.setattr(ft.Bus, "__init__", lambda self, port, timeout_s=0.2: (setattr(self, "port", port), setattr(self, "timeout_s", 0.2), setattr(self, "fd", None), setattr(self, "lock", threading.RLock()))[-2])
     bus = ft.open_wheels(servos.path, [7, 8, 9])
     for sid in (7, 8, 9):
         assert servos.regs[sid][ft.OPERATING_MODE[0]] == 1
@@ -143,7 +143,7 @@ def test_open_sets_velocity_mode_once_and_torque_on(servos, monkeypatch):
 
 
 def test_missing_servo_is_named(servos, monkeypatch):
-    monkeypatch.setattr(ft.Bus, "__init__", lambda self, port, timeout_s=0.05: (setattr(self, "port", port), setattr(self, "timeout_s", 0.05), setattr(self, "fd", None))[-1])
+    monkeypatch.setattr(ft.Bus, "__init__", lambda self, port, timeout_s=0.05: (setattr(self, "port", port), setattr(self, "timeout_s", 0.05), setattr(self, "fd", None), setattr(self, "lock", threading.RLock()))[-2])
     with pytest.raises(ft.BusError, match="servo 10"):
         ft.open_wheels(servos.path, [7, 10])
 
