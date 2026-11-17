@@ -52,6 +52,7 @@ POSE_STALE_S = 5.0  # a pose older than this isn't reported (a failed peek keeps
 # opening retries fast for a while, and a held board is dropped only after this much silence.
 LINK_LOST_S, OPEN_RETRY_FAST_S, OPEN_GIVE_UP_S = 5.0, 0.3, 6.0
 GOAL_RESEND_S = 0.2
+HELD_READ_TIMEOUT_S = 0.015  # a reply takes ~0.4 ms when it comes
 # Every other peek, and the first head command, failed live (2026-11-16): the first read right
 # after opening the port went unanswered. A short settle after open, and a longer reply wait
 # than the 20 ms default, on every open of this board.
@@ -207,11 +208,11 @@ class Head:
         c = self.cal[m]
         return ft.deg_to_raw(deg, c["range_min"], c["range_max"])
 
-    def _read(self, bus):
+    def _read(self, bus, retries=2):
         out = {}
         for m, sid in self.ids.items():
             c = self.cal[m]
-            out[m] = ft.raw_to_deg(bus.read(sid, ft.PRESENT_POSITION), c["range_min"], c["range_max"])
+            out[m] = ft.raw_to_deg(bus.read(sid, ft.PRESENT_POSITION, retries=retries), c["range_min"], c["range_max"])
         return out
 
     def tick(self, now, dt):
@@ -243,7 +244,14 @@ class Head:
             self._peek(now)
             return
         try:
-            self.pos, self.pos_at = self._read(self.bus), now
+            # One quick attempt per servo: this runs on the node's only thread, and retried
+            # reads through a link dropout held up the goal frames ~300 ms at a time, which
+            # made the head lag the pad (2026-11-16). The next poll is 1/STATE_HZ away anyway.
+            saved, self.bus.timeout_s = self.bus.timeout_s, HELD_READ_TIMEOUT_S
+            try:
+                self.pos, self.pos_at = self._read(self.bus, retries=0), now
+            finally:
+                self.bus.timeout_s = saved
             self.read_fail_since = None
         except OSError as e:
             self._lost(now, f"arm board gone: {e}")

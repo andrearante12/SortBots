@@ -1184,7 +1184,7 @@
   // The head pad over the camera's bottom-right (the drive pad's mirror): hold an arrow to
   // look that way, the dot centres. It moves the sliders, which stay the one source of what
   // is sent, so a pad press and a drag can't disagree. Tilt > 0 looks down, pan > 0 left.
-  const HEAD_PAD_RAD_S = 0.6, HEAD_PAD_DIR = { up: ["tilt", -1], down: ["tilt", 1], left: ["pan", 1], right: ["pan", -1] };
+  const HEAD_PAD_RAD_S = 1.2, HEAD_PAD_DIR = { up: ["tilt", -1], down: ["tilt", 1], left: ["pan", 1], right: ["pan", -1] };
   function wireHeadPad(id, c, pad) {
     c.headPad = pad;
     const setAxis = (key, rad) => {

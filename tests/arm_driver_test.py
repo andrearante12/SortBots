@@ -20,6 +20,7 @@ class FakeBus:
 
     def __init__(self, cal, present=None, tamper=None):
         self.regs, self.writes, self.goals, self.open_ = {}, [], [], False
+        self.timeout_s = 0.05
         for m, c in cal.items():
             r = {ft.MODEL_NUMBER: 777, ft.MIN_POSITION_LIMIT: c["range_min"], ft.MAX_POSITION_LIMIT: c["range_max"],
                  ft.HOMING_OFFSET: ad.homing_register(c["homing_offset"]), ft.OPERATING_MODE: 0,

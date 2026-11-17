@@ -14,7 +14,8 @@ head:
   pan_sign: 1.0
   tilt_sign: 1.0
   # Software slew on the goal: a slider flick must not slam the camera across its range.
-  max_dps: 90.0
+  # 90 felt sluggish on the head pad (2026-11-16).
+  max_dps: 150.0
   # The SO-101 follower's gains, which head.py keys already runs the head on.
   pid: {p: 16, i: 0, d: 32}
   # Degrees inside each calibrated stop that a goal may reach (head.py limits()).
