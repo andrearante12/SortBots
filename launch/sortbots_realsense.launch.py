@@ -47,12 +47,6 @@ def _actions(context):
         output="screen",
         parameters=[{
             "camera_name": "camera",
-            # Hardware-reset the D435 when the driver starts. After a boot it sometimes opened
-            # in a bad state: "RealSense Node Is Up!", both streams opened, and not one frame
-            # (kernel: "Failed to query (GET_CUR) UVC control"), so no odometry and the robot
-            # never came online (2026-11-16); re-opening it fixed it. The camera drops off USB
-            # and comes back during the reset: jetson.sh binds all of /dev for exactly that.
-            "initial_reset": True,
             # tf_prefix is what makes this multi-robot-safe: frames become
             # <rid>/camera_link, <rid>/camera_color_optical_frame, ... — the
             # same <ns>/ prefixing the sim uses (scripts/_ros2_graphs.py).
