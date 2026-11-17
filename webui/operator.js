@@ -429,6 +429,9 @@
     const r = robots.get(id), p = r && r.obstacles;
     c.perc.hidden = !packageWorld();
     if (r && packageWorld()) return drawCamPlates(c, g, r);
+    // Manipulation mode: the boxes are the table and the package the arm is working on, and
+    // they covered what the operator was aiming at (2026-11-16). Back in nav mode.
+    if (r && r.mode && r.mode.mode === "manip") return;
     if (!p || performance.now() - r.obstaclesAt > OBSTACLE_TTL_MS || !p.w || !p.h) return;
     g.font = '600 10px "IBM Plex Sans", system-ui, sans-serif'; g.textBaseline = "bottom";
     // Each picture showing gets the boxes: the depth is aligned to colour, so the same
@@ -738,6 +741,7 @@
       if (m.note && m.note !== wasNote) toast(`${nameOf(id)}: ${m.note}`);
       const c = cams.get(id);
       if (c && m.mode !== was && c.padMode !== "head") { c.padMode = m.mode === "manip" ? "arm" : "drive"; applyPadMode(c); }
+      if (m.mode !== was) drawCamObstacles(id);   // clear or restore the boxes now, not on the next obstacle message
       if (c) syncPickLine(c);
     });
     sub(`/${id}/pick_status`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
