@@ -150,7 +150,9 @@ gamepad stays plugged into the laptop: the browser reads it there and sends comm
 tunnel.
 
 The Robot view and the ROS stack (mapping, localization) can't run at once on the Jetson: both
-need the D435. Stop one before starting the other.
+need the D435. Stop one before starting the other. The console starts by itself at every boot
+(`sortbots-console.service`, a one-shot: `jetson.sh stop` sticks until the next reboot), so
+after a reboot stop it again before starting the Robot view.
 
 ## Gaussian splats
 
