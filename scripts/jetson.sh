@@ -155,6 +155,22 @@ case "${1:-}" in
     echo "[jetson] console starting in container '$NAME'."
     echo "         dashboard: $(dashboard_url)   logs: scripts/jetson.sh logs"
     echo "         (from any device signed in to the same Tailscale tailnet)"
+    # At boot (systemd sets INVOCATION_ID), start configs/jetson.yaml's `autostart` scenario
+    # once the console answers, so the robot comes up in the operator view on its own. A manual
+    # `jetson.sh console` leaves the robot stack to the operator, as before.
+    scenario=$(sed -n 's/^autostart:[[:space:]]*\([A-Za-z0-9_-]*\).*/\1/p' "$REPO_ROOT/configs/jetson.yaml" 2>/dev/null)
+    if [[ -n "${INVOCATION_ID:-}" && -n "$scenario" ]]; then
+      for _ in $(seq 60); do
+        curl -fsS -o /dev/null "http://localhost:$PORT/api/session" 2>/dev/null && break
+        sleep 1
+      done
+      if curl -fsS -X POST -H 'Content-Type: application/json' -d "{\"scenario\": \"$scenario\"}" \
+           "http://localhost:$PORT/api/session/start" -o /dev/null 2>/dev/null; then
+        echo "[jetson] boot: robot stack starting ($scenario)"
+      else
+        echo "[jetson] boot: could not start $scenario (start it from the operator view)"
+      fi
+    fi
     ;;
 
   shell)
