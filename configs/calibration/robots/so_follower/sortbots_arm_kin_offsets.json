@@ -1,0 +1,13 @@
+{
+  "offsets_deg": {
+    "shoulder_pan": 7.648351648351649,
+    "shoulder_lift": -6.75734800812807,
+    "elbow_flex": -1.461088347213545,
+    "wrist_flex": -13.360577580195077,
+    "wrist_roll": 0.0
+  },
+  "from": "handeye solve",
+  "n": 22,
+  "saved": "Thu Nov 12 15:36:55 2026",
+  "limits_widened": "20261115-205518"
+}

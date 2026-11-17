@@ -43,7 +43,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 BRIDGE = REPO / "scripts" / "drive_bridge.py"
-DEFAULT_PYTHON = Path.home() / "miniconda3" / "envs" / "lerobot" / "bin" / "python"
+# The laptop's lerobot env is miniconda's, the Jetson's miniforge's (scripts/arm.sh looks the same way).
+DEFAULT_PYTHON = next((p for p in (Path.home() / d / "envs" / "lerobot" / "bin" / "python"
+                                   for d in ("miniconda3", "miniforge3")) if p.exists()),
+                      Path.home() / "miniconda3" / "envs" / "lerobot" / "bin" / "python")
 LOG_LINES = 40
 HANDEYE = os.environ.get("SORTBOTS_HANDEYE_URL", "http://127.0.0.1:8765")  # tests point it at a fake
 CONFIG = REPO / "configs" / "drive_base.yaml"
