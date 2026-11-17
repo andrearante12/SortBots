@@ -1175,7 +1175,7 @@
         <div class="side">
           <button type="button" data-wf="1" title="Wrist up (hold)">wrist &#8593;</button><button type="button" data-wf="-1" title="Wrist down (hold)">wrist &#8595;</button>
           <div class="lv" role="group" aria-label="Arm speed"><button type="button" data-lv="0">L1</button><button type="button" data-lv="1">L2</button><button type="button" data-lv="2">L3</button><button type="button" data-lv="3">L4</button></div>
-          <button type="button" data-arm-act="magnet" title="Magnet on / off">Magnet</button><button type="button" data-arm-act="pick" title="One-button pick and place">Pick</button><button type="button" data-arm-act="rest" title="Back to the rest pose (refused while the magnet is on)">Rest</button>
+          <button type="button" data-arm-act="magnet" title="Magnet on / off">Magnet</button><button type="button" data-arm-act="pick" title="One-button pick and place">Pick</button><button type="button" data-arm-act="rest" title="Back to the rest pose. With the magnet on it lets go first: whatever it holds drops where the hand is">Rest</button>
         </div>
       </div>`;
     const perc = document.createElement("div");

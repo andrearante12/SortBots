@@ -20,7 +20,8 @@ and a servo board takes one owner: anything that moves either goes through here.
                                               base_link: x, y, z m, pitch rad), "magnet"
     /<id>/pick_request std_msgs/String (JSON) {"cmd": "auto"} the one-button pick and place
                                               (scripts/pick_core.py, handeye.py's PICK);
-                                              {"cmd": "rest"} back to the taught rest pose;
+                                              {"cmd": "rest"} back to the taught rest pose,
+                                              releasing the magnet first if it's on;
                                               {"cmd": "cancel"} holds the arm where it is
     /<id>/pick_status  std_msgs/String (JSON, latched) phase/busy/note/result, the keys the
                                               sim's magnet_pick.py publishes
@@ -94,6 +95,7 @@ POSE_STALE_S = 5.0  # a pose older than this isn't reported (a failed peek keeps
 # opening retries fast for a while, and a held board is dropped only after this much silence.
 LINK_LOST_S, OPEN_RETRY_FAST_S, OPEN_GIVE_UP_S = 5.0, 0.3, 6.0
 GOAL_RESEND_S = 0.2
+REST_RELEASE_S = 0.6  # Rest with the magnet on: release, wait this long for the package to drop
 HELD_READ_TIMEOUT_S = 0.015  # a reply takes ~0.4 ms when it comes
 # Every other peek, and the first head command, failed live (2026-11-16): the first read right
 # after opening the port went unanswered. A short settle after open, and a longer reply wait
@@ -815,11 +817,21 @@ def run_node(robot_id: str, cfg: dict):
             result, note = "failed", ""
             try:
                 if action == "rest":
-                    # A fresh core hasn't asked the board yet: without this poll go_rest's
-                    # "magnet is ON" refusal couldn't fire, and a held package would be carried
-                    # into the folded pose.
+                    # Rest releases first, then folds: whatever the magnet holds drops where the
+                    # hand is (chosen 2026-11-16 over handeye's refusal). A fresh core hasn't asked
+                    # the board yet, hence the poll; and the fold waits for the board to CONFIRM
+                    # off, so a magnet that didn't let go is never carried into the folded pose.
                     core.mag.poll()
-                    result = "rest" if core.go_rest() else ("aborted" if abort.is_set() else "failed")
+                    if core.mag.on:
+                        if core.mag.set(False) is not False:
+                            core.say("magnet did not confirm OFF: not folding with it maybe still holding", 1e9)
+                            raise_result = "failed"
+                        else:
+                            time.sleep(REST_RELEASE_S)   # let the package fall clear first
+                            raise_result = None
+                    else:
+                        raise_result = None
+                    result = raise_result or ("rest" if core.go_rest() else ("aborted" if abort.is_set() else "failed"))
                 else:
                     core.start()
                     result = core.auto_pick()
