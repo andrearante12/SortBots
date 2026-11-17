@@ -747,13 +747,14 @@ def run_node(robot_id: str, cfg: dict):
     base_state = {"st": None}
     node.create_subscription(String, f"/{robot_id}/base_status",
                              lambda m: base_state.__setitem__("st", _json(m.data)), 10)
-    pick = {"thread": None, "abort": threading.Event(), "subs": [], "done": False, "robot": None}
+    pick = {"thread": None, "abort": threading.Event(), "subs": [], "done": False, "robot": None, "last": None}
 
     def pick_status(phase, note="", busy=False, **extra):
         mag = magnet.board if magnet else None
         msg = {"phase": phase, "busy": busy, "mode": "manipulation" if busy else "idle", "marker": 10,
                "note": note, "cmd": "auto", "target": None, "magnet": extra.pop("magnet", mag), **extra}
-        pick_pub.publish(String(data=json.dumps(msg, default=str)))
+        pick["last"] = String(data=json.dumps(msg, default=str))
+        pick_pub.publish(pick["last"])
 
     pick_status("IDLE", "ready" if (arm and magnet) else "no arm or magnet configured")
 
@@ -885,6 +886,11 @@ def run_node(robot_id: str, cfg: dict):
 
     def on_state():
         now = time.monotonic()
+        # Latched, and re-sent at 1 Hz too: rosbridge doesn't hand a latched message to a page
+        # that subscribes later, so without this the operator view never saw the pick (2026-11-16).
+        if pick["last"] is not None and now - last.get("pick_pub", 0.0) >= 1.0:
+            pick_pub.publish(pick["last"])
+            last["pick_pub"] = now
         if pick["thread"] is not None:
             return                     # the pick reads the board itself
         head.poll(now)
