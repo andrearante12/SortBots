@@ -383,6 +383,7 @@ class PickCore:
                    "pitch_top": None, "pitch_app": None, "rest_q": poses.rest_q, "place_q": poses.place_q}
         self.head_goal = None
         self._reported = None
+        self._ik_memo = {}
 
     # ---- reporting (cmd_pick say / publish) -------------------------------------------------
     def say(self, text, secs=8.0):
@@ -496,9 +497,25 @@ class PickCore:
         return self.mag.set(on)
 
     # ---- the planner (cmd_pick closures) ----------------------------------------------------
+    def _ik(self, kin, target, seeds, lo, hi, magnet_m, roll, **kw):
+        """head_cam.ik_down, through head_cam.ik_down_batch (the same answer, all seeds solved at
+        once) and a memo of exact repeats: do_plan asks for the same high/hover/contact poses its
+        reach search already solved (2026-11-16: 3 of 28 solves). The key is every input's exact
+        bytes, so a hit is the very call it stands for; joint arrays go out as copies."""
+        arr = lambda v: None if v is None else np.asarray(v, float).tobytes()  # noqa: E731
+        kw = {"pos_tol_m": 0.002, "tilt_tol_deg": 2.0, "pitch_deg": 0.0, "axis": None, **kw}  # ik_down's defaults
+        key = (id(kin), arr(target), tuple(arr(s) for s in seeds), arr(lo), arr(hi), float(magnet_m), float(roll),
+               float(kw["pos_tol_m"]), float(kw["tilt_tol_deg"]), float(kw["pitch_deg"]), arr(kw["axis"]))
+        if key not in self._ik_memo:
+            if len(self._ik_memo) > 512:
+                self._ik_memo.clear()
+            self._ik_memo[key] = head_cam.ik_down_batch(kin, target, seeds, lo, hi, magnet_m, roll, **kw)
+        r = self._ik_memo[key]
+        return None if r is None else (r[0].copy(), r[1], r[2])
+
     def down_ik(self, target, seeds_, roll):
-        return head_cam.ik_down(self.kin, target, seeds_, self.lo, self.hi, self.hc.magnet_m, roll,
-                                pitch_deg=self.cfg.pitch_deg)
+        return self._ik(self.kin, target, seeds_, self.lo, self.hi, self.hc.magnet_m, roll,
+                        pitch_deg=self.cfg.pitch_deg)
 
     def model_pitch(self, q):
         """cmd_pick.model_pitch"""
@@ -510,14 +527,14 @@ class PickCore:
         st, cfg = self.st, self.cfg
         if st["face"] == "top" and pitch is None and tol is None:
             if st.get("pitch_top") is not None and st["pitch_top"] != cfg.pitch_deg:
-                return head_cam.ik_down(self.kin, target, seeds_, self.lo, self.hi, self.hc.magnet_m, roll,
-                                        pitch_deg=st["pitch_top"])
+                return self._ik(self.kin, target, seeds_, self.lo, self.hi, self.hc.magnet_m, roll,
+                                pitch_deg=st["pitch_top"])
             return self.down_ik(target, seeds_, roll)
         side = st["face"] == "side"
-        return head_cam.ik_down(self.kin, target, list(seeds_) + (self.side_seeds if side else []), self.lo,
-                                self.hi, self.hc.magnet_m, roll, tilt_tol_deg=tol or 2.0,
-                                pitch_deg=(cfg.side_pitch_deg if side else cfg.pitch_deg) if pitch is None else pitch,
-                                axis=st["axis"] if side else None)
+        return self._ik(self.kin, target, list(seeds_) + (self.side_seeds if side else []), self.lo,
+                        self.hi, self.hc.magnet_m, roll, tilt_tol_deg=tol or 2.0,
+                        pitch_deg=(cfg.side_pitch_deg if side else cfg.pitch_deg) if pitch is None else pitch,
+                        axis=st["axis"] if side else None)
 
     def along(self, d):
         """cmd_pick.along"""
@@ -739,8 +756,8 @@ class PickCore:
             n = max(1, int(math.ceil((need - tool[2]) / 0.01)))
             for i in range(1, n + 1):
                 z = tool[2] + (need - tool[2]) * i / n
-                r = head_cam.ik_down(kin, [tool[0], tool[1], z], seed, lo, hi, mm, float(q[4]),
-                                     tilt_tol_deg=3.0, pitch_deg=pitch)
+                r = self._ik(kin, [tool[0], tool[1], z], seed, lo, hi, mm, float(q[4]),
+                             tilt_tol_deg=3.0, pitch_deg=pitch)
                 if r is None:
                     break
                 path.append((z, r[0]))
@@ -941,8 +958,8 @@ class PickCore:
         for h in (0.06, 0.04, 0.02):
             pts, seed, ok = [], [q_pl], True
             for hh in np.arange(0.0, h + 1e-9, 0.01)[::-1]:
-                r = head_cam.ik_down(kin, tool + [0, 0, hh], seed, lo_f, hi_f, mm, float(q_pl[4]),
-                                     tilt_tol_deg=3.0, axis=axis)
+                r = self._ik(kin, tool + [0, 0, hh], seed, lo_f, hi_f, mm, float(q_pl[4]),
+                             tilt_tol_deg=3.0, axis=axis)
                 if r is None:
                     ok = False
                     break

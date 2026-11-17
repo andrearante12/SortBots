@@ -102,6 +102,26 @@ class SO101Kin:
                 T = T @ R
         return T
 
+    def flange_many(self, Q):
+        """flange() of every row of Q (n x 5 robot radians) at once: (n, 4, 4). The SAME
+        products as flange(), in the same order and association, only stacked: numpy's matmul
+        runs the 2-D kernel per stacked slice, and cos/sin come from math as there, so each slice
+        is bit-identical to flange() of that row (pick planning's batched IK relies on it,
+        2026-11-16: do_plan took 17 s on the Jetson, nearly all of it flange() overhead)."""
+        Q = np.asarray(Q, float) + self.off
+        n = len(Q)
+        T = np.eye(4)
+        for i, (To, rev) in enumerate(self.joints[:len(ARM)]):
+            T = T @ To
+            if rev:
+                R = np.zeros((n, 4, 4))
+                c = np.array([math.cos(v) for v in Q[:, i]])
+                s = np.array([math.sin(v) for v in Q[:, i]])
+                R[:, 0, 0], R[:, 0, 1], R[:, 1, 0], R[:, 1, 1] = c, -s, s, c
+                R[:, 2, 2] = R[:, 3, 3] = 1.0
+                T = T @ R
+        return T if T.ndim == 3 else np.broadcast_to(T, (n, 4, 4)).copy()
+
     def tool_point(self, q, length):
         """A point `length` metres out along the roll axis from the flange (the magnet face
         is ~0.047): base_link xyz."""

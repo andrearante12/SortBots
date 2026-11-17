@@ -333,3 +333,108 @@ def ik_down(kin, face_target, seeds, lo, hi, magnet_m=MAGNET_FACE_M, roll=0.0,
     if not inside or pos_err > pos_tol_m or tilt > tilt_tol_deg:
         return None
     return q, pos_err, tilt
+
+
+# -- the same solve, every seed at once ----------------------------------------------------------
+# ik_down runs one LM per seed and pick planning calls it dozens of times with ~30 seeds:
+# do_plan took 17.5 s on the Jetson (2026-11-16), nearly all of it Python overhead round
+# kin.flange's ten 4x4 products. ik_down_batch gives the SAME answer bit for bit: each seed's LM
+# is _lm's own control flow (_lm_steps below, a line-for-line copy that yields the points it wants
+# evaluated), and only the residuals are computed together, by kin.flange_many, whose slices are
+# flange() exactly. The small linear algebra stays per seed, in the same numpy calls. A kin whose
+# flange_many doesn't match flange bit for bit on this machine (another BLAS) falls back to
+# flange() per point: slower, never different.
+
+def _lm_steps(x, iters=300, lam=1e-3):
+    """_lm(f, x) as a generator: yields the list of points it needs f of, is sent their
+    residuals, returns (x, r) as _lm does. The same arithmetic in the same order; keep it in
+    step with _lm."""
+    r = (yield [x])[0]
+    cost = r @ r
+    nudge = np.eye(x.size) * 1e-6  # row k: _lm's dx for column k, the same values
+    for _ in range(iters):
+        J = np.empty((r.size, x.size))
+        rs = yield [x + nudge[k] for k in range(x.size)]
+        for k in range(x.size):
+            J[:, k] = (rs[k] - r) / 1e-6
+        g, H = J.T @ r, J.T @ J
+        while True:
+            step = np.linalg.solve(H + lam * np.diag(np.diag(H) + 1e-9), -g)
+            r_new = (yield [x + step])[0]
+            if r_new @ r_new < cost:
+                x, r, cost, lam = x + step, r_new, r_new @ r_new, max(lam / 3, 1e-9)
+                break
+            lam *= 4
+            if lam > 1e8:
+                return x, r
+        if np.linalg.norm(step) < 1e-10:
+            break
+    return x, r
+
+
+def lm_many(f_many, x0s, iters=300, lam=1e-3):
+    """_lm from each start in x0s, in lockstep: f_many(list of points) -> one residual row per
+    point. -> [(x, r)] in x0s order, each what _lm(f, x0) returns."""
+    gens = [_lm_steps(np.array(x0, float), iters, lam) for x0 in x0s]
+    out = [None] * len(gens)
+    want = {i: g.send(None) for i, g in enumerate(gens)}
+    while want:
+        order = list(want)
+        rows = f_many([p for i in order for p in want[i]])
+        j, nxt = 0, {}
+        for i in order:
+            n = len(want[i])
+            try:
+                nxt[i] = gens[i].send([rows[j + m] for m in range(n)])
+            except StopIteration as e:
+                out[i] = e.value
+            j += n
+        want = nxt
+    return out
+
+
+_BATCH_OK = {}
+
+
+def _flange_many_exact(kin):
+    """Does kin.flange_many match kin.flange bit for bit here? Checked once per kin."""
+    key = id(kin)
+    if key not in _BATCH_OK:
+        ok = hasattr(kin, "flange_many")
+        if ok:
+            Q = np.random.default_rng(0).uniform(-3.0, 3.0, (64, 5))
+            ok = bool(np.array_equal(kin.flange_many(Q), np.array([kin.flange(q) for q in Q])))
+        _BATCH_OK[key] = (kin, ok)  # kin kept so its id isn't reused by another object
+    return _BATCH_OK[key][1]
+
+
+def ik_down_batch(kin, face_target, seeds, lo, hi, magnet_m=MAGNET_FACE_M, roll=0.0,
+                  pos_tol_m=0.002, tilt_tol_deg=2.0, pitch_deg=0.0, axis=None):
+    """ik_down, every seed's solve at once: the same arguments, the same result bit for bit."""
+    face_target = np.asarray(face_target, float)
+    up = face_normal_trimmed(arm_radial(face_target), axis, pitch_deg)
+    tool = np.array([0.0, 0.0, -magnet_m, 1.0])
+    exact = _flange_many_exact(kin)
+
+    def res_many(pts):
+        Q = np.array([[*p, roll] for p in pts])
+        F = kin.flange_many(Q) if exact else np.array([kin.flange(q) for q in Q])
+        face = (F @ tool)[:, :3]
+        return np.concatenate([face - face_target, DOWN_W * (F[:, :3, 2] - up)], axis=1)
+
+    best = None
+    for x, r in lm_many(res_many, [s[:4] for s in seeds], iters=120):
+        x = np.array(x, float)
+        F = kin.flange(np.array([*x, roll]))
+        pos_err = float(np.linalg.norm(r[:3]))
+        tilt = math.degrees(math.acos(max(-1.0, min(1.0, float(F[:3, 2] @ up)))))
+        inside = bool(np.all(x >= lo[:4]) and np.all(x <= hi[:4]))
+        score = (not inside, pos_err + DOWN_W * math.radians(tilt))
+        if best is None or score < best[0]:
+            best = (score, np.array([*x, roll]), pos_err, tilt, inside)
+    if best is None:
+        return None
+    _, q, pos_err, tilt, inside = best
+    if not inside or pos_err > pos_tol_m or tilt > tilt_tol_deg:
+        return None
+    return q, pos_err, tilt

@@ -405,6 +405,46 @@ def test_pieces_match_handeyes_closures():
             assert z1 == z2 and np.allclose(q1, q2)
 
 
+# ---- the batched IK is ik_down, bit for bit ---------------------------------------------------
+def test_flange_many_is_flange_bit_for_bit():
+    Q = np.random.default_rng(5).uniform(-3.2, 3.2, (500, 5))
+    assert np.array_equal(KIN.flange_many(Q), np.array([KIN.flange(q) for q in Q]))
+    assert head_cam._flange_many_exact(KIN)  # else ik_down_batch falls back (slower, same answer)
+
+
+def test_ik_down_batch_is_ik_down_bit_for_bit():
+    seeds = [np.radians(s["arm_deg"]) for s in POSES.samples] + [POSES.rest_q]
+    rng = np.random.default_rng(11)
+    cases = [(TARGET, {}), (TARGET + [0, 0, 0.05], {"pitch_deg": -4.7}), (np.array([0.8, 0.0, 0.0]), {}),
+             (np.array([0.229, 0.125, 0.191]), {"pitch_deg": -22.7, "tilt_tol_deg": 2.0}),
+             (np.array([0.229, 0.125, 0.211]), {"pitch_deg": -28.7}),
+             (np.array([0.25, 0.0, 0.05]), {"pitch_deg": 0.0, "tilt_tol_deg": 3.0, "axis": [-1.0, 0.0, 0.1]})]
+    cases += [(np.array([rng.uniform(0.1, 0.35), rng.uniform(-0.2, 0.2), rng.uniform(-0.05, 0.2)]),
+               {"pitch_deg": float(rng.uniform(-25, 5))}) for _ in range(6)]
+    solved = 0
+    for tgt, kw in cases:
+        a = head_cam.ik_down(KIN, tgt, seeds, POSES.lo, POSES.hi, HC.magnet_m, 0.04, **kw)
+        b = head_cam.ik_down_batch(KIN, tgt, seeds, POSES.lo, POSES.hi, HC.magnet_m, 0.04, **kw)
+        assert (a is None) == (b is None), (tgt, kw)
+        if a is not None:
+            assert np.array_equal(a[0], b[0]) and a[1] == b[1] and a[2] == b[2], (tgt, kw)
+            solved += 1
+    assert 3 <= solved < len(cases)  # both outcomes covered
+
+
+def test_the_ik_memo_answers_only_exact_repeats():
+    core, bus, mag, _ = make_core()
+    seeds = [POSES.rest_q]
+    r1 = core._ik(KIN, TARGET, seeds, POSES.lo, POSES.hi, HC.magnet_m, 0.0, pitch_deg=-4.7)
+    r2 = core._ik(KIN, TARGET, seeds, POSES.lo, POSES.hi, HC.magnet_m, 0.0, pitch_deg=-4.7, tilt_tol_deg=2.0,
+                  axis=None)
+    assert len(core._ik_memo) == 1 and (r1 is None) == (r2 is None)
+    if r1 is not None:
+        assert r1[0] is not r2[0] and np.array_equal(r1[0], r2[0])  # copies: nobody edits the memo
+    core._ik(KIN, TARGET, seeds, POSES.lo, POSES.hi, HC.magnet_m, 0.0, pitch_deg=-4.7 + 1e-12)
+    assert len(core._ik_memo) == 2
+
+
 # ---- the whole PICK, command for command -----------------------------------------------------
 def _pick_pair(**core_kw):
     """handeye: boot (head ramp, torque reset, go to rest), then PICK. PickCore: the same."""
