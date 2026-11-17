@@ -2225,14 +2225,23 @@
     if (!show) return;
     const starting = !!boot || (session && session.state === "stopping");
     const real = platform === "real", what = real ? "robot stack" : "simulation";
-    $("#empty-title").textContent = boot ? "Starting up" : session && session.state === "stopping" ? "Stopping"
-      : controlAvailable ? `${real ? "Robot stack" : "Simulation"} not running` : "Waiting for the robots";
-    $("#empty-sub").textContent = boot ? boot.text : starting ? "" : controlAvailable
-      ? `Start the ${what} to see your robots and give them tasks.`
-      : "No robot is reporting yet. Check that the robot console is running.";
+    // Searching: the stack is up (or this console can't start one) and no robot is reporting.
+    // Before it's up, the start-up phases keep their progress bar.
+    const list = [...robots.values()];
+    const searching = (session && session.state === "running") || !controlAvailable;
+    $("#empty-radar").hidden = !searching;
+    $("#empty-boot").hidden = searching || !boot;
+    if (searching) {
+      $("#empty-title").textContent = "No robots found";
+      $("#empty-sub").textContent = list.length ? `Searching… (${list.filter(online).length} of ${list.length} online)` : "Searching for robots…";
+    } else {
+      $("#empty-title").textContent = boot ? "Starting up" : session && session.state === "stopping" ? "Stopping"
+        : `${real ? "Robot stack" : "Simulation"} not running`;
+      $("#empty-sub").textContent = boot ? boot.text : starting ? "" : `Start the ${what} to see your robots and give them tasks.`;
+    }
     $("#empty-go").textContent = `Start ${what}`;
-    $("#empty-go").hidden = starting || !controlAvailable;
-    $("#empty-test").hidden = starting || !controlAvailable || real; // tests drive Isaac
+    $("#empty-go").hidden = starting || searching || !controlAvailable;
+    $("#empty-test").hidden = starting || searching || !controlAvailable || real; // tests drive Isaac
   }
 
   // A session started with demo: true (the Fleet demo preset) runs the task demo by

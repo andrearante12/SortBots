@@ -395,6 +395,21 @@
   #coverage[hidden] { display: none; }
   #empty { position: absolute; inset: 0; background: var(--scrim); display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; z-index: 3; text-align: center; padding: 24px; }
   #empty b { font-size: 1.15rem; font-weight: 600; }
+  /* "No robots found": a radar sweep while the page waits for any robot to report
+     (operator.js renderEmpty). Rings expand from the dot, staggered. */
+  #empty .radar { position: relative; width: 84px; height: 84px; margin-bottom: 6px; }
+  #empty .radar[hidden] { display: none; }
+  #empty .radar i { position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--info); opacity: 0;
+                    animation: radar-ping 2.4s cubic-bezier(.2,.6,.3,1) infinite; }
+  #empty .radar i:nth-child(2) { animation-delay: .8s; }
+  #empty .radar i:nth-child(3) { animation-delay: 1.6s; }
+  #empty .radar b { position: absolute; left: 50%; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%;
+                    background: var(--info); box-shadow: 0 0 0 4px color-mix(in srgb, var(--info) 25%, transparent); }
+  @keyframes radar-ping { 0% { transform: scale(.15); opacity: .9; } 100% { transform: scale(1); opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    #empty .radar i { animation: none; opacity: .35; } #empty .radar i:nth-child(1) { transform: scale(.4); }
+    #empty .radar i:nth-child(2) { transform: scale(.7); } #empty .radar i:nth-child(3) { transform: scale(1); }
+  }
   .empty-acts { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
   #toast { position: absolute; top: 16px; left: 50%; z-index: 3; transform: translateX(-50%); background: var(--ink); color: var(--on-ink); padding: 6px 14px; border-radius: 6px; font-size: .84rem; opacity: 0; transition: opacity .2s; pointer-events: none; }
   #toast.on { opacity: 1; }
@@ -803,7 +818,7 @@
     <p id="rc-err" hidden></p>
   </div>
   <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
-  <div id="empty" hidden><b id="empty-title">Simulation not running</b><span class="muted" id="empty-sub">Start the simulation to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><div class="empty-acts"><button class="btn primary" id="empty-go">Start simulation</button><button class="btn" id="empty-test">Run a test</button><button class="btn" id="empty-robot" hidden title="The robot plugged into this machine: camera, driving, pick and place">Open the Robot view</button></div></div>
+  <div id="empty" hidden><div class="radar" id="empty-radar" hidden aria-hidden="true"><i></i><i></i><i></i><b></b></div><b id="empty-title">Simulation not running</b><span class="muted" id="empty-sub">Start the simulation to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><div class="empty-acts"><button class="btn primary" id="empty-go">Start simulation</button><button class="btn" id="empty-test">Run a test</button><button class="btn" id="empty-robot" hidden title="The robot plugged into this machine: camera, driving, pick and place">Open the Robot view</button></div></div>
   <div id="toast" role="status"></div>
 </main>
 
