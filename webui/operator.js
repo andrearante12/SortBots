@@ -678,7 +678,7 @@
       id, color: COLORS[robots.size % COLORS.length], pose: null, linkAt: -Infinity, plan: [],
       explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity, queueDepth: 0,
       nav: null, seenStamp: {}, odom: null, odomAt: -Infinity,
-      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity, head: null, headAt: -Infinity,
+      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity, head: null, headAt: -Infinity, arm: null, armAt: -Infinity,
     };
     robots.set(id, r);
     // Kept so removeRobot can drop them when a run leaves this robot out.
@@ -716,6 +716,17 @@
       r.head = h;
       if ((h.state === "busy" || h.state === "error") && h.state !== was) toast(`${nameOf(id)}: head ${h.state}. ${h.message || ""}`);
       syncHeads();
+    });
+    // The real arm and magnet (arm_driver's arm_state): shows the arm pad, reports refusals.
+    sub(`/${id}/arm_state`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
+      let a;
+      try { a = JSON.parse(msg.data); } catch (e) { return; }
+      const was = r.arm && r.arm.state, wasMag = r.arm && r.arm.magnet && r.arm.magnet.state;
+      r.arm = a; r.armAt = performance.now();
+      if ((a.state === "busy" || a.state === "error") && a.state !== was) toast(`${nameOf(id)}: arm ${a.state}. ${a.message || ""}`);
+      if (a.magnet && a.magnet.state === "error" && wasMag !== "error") toast(`${nameOf(id)}: ${a.magnet.message}`);
+      if (a.note) toast(`${nameOf(id)}: ${a.note}`);
+      syncArmPads();
     });
     sub(`/${id}/pick_status`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
       try { r.pick = JSON.parse(msg.data); } catch (e) { /* keep the last one */ }
@@ -1141,6 +1152,20 @@
         <span></span><button type="button" data-headpad="up" aria-label="Look up">&#9650;</button><span></span>
         <button type="button" data-headpad="left" aria-label="Look left">&#9664;</button><button type="button" data-headpad="center" aria-label="Centre the head">&#9679;</button><button type="button" data-headpad="right" aria-label="Look right">&#9654;</button>
         <span></span><button type="button" data-headpad="down" aria-label="Look down">&#9660;</button><span></span>
+      </div>
+      <div class="armpad" role="group" aria-label="Move the arm" title="Move the arm's hand: hold a button (it stops when you let go)" hidden>
+        <div class="xy">
+          <span></span><button type="button" data-arm="out" aria-label="Reach out" title="Reach out">&#9650;</button><span></span>
+          <button type="button" data-arm="left" aria-label="Swing left" title="Swing left">&#9664;</button><button type="button" data-arm="stop" aria-label="Stop the arm" title="Stop">&#9632;</button><button type="button" data-arm="right" aria-label="Swing right" title="Swing right">&#9654;</button>
+          <span></span><button type="button" data-arm="in" aria-label="Pull in" title="Pull in">&#9660;</button><span></span>
+        </div>
+        <div class="zz">
+          <button type="button" data-arm="up" aria-label="Hand up" title="Hand up">&#10514;</button><button type="button" data-arm="tilt-up" aria-label="Tilt the tool up" title="Tilt the tool up">&#8599;</button><button type="button" data-arm="roll-left" aria-label="Roll the wrist left" title="Roll the wrist left">&#8634;</button>
+          <button type="button" data-arm="down" aria-label="Hand down" title="Hand down">&#10515;</button><button type="button" data-arm="tilt-down" aria-label="Tilt the tool down" title="Tilt the tool down">&#8600;</button><button type="button" data-arm="roll-right" aria-label="Roll the wrist right" title="Roll the wrist right">&#8635;</button>
+        </div>
+        <div class="acts">
+          <button type="button" data-arm-act="magnet" aria-label="Magnet on or off" title="Magnet on / off">Magnet</button><button type="button" data-arm-act="pick" aria-label="Pick and place" title="One-button pick and place">Pick</button>
+        </div>
       </div>`;
     const perc = document.createElement("div");
     perc.className = "perc"; perc.hidden = true;
@@ -1155,6 +1180,7 @@
     cams.set(id, c);
     wireHead(id, c);
     wireHeadPad(id, c, el.querySelector(".headpad"));
+    wireArmPad(id, c, el.querySelector(".armpad"));
     syncCamButtons(c);
     wireDrivePad(id, el.querySelector(".drive"));
     return c;
@@ -1299,6 +1325,73 @@
     pad.addEventListener("pointerdown", () => { pad.classList.add("on"); clearTimeout(fade); });
     pad.addEventListener("pointerup", () => { clearTimeout(fade); fade = setTimeout(() => pad.classList.remove("on"), 3000); });
   }
+  // -- the real arm (nodes/arm_driver.py on /<id>/arm_cmd) -------------------------------------
+  // Hold a button to move the HAND that way (arm_driver solves the joints); the pad re-sends
+  // at 10 Hz while held, the deadman, and a stop the moment nothing is held. Several held
+  // buttons add up (out + up = diagonal), like the drive pad. Magnet toggles; Pick asks the
+  // pick node for the one-button pick and place.
+  const ARM_HZ = 10, ARM_AXES = {
+    out: ["out", 1], in: ["out", -1], left: ["left", 1], right: ["left", -1], up: ["up", 1], down: ["up", -1],
+    "tilt-up": ["tilt", 1], "tilt-down": ["tilt", -1], "roll-left": ["roll", 1], "roll-right": ["roll", -1],
+  };
+  const armCmd = (id, cmd) => publishString(`/${id}/arm_cmd`, JSON.stringify(cmd));
+  function wireArmPad(id, c, pad) {
+    c.armPad = pad;
+    const held = new Set();
+    let timer = null;
+    const jog = () => {
+      const j = { out: 0, left: 0, up: 0, tilt: 0, roll: 0 };
+      for (const k of held) { const [axis, sign] = ARM_AXES[k]; j[axis] += sign; }
+      armCmd(id, { jog: j });
+    };
+    const release = (b) => {
+      if (b) { held.delete(b.dataset.arm); b.classList.remove("held"); }
+      if (!held.size) { clearInterval(timer); timer = null; armCmd(id, { stop: true }); } else jog();
+    };
+    for (const b of pad.querySelectorAll("[data-arm]")) {
+      const k = b.dataset.arm;
+      b.addEventListener("pointerdown", (e) => {
+        e.preventDefault(); e.stopPropagation(); b.setPointerCapture(e.pointerId);
+        if (k === "stop") { held.clear(); pad.querySelectorAll(".held").forEach((x) => x.classList.remove("held")); return release(null); }
+        held.add(k); b.classList.add("held"); jog();
+        if (!timer) timer = setInterval(jog, 1000 / ARM_HZ);
+      });
+      const up = () => { if (held.has(k)) release(b); };
+      b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up); b.addEventListener("lostpointercapture", up);
+      b.addEventListener("click", (e) => e.stopPropagation()); // not a card click
+    }
+    pad.querySelector('[data-arm-act="magnet"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      const r = robots.get(id), m = r && r.arm && r.arm.magnet;
+      const on = !(m && (m.want === "on"));
+      armCmd(id, { magnet: on ? "on" : "off" });
+      toast(`${nameOf(id)}: magnet ${on ? "on" : "off"}`);
+    });
+    pad.querySelector('[data-arm-act="pick"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      // A pick node publishes a latched pick_status; without one nothing would answer.
+      const r = robots.get(id);
+      if (!r || !r.pick) return toast(`${nameOf(id)}: pick and place isn't running on this robot yet`);
+      publishString(`/${id}/pick_request`, JSON.stringify({ cmd: "auto" }));
+      toast(`${nameOf(id)}: pick and place started`);
+    });
+    let fade = null;
+    pad.addEventListener("pointerdown", () => { pad.classList.add("on"); clearTimeout(fade); });
+    pad.addEventListener("pointerup", () => { clearTimeout(fade); fade = setTimeout(() => pad.classList.remove("on"), 3000); });
+  }
+  function syncArmPads() {
+    for (const [id, c] of cams) {
+      if (!c.armPad) continue;
+      const r = robots.get(id), a = r && r.arm && performance.now() - r.armAt < 3000 ? r.arm : null;
+      c.armPad.hidden = !a;
+      if (!a) continue;
+      const mag = c.armPad.querySelector('[data-arm-act="magnet"]');
+      const on = a.magnet && a.magnet.board === "ON";
+      mag.classList.toggle("on", !!on);
+      mag.textContent = on ? "Magnet ON" : "Magnet";
+    }
+  }
+
   // Keys drive the robot in control (the open card clicked into last), from anywhere on
   // the page except a form field; losing focus mid-drive releases everything, since the
   // keyup would never arrive.

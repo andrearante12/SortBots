@@ -20,3 +20,24 @@ head:
   pid: {p: 16, i: 0, d: 32}
   # Degrees inside each calibrated stop that a goal may reach (head.py limits()).
   margin_deg: 2.0
+
+arm:
+  calibration: configs/calibration/robots/so_follower/sortbots_arm.json
+  # The operator view's arm pad, at arm_cartesian.py's second speed level (x0.5 of its
+  # defaults): the hand moves 5 cm/s, the tool tilts 22.5 deg/s, the wrist rolls 45 deg/s.
+  hand_mps: 0.05
+  tilt_dps: 22.5
+  roll_dps: 45.0
+  # Cap on any joint's goal speed: IK near the folded pose asks for big swings per tick.
+  joint_dps: 75.0
+  # The pad re-sends at 10 Hz while held; nothing for this long and the hand stops.
+  watchdog_s: 0.5
+  pid: {p: 16, i: 0, d: 32}
+  margin_deg: 2.0
+
+magnet:
+  port_glob: /dev/serial/by-id/usb-Silicon_Labs_CP2102*
+  # "on" asks the firmware for on_s (its own cap is 30 s) and is re-sent every rearm_s while
+  # wanted, so a dead process lets go within on_s (handeye.py's rearm_if_due).
+  on_s: 30
+  rearm_s: 10

@@ -12,6 +12,9 @@ import arm_driver as ad  # noqa: E402
 import feetech as ft  # noqa: E402
 
 CFG = ad.load_config(REPO / "configs" / "arm_board.yaml")
+# The head tests reason in head.py's degrees; the live sign (pan is mirrored on this robot)
+# has its own test below, so pin both to +1 here.
+CFG["head"]["pan_sign"] = CFG["head"]["tilt_sign"] = 1.0
 DT = 1.0 / ad.CONTROL_HZ
 
 
@@ -201,3 +204,148 @@ def test_calibration_mismatch_is_not_retried():
     head, bus = make(tamper=lambda regs: regs[8].__setitem__(ft.HOMING_OFFSET, 0))
     head.command({"head_tilt_joint": 0.1}, 0.0)
     assert head.state == "error"
+
+
+# -- the arm ----------------------------------------------------------------------------------
+
+def arm_bus(present_deg=None, tamper=None):
+    """A FakeBus with the head AND the arm's five servos, the arm resting at present_deg."""
+    cal = {**CFG["head"]["cal"], **CFG["arm"]["cal"]}
+    present = {}
+    for j, d in (present_deg or {}).items():
+        c = cal[j]
+        present[j] = ft.deg_to_raw(d, c["range_min"], c["range_max"])
+    bus = FakeBus(cal, present=present, tamper=tamper)
+    for c in CFG["arm"]["cal"].values():
+        bus.regs[c["id"]][ad.TORQUE_LIMIT] = 300
+    return bus
+
+
+# A reachable, unfolded pose (degrees) so IK has room to move the hand every way.
+READY = {"shoulder_pan": 0.0, "shoulder_lift": -40.0, "elbow_flex": 40.0, "wrist_flex": 40.0, "wrist_roll": 0.0}
+
+
+def make_arm(**kw):
+    bus = arm_bus(**kw)
+    return ad.Arm(CFG), bus
+
+
+def run_arm(arm, bus, t0, seconds, jog=None):
+    t = t0
+    for _ in range(int(round(seconds / DT))):
+        if jog is not None:
+            arm.command(jog, t)
+        arm.tick(bus, t, DT)
+        t += DT
+    return t
+
+
+def test_arm_engage_never_moves_and_restores_torque_limit():
+    arm, bus = make_arm(present_deg=READY)
+    arm.engage(bus)
+    first = bus.goals[0]
+    for j, sid in arm.ids.items():
+        assert first[sid] == bus.regs[sid][ft.PRESENT_POSITION]   # goal = present before torque on
+        assert bus.regs[sid][ft.TORQUE_ENABLE] == 1
+        assert bus.regs[sid][ad.TORQUE_LIMIT] == 1000
+    assert arm.engaged and arm.state == "holding"
+
+
+def test_jog_moves_the_hand_the_way_asked():
+    arm, bus = make_arm(present_deg=READY)
+    arm.engage(bus)
+    x0, y0, z0, _ = arm.kin.pose(arm.q)
+    run_arm(arm, bus, 0.0, 1.0, jog={"up": 1})
+    z1 = arm.kin.pose(arm.q)[2]
+    assert z1 - z0 > 0.02                                    # ~5 cm/s for 1 s, joint-capped
+    r0 = math.hypot(*arm.kin.pose(arm.q)[:2])
+    run_arm(arm, bus, 1.0, 1.0, jog={"out": 1})
+    assert math.hypot(*arm.kin.pose(arm.q)[:2]) > r0 + 0.02
+    th0 = math.atan2(*arm.kin.pose(arm.q)[1::-1])
+    run_arm(arm, bus, 2.0, 1.0, jog={"left": 1})
+    assert math.atan2(*arm.kin.pose(arm.q)[1::-1]) > th0      # left = counter-clockwise
+
+
+def test_arm_deadman_stops_the_hand():
+    arm, bus = make_arm(present_deg=READY)
+    arm.engage(bus)
+    t = run_arm(arm, bus, 0.0, 0.5, jog={"up": 1})
+    q_stop = arm.q.copy()
+    run_arm(arm, bus, t + arm.watchdog_s + 0.01, 1.0)        # no more commands
+    assert (arm.q == q_stop).all()
+
+
+def test_joint_speed_is_capped():
+    arm, bus = make_arm(present_deg=READY)
+    arm.engage(bus)
+    q0 = arm.q.copy()
+    arm.command({"out": 1, "up": 1, "left": 1, "tilt": 1}, 0.0)
+    arm.tick(bus, 0.0, DT)
+    assert max(abs(a - b) for a, b in zip(arm.q, q0)) <= arm.joint_rps * DT + 1e-9
+
+
+def test_arm_calibration_mismatch_refused():
+    arm, bus = make_arm(present_deg=READY, tamper=lambda regs: regs[3].__setitem__(ft.HOMING_OFFSET, 0))
+    with pytest.raises(ad.CalibrationMismatch):
+        arm.engage(bus)
+    assert not any(w[1] == ft.TORQUE_ENABLE and w[2] == 1 and w[0] in (1, 2, 3, 4, 5) for w in bus.writes)
+
+
+def test_arm_state_reports_pose():
+    arm, bus = make_arm(present_deg=READY)
+    arm.engage(bus)
+    arm.poll(bus, 1.0)
+    st = arm.status(now=1.0)
+    assert st["engaged"] and set(st["pose"]) == {"x", "y", "z", "pitch"}
+
+
+# -- the magnet ---------------------------------------------------------------------------------
+
+class FakeESP32:
+    """hardware/magnet_esp32/main.py's line protocol on a pty."""
+
+    def __init__(self):
+        import os as _os, pty, threading, tty
+        self.master, self.slave = pty.openpty()
+        tty.setraw(self.slave)
+        self.path, self.cmds, self.on = _os.ttyname(self.slave), [], False
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        import os as _os
+        buf = b""
+        while True:
+            try:
+                buf += _os.read(self.master, 256)
+            except OSError:
+                return
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                cmd = line.decode().strip()
+                self.cmds.append(cmd)
+                if cmd == "ping":
+                    reply = "ok pong"
+                elif cmd.startswith("on"):
+                    self.on, reply = True, "ok on"
+                elif cmd == "off":
+                    self.on, reply = False, "ok off"
+                else:
+                    reply = "ok " + ("on" if self.on else "off")
+                _os.write(self.master, (reply + "\n").encode())
+
+
+def test_magnet_on_rearm_and_off_on_close(monkeypatch):
+    import time as _t
+    esp = FakeESP32()
+    monkeypatch.setattr(ad.fcntl, "ioctl", lambda *a: None)   # a pty has no DTR/RTS lines
+    mag = ad.Magnet({"magnet": {"port_glob": esp.path, "on_s": 30, "rearm_s": 0.3}})
+    mag.set(True)
+    deadline = _t.time() + 5
+    while mag.status()["board"] != "ON" and _t.time() < deadline:
+        _t.sleep(0.05)
+    assert mag.status()["board"] == "ON" and esp.on
+    _t.sleep(0.8)
+    assert sum(c.startswith("on") for c in esp.cmds) >= 2          # re-armed
+    assert all(c in ("ping", "on 30", "off") for c in esp.cmds)
+    mag.close()
+    assert not esp.on and esp.cmds[-1] == "off"                    # never left on
