@@ -801,7 +801,11 @@ def run_node(robot_id: str, cfg: dict):
         abort = pick["abort"]
         base = pick_ros.CmdVelBase(publish_vel, lambda: base_state["st"], abort)
 
+        said = {"text": ""}
+
         def report(phase, text, **extra):
+            if text:
+                said["text"] = text
             busy = phase in pick_core.PickCore.MOVING_FLAGS or phase in ("HELD", "LOCKED", "PLANNED", "HOVERING", "HOLDING")
             pick_status(phase, text, busy=True if pick["thread"] else busy, **{k: v for k, v in extra.items() if k in ("state", "magnet")})
 
@@ -822,7 +826,9 @@ def run_node(robot_id: str, cfg: dict):
             except Exception as e:   # the thread must always end in a status, never silently
                 note = f"{type(e).__name__}: {e}"
                 log.error(f"pick crashed: {note}")
-            pick_status(result.upper(), note or result, busy=False, result=result)
+            # The pick's own last words say WHY ("magnet is ON: release before going to rest");
+            # a bare "failed" in their place told the operator nothing (2026-11-16).
+            pick_status(result.upper(), note or said["text"] or result, busy=False, result=result)
             pick["done"] = True
 
         pick["done"] = False
