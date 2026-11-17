@@ -47,8 +47,9 @@ STATE_HZ = 5
 RETRY_OPEN_S = 2.0
 PEEK_S = 1.0  # while not holding the board: read where the head is this often, torque untouched
 POSE_STALE_S = 5.0  # a pose older than this isn't reported (a failed peek keeps the last one)
-# Every other peek failed live (2026-11-16): the first read right after opening the port went
-# unanswered. A short settle after open, and a longer reply wait than the 20 ms default.
+# Every other peek, and the first head command, failed live (2026-11-16): the first read right
+# after opening the port went unanswered. A short settle after open, and a longer reply wait
+# than the 20 ms default, on every open of this board.
 PEEK_SETTLE_S, PEEK_TIMEOUT_S = 0.03, 0.05
 HEAD_JOINTS = {"head_pan_joint": "head_pan", "head_tilt_joint": "head_tilt"}
 
@@ -133,9 +134,10 @@ class Head:
         if held:
             self.state, self.message = "busy", busy_message(f"The arm board {self.port}", held)
             return
-        bus = self.opener(self.port)
+        bus = self.opener(self.port, timeout_s=PEEK_TIMEOUT_S)
         try:
             bus.open()
+            time.sleep(PEEK_SETTLE_S)  # the same first-read-after-open loss the peek hit
             self._configure(bus)
         except (OSError, ft.BusError) as e:
             try:
