@@ -105,8 +105,9 @@ def sync_velocity_frame(raw_by_id: dict[int, int]) -> bytes:
 
 def deg_to_raw(deg: float, range_min: int, range_max: int) -> int:
     """lerobot's MotorNormMode.DEGREES (drive_mode 0): 0 deg is the middle of the calibrated
-    range, MAX_RES steps a turn. Checked against lerobot's Goal_Position frames."""
-    return int(round((range_min + range_max) / 2 + deg * MAX_RES / 360))
+    range, MAX_RES steps a turn. int(), not round(): lerobot truncates (motors_bus.py
+    _unnormalize), and a step off from what handeye.py sends would shift every taught pose."""
+    return int(deg * MAX_RES / 360 + (range_min + range_max) / 2)
 
 
 def raw_to_deg(raw: int, range_min: int, range_max: int) -> float:

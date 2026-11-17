@@ -167,3 +167,8 @@ def test_degrees_match_lerobot_head_calibration():
     assert ft.sync_write_frame(ft.GOAL_POSITION, goal) == H("ff ff fe 0a 83 2a 02 07 37 08 08 68 06 8c")
     assert abs(ft.raw_to_deg(2000, *pan) - 0.9230769) < 1e-6
     assert abs(ft.raw_to_deg(2000, *tilt) - 11.6043956) < 1e-6
+
+
+def test_deg_to_raw_truncates_like_lerobot():
+    # 0.1 deg past the pan mid (1989.5): 1989.5 + 1.1375 = 1990.64 -> lerobot's int() gives 1990.
+    assert ft.deg_to_raw(0.1, 567, 3412) == 1990
