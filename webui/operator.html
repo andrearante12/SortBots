@@ -283,6 +283,7 @@
   .cam .armpad .ax.t { top: 3px; left: 50%; transform: translateX(-50%); } .cam .armpad .ax.b { bottom: 3px; left: 50%; transform: translateX(-50%); }
   .cam .armpad .ax.l { left: 3px; top: 50%; transform: translateY(-50%); } .cam .armpad .ax.r { right: 3px; top: 50%; transform: translateY(-50%); }
   .cam .armpad .side { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
+  .cam .armpad [data-arm-act="rest"] { grid-column: 1 / -1; }
   .cam .armpad .lv { grid-column: 1 / -1; display: flex; gap: 2px; }
   .cam .armpad button { height: 22px; padding: 0 7px; border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65);
                         color: #e6ebf0; font: 600 .64rem system-ui, sans-serif; line-height: 1; touch-action: none; white-space: nowrap; }

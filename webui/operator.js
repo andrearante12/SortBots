@@ -1163,7 +1163,7 @@
         <div class="side">
           <button type="button" data-wf="1" title="Wrist up (hold)">wrist &#8593;</button><button type="button" data-wf="-1" title="Wrist down (hold)">wrist &#8595;</button>
           <div class="lv" role="group" aria-label="Arm speed"><button type="button" data-lv="0">L1</button><button type="button" data-lv="1">L2</button><button type="button" data-lv="2">L3</button><button type="button" data-lv="3">L4</button></div>
-          <button type="button" data-arm-act="magnet" title="Magnet on / off">Magnet</button><button type="button" data-arm-act="pick" title="One-button pick and place">Pick</button>
+          <button type="button" data-arm-act="magnet" title="Magnet on / off">Magnet</button><button type="button" data-arm-act="pick" title="One-button pick and place">Pick</button><button type="button" data-arm-act="rest" title="Back to the rest pose (refused while the magnet is on)">Rest</button>
         </div>
       </div>`;
     const perc = document.createElement("div");
@@ -1388,6 +1388,12 @@
       armCmd(id, { magnet: on ? "on" : "off" });
       toast(`${nameOf(id)}: magnet ${on ? "on" : "off"}`);
     });
+    pad.querySelector('[data-arm-act="rest"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      const r = robots.get(id);
+      if (!r || !r.pick) return toast(`${nameOf(id)}: the arm's pick node isn't running`);
+      publishString(`/${id}/pick_request`, JSON.stringify({ cmd: "rest" }));
+    });
     pad.querySelector('[data-arm-act="pick"]').addEventListener("click", (e) => {
       e.stopPropagation();
       // A pick node publishes a latched pick_status; without one nothing would answer.
@@ -1449,7 +1455,7 @@
   }
   // The pick's phase and its own words (pick_status from arm_driver), over the picture in Arm
   // mode: the page showed nothing while a pick searched, locked or failed (2026-11-16).
-  const PICK_PHASE_TONE = { FAILED: "bad", ABORTED: "bad", BUSY: "warn", PLACED: "ok", PICKED: "ok", IDLE: "" };
+  const PICK_PHASE_TONE = { FAILED: "bad", ABORTED: "bad", BUSY: "warn", PLACED: "ok", PICKED: "ok", REST: "ok", IDLE: "" };
   function syncPickLine(c) {
     if (!c.pickLine) return;
     const r = c.robotId && robots.get(c.robotId), p = r && r.pick;

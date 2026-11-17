@@ -20,6 +20,7 @@ and a servo board takes one owner: anything that moves either goes through here.
                                               base_link: x, y, z m, pitch rad), "magnet"
     /<id>/pick_request std_msgs/String (JSON) {"cmd": "auto"} the one-button pick and place
                                               (scripts/pick_core.py, handeye.py's PICK);
+                                              {"cmd": "rest"} back to the taught rest pose;
                                               {"cmd": "cancel"} holds the arm where it is
     /<id>/pick_status  std_msgs/String (JSON, latched) phase/busy/note/result, the keys the
                                               sim's magnet_pick.py publishes
@@ -763,7 +764,9 @@ def run_node(robot_id: str, cfg: dict):
         t.linear.x = float(x)
         vel_pub.publish(t)
 
-    def start_pick():
+    def start_pick(action="auto"):
+        """action "auto": the one-button pick and place. "rest": handeye's Go to rest (the old
+        page's reset button), the same thread and pausing, so a pad touch interrupts it too."""
         import pick_core
         import pick_ros
         if pick["thread"] is not None:
@@ -800,8 +803,15 @@ def run_node(robot_id: str, cfg: dict):
         def run():
             result, note = "failed", ""
             try:
-                core.start()
-                result = core.auto_pick()
+                if action == "rest":
+                    # A fresh core hasn't asked the board yet: without this poll go_rest's
+                    # "magnet is ON" refusal couldn't fire, and a held package would be carried
+                    # into the folded pose.
+                    core.mag.poll()
+                    result = "rest" if core.go_rest() else ("aborted" if abort.is_set() else "failed")
+                else:
+                    core.start()
+                    result = core.auto_pick()
             except Exception as e:   # the thread must always end in a status, never silently
                 note = f"{type(e).__name__}: {e}"
                 log.error(f"pick crashed: {note}")
@@ -809,15 +819,16 @@ def run_node(robot_id: str, cfg: dict):
             pick["done"] = True
 
         pick["done"] = False
+        abort.clear()
         pick["thread"] = threading.Thread(target=run, daemon=True)
-        log.info("pick: starting")
-        pick_status("STARTING", "pick and place", busy=True)
+        log.info(f"pick: starting {action}")
+        pick_status("STARTING", "going to rest" if action == "rest" else "pick and place", busy=True)
         pick["thread"].start()
 
     def on_pick_request(msg):
         cmd = _json(msg.data) or {}
-        if cmd.get("cmd") == "auto":
-            start_pick()
+        if cmd.get("cmd") in ("auto", "rest"):
+            start_pick(cmd["cmd"])
         elif cmd.get("cmd") in ("cancel", "stop", "abort"):
             pick["abort"].set()
 
