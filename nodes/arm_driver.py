@@ -47,6 +47,11 @@ STATE_HZ = 5
 RETRY_OPEN_S = 2.0
 PEEK_S = 1.0  # while not holding the board: read where the head is this often, torque untouched
 POSE_STALE_S = 5.0  # a pose older than this isn't reported (a failed peek keeps the last one)
+# The arm board's link drops out for ~1-2 s at a time on the Jetson (2026-11-16: ~25% of reads
+# lost in bursts, through lerobot too, with nothing else opening the port). Ride through it:
+# opening retries fast for a while, and a held board is dropped only after this much silence.
+LINK_LOST_S, OPEN_RETRY_FAST_S, OPEN_GIVE_UP_S = 5.0, 0.3, 6.0
+GOAL_RESEND_S = 0.2
 # Every other peek, and the first head command, failed live (2026-11-16): the first read right
 # after opening the port went unanswered. A short settle after open, and a longer reply wait
 # than the 20 ms default, on every open of this board.
@@ -81,6 +86,10 @@ def homing_register(offset: int) -> int:
     return abs(offset) | (1 << 11 if offset < 0 else 0)
 
 
+class CalibrationMismatch(ft.BusError):
+    """The servos answer, but not as the calibration file says: never retried into."""
+
+
 class Head:
     """Commands in, goal frames out, on whatever bus `opener` returns. `now` is passed in so
     the tests can run it on a fake clock."""
@@ -102,6 +111,9 @@ class Head:
         self.pos_at = -1e9
         self.next_open = 0.0
         self.next_peek = 0.0
+        self.open_fail_since = None
+        self.read_fail_since = None
+        self.goal_sent_at = -1e9
         self.state, self.message = "idle", ""
 
     # -- conversions: the sim's radians <-> head.py's degrees -----------------------------------
@@ -144,9 +156,17 @@ class Head:
                 bus.close()
             except OSError:
                 pass
+            if isinstance(e, ft.BusError) and not isinstance(e, CalibrationMismatch):
+                # A link dropout: try again soon, and only call it an error once it has lasted.
+                self.open_fail_since = self.open_fail_since if self.open_fail_since is not None else now
+                if now - self.open_fail_since < OPEN_GIVE_UP_S:
+                    self.next_open = now + OPEN_RETRY_FAST_S
+                    self.state, self.message = "connecting", f"arm board not answering yet: {e}"
+                    return
+            self.open_fail_since = None
             self.state, self.message = "error", f"arm board {self.port}: {e}"
             return
-        self.bus = bus
+        self.bus, self.open_fail_since, self.read_fail_since = bus, None, None
         self.state, self.message = "holding", ""
 
     def _configure(self, bus):
@@ -159,7 +179,7 @@ class Head:
                    bus.read(sid, ft.HOMING_OFFSET))
             want = (c["range_min"], c["range_max"], homing_register(c["homing_offset"]))
             if got != want:
-                raise ft.BusError(f"{m} (id {sid}) registers {got} don't match the calibration {want}: "
+                raise CalibrationMismatch(f"{m} (id {sid}) registers {got} don't match the calibration {want}: "
                                   f"servo swapped or re-homed? Recalibrate (head.py calibrate)")
         for m, sid in self.ids.items():
             # head.py keys: configure_motors, position mode, the follower's gains, all with
@@ -195,7 +215,11 @@ class Head:
         return out
 
     def tick(self, now, dt):
-        if self.bus is None or self.target is None:
+        if self.bus is None:
+            if self.state == "connecting" and now >= self.next_open:
+                self._open(now)
+            return
+        if self.target is None:
             return
         step = self.max_dps * dt
         moved = False
@@ -204,7 +228,10 @@ class Head:
             ng = t if abs(t - g) <= step else g + math.copysign(step, t - g)
             if ng != g:
                 self.goal[m], moved = ng, True
-        if moved:
+        # Re-sent while holding even when unchanged: a goal frame is never acknowledged, and one
+        # lost in a link dropout would otherwise leave the head short of where it was sent.
+        if moved or now - self.goal_sent_at >= GOAL_RESEND_S:
+            self.goal_sent_at = now
             try:
                 self.bus.sync_write(ft.GOAL_POSITION, {self.ids[m]: self._raw(m, d) for m, d in self.goal.items()})
             except (OSError, ft.BusError) as e:
@@ -217,8 +244,14 @@ class Head:
             return
         try:
             self.pos, self.pos_at = self._read(self.bus), now
-        except (OSError, ft.BusError) as e:
-            self._lost(now, f"arm board read failed: {e}")
+            self.read_fail_since = None
+        except OSError as e:
+            self._lost(now, f"arm board gone: {e}")
+        except ft.BusError as e:
+            # A dropout: keep holding (the goal frames are re-sent) unless it has gone on.
+            self.read_fail_since = self.read_fail_since if self.read_fail_since is not None else now
+            if now - self.read_fail_since >= LINK_LOST_S:
+                self._lost(now, f"arm board silent for {LINK_LOST_S:.0f} s: {e}")
 
     def _peek(self, now):
         """Not holding the board: open it just long enough to read the head's position, so the

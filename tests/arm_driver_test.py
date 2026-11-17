@@ -146,3 +146,57 @@ def test_peek_skips_a_held_board():
     head = ad.Head(CFG, opener=lambda port, **kw: bus, holders_of=lambda port: [(7, "handeye")])
     head.poll(0.0)
     assert head.pos is None and not bus.open_
+
+
+class FlakyBus(FakeBus):
+    """Drops every read while `down` is set, like the Jetson's arm-board link did."""
+    down = False
+
+    def read(self, sid, reg, sign_bit=None, retries=2):
+        if self.down:
+            raise ft.BusError(f"servo {sid}: no reply")
+        return super().read(sid, reg, sign_bit, retries)
+
+
+def test_open_rides_through_a_dropout():
+    bus = FlakyBus(CFG["head"]["cal"])
+    bus.down = True
+    head = ad.Head(CFG, opener=lambda port, **kw: bus, holders_of=lambda port: [])
+    head.command({"head_pan_joint": 0.0}, 0.0)
+    assert head.state == "connecting" and head.bus is None
+    bus.down = False
+    head.tick(0.0 + ad.OPEN_RETRY_FAST_S + 0.01, DT)        # the tick retries, no new command needed
+    assert head.state == "holding" and head.bus is bus
+
+
+def test_open_gives_up_after_a_long_silence():
+    bus = FlakyBus(CFG["head"]["cal"])
+    bus.down = True
+    head = ad.Head(CFG, opener=lambda port, **kw: bus, holders_of=lambda port: [])
+    head.command({"head_pan_joint": 0.0}, 0.0)
+    t = 0.0
+    while t < ad.OPEN_GIVE_UP_S + 1 and head.state == "connecting":
+        t += ad.OPEN_RETRY_FAST_S + 0.01
+        head.tick(t, DT)
+    assert head.state == "error"
+
+
+def test_held_board_survives_short_read_gaps_and_resends_goals():
+    bus = FlakyBus(CFG["head"]["cal"])
+    head = ad.Head(CFG, opener=lambda port, **kw: bus, holders_of=lambda port: [])
+    head.command({"head_pan_joint": 0.0}, 0.0)
+    n = len(bus.goals)
+    bus.down = True
+    for i in range(1, 11):                     # 2 s of lost reads at STATE_HZ
+        head.poll(i * 0.2)
+        head.tick(i * 0.2, DT)
+    assert head.bus is bus and head.state == "holding"
+    assert len(bus.goals) > n                  # goals kept going out while reads were lost
+    head.poll(ad.LINK_LOST_S + 1.0)
+    assert head.bus is None and head.state == "error"
+
+
+def test_calibration_mismatch_is_not_retried():
+    head, bus = make(tamper=lambda regs: regs[8].__setitem__(ft.HOMING_OFFSET, 0))
+    head.command({"head_tilt_joint": 0.1}, 0.0)
+    assert head.state == "error"
