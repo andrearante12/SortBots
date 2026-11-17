@@ -10,8 +10,8 @@ head:
   calibration: configs/calibration/robots/sortbots_head/sortbots_head.json
   # /<id>/head_cmd is in the sim's convention (xlerobot.urdf radians, tilt > 0 looks down);
   # head.py's degrees are 0 at the calibrated centre. These signs map one onto the other.
-  # Check live with a small move before trusting them.
-  pan_sign: 1.0
+  # Checked live 2026-11-16: tilt as is; pan was mirrored (left on the pad turned it right).
+  pan_sign: -1.0
   tilt_sign: 1.0
   # Software slew on the goal: a slider flick must not slam the camera across its range.
   # 90 felt sluggish on the head pad (2026-11-16).
