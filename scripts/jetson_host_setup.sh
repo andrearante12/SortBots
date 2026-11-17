@@ -156,9 +156,11 @@ mkdir -p /var/lib/sortbots /etc/systemd/system.conf.d
 cat > /usr/local/sbin/sortbots-efi-watchdog <<'WDOG'
 #!/bin/bash
 # Installed by scripts/jetson_host_setup.sh (step 8): edit that, not this.
-# Waits for the kernel's RCU stall report naming efi_rts_wq (a UEFI runtime call that never
-# returned), then forces a reboot. Nothing else triggers it.
-dmesg --follow --nopager 2>/dev/null | grep -m1 -q "efi_rts_wq" || exit 0
+# Waits for the kernel's RCU stall report naming the UEFI runtime-services workqueue (a firmware
+# call that never returned), then forces a reboot. Nothing else triggers it.
+# The stall dump's own line, not the bare word: systemd can log a unit's start message into the
+# kernel log early in boot, and a unit description mentioning the word would trigger this.
+dmesg --follow --nopager 2>/dev/null | grep -m1 -q "Workqueue: efi_rts_wq" || exit 0
 logger -p user.crit -t efi-watchdog "UEFI runtime call stuck (efi_rts_wq RCU stall): forcing a reboot"
 echo "$(date -Is) uptime $(cut -d' ' -f1 /proc/uptime)s: efi_rts_wq stall, forced reboot" >> /var/lib/sortbots/efi-resets.log
 journalctl --sync 2>/dev/null; sync
@@ -168,7 +170,7 @@ WDOG
 chmod 755 /usr/local/sbin/sortbots-efi-watchdog
 cat > /etc/systemd/system/sortbots-efi-watchdog.service <<'UNIT'
 [Unit]
-Description=SortBots: reboot when a UEFI runtime call hangs (efi_rts_wq stall)
+Description=SortBots: reboot when a UEFI firmware call hangs
 After=local-fs.target systemd-journald.service
 [Service]
 Type=simple
