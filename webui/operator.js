@@ -730,6 +730,8 @@
     });
     sub(`/${id}/pick_status`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
       try { r.pick = JSON.parse(msg.data); } catch (e) { /* keep the last one */ }
+      const c = cams.get(id);
+      if (c) syncPickLine(c);
     });
     // The real base (nodes/base_driver.py): say why the pad doesn't move it. Without this
     // a held arrow on a board the Robot view holds, or one unplugged, did nothing silently.
@@ -1154,6 +1156,7 @@
         <button type="button" data-headpad="left" aria-label="Look left">&#9664;</button><button type="button" data-headpad="center" aria-label="Centre the head">&#9679;</button><button type="button" data-headpad="right" aria-label="Look right">&#9654;</button>
         <span></span><button type="button" data-headpad="down" aria-label="Look down">&#9660;</button><span></span>
       </div>
+      <div class="pickline" hidden><b></b><span></span></div>
       <div class="armpad" role="group" aria-label="Move the arm" hidden>
         <div class="tp hand" title="Drag to move the hand: up = away, down = toward, left / right; let go and it stops"><i class="ax t">away</i><i class="ax b">toward</i><i class="ax l">left</i><i class="ax r">right</i><b class="knob"></b></div>
         <div class="tp z" title="Drag up / down to raise / lower the hand"><i class="ax t">up</i><i class="ax b">down</i><b class="knob"></b></div>
@@ -1335,13 +1338,17 @@
   const armCmd = (id, cmd) => publishString(`/${id}/arm_cmd`, JSON.stringify(cmd));
   function wireArmPad(id, c, pad) {
     c.armPad = pad;
+    c.pickLine = pad.parentElement.querySelector(".pickline");
     const J = { out: 0, left: 0, up: 0, tilt: 0, wf: 0, roll: 0 };
     let timer = null, level = null;
     const live = () => Object.values(J).some((v) => v);
     const send = () => armCmd(id, level == null ? { jog: { ...J } } : { jog: { ...J }, level });
+    // A stop goes out only when the pad WAS moving the arm: arm_driver aborts a running pick on
+    // any stop or pad touch, and a stop sent on a mere focus change (window blur, a screenshot
+    // tool) aborted a pick that had just locked on (2026-11-16).
     const update = () => {
       if (live()) { if (!timer) { send(); timer = setInterval(send, ARM_SEND_MS); } }
-      else { if (timer) { clearInterval(timer); timer = null; } armCmd(id, { stop: true }); }
+      else if (timer) { clearInterval(timer); timer = null; armCmd(id, { stop: true }); }
     };
     const dz = (v) => (Math.abs(v) < ARM_DEAD ? 0 : v);
     function dragger(el, f) {
@@ -1373,7 +1380,7 @@
       armCmd(id, { jog: { ...J }, level }); // takes effect now, even with no finger down
       pad.querySelectorAll("[data-lv]").forEach((x) => x.classList.toggle("sel", x === b));
     });
-    addEventListener("blur", () => { for (const k in J) J[k] = 0; update(); });
+    addEventListener("blur", () => { if (!live()) return; for (const k in J) J[k] = 0; update(); });
     pad.querySelector('[data-arm-act="magnet"]').addEventListener("click", (e) => {
       e.stopPropagation();
       const r = robots.get(id), m = r && r.arm && r.arm.magnet;
@@ -1413,6 +1420,7 @@
   // (head_state / arm_state, or the sim's head); the choice is remembered per browser.
   const PAD_MODE_KEY = "sortbots.padMode";
   function wirePadMode(id, c, el) {
+    c.robotId = id;
     c.padModeEl = el.querySelector(".padmode");
     c.drivePad = el.querySelector(".drive");
     try { c.padMode = localStorage.getItem(PAD_MODE_KEY) || "drive"; } catch (e) { c.padMode = "drive"; }
@@ -1437,6 +1445,20 @@
     c.drivePad.hidden = mode !== "drive";
     if (c.headPad) c.headPad.hidden = mode !== "head";
     if (c.armPad) c.armPad.hidden = mode !== "arm";
+    syncPickLine(c);
+  }
+  // The pick's phase and its own words (pick_status from arm_driver), over the picture in Arm
+  // mode: the page showed nothing while a pick searched, locked or failed (2026-11-16).
+  const PICK_PHASE_TONE = { FAILED: "bad", ABORTED: "bad", BUSY: "warn", PLACED: "ok", PICKED: "ok", IDLE: "" };
+  function syncPickLine(c) {
+    if (!c.pickLine) return;
+    const r = c.robotId && robots.get(c.robotId), p = r && r.pick;
+    const show = c.padMode === "arm" && c.hasArm && p && p.phase;
+    c.pickLine.hidden = !show;
+    if (!show) return;
+    c.pickLine.querySelector("b").textContent = p.phase;
+    c.pickLine.querySelector("span").textContent = p.note || "";
+    c.pickLine.dataset.tone = PICK_PHASE_TONE[p.phase] ?? (p.busy ? "busy" : "");
   }
 
   // Keys drive the robot in control (the open card clicked into last), from anywhere on
