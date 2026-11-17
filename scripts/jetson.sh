@@ -205,6 +205,15 @@ case "${1:-}" in
     # half-merged with nobody at a keyboard to fix it. Uncommitted tracked
     # changes block it — the machine is shared, and a switch or pull would
     # otherwise carry someone's edits along or refuse halfway.
+    # Not at boot. A boot keeps the checkout as it was (branch and commit): the
+    # robot comes back running what it ran, and a branch under test isn't swapped
+    # for main by a power blip (2026-11-16). Older installs of
+    # sortbots-console.service still call `update` before `console`; systemd sets
+    # INVOCATION_ID for its services, so that call is recognised and skipped.
+    if [[ -n "${INVOCATION_ID:-}" ]]; then
+      echo "[jetson] boot: keeping $(git -C "$REPO_ROOT" branch --show-current) @ $(git -C "$REPO_ROOT" log --oneline -1) (update is manual)"
+      exit 0
+    fi
     branch="${2:-${SORTBOTS_BRANCH:-main}}"
     cd "$REPO_ROOT" || exit 1
     if ! git diff --quiet || ! git diff --cached --quiet; then
