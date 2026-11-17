@@ -1,0 +1,21 @@
+# The arm's servo board on the real robot: the SO-101 arm (ids 1-5) and the pan/tilt head
+# (7/8), driven over ROS by nodes/arm_driver.py. Not the Robot view's tools (head.py,
+# handeye.py), which open the same board themselves: one process at a time.
+
+# By USB serial, as everywhere else: plugging the base's board in renumbers this one.
+port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B91029024-if00
+
+head:
+  # The repo copy is the source of truth (scripts/calibration.sh installs it for lerobot).
+  calibration: configs/calibration/robots/sortbots_head/sortbots_head.json
+  # /<id>/head_cmd is in the sim's convention (xlerobot.urdf radians, tilt > 0 looks down);
+  # head.py's degrees are 0 at the calibrated centre. These signs map one onto the other.
+  # Check live with a small move before trusting them.
+  pan_sign: 1.0
+  tilt_sign: 1.0
+  # Software slew on the goal: a slider flick must not slam the camera across its range.
+  max_dps: 90.0
+  # The SO-101 follower's gains, which head.py keys already runs the head on.
+  pid: {p: 16, i: 0, d: 32}
+  # Degrees inside each calibrated stop that a goal may reach (head.py limits()).
+  margin_deg: 2.0

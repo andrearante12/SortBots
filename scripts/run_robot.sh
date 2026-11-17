@@ -56,7 +56,7 @@ PIPELINE_PATTERNS=(realsense2_camera_node rtabmap_slam rgbd_odometry rtabmap_viz
                    fleet_radio.py fleet_tasks.py dynamic_obstacle_filter.py recon_cloud_merge.py \
                    depth_colorizer.py feature_overlay.py obstacle_cloud.py \
                    obstacle_detector.py package_detector.py map_handoff.py rtabmap_sync \
-                   base_driver.py \
+                   base_driver.py arm_driver.py \
                    sortbots_bringup.launch.py)
 KEEP_CONSOLE=false
 

@@ -26,13 +26,26 @@ PING, READ, WRITE, SYNC_WRITE = 0x01, 0x02, 0x03, 0x83
 
 # STS3215 control table, the registers used here: (address, bytes).
 MODEL_NUMBER = (3, 2)
+RETURN_DELAY = (7, 1)
+MIN_POSITION_LIMIT = (9, 2)
+MAX_POSITION_LIMIT = (11, 2)
+P_COEFFICIENT = (21, 1)
+D_COEFFICIENT = (22, 1)
+I_COEFFICIENT = (23, 1)
+HOMING_OFFSET = (31, 2)    # sign-magnitude, sign on bit 11
 OPERATING_MODE = (33, 1)   # EEPROM: 0 position, 1 velocity
 TORQUE_ENABLE = (40, 1)
+ACCELERATION = (41, 1)
+GOAL_POSITION = (42, 2)
 GOAL_VELOCITY = (46, 2)    # sign-magnitude, sign on bit 15
+LOCK = (55, 1)
+PRESENT_POSITION = (56, 2)
 PRESENT_VOLTAGE = (62, 1)  # 0.1 V
+MAX_ACCELERATION = (85, 1)
 
 STS3215_MODEL = 777
-VELOCITY_MODE = 1
+POSITION_MODE, VELOCITY_MODE = 0, 1
+MAX_RES = 4095  # lerobot's DEGREES normalisation divides by this, not 4096
 
 
 def checksum(body: bytes) -> int:
@@ -78,12 +91,26 @@ def read_frame(servo_id: int, reg: tuple[int, int]) -> bytes:
     return frame(servo_id, READ, bytes([addr, size]))
 
 
-def sync_velocity_frame(raw_by_id: dict[int, int]) -> bytes:
-    addr, size = GOAL_VELOCITY
+def sync_write_frame(reg: tuple[int, int], values: dict[int, int], sign_bit: int | None = None) -> bytes:
+    addr, size = reg
     params = bytes([addr, size])
-    for sid, raw in raw_by_id.items():
-        params += bytes([sid]) + velocity(raw)
+    for sid, v in values.items():
+        params += bytes([sid]) + encode(v, size, sign_bit)
     return frame(BROADCAST, SYNC_WRITE, params)
+
+
+def sync_velocity_frame(raw_by_id: dict[int, int]) -> bytes:
+    return sync_write_frame(GOAL_VELOCITY, raw_by_id, sign_bit=15)
+
+
+def deg_to_raw(deg: float, range_min: int, range_max: int) -> int:
+    """lerobot's MotorNormMode.DEGREES (drive_mode 0): 0 deg is the middle of the calibrated
+    range, MAX_RES steps a turn. Checked against lerobot's Goal_Position frames."""
+    return int(round((range_min + range_max) / 2 + deg * MAX_RES / 360))
+
+
+def raw_to_deg(raw: int, range_min: int, range_max: int) -> float:
+    return (raw - (range_min + range_max) / 2) * 360 / MAX_RES
 
 
 def parse_status(buf: bytes, servo_id: int) -> tuple[int, bytes] | None:
@@ -190,6 +217,9 @@ class Bus:
     def sync_velocity(self, raw_by_id: dict[int, int]):
         """Goal_Velocity to several servos in one unanswered broadcast frame."""
         self._send(sync_velocity_frame(raw_by_id))
+
+    def sync_write(self, reg: tuple[int, int], values: dict[int, int], sign_bit: int | None = None):
+        self._send(sync_write_frame(reg, values, sign_bit))
 
 
 def open_wheels(port: str, ids: list[int]) -> Bus:

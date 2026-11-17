@@ -678,7 +678,7 @@
       id, color: COLORS[robots.size % COLORS.length], pose: null, linkAt: -Infinity, plan: [],
       explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity, queueDepth: 0,
       nav: null, seenStamp: {}, odom: null, odomAt: -Infinity,
-      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity,
+      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity, head: null, headAt: -Infinity,
     };
     robots.set(id, r);
     // Kept so removeRobot can drop them when a run leaves this robot out.
@@ -702,6 +702,16 @@
       try { r.boxes = JSON.parse(msg.data); } catch (e) { return; }
       r.boxesAt = performance.now();
       drawCamObstacles(id);
+    });
+    // The real head (nodes/arm_driver.py): where it is, in the sim's radians, so the sliders
+    // under the camera tile show and track it as they do the sim's (syncHeads).
+    sub(`/${id}/head_state`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
+      let h;
+      try { h = JSON.parse(msg.data); } catch (e) { return; }
+      const was = r.head && r.head.state;
+      r.head = h; r.headAt = performance.now();
+      if ((h.state === "busy" || h.state === "error") && h.state !== was) toast(`${nameOf(id)}: head ${h.state}. ${h.message || ""}`);
+      syncHeads();
     });
     sub(`/${id}/pick_status`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
       try { r.pick = JSON.parse(msg.data); } catch (e) { /* keep the last one */ }
@@ -1162,7 +1172,10 @@
   }
   function syncHeads() {
     for (const [id, c] of cams) {
-      const h = worldTruth && worldTruth.head && worldTruth.head[id];
+      // The sim's ground truth, or the real head's own report (arm_driver's head_state).
+      const r = robots.get(id);
+      const real = r && r.head && typeof r.head.pan === "number" && performance.now() - r.headAt < 3000 ? r.head : null;
+      const h = (worldTruth && worldTruth.head && worldTruth.head[id]) || real;
       c.head.hidden = !h;
       if (!h || performance.now() - c.headAt < HEAD_HANDS_OFF_MS) continue; // not under the operator's hand
       for (const [key] of HEAD_AXES) {

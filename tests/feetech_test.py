@@ -146,3 +146,24 @@ def test_missing_servo_is_named(servos, monkeypatch):
     monkeypatch.setattr(ft.Bus, "__init__", lambda self, port, timeout_s=0.05: (setattr(self, "port", port), setattr(self, "timeout_s", 0.05), setattr(self, "fd", None))[-1])
     with pytest.raises(ft.BusError, match="servo 10"):
         ft.open_wheels(servos.path, [7, 10])
+
+
+def test_position_frames_match_lerobot():
+    # lerobot's head sequence (configure, position mode, gains, goal, torque on), captured
+    # against the real head calibration on a pty, 2026-11-16.
+    assert ft.write_frame(7, ft.RETURN_DELAY, 0) == H("ff ff 07 04 03 07 00 ea")
+    assert ft.write_frame(7, ft.MAX_ACCELERATION, 254) == H("ff ff 07 04 03 55 fe 9e")
+    assert ft.write_frame(7, ft.ACCELERATION, 254) == H("ff ff 07 04 03 29 fe ca")
+    assert ft.write_frame(8, ft.OPERATING_MODE, ft.POSITION_MODE) == H("ff ff 08 04 03 21 00 cf")
+    assert ft.write_frame(7, ft.P_COEFFICIENT, 16) == H("ff ff 07 04 03 15 10 cc")
+    assert ft.write_frame(7, ft.I_COEFFICIENT, 0) == H("ff ff 07 04 03 17 00 da")
+    assert ft.write_frame(7, ft.D_COEFFICIENT, 32) == H("ff ff 07 04 03 16 20 bb")
+    assert ft.write_frame(7, ft.LOCK, 1) == H("ff ff 07 04 03 37 01 b9")
+
+
+def test_degrees_match_lerobot_head_calibration():
+    pan, tilt = (567, 3412), (847, 2889)  # configs/calibration/robots/sortbots_head/sortbots_head.json
+    goal = {7: ft.deg_to_raw(10.0, *pan), 8: ft.deg_to_raw(-20.0, *tilt)}
+    assert ft.sync_write_frame(ft.GOAL_POSITION, goal) == H("ff ff fe 0a 83 2a 02 07 37 08 08 68 06 8c")
+    assert abs(ft.raw_to_deg(2000, *pan) - 0.9230769) < 1e-6
+    assert abs(ft.raw_to_deg(2000, *tilt) - 11.6043956) < 1e-6

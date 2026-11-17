@@ -255,6 +255,18 @@ def _make_per_robot_actions(
                 ],
                 output="screen",
             ))
+        # The arm's board: the pan/tilt head on /<id>/head_cmd (the camera tile's sliders),
+        # the arm next. One process owns that board (nodes/arm_driver.py). Real only: Isaac
+        # moves the sim's head itself.
+        if platform == "real":
+            actions.append(ExecuteProcess(
+                cmd=[
+                    "python3",
+                    os.path.join(REPO_ROOT, "nodes", "arm_driver.py"),
+                    "--robot-id", rid,
+                ],
+                output="screen",
+            ))
         # Live obstacles from raw depth, at camera rate, in base_link: what is
         # in front of the robot NOW, independent of odometry and SLAM (and of
         # where SLAM runs). Real robot only for now — sim's Nav2 reads the
