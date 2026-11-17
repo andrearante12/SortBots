@@ -297,8 +297,13 @@ def run_node(robot_id: str, cfg: dict):
         head.tick(now, min(0.1, now - last["t"]))
         last["t"] = now
         if head.state != last["state"]:
-            (log.warning if head.state in ("busy", "error") else log.info)(
-                f"head {head.state}{': ' + head.message if head.message else ''}")
+            text = f"head {head.state}{': ' + head.message if head.message else ''}"
+            # Two call sites, not one with a chosen severity: rclpy raises "Logger severity
+            # cannot be changed between calls" for that, which killed this node (2026-11-16).
+            if head.state in ("busy", "error"):
+                log.warning(text)
+            else:
+                log.info(text)
             last["state"] = head.state
 
     def on_state():
