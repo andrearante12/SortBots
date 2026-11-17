@@ -46,3 +46,16 @@ camera:
   # Tried in order: a D435 on a USB 2 port can't do 30 fps at 640x480 (docs/real-robot.md).
   fps: [30, 15]
   jpeg_quality: 70
+
+# The ROS path: nodes/base_driver.py on /<id>/cmd_vel (the operator view's drive pad on the
+# Map view, later Nav2 and the explorer). Not the Robot view above, which has its own levels.
+ros:
+  # Index into speed_levels. 0 = the slowest (0.1 m/s, 30 deg/s): the pad publishes the
+  # sim's 0.5 m/s, and every command is clamped to this level first.
+  speed_level: 0
+  # The pad republishes at 10 Hz while held. Rosbridge over Wi-Fi adds jitter on top of
+  # that, so the ROS path waits a little longer than the Robot view's 0.3 s before stopping.
+  watchdog_s: 0.5
+  # Stopped this long and the board is released (wheels 0, torque off), so the Robot view
+  # and `handeye pick` can open it.
+  idle_release_s: 3.0

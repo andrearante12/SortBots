@@ -118,6 +118,26 @@
            padding: 3px 8px; border: 1px solid var(--line); border-radius: 99px; margin-left: -6px; cursor: default; }
   #build.stale { color: var(--warnink); background: var(--warnbg); border-color: var(--warnline); }
   @media (max-width: 1100px) { #build { max-width: 120px; } }
+  #platform-chip { display: inline-flex; align-items: center; gap: 7px; padding: 4px 10px; margin-left: -6px;
+                   font: 600 .74rem/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; }
+  #platform-chip .dot { width: 8px; height: 8px; border-radius: 50%; }
+  #platform-chip[data-platform="real"] { color: var(--go); border-color: var(--go); }
+  #platform-chip[data-platform="real"] .dot { background: var(--go); }
+  #platform-chip[data-platform="sim"] { color: var(--info); border-color: var(--info); }
+  #platform-chip[data-platform="sim"] .dot { background: var(--info); }
+  #platform-pop { position: fixed; top: 54px; left: 150px; z-index: 6; width: 360px; max-width: calc(100vw - 24px);
+                  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px var(--shadow); padding: 12px; }
+  #platform-pop h3 { margin: 0 0 8px; font-size: .9rem; }
+  #platform-pop ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+  #platform-pop .console { display: grid; grid-template-columns: auto 1fr; column-gap: 10px; align-items: baseline;
+                           padding: 8px 10px; border-radius: 8px; color: var(--ink); text-decoration: none; }
+  #platform-pop a.console:hover { background: var(--hover2); }
+  #platform-pop .console.here { background: var(--sel); }
+  #platform-pop .console b { grid-row: span 2; font: 600 .7rem ui-monospace, monospace; letter-spacing: .06em; }
+  #platform-pop .console[data-platform="real"] b { color: var(--go); }
+  #platform-pop .console[data-platform="sim"] b { color: var(--info); }
+  #platform-pop .console .url { font-size: .76rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #platform-pop .hint { margin: 8px 0 0; font-size: .8rem; color: var(--muted); }
   #alarms { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
   #alarms .dot { background: var(--faint); }
   #alarms.on { color: var(--stop); border-color: var(--stopb); font-weight: 600; }
@@ -584,6 +604,14 @@
        checked out on the host, so say so. Amber when the server code is older than the
        checkout and a console restart is needed. -->
   <span id="build" hidden></span>
+  <!-- SIM or REAL: what this console's drive pad and Stop all act on (serve.py /api/consoles).
+       Its menu jumps to the other consoles, one per backend machine. -->
+  <button class="btn" id="platform-chip" hidden aria-haspopup="true" aria-expanded="false"><span class="dot"></span><span id="platform-label"></span></button>
+  <div id="platform-pop" hidden role="dialog" aria-label="Consoles">
+    <h3>Consoles</h3>
+    <ul id="platform-list"></ul>
+    <p id="platform-none" class="hint">No other console is configured. Add one to <code>configs/consoles.yaml</code>.</p>
+  </div>
   <!-- Map / 3D cloud / Sim picks what the stage shows. How the session was started
        (mapping vs. a premapped, read-only map) is the session chip's tooltip: it was a
        header tile until 2026-10-24, squeezed to an unreadable "MODE" at laptop widths. -->

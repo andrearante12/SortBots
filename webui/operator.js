@@ -706,6 +706,15 @@
     sub(`/${id}/pick_status`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
       try { r.pick = JSON.parse(msg.data); } catch (e) { /* keep the last one */ }
     });
+    // The real base (nodes/base_driver.py): say why the pad doesn't move it. Without this
+    // a held arrow on a board the Robot view holds, or one unplugged, did nothing silently.
+    sub(`/${id}/base_status`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
+      let b;
+      try { b = JSON.parse(msg.data); } catch (e) { return; }
+      const was = r.base && r.base.state;
+      r.base = b;
+      if ((b.state === "busy" || b.state === "error") && b.state !== was) toast(`${nameOf(id)}: base ${b.state}. ${b.message || ""}`);
+    });
 
     // Only the twist is used (speed / turn rate on the card); the pose comes from /tf.
     // Throttled: the card shows it to two decimals, 4 Hz is plenty.
@@ -1484,6 +1493,52 @@
     } else lines.push("This is what the site is running.");
     el.title = lines.join("\n");
   }
+
+  // -- sim or real, and the other consoles (serve.py /api/consoles) ---------------------------------
+  // One console per backend: the Jetson's serves the real robot, a desktop's the Isaac sim.
+  // The chip says which this page is driving, so a drive pad press is never a surprise, and
+  // its menu jumps to the other consoles (configs/consoles.yaml).
+  let consoles = [];
+  async function loadConsoles() {
+    let body;
+    try { const r = await fetch("/api/consoles"); if (!r.ok) return; body = await r.json(); } catch (e) { return; }
+    const chip = $("#platform-chip"), plat = body.platform;
+    if (plat !== "sim" && plat !== "real") { chip.hidden = true; return; }
+    consoles = body.consoles || [];
+    chip.hidden = false;
+    chip.dataset.platform = plat;
+    $("#platform-label").textContent = plat === "real" ? "REAL" : "SIM";
+    chip.title = plat === "real" ? "Driving the real robot (this console runs on the robot)" : "Driving the Isaac simulation";
+    const here = location.host;
+    const list = $("#platform-list");
+    list.replaceChildren();
+    for (const c of consoles) {
+      const li = document.createElement("li");
+      let cur = false;
+      try { cur = new URL(c.url, location.href).host === here; } catch (e) { /* bad url: listed, not marked */ }
+      const a = document.createElement(cur ? "span" : "a");
+      if (!cur) a.href = c.url;
+      a.className = "console" + (cur ? " here" : "");
+      a.dataset.platform = c.platform;
+      a.innerHTML = `<b></b><span class="name"></span><span class="url"></span>`;
+      a.querySelector("b").textContent = c.platform === "real" ? "REAL" : "SIM";
+      a.querySelector(".name").textContent = c.name + (cur ? " (this page)" : "");
+      a.querySelector(".url").textContent = c.url;
+      li.appendChild(a);
+      list.appendChild(li);
+    }
+    $("#platform-none").hidden = consoles.some((c) => { try { return new URL(c.url, location.href).host !== here; } catch (e) { return false; } });
+  }
+  $("#platform-chip").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const pop = $("#platform-pop");
+    pop.hidden = !pop.hidden;
+    $("#platform-chip").setAttribute("aria-expanded", String(!pop.hidden));
+  });
+  document.addEventListener("click", (e) => {
+    const pop = $("#platform-pop");
+    if (!pop.hidden && !pop.contains(e.target)) { pop.hidden = true; $("#platform-chip").setAttribute("aria-expanded", "false"); }
+  });
 
   // -- gateway pin (comms overlay) -------------------------------------------------------------------
   // Where the fleet's gateway / access point stands, per platform (serve.py:
@@ -2492,7 +2547,7 @@
 
   // -- boot ----------------------------------------------------------------------------------------------------------------------
   applyTheme(); resize(); setTool("select"); renderTasks(); renderWaypoints();
-  refreshRoster(); loadWaypoints(); loadGateway(); pollSession(); loadVersion();
+  refreshRoster(); loadWaypoints(); loadGateway(); pollSession(); loadVersion(); loadConsoles();
   // "sim" waits for loadWaypoints to learn the platform (it's sim-only), see there.
   try { const v = localStorage.getItem("sortbots.mapView"); if (v === "3d") setView("3d"); } catch (e) { /* default: 2D */ }
   setInterval(loadWaypoints, 10000); // another operator may have added pins
@@ -2502,5 +2557,5 @@
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane, setView, get stageView() { return stageView; }, simCam, loadVersion };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane, setView, get stageView() { return stageView; }, simCam, loadVersion, loadConsoles };
 })();

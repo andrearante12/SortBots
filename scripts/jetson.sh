@@ -105,7 +105,8 @@ case "${1:-}" in
     #   /proc/devices), plus usb (189) for resets. Binding all of /dev rather
     #   than --device per node is what survives re-enumeration: the D435
     #   drops and reappears on every hardware reset the driver issues, and a
-    #   --device snapshot would lose it.
+    #   --device snapshot would lose it. 166/188 are ttyACM/ttyUSB: the servo
+    #   boards (nodes/base_driver.py opens the wheels' by /dev/serial/by-id).
     # --user: files the pipeline writes into the repo (data/sessions, maps/)
     #   stay owned by you, not root. HOME points at the bind-mounted ~/.ros's
     #   parent so run_robot.sh's ~/.ros/sortbots_<id>.db is the host's.
@@ -123,6 +124,8 @@ case "${1:-}" in
       --device-cgroup-rule 'c 189:* rmw' \
       --device-cgroup-rule 'c 81:* rmw' \
       --device-cgroup-rule "c $MEDIA_MAJOR:* rmw" \
+      --device-cgroup-rule 'c 166:* rmw' \
+      --device-cgroup-rule 'c 188:* rmw' \
       -v /dev:/dev \
       -v /run/udev:/run/udev:ro \
       --user "$(id -u):$(id -g)" \
