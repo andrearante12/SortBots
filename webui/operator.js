@@ -66,12 +66,75 @@
   let knownBox = null; // [minX, minY, maxX, maxY] of non-unknown cells, world metres
   let dirty = true;
 
+  // -- the robot's computer rebooting or dropping off Wi-Fi ----------------------------------
+  // The page is served by the robot's own console, so while it is down nothing at this address
+  // answers: a fresh load can only show the browser's error. A page that is ALREADY open can do
+  // better, and say what has come back as the robot boots (2026-11-16: it sat on a stale view).
+  // Stages: the GUI server answers (/api/session), the live link (rosbridge), the robot stack
+  // (session + robots online). Shown once the server has been gone OUTAGE_SHOW_MS, so a Wi-Fi
+  // blip doesn't flash it; it closes by itself OUTAGE_DONE_MS after the robots are back.
+  const OUTAGE_SHOW_MS = 4000, OUTAGE_DONE_MS = 2500;
+  const outage = {
+    downAt: null, serverAt: null, rosAt: null, rosUp: false, doneAt: null, timer: null, dismissed: false,
+    server(ok) {
+      const now = performance.now();
+      if (!ok && this.downAt === null) { this.downAt = now; this.serverAt = this.rosAt = this.doneAt = null; this.dismissed = false; }
+      if (ok && this.downAt !== null && this.serverAt === null) {
+        this.serverAt = now;
+        // the console restarted: what it serves may have changed (branch, consoles, robots)
+        refreshRoster(); loadVersion(); loadConsoles();
+      }
+      this.tick();
+    },
+    ros(up) {
+      this.rosUp = up;
+      if (up && this.downAt !== null && this.rosAt === null) this.rosAt = performance.now();
+      this.tick();
+    },
+    tick() {
+      if (this.downAt === null) return;
+      const now = performance.now(), el = $("#outage");
+      if (!el) return;
+      const mmss = (ms) => { const t = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; };
+      const since = (t) => (t === null ? "" : mmss(t - this.downAt));
+      const list = [...robots.values()], up = list.filter(online).length;
+      const running = session && session.state === "running", starting = session && session.state === "starting";
+      let stack, stackOk = false;
+      if (this.serverAt === null) stack = "";
+      else if (!controlAvailable) { stack = "no session control on this console"; stackOk = true; }
+      else if (running && list.length && up === list.length) { stack = `${up} of ${list.length} online`; stackOk = true; }
+      else if (running) stack = `starting: ${up} of ${list.length || "?"} robots online`;
+      else if (starting) stack = PHASE_TEXT[session.phase] || session.phase_label || "starting";
+      else { stack = "not started"; stackOk = true; }
+      const done = this.serverAt !== null && this.rosUp && stackOk;
+      if (done && this.doneAt === null) this.doneAt = now;
+      if (!done) this.doneAt = null;
+      if (this.doneAt !== null && now - this.doneAt > OUTAGE_DONE_MS) {
+        this.downAt = null; el.hidden = true; clearInterval(this.timer); this.timer = null; return;
+      }
+      if (now - this.downAt < OUTAGE_SHOW_MS || this.dismissed) return;
+      el.hidden = false;
+      if (!this.timer) this.timer = setInterval(() => this.tick(), 1000);
+      const row = (ok, pend, text, at) => `<li class="${ok ? "ok" : pend ? "pend" : "wait"}"><i>${ok ? "&#10003;" : pend ? "&hellip;" : "&middot;"}</i><span>${text}</span><time>${at}</time></li>`;
+      $("#outage-title").textContent = done ? "Robot back online" : this.serverAt === null ? "Robot offline: rebooting or out of Wi-Fi" : "Robot coming back";
+      $("#outage-time").textContent = mmss(now - this.downAt);
+      $("#outage-steps").innerHTML =
+        row(this.serverAt !== null, this.serverAt === null, this.serverAt === null ? "Waiting for the robot's computer (a boot takes about a minute)" : "GUI server back", since(this.serverAt)) +
+        row(this.rosUp && this.rosAt !== null, this.serverAt !== null && !this.rosUp, "Live link (rosbridge)", since(this.rosAt)) +
+        row(stackOk && this.serverAt !== null, this.serverAt !== null && !stackOk, `Robot stack${stack ? ": " + esc(stack) : ""}`, "");
+      const late = this.serverAt === null && now - this.downAt > 180000;
+      $("#outage-hint").hidden = !late;
+      $("#outage-start").hidden = !(this.serverAt !== null && controlAvailable && !running && !starting);
+    },
+  };
+
   // -- rosbridge --------------------------------------------------------------
 
   const ros = new ROSLIB.Ros({ url: ROSBRIDGE_URL });
-  ros.on("connection", () => { $("#link-down").hidden = true; });
+  ros.on("connection", () => { $("#link-down").hidden = true; outage.ros(true); });
   ros.on("close", () => {
     $("#link-down").hidden = false;
+    outage.ros(false);
     setTimeout(() => ros.connect(ROSBRIDGE_URL), 2000);
   });
   ros.on("error", (e) => { $("#link-down").hidden = false; console.error("rosbridge error", e); });
@@ -2234,9 +2297,10 @@
           refreshRoster();
         }
       }
-    } catch (e) { /* the console is down; keep the last known state */ }
+      outage.server(true);
+    } catch (e) { outage.server(false); /* the console is down; keep the last known state */ }
     renderHeader();
-    sessionTimer = setTimeout(pollSession, sessionActive() && session.state !== "running" ? 1000 : 3000);
+    sessionTimer = setTimeout(pollSession, outage.downAt !== null || (sessionActive() && session.state !== "running") ? 1000 : 3000);
   }
 
   function openSession() {
@@ -2492,6 +2556,8 @@
     stopCall("/api/session/finish", { name }, `Saving ${name}, then shutting the sim down…`);
   });
   $("#session-chip").addEventListener("click", openSession);
+  $("#outage-start").addEventListener("click", () => { $("#outage").hidden = true; openSession(); });
+  $("#outage-close").addEventListener("click", () => { outage.dismissed = true; $("#outage").hidden = true; });
   $("#empty-go").addEventListener("click", openSession);
   $("#sp-x").addEventListener("click", closeSession);
   $("#session").addEventListener("click", (e) => { if (e.target.id === "session") closeSession(); });
