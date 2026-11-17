@@ -977,6 +977,16 @@
   </div>
 </div>
 
+<!-- The robot's computer rebooting or off Wi-Fi: what has come back so far (operator.js outage). -->
+<div id="outage" hidden role="dialog" aria-live="polite" aria-label="Robot connection">
+  <div class="card">
+    <div class="hd"><b id="outage-title"></b><time id="outage-time"></time></div>
+    <ul id="outage-steps"></ul>
+    <p id="outage-hint" class="hint" hidden>Over 3 minutes: check the robot has power, and that nothing is plugged into its USB-C port (that hangs it at boot).</p>
+    <div class="acts"><button class="btn primary" id="outage-start" hidden>Start the robot stack&hellip;</button><button class="btn" id="outage-close">Hide</button></div>
+  </div>
+</div>
+
 <script src="vendor/roslib.min.js"></script>
 <!-- three.js + OrbitControls (vendored) for the 3D cloud view. -->
 <script src="vendor/three.min.js"></script>
@@ -987,14 +997,5 @@
 <script src="scenarios.js"></script>
 <script src="operator_tests.js"></script>
 <script src="operator_drive.js"></script>
-<!-- The robot's computer rebooting or off Wi-Fi: what has come back so far (operator.js outage). -->
-<div id="outage" hidden role="dialog" aria-live="polite" aria-label="Robot connection">
-  <div class="card">
-    <div class="hd"><b id="outage-title"></b><time id="outage-time"></time></div>
-    <ul id="outage-steps"></ul>
-    <p id="outage-hint" class="hint" hidden>Over 3 minutes: check the robot has power, and that nothing is plugged into its USB-C port (that hangs it at boot).</p>
-    <div class="acts"><button class="btn primary" id="outage-start" hidden>Start the robot stack&hellip;</button><button class="btn" id="outage-close">Hide</button></div>
-  </div>
-</div>
 </body>
 </html>
