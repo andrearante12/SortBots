@@ -67,9 +67,9 @@ def test_board_is_opened_only_when_driving_and_released_when_idle():
 
 def test_commands_clamped_to_ros_speed_level():
     d, st = make()
-    run(d, 0.0, 2.0, cmd=(0.5, 0.0, 1.2))    # the sim's pad speeds
+    run(d, 0.0, 2.0, cmd=(1.0, 0.0, 3.0))    # past every level, so both are clamped
     assert math.isclose(d.vel[0], d.ros["max_xy"]) and math.isclose(d.vel[2], d.ros["max_w"])
-    assert d.ros["max_xy"] == CFG["speed_levels"][0]["xy_mps"]
+    assert d.ros["max_xy"] == CFG["speed_levels"][CFG["ros"]["speed_level"]]["xy_mps"]
     assert st["bus"].frames[-1] == dict(zip(d.ids, body_to_wheel_raw(*d.vel, CFG)))
 
 

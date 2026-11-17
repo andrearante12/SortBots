@@ -234,6 +234,9 @@
   .cam .drive button:hover { background: rgba(10,12,16,.85); }
   .cam .drive button.held { background: rgba(255,255,255,.9); color: #15191e; }
   .cam .drive [data-drive="stop"] { color: #ff8a80; }
+  .cam .drive .lvl { font: 600 .62rem system-ui, sans-serif; }
+  .cam .drive .lvl[hidden] { display: none; }
+  .cam .drive .lvl.sel { background: rgba(255,255,255,.9); color: #15191e; }
   @media (pointer: coarse) { .cam .drive { grid-template-columns: repeat(3, 36px); } .cam .drive button { width: 36px; height: 32px; font-size: .9rem; } }
   /* The pick's phase and note in Arm mode (operator.js syncPickLine), under the mode switch. */
   .cam .pickline { position: absolute; top: 36px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 24px);

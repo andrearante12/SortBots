@@ -50,9 +50,10 @@ camera:
 # The ROS path: nodes/base_driver.py on /<id>/cmd_vel (the operator view's drive pad on the
 # Map view, later Nav2 and the explorer). Not the Robot view above, which has its own levels.
 ros:
-  # Index into speed_levels. 0 = the slowest (0.1 m/s, 30 deg/s): the pad publishes the
-  # sim's 0.5 m/s, and every command is clamped to this level first.
-  speed_level: 0
+  # Index into speed_levels: the CAP on every cmd_vel. The operator view's Nav pad picks
+  # L1..L3 itself (2026-11-16) and starts each page at L1; this clamp is the backstop, at L3,
+  # the base's ceiling (max_raw).
+  speed_level: 2
   # The pad republishes at 10 Hz while held. Rosbridge over Wi-Fi adds jitter on top of
   # that, so the ROS path waits a little longer than the Robot view's 0.3 s before stopping.
   watchdog_s: 0.5

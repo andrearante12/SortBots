@@ -1166,6 +1166,7 @@
         <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
         <button type="button" data-drive="rot-left" aria-label="Rotate left">&#8634;</button><button type="button" data-drive="back" aria-label="Back">&#9660;</button><button type="button" data-drive="rot-right" aria-label="Rotate right">&#8635;</button>
+        <button type="button" class="lvl" data-drive-level="0" title="Speed L1: 0.1 m/s, 30 deg/s" hidden>L1</button><button type="button" class="lvl" data-drive-level="1" title="Speed L2: 0.2 m/s, 60 deg/s" hidden>L2</button><button type="button" class="lvl" data-drive-level="2" title="Speed L3: 0.3 m/s, 90 deg/s" hidden>L3</button>
       </div>
       <div class="headpad" role="group" aria-label="Aim the head" title="Aim the head: hold an arrow; the dot centres it" hidden>
         <span></span><button type="button" data-headpad="up" aria-label="Look up">&#9650;</button><span></span>
@@ -1294,10 +1295,22 @@
   const drives = new Map(); // id -> {held: Set, timer}
   const driveOf = (id) => drives.get(id) || drives.set(id, { held: new Set(), timer: null }).get(id);
 
+  // The real base's speed levels: XLeRobot's three, the same as configs/drive_base.yaml's
+  // speed_levels and the Robot view's gamepad. base_driver clamps to the top one whatever is sent.
+  // Each page starts at L1, so a stray touch after a reload never starts fast. The sim keeps
+  // DRIVE_LINEAR_MPS (its base's URDF limit): the levels are a real-robot thing.
+  const DRIVE_LEVELS = [[0.1, 30], [0.2, 60], [0.3, 90]];
+  function driveScale(id) {
+    if (platform !== "real") return [1, 1];
+    const [mps, dps] = DRIVE_LEVELS[driveOf(id).level || 0];
+    return [mps / DRIVE_LINEAR_MPS, (dps * Math.PI / 180) / DRIVE_ANGULAR_RADPS];
+  }
   function drivePublish(id) {
     const d = driveOf(id);
     let x = 0, y = 0, z = 0;
     for (const cmd of d.held) { const v = DRIVE_VECTORS[cmd]; x += v[0]; y += v[1]; z += v[2]; }
+    const [kl, ka] = driveScale(id);
+    x *= kl; y *= kl; z *= ka;
     publish(`/${id}/cmd_vel`, "geometry_msgs/Twist", { linear: { x, y, z: 0 }, angular: { x: 0, y: 0, z } });
     const c = cams.get(id);
     if (c) for (const b of c.el.querySelectorAll("[data-drive]")) b.classList.toggle("held", d.held.has(b.dataset.drive));
@@ -1330,6 +1343,19 @@
     drivePublish(id);
   }
   function wireDrivePad(id, pad) {
+    const levels = pad.querySelectorAll("[data-drive-level]");
+    const showLevel = () => levels.forEach((b) => {
+      b.hidden = platform !== "real";
+      b.classList.toggle("sel", Number(b.dataset.driveLevel) === (driveOf(id).level || 0));
+    });
+    for (const b of levels) b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      driveOf(id).level = Number(b.dataset.driveLevel);
+      showLevel();
+      if (driveOf(id).held.size) drivePublish(id);   // a held arrow changes speed right away
+    });
+    pad.showLevel = showLevel;
+    showLevel();
     for (const b of pad.querySelectorAll("[data-drive]")) {
       const cmd = b.dataset.drive;
       b.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); b.setPointerCapture(e.pointerId); driveStart(id, cmd); });
@@ -1821,6 +1847,7 @@
         $('#tools [data-t="tp"]').hidden = platform !== "sim";
         if (platform !== "sim" && tool === "tp") setTool("select");
         $('#view [data-v="sim"]').hidden = platform !== "sim";
+        for (const c of cams.values()) { const pad = c.el.querySelector(".drive"); if (pad && pad.showLevel) pad.showLevel(); }
         if (platform !== "sim" && stageView === "sim") setView("2d");
         try { if (platform === "sim" && stageView === "2d" && localStorage.getItem("sortbots.mapView") === "sim") setView("sim"); } catch (e) { /* stay on the map */ }
       }
