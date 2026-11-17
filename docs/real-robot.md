@@ -18,7 +18,15 @@ phone ──:8081/:9090/:8080──▶ Jetson ─ docker sortbots-jetson:jazzy
 1. Add yourself to the docker group, and check `docker info | grep nvidia`.
 2. Install the RealSense udev rules (`99-realsense-libusb.rules`).
 3. Plug the D435 into a USB **3** port. `lsusb -t` must show `5000M`; at 480M the
-   driver falls back to 640×480@15.
+   driver falls back to 640×480@15. Put the arm, base and magnet serial boards
+   on the **USB-A** ports too. **Never boot with a device on the USB-C port.**
+   With a serial board on USB-C, the port comes up in host mode and the Jetson
+   hangs in early boot. This was seen 2026-11-16: the kernel stopped 12.7 s in,
+   right after `cdc_acm 1-1`. Hot-plugging the arm board into USB-C after boot
+   worked in a controlled test, so USB-C is usable if the board is unplugged
+   before every reboot or power-on. The USB-C driver also logs
+   `VDD_5V0_SYS: Underflow of regulator enable count` on unplug, so treat that
+   port as fragile. Its normal use is the laptop recovery cable.
 4. Set the power mode: `sudo nvpmodel -m 2 && sudo jetson_clocks`.
 
 ```bash
