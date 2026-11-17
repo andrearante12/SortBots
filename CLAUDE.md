@@ -37,6 +37,11 @@ platform:=real`. Runbook: `docs/real-robot.md`.
   view's **Robot** view, `serve.py --drive` on the machine the robot is plugged
   into (`docs/drive.md`). The arm's own tools (`scripts/arm.sh`, `handeye pick`)
   run in the `lerobot` env; one process owns a servo board or the D435 at a time.
+- The arm's calibration is in the repo (`configs/calibration/`), not only in
+  `~/.cache`: `scripts/calibration.sh install` on a new machine, `save` and commit
+  after recalibrating. On the Jetson the Robot view runs on the host (miniforge's
+  lerobot env) with the ROS console stopped, reached by SSH tunnel
+  (`docs/real-robot.md`).
 
 ## Layout
 

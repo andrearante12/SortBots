@@ -11,6 +11,11 @@ one-button pick and place. It needs no ROS.
 Open **Robot**, press **Start**, press any button on the pad (a browser lists a pad only after
 one of its buttons is pressed).
 
+On the **Jetson**, run the same serve.py on the Jetson's host and reach it through an SSH tunnel
+from the laptop, with the ROS console stopped: `docs/real-robot.md`, "The arm, pick and place,
+and the Robot view on the Jetson". A new machine needs the calibration first:
+`scripts/calibration.sh install` (`docs/head_camera.md`).
+
 | Pad | |
 |---|---|
 | hold **RT** + left stick | move and strafe (RT is the deadman) |

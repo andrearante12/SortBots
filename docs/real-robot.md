@@ -110,6 +110,48 @@ Without a workstation, the default `--slam-role all` maps on the Jetson at `nice
 - cuVSLAM, which needs JetPack 7.2.
 - Mesh radios (see [Fleet comms](commsim.md)).
 
+## The arm, pick and place, and the Robot view on the Jetson
+
+Everything in `docs/drive.md` and `docs/head_camera.md` runs on the Jetson as it does on the
+laptop: same robot, same boards, same calibration. The Jetson is just the computer it's plugged
+into. Three things differ: the lerobot env is miniforge's, the ROS console wants the same camera
+and port, and the browser is on another machine.
+
+**Once per Jetson:**
+
+1. The `lerobot` env is at `~/miniforge3/envs/lerobot` (not miniconda). `scripts/arm.sh` and
+   the Robot view find either. It has lerobot, numpy, PyYAML and OpenCV.
+2. **It has no `pyrealsense2` yet** (checked 2026-11-16), and `handeye pick` and the Robot view's
+   camera both need it. Try `~/miniforge3/envs/lerobot/bin/pip install pyrealsense2`; if pip has
+   no aarch64 wheel for Python 3.12, build librealsense with `-DBUILD_PYTHON_BINDINGS=ON` against
+   that env's python. The ROS container has its own RealSense driver; it doesn't help the host env.
+3. Put the calibration where the tools look: `scripts/calibration.sh install`. The Jetson had an
+   older arm calibration (2026-11-06); install keeps it as `sortbots_arm.before-install-*.json`.
+4. The boards are found by USB serial, as on the laptop: arm `5B91029024`, base `5B79016064`,
+   magnet ESP32 on the CP2102 (`ttyUSB0`). Check with `ls -l /dev/serial/by-id/`. A board that
+   comes back `root:dialout 660` after a re-plug needs `sudo chmod 666` (docs/arm.md).
+
+**Each session:**
+
+```bash
+# on the Jetson: the ROS console holds the D435 and port 8081, so stop it first
+scripts/jetson.sh stop
+~/miniforge3/envs/lerobot/bin/python webui/serve.py --drive     # host, NOT in the container
+
+# on the laptop (where the browser and the gamepad are):
+ssh -N -L 8081:localhost:8081 jetson-orin.tail0d28f9.ts.net
+# then open http://localhost:8081/ -> Robot
+```
+
+The SSH tunnel is the point, not a workaround: the drive routes answer only a browser on the
+robot's own machine, and refuse anything through Tailscale Serve/Funnel (serve.py has no
+authentication). Through the tunnel the request arrives on the Jetson from localhost. The
+gamepad stays plugged into the laptop: the browser reads it there and sends commands over the
+tunnel.
+
+The Robot view and the ROS stack (mapping, localization) can't run at once on the Jetson: both
+need the D435. Stop one before starting the other.
+
 ## Gaussian splats
 
 The 3D panel's **splat** mode shows a photoreal Gaussian splat of a saved map. It
