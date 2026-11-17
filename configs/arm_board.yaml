@@ -42,3 +42,13 @@ magnet:
   # wanted, so a dead process lets go within on_s (handeye.py's rearm_if_due).
   on_s: 30
   rearm_s: 10
+
+# The one-button pick (scripts/pick_core.py PickConfig); anything not set here keeps handeye's
+# default.
+pick:
+  # handeye backs the base 15 cm off the table before swinging over the place pose. 0: no
+  # wheels needed, the place goes straight to rest and over (2026-11-16, base board not fitted).
+  base_back_cm: 0
+  # Aim correction along the line from the arm's base through the target, + = away from the
+  # robot. handeye's +1 mm landed ~2 mm short on the first ROS picks (2026-11-16): +3.
+  radial_mm: 3.0

@@ -58,6 +58,7 @@ Safety:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import fcntl
 import glob
 import json
@@ -811,7 +812,11 @@ def run_node(robot_id: str, cfg: dict):
             busy = phase in pick_core.PickCore.MOVING_FLAGS or phase in ("HELD", "LOCKED", "PLANNED", "HOVERING", "HOLDING")
             pick_status(phase, text, busy=True if pick["thread"] else busy, **{k: v for k, v in extra.items() if k in ("state", "magnet")})
 
-        core = pick_core.PickCore(io, cam, pick_ros.MagnetIO(magnet), base, kin, hc, poses, abort=abort, report=report)
+        # configs/arm_board.yaml `pick:` overrides handeye's defaults (PickConfig's fields only).
+        fields = {f.name for f in dataclasses.fields(pick_core.PickConfig)}
+        over = {k: v for k, v in (cfg.get("pick") or {}).items() if k in fields}
+        core = pick_core.PickCore(io, cam, pick_ros.MagnetIO(magnet), base, kin, hc, poses,
+                                  cfg=pick_core.PickConfig(**over), abort=abort, report=report)
 
         def run():
             result, note = "failed", ""
