@@ -1,0 +1,25 @@
+# The splat trainer's Python packages (splat/, scripts/splat.sh, docs/real-robot.md
+# "Gaussian splats"). ONE list for both installers: environment-splat.yml (conda)
+# includes it, and scripts/install_splat.sh feeds it to `uv pip` where there is no
+# conda (the RTX 4070 laptop, 2026-11-17).
+#
+# Python 3.10 + torch 2.4/cu124 is not arbitrary: it is the newest combination
+# gsplat publishes PREBUILT wheels for (docs.gsplat.studio/whl). Anything else
+# makes gsplat JIT-compile its CUDA kernels on first import, which needs nvcc,
+# and these machines have only the driver. cu124 runs on the 580 driver (CUDA 13).
+--extra-index-url https://download.pytorch.org/whl/cu124
+--extra-index-url https://docs.gsplat.studio/whl/pt24cu124
+torch==2.4.1+cu124
+gsplat==1.5.3+pt24cu124
+# gsplat's CUDA backend imports these at load (gsplat/cuda/_backend.py ->
+# torch.utils.cpp_extension), and only conda's pip happened to bring them; a
+# bare venv fails with "No module named 'packaging'", then 'setuptools'.
+# setuptools < 70: the last line torch 2.4's cpp_extension was released against.
+packaging
+setuptools<70
+numpy<2
+pillow
+pyyaml
+# splat/rtabmap_db.py's pose-graph solve: sparse, so a 1,000-keyframe map
+# doesn't need a dense 6000x6000 system.
+scipy
