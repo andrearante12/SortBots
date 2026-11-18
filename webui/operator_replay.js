@@ -41,7 +41,7 @@
     recovery: ["--faint", "Recovery"], done: ["--go", "Delivered"], disturb: ["--info", "Disturbance"],
   };
   const CARRY = new Set(["NAV_TO_DROPOFF", "PLACING"]);
-  const FETCH = new Set(["NAV_TO_PICKUP", "PICKING"]);
+  const FETCH = new Set(["NAV_TO_PICKUP", "AWAIT_PICK", "PICKING"]);
 
   let run = null;               // the packed run (fleetsim/replay.py _pack)
   let idx = null;               // time columns + derived spans, built once per run

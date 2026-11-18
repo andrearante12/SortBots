@@ -600,7 +600,7 @@
   // Any unfinished task can be cancelled (/<id>/cancel_task, by id).
 
   const TASK_PHASE = {
-    NAV_TO_PICKUP: "Heading to pick-up", PICKING: "Picking up", NAV_TO_DROPOFF: "Heading to drop-off",
+    NAV_TO_PICKUP: "Heading to pick-up", AWAIT_PICK: "Waiting for the fleet to confirm the pick", PICKING: "Picking up", NAV_TO_DROPOFF: "Heading to drop-off",
     PLACING: "Placing", NAV_TO_GOAL: "Moving", DONE: "Done", FAILED: "Failed", CANCELLED: "Cancelled",
   };
   // DONE / FAILED / CANCELLED are one-message transients task_manager publishes just before IDLE.
@@ -641,7 +641,7 @@
   }
 
   const TASK_LABEL = (t) => ({
-    BIDDING: ["bidding", "bid"], CLAIMED: ["assigned", ""], QUEUED: ["waiting", ""], NAV_TO_PICKUP: ["en route", "active"], PICKING: ["picking up", "active"],
+    BIDDING: ["bidding", "bid"], CLAIMED: ["assigned", ""], QUEUED: ["waiting", ""], NAV_TO_PICKUP: ["en route", "active"], AWAIT_PICK: ["confirming pick", "active"], PICKING: ["picking up", "active"],
     NAV_TO_DROPOFF: ["en route", "active"], PLACING: ["placing", "active"], NAV_TO_GOAL: ["en route", "active"],
     DONE: ["done", "done"], FAILED: ["failed", "failed"], CANCELLED: ["cancelled", ""],
   }[t.state] || [t.state.toLowerCase(), "active"]);
@@ -816,7 +816,7 @@
     if (st.tag === "silent") return { cls: "failed", title: "Silent", sub: st.detail };
     if (st.tag === "on a task") {
       const t = s.task ? { id: s.task_id, ...s.task } : tasks.find((x) => x.id === s.task_id) || { id: s.task_id };
-      const cls = ["PICKING", "PLACING"].includes(s.state) ? "working" : "moving";
+      const cls = ["AWAIT_PICK", "PICKING", "PLACING"].includes(s.state) ? "working" : "moving";
       // A move's phase is just "Moving", which the pill already says.
       if (t.kind === "goto" && t.goto) return { cls, title: `Going to ${esc(t.goto)}`, sub: waiting.slice(3) };
       return { cls, title: taskTitle(t), sub: (TASK_PHASE[s.state] || s.state) + waiting };

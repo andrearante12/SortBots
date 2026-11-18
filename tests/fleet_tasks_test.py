@@ -49,6 +49,7 @@ class Bus:
         self._next_status = 0.0
         self.dispatched: dict[str, list] = {rid: [] for rid in robots}
         self.cancelled: dict[str, list] = {rid: [] for rid in robots}
+        self.picks: dict[str, list] = {rid: [] for rid in robots}
         self.log: list = []
         self.down: set = set()
 
@@ -56,7 +57,7 @@ class Bus:
         n = ft.FleetTasks(rid, self.params, WAYPOINTS, cfg=CFG, now=self.t)
         n.set_pose(pose, self.t)
         self.nodes[rid] = n
-        self.dispatched[rid], self.cancelled[rid] = [], []
+        self.dispatched[rid], self.cancelled[rid], self.picks[rid] = [], [], []
         return n
 
     def _pump(self):
@@ -75,6 +76,8 @@ class Bus:
                         self.dispatched[name].append(val)
                     elif kind == "cancel":
                         self.cancelled[name].append(val)
+                    elif kind == "pick":
+                        self.picks[name].append(val)
                     elif kind == "log":
                         self.log.append((name, val))
 
@@ -141,7 +144,8 @@ def test_closest_robot_wins_and_only_it_gets_dispatched():
     bus.run(3.0)
     assert bus.board(tid)["owner"] == "robot_1"
     assert bus.dispatched["robot_1"] == [
-        {"task_id": f"fleet-{tid}", "pickup": "shelf_a", "dropoff": "zone_a"}]
+        {"task_id": f"fleet-{tid}", "pickup": "shelf_a", "dropoff": "zone_a",
+         "await_pick": True}]  # confirmed picks (configs/fleet_tasks.yaml)
     assert bus.dispatched["robot_0"] == []
 
 
@@ -558,3 +562,50 @@ def test_waypoints_can_be_a_loader_read_on_every_request():
     assert gw.request("shelf_a", "new_pin", 0.0) is None
     live["new_pin"] = Waypoint({"name": "new_pin", "x": 1.0, "y": 1.0})
     assert gw.request("shelf_a", "new_pin", 0.1) is not None
+
+
+# ---- confirmed picks and completes (commsim protocol.py, 2026-11-17)
+
+def _won_by_robot_0():
+    bus = Bus({"robot_0": near(0.5), "robot_1": near(4.0)})
+    bus.run(1.0)
+    tid = bus.request()
+    bus.run(3.0)
+    assert bus.board(tid)["owner"] == "robot_0"
+    assert bus.dispatched["robot_0"][-1]["await_pick"] is True
+    return bus, tid
+
+
+def test_the_pick_waits_at_the_shelf_for_the_majority():
+    bus, tid = _won_by_robot_0()
+    bus.report("robot_0", tid, "AWAIT_PICK")
+    bus.run(0.2)
+    assert bus.picks["robot_0"] == [f"fleet-{tid}"]
+    assert bus.board(tid)["committed"]  # the gateway already holds it committed
+
+
+def test_no_pick_permit_while_cut_off_and_the_task_moves_on():
+    bus, tid = _won_by_robot_0()
+    bus.down.add("robot_0")
+    bus.report("robot_0", tid, "AWAIT_PICK")
+    bus.run(30.0)
+    assert bus.picks["robot_0"] == []
+    assert f"fleet-{tid}" in bus.cancelled["robot_0"]  # gave it up at its lease
+    assert bus.board(tid)["owner"] == "robot_1"  # the majority re-auctioned it
+
+
+def test_a_completion_lost_to_a_cut_off_owner_reaches_the_gateway():
+    bus, tid = _won_by_robot_0()
+    bus.report("robot_0", tid, "AWAIT_PICK")
+    bus.run(0.2)
+    bus.report("robot_0", tid, "PICKING")
+    bus.report("robot_0", tid, "NAV_TO_DROPOFF")
+    bus.run(1.0)
+    bus.down.add("robot_0")
+    bus.report("robot_0", tid, "DONE")  # lost
+    bus.run(20.0)
+    assert bus.board(tid)["state"] != "done"
+    bus.down.discard("robot_0")
+    bus.run(3.0)
+    assert bus.board(tid)["state"] == "done"
+    assert bus.dispatched["robot_1"] == []  # nobody was sent to the empty shelf

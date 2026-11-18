@@ -11,6 +11,9 @@ gateway only injects tasks and keeps a board of what it has heard.
                 -> TaskAnnounce on /fleet/tasks
     robots:   Bid -> (1 s window) -> Claim by the winner
     winner:   /<robot>/dispatch_task -> task_manager.py works it
+              /<robot>/task_status AWAIT_PICK -> (confirmed picks) ask the
+                                     majority; on their acks
+                                     /<robot>/pick_permit -> PICKING
               /<robot>/task_status NAV_TO_DROPOFF -> commit (item on board:
                                      the task can no longer move, protocol.py)
                                    DONE   -> Complete (fleet-wide)
@@ -169,6 +172,8 @@ class FleetTasks:
         ("dispatch", payload)    -> /<robot>/dispatch_task (JSON dict;
                                     "carrying": true = item already on board)
         ("cancel", task_id_str)  -> /<robot>/cancel_task
+        ("pick", task_id_str)    -> /<robot>/pick_permit (confirmed picks: the
+                                    majority acked, task_manager may pick)
         ("alloc", payload)       -> /<robot>/task_alloc, on change
         ("log", text)
     """
@@ -198,6 +203,9 @@ class FleetTasks:
         # these is the echo of our own decision; a CANCELLED for anything else
         # we own came from a person (operator Stop all / Clear tasks / x).
         self._cancelling: set[int] = set()
+        # Fleet tasks task_manager is holding at the shelf (AWAIT_PICK) until
+        # the majority has acknowledged the pick (protocol.py, confirmed picks).
+        self._awaiting_pick: set[int] = set()
         self.names: dict[int, tuple[str, str]] = {}
         # (pickup, dropoff) -> steady time until which we do not bid on it
         # again. Without it a robot that cannot do a task (no arm, a pick it
@@ -275,6 +283,9 @@ class FleetTasks:
             deliver(self.alloc, sender, m, now)
         except (KeyError, TypeError, ValueError) as exc:
             self._log(f"dropped {m.get('type')} from {robot_name(sender)}: {exc}")
+        if m["type"] == "Ack":
+            for tid in list(self._awaiting_pick):  # the ack that completes a majority
+                self._check_pick(tid, now)
         self._flush()
 
     def on_peer_status(self, robot_id: str, now: float, *, battery_pct: float | None = None,
@@ -341,6 +352,11 @@ class FleetTasks:
             self._actions = [a for a in self._actions
                              if a != ("cancel", f"{TASK_PREFIX}{tid}")]
             return
+        if state == "AWAIT_PICK":
+            self._awaiting_pick.add(tid)
+            self._check_pick(tid, now)
+        else:
+            self._awaiting_pick.discard(tid)
         if state in ("NAV_TO_DROPOFF", "PLACING") and not self.alloc.committed(tid):
             self.alloc.commit(tid, now)
             self._log(f"task {tid}: item picked up, committed")
@@ -367,6 +383,23 @@ class FleetTasks:
                 self._log(f"task {tid} failed here; released for another robot")
         self._flush()
 
+    def _check_pick(self, tid: int, now: float) -> None:
+        if tid in self._awaiting_pick and self.alloc.request_pick(tid, now):
+            self._awaiting_pick.discard(tid)
+            self._actions.append(("pick", f"{TASK_PREFIX}{tid}"))
+            self._log(f"task {tid}: the majority knows; picking")
+
+    def _dispatch(self, tid: int, pick: str, drop: str, **extra) -> None:
+        # await_pick: hold at the shelf until we say so (/<robot>/pick_permit).
+        # Only when the protocol would ever withhold it, so a fleet without a
+        # quorum, and the operator's own tasks, pick on arrival as before.
+        # A carrying re-dispatch skips the shelf, so it has no pick to gate.
+        gate = (self.alloc.p.confirmed_picks and self.alloc.p.quorum_nodes > 0
+                and not extra.get("carrying"))
+        self._actions.append(("dispatch", {"task_id": f"{TASK_PREFIX}{tid}",
+                                           "pickup": pick, "dropoff": drop,
+                                           **({"await_pick": True} if gate else {}), **extra}))
+
     def _adopt(self, st: dict, now: float) -> None:
         """First task_status after OUR start: task_manager may have kept
         working through a restart of this node. A task with the item on
@@ -382,7 +415,7 @@ class FleetTasks:
             pick, drop = cur.get("pickup"), cur.get("dropoff")
             wps = self.waypoints()
             t = TaskView(tid, state=CLAIMED, owner=self.num, owner_cost=COMMITTED_COST,
-                         last_renew=now, claimed_at=now)
+                         last_renew=now, claimed_at=now, on_board=True)
             if pick in wps and drop in wps:
                 self.names[tid] = (pick, drop)
                 t.pickup, t.dropoff = self._xy(pick, wps), self._xy(drop, wps)
@@ -509,11 +542,15 @@ class FleetTasks:
             if now >= due and self.alloc.committed(tid) and tid in self.names:
                 del self._retry[tid]
                 pick, drop = self.names[tid]
-                self._actions.append(("dispatch", {"task_id": f"{TASK_PREFIX}{tid}",
-                                                   "pickup": pick, "dropoff": drop,
-                                                   "carrying": True}))
+                self._dispatch(tid, pick, drop, carrying=True)
                 self._log(f"retrying dropoff of task {tid}")
         self.alloc.tick(now)
+        for tid in list(self._awaiting_pick):
+            t = self.alloc.tasks.get(tid)
+            if t is None or t.state != CLAIMED or t.owner != self.num:
+                self._awaiting_pick.discard(tid)  # lost it; stop_task cancels the hold
+            else:
+                self._check_pick(tid, now)
         if len(self.names) > len(self.alloc.tasks):  # the allocator pruned finished tasks
             self.names = {k: v for k, v in self.names.items() if k in self.alloc.tasks}
         # An echo that never came (task_manager had already finished it) must
@@ -586,10 +623,10 @@ class FleetTasks:
                 self._log(f"released task {tid}: no waypoint names")
                 return
             pick, drop = self.names[tid]
-            self._actions.append(("dispatch", {"task_id": f"{TASK_PREFIX}{tid}",
-                                               "pickup": pick, "dropoff": drop}))
+            self._dispatch(tid, pick, drop)
             self._log(f"won task {tid} ({pick} -> {drop}), cost {e.get('cost'):.1f}")
         elif kind in ("task_yielded", "stop_task"):
+            self._awaiting_pick.discard(tid)
             self._cancel_local(tid)
             self._retry.pop(tid, None)
             why = e.get("reason") or f"out-bid by {robot_name(e.get('to'))}"
@@ -598,7 +635,8 @@ class FleetTasks:
             self._log(f"stopped task {tid}: {why}")
         elif kind in ("isolated", "rejoined", "hold_safe", "lease_expired",
                       "robot_silent", "robot_back", "battery_gated", "declined",
-                      "committed", "owner_missing"):
+                      "committed", "owner_missing", "pick_requested", "pick_granted",
+                      "complete_confirmed"):
             detail = {k: v for k, v in e.items() if k not in ("event", "robot_id", "t")}
             self._log(f"{kind} {detail}" if detail else kind)
             peer = robot_name(e.get("peer"))
@@ -699,6 +737,7 @@ def main(argv=None):
                 self.dispatch_pub = self.create_publisher(
                     String, f"/{rid}/dispatch_task", 10)
                 self.cancel_pub = self.create_publisher(String, f"/{rid}/cancel_task", 10)
+                self.pick_pub = self.create_publisher(String, f"/{rid}/pick_permit", 10)
                 self.alloc_pub = self.create_publisher(String, f"/{rid}/task_alloc", LATCHED)
                 # LATCHED, matching task_manager's publisher: a volatile
                 # subscriber never gets the last status replayed, so restart
@@ -809,6 +848,8 @@ def main(argv=None):
                     self.dispatch_pub.publish(String(data=json.dumps(val)))
                 elif kind == "cancel":
                     self.cancel_pub.publish(String(data=val))
+                elif kind == "pick":
+                    self.pick_pub.publish(String(data=val))
                 elif kind == "alloc":
                     self.alloc_pub.publish(String(data=json.dumps(val)))
                 elif kind == "log":

@@ -104,48 +104,76 @@ def test_tasks_announced_during_a_split_are_never_worked_twice():
     assert v["fleet_tasks"]["done"] == v["fleet_tasks"]["announced"]
 
 
-def _split_around_the_pick(**kw):
-    """One task; cut its owner off 5 s before it reaches the shelf (inside
-    its 10 s lease), for 60 s."""
-    tasks = [{"at_s": 1, "pickup": "shelf_2_1", "dropoff": "dock_1"}]
-    base, _ = run(scenario(robots=5, duration_s=500, tasks=tasks))
-    owner, t_pick = next((e["rid"], e["t"]) for e in base.events
-                         if e["s"] == "task" and e["state"] == "NAV_TO_DROPOFF")
-    s, _ = run(scenario(robots=5, duration_s=500, tasks=tasks, **kw, disturbances=[
-        {"at_s": max(1.0, t_pick - 5.0), "duration_s": 60, "partition": [[owner], "rest"]}]))
+ONE_TASK = [{"at_s": 1, "pickup": "shelf_2_1", "dropoff": "dock_1"}]
+SPEC = {"fleet_tasks": {"protocol": {"confirmed_picks": False, "confirmed_completes": False}}}
+
+
+def _times():
+    """When the owner of ONE_TASK picks it up and delivers it, unsplit."""
+    base, _ = run(scenario(robots=5, duration_s=500, tasks=ONE_TASK))
+    ev = [e for e in base.events if e["s"] == "task"]
+    owner, t_pick = next((e["rid"], e["t"]) for e in ev if e["state"] == "NAV_TO_DROPOFF")
+    t_done = next(e["t"] for e in ev if e["state"] == "DONE")
+    return owner, t_pick, t_done
+
+
+def _split(at_s, duration_s, config=None):
+    owner, *_ = _times()
+    s, _ = run(scenario(robots=5, duration_s=500, tasks=ONE_TASK, config=config or {},
+                        disturbances=[{"at_s": max(1.0, at_s), "duration_s": duration_s,
+                                       "partition": [[owner], "rest"]}]))
     return s, owner
 
 
-def test_pickup_inside_the_lease_window_still_sends_a_second_robot():
-    # KNOWN PROTOCOL GAP 1 (found 2026-11-02; commsim's DES reports the same
-    # 0-2 duplicate episodes per partition run). An owner cut off from the
-    # majority must stop within task_lease_s — unless it picks the item up
-    # first: a committed task never yields. The majority never hears the
-    # commit and reclaims at lease + margin, so a second robot drives to a
-    # shelf the item has left. Flip when the protocol closes it (e.g. no
-    # pick without a quorum).
-    s, _owner = _split_around_the_pick()
+def test_no_pick_without_the_majority_knowing():
+    # Owner cut off 5 s before the shelf, inside its 10 s lease. Fixed
+    # 2026-11-17 (confirmed picks): it waits at the shelf for acks that can't
+    # come, gives the task up at its lease, and the majority's robot is the
+    # only one that ever picks.
+    _, t_pick, _ = _times()
+    s, owner = _split(t_pick - 5.0, 60)
+    v = score(s, [{"metric": "fleet_tasks"}, {"metric": "nav"}])
+    assert v["fleet_tasks"]["duplicates"] == 0
+    assert v["nav"]["empty_shelf"] == 0
+    assert v["fleet_tasks"]["done"] == v["fleet_tasks"]["announced"]
+    assert [e for e in s.events if e["s"] == "task" and e["rid"] == owner
+            and e["state"] == "AWAIT_PICK"]
+
+
+def test_without_confirmed_picks_the_split_sends_a_second_robot():
+    # The gap as found 2026-11-02 (commsim's DES reports the same 0-2
+    # duplicate episodes per partition run): the owner picks while cut off, a
+    # committed task never yields, the majority never heard the commit and
+    # reclaims at lease + margin, and a second robot finds the shelf empty.
+    _, t_pick, _ = _times()
+    s, _ = _split(t_pick - 5.0, 60, SPEC)
     v = score(s, [{"metric": "fleet_tasks"}, {"metric": "nav"}])
     assert v["fleet_tasks"]["duplicates"] >= 1
     assert v["nav"]["empty_shelf"] >= 1
-    assert v["fleet_tasks"]["done"] == v["fleet_tasks"]["announced"]
 
 
-def test_a_completion_lost_in_a_split_is_never_repeated():
-    # KNOWN PROTOCOL GAP 2 (found 2026-11-02). The cut-off owner delivers
-    # while still split; its fleet-wide Complete is lost and nothing ever
-    # repeats it. After the heal the majority still holds the task open,
-    # and the robot that knows it is DONE ignores their claims for it
-    # (protocol.py _assert_owner returns early for DONE tasks), so robot
-    # after robot is sent to the empty shelf until each one's failed_backoff
-    # runs. The DES can't see this: its robots never find a shelf empty.
-    # Flip when e.g. a node that knows a task is DONE answers a claim or
-    # lease beacon for it with a Complete.
-    s, _owner = _split_around_the_pick()
-    v = score(s, [{"metric": "nav"}])
-    assert v["nav"]["empty_shelf"] > 1
+def test_a_completion_made_during_a_split_reaches_everyone():
+    # Cut off after the pick, delivered while still cut off: the Complete is
+    # lost. Fixed 2026-11-17 (confirmed completes): the owner repeats it until
+    # acked, so after the heal the gateway's board says done and nobody is
+    # ever sent to the empty shelf.
+    _, t_pick, t_done = _times()
+    s, owner = _split(t_pick + 1.0, t_done - t_pick + 20.0)
+    v = score(s, [{"metric": "fleet_tasks"}, {"metric": "nav"}])
+    assert s.gw.alloc.tasks[1].state == "done"
+    assert v["nav"]["empty_shelf"] == 0 and v["fleet_tasks"]["duplicates"] == 0
+    assert [e for e in s.events if e["s"] == "fleet_log" and e["rid"] == owner
+            and "complete_confirmed" in e["text"]] or not s.cfg["record"]["fleet_log"]
+
+
+def test_without_confirmed_completes_the_gateway_never_learns():
+    # The same split with the spec's fire-and-forget Complete: the item was
+    # committed before the split, so nobody reclaims it, but the gateway holds
+    # it as owner_missing for ever.
+    _, t_pick, t_done = _times()
+    s, _ = _split(t_pick + 1.0, t_done - t_pick + 20.0, SPEC)
     gw_state = s.gw.alloc.tasks.get(1)
-    assert gw_state is None or gw_state.state != "done"
+    assert gw_state is not None and gw_state.state != "done"
 
 
 def test_radio_network_runs_and_reports_load():
@@ -154,6 +182,13 @@ def test_radio_network_runs_and_reports_load():
     assert v["comms"]["status_delivery"] > 0.5
     assert v["comms"]["load_max"] > 0.0
     assert v["fleet_tasks"]["done"] >= 2
+
+
+def test_two_sets_into_a_free_form_block_both_apply():
+    scn = config.resolve({"name": "t"}, sets=[("fleet_tasks.protocol.confirmed_picks", False),
+                                              ("fleet_tasks.protocol.confirmed_completes", False)])
+    assert scn["config"]["fleet_tasks"] == {"protocol": {"confirmed_picks": False,
+                                                         "confirmed_completes": False}}
 
 
 def test_unknown_setting_is_rejected():

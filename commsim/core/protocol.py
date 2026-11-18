@@ -30,6 +30,38 @@ uncommitted tasks, which is before the majority side's lease + margin runs
 out. At most one side of a split holds a majority, so a split can no longer
 put two robots on one task: the cut-off side waits instead of reclaiming.
 
+Confirmed picks (Params.confirmed_picks, with a quorum): an owner at the
+shelf does not touch the item until a majority, itself counted, has
+acknowledged that it is about to. It announces the pick as a Claim at
+COMMITTED_COST, which every peer that hears it holds as committed (never
+reclaimed), and answers with an Ack; the pick goes ahead on the majority's
+acks. Hearing a majority is not enough: a split 5 s before the shelf still
+looks like a quorum for status_timeout_s, the owner picks, and the majority,
+having never heard the commit, sends a second robot to an empty shelf
+(fleetsim test_sim.py, found 2026-11-02). An owner that never got its acks
+abandons the task at its lease as before, nothing having been picked.
+
+Confirmed completes (Params.confirmed_completes): a Complete is acknowledged,
+and the owner repeats it until every peer it currently hears, and at least a
+majority, has. A completion lost in a split otherwise left the majority
+holding the task open and sending robot after robot to the empty shelf. Two
+backstops reach the nodes the repeats missed: anyone who knows a task is
+DONE (or CANCELLED) answers a Claim, LeaseBeacon, Bid or TaskAnnounce for it
+with that final TaskEvent, and a node whose committed owner has gone silent
+(owner_missing) asks the fleet with a TaskQuery every query_s. The supposed
+owner answers a query for a task it does not hold with a Release, which is
+how a pick that was announced but abandoned, or forgotten in a restart, gets
+re-auctioned instead of waiting for an operator.
+
+Addressing: an Ack names its one receiver ("to": id), and a repeated pick
+Claim or Complete names the peers still missing ("to": [ids]). Receivers
+ignore "to" except on an Ack, so a harness that can only broadcast stays
+correct; one that can address (fleetsim, a zenoh key per robot) sends each
+copy only where it is needed. Broadcast acks and repeats are n^2 copies per
+pick, and under load the lost ones re-trigger the round: fleetsim's 50-robot
+fleet_scale fell from 108 to 19 deliveries before they were addressed
+(2026-11-17).
+
 Trust: every peer on the fleet topic is trusted. Any sender may complete or
 cancel any task, and anything on the gateway's request topic is a task.
 The mesh key (commsim/hw) is the boundary; nothing here authenticates.
@@ -102,6 +134,20 @@ class Params:
     battery_drain_pct_per_s: float = 0.05  # placeholder: ~33 min driving per charge
     battery_reserve_pct: float = 20.0      # placeholder: margin to reach a charger
     battery_penalty_s: float = 30.0        # placeholder: open question, tune in DES
+    # Team decision 2026-11-17: no pick without a majority's acknowledgement,
+    # and no completion lost (module docstring). Off by default so the DES and
+    # spec_original.yaml reproduce; fleetsim and the robots turn both on.
+    # Needs quorum_nodes > 0 for picks (without one there is no majority).
+    confirmed_picks: bool = False
+    confirmed_completes: bool = False
+    ack_repeat_s: float = 1.0      # resend an unacknowledged pick Claim or Complete
+    # TaskQuery while a committed owner is missing: first after query_s, then
+    # doubling to query_max_s. A fixed 10 s, answered fleet-wide, was n^3
+    # copies exactly when the radio was already full (lost beacons are what
+    # make owners look missing): fleet_scale's /fleet/tasks tripled, 2026-11-17.
+    query_s: float = 10.0
+    query_max_s: float = 120.0
+    answer_backoff_s: float = 1.0  # at most one final-state answer per task per this long
 
     @classmethod
     def from_config(cls, cfg: dict) -> "Params":
@@ -129,6 +175,14 @@ class TaskView:
     finished_at: Optional[float] = None  # DONE/CANCELLED at: pruned after retention
     owner_missing: bool = False  # committed owner's lease expired; reported once
     reclaim_blocked: bool = False  # lease expired without a quorum; reported once
+    on_board: bool = False  # OUR task, item picked up (commit()); see committed()
+    pick_acks: Optional[set] = None  # confirmed pick announced: peers that acked it
+    pick_granted: bool = False  # a majority acked: the pick is under way, never abandoned
+    done_acks: Optional[set] = None  # we completed it: peers that acked; None once confirmed
+    next_repeat: float = -math.inf  # when the unacknowledged pick Claim / Complete goes again
+    answered_at: float = -math.inf  # last final-state answer we sent for it
+    next_query: Optional[float] = None  # next TaskQuery while owner_missing
+    query_gap: float = 0.0  # current TaskQuery period (backs off)
 
 
 # cost_fn(pickup, dropoff[, start]) -> (travel time to pickup s, straight-line
@@ -187,21 +241,90 @@ class Allocator:
                 if t.state == CLAIMED and t.owner == self.id]
 
     def committed(self, task_id: int) -> bool:
+        """Our own task: the item is on board. Someone else's: claimed at
+        COMMITTED_COST, so it is never reclaimed (a confirmed pick announces
+        that before the item is taken, and a peer can't tell the two apart)."""
         t = self.tasks.get(task_id)
-        return t is not None and t.state == CLAIMED and t.owner_cost <= COMMITTED_COST
+        if t is None or t.state != CLAIMED:
+            return False
+        if t.owner == self.id:
+            return t.on_board
+        return t.owner_cost <= COMMITTED_COST
 
     def commit(self, task_id: int, now: float) -> None:
         """The item is on this robot: the task can no longer move (module
         docstring). Idempotent; ignored unless we own the task."""
         t = self.tasks.get(task_id)
-        if t is None or t.state != CLAIMED or t.owner != self.id:
+        if t is None or t.state != CLAIMED or t.owner != self.id or t.on_board:
             return
-        if t.owner_cost <= COMMITTED_COST:
-            return
-        t.owner_cost = COMMITTED_COST
-        self.out.append({"type": "Claim", "task_id": task_id, "cost": COMMITTED_COST,
-                         "lease_s": self.p.task_lease_s})
+        t.on_board = True
+        t.pick_acks = None
+        if t.owner_cost > COMMITTED_COST:  # a confirmed pick already announced it
+            t.owner_cost = COMMITTED_COST
+            self.out.append({"type": "Claim", "task_id": task_id, "cost": COMMITTED_COST,
+                             "lease_s": self.p.task_lease_s})
         self._event("committed", now, task_id=task_id)
+
+    def _need(self) -> int:
+        """Peers that, with us, make a majority. 0 without a quorum."""
+        return self.p.quorum_nodes // 2
+
+    def request_pick(self, task_id: int, now: float) -> bool:
+        """At the shelf, before touching the item: True once the pick may go
+        ahead. Idempotent; the harness calls it again while it waits (module
+        docstring, "Confirmed picks"). Without confirmed picks, always True."""
+        t = self.tasks.get(task_id)
+        if t is None or t.state != CLAIMED or t.owner != self.id:
+            return False
+        if t.on_board or t.pick_granted or not self.p.confirmed_picks or self._need() == 0:
+            return True
+        if t.pick_acks is None:
+            if not self.has_quorum(now):
+                # Possibly the minority side: announcing a pick here would make
+                # peers hold a task no one can then reach. Wait at the shelf.
+                return False
+            t.pick_acks = set()
+            t.owner_cost = COMMITTED_COST  # never yield it: every acker holds it committed
+            self._pick_claim(t, now)
+            self._event("pick_requested", now, task_id=task_id)
+        if len(t.pick_acks) >= self._need():
+            t.pick_granted = True
+            self._event("pick_granted", now, task_id=task_id, acks=sorted(t.pick_acks))
+            return True
+        return False
+
+    def _pick_claim(self, t: TaskView, now: float) -> None:
+        m = {"type": "Claim", "task_id": t.task_id, "cost": COMMITTED_COST,
+             "lease_s": self.p.task_lease_s}
+        missing = self._missing(t.pick_acks or set(), now, heard_only=False)
+        if t.next_repeat > -math.inf and missing:  # a repeat: only who hasn't acked
+            m["to"] = missing
+        self.out.append(m)
+        t.next_repeat = now + self.p.ack_repeat_s
+
+    def _missing(self, acks: set, now: float, heard_only: bool = True) -> list:
+        """Peers that haven't acked: those heard within status_timeout_s, or
+        (heard_only False) every peer ever heard. [] means "nobody known":
+        the caller broadcasts."""
+        peers = {p for p, ts in self.peer_heard.items()
+                 if not heard_only or now - ts <= self.p.status_timeout_s}
+        return sorted(peers - acks)
+
+    def _answer_final(self, t: TaskView, sender: int, now: float) -> None:
+        """Someone still talks about a task we know is finished: tell them,
+        and only them (protocol "Addressing")."""
+        if not self.p.confirmed_completes or t.state not in (DONE, CANCELLED):
+            return
+        if sender == self.id or now - t.answered_at < self.p.answer_backoff_s:
+            return
+        t.answered_at = now
+        self.out.append({"type": "TaskEvent", "task_id": t.task_id,
+                         "kind": COMPLETE if t.state == DONE else CANCEL, "to": [sender]})
+
+    def _complete_confirmed(self, t: TaskView, now: float) -> bool:
+        """Every peer we hear right now has acked, and at least a majority."""
+        heard = {p for p, ts in self.peer_heard.items() if now - ts <= self.p.status_timeout_s}
+        return len(t.done_acks) >= max(self._need(), 1) and heard <= t.done_acks
 
     def _radius(self, rnd: int) -> float:
         if rnd >= self.p.rebid_max_rounds:
@@ -331,12 +454,15 @@ class Allocator:
             self._open_bidding(t, now)
         elif t.pickup is None:  # learned of it from a Status before the announce
             t.pickup, t.dropoff = tuple(pickup), tuple(dropoff)
+        else:
+            self._answer_final(t, sender, now)  # a re-announce from a gateway that missed the end
 
     def on_bid(self, sender: int, task_id: int, cost: float, now: float) -> None:
         self._heard(sender, now)
         t = self.tasks.get(task_id)
         if t is None:
             return
+        self._answer_final(t, sender, now)
         if t.state == OPEN:  # a peer's rebid / reclaim round started first: join it
             self._open_bidding(t, now)
         if t.state == BIDDING:
@@ -397,6 +523,7 @@ class Allocator:
         t.window_end = t.rebid_at = None
         t.bids = {}
         t.owner_missing = t.reclaim_blocked = False
+        t.next_query = None
 
     def on_claim(self, sender: int, task_id: int, cost: float, now: float) -> None:
         self._heard(sender, now)
@@ -408,7 +535,42 @@ class Allocator:
             # window; our Claim will beat theirs and they yield on receipt.
             t.bids[sender] = float(cost)
             return
+        if t.state in (DONE, CANCELLED):
+            self._answer_final(t, sender, now)
+            return
         self._assert_owner(t, sender, float(cost), now)
+        if (self.p.confirmed_picks and cost <= COMMITTED_COST and t.state == CLAIMED
+                and t.owner == sender):
+            self.out.append({"type": "Ack", "task_id": task_id, "of": "pick", "to": sender})
+
+    def on_ack(self, sender: int, task_id: int, of: str, to: int, now: float) -> None:
+        self._heard(sender, now)
+        if to != self.id:
+            return  # one topic carries everyone's acks
+        t = self.tasks.get(task_id)
+        if t is None:
+            return
+        if of == "pick" and t.pick_acks is not None and t.owner == self.id:
+            t.pick_acks.add(sender)
+        elif of == "complete" and t.done_acks is not None:
+            t.done_acks.add(sender)
+            if self._complete_confirmed(t, now):
+                t.done_acks = None
+                self._event("complete_confirmed", now, task_id=task_id)
+
+    def on_task_query(self, sender: int, task_id: int, owner: Optional[int],
+                      now: float) -> None:
+        """A peer's committed owner went silent and it asks what happened."""
+        self._heard(sender, now)
+        t = self.tasks.get(task_id)
+        if t is not None and t.state in (DONE, CANCELLED):
+            self._answer_final(t, sender, now)
+        elif owner == self.id and (t is None or t.state != CLAIMED or t.owner != self.id):
+            # They hold it as ours and we don't: a pick we announced and
+            # abandoned, or one forgotten in a restart. Nothing was picked
+            # (an item on board is adopted back), so hand it back.
+            self.out.append({"type": "TaskEvent", "task_id": task_id, "kind": RELEASE})
+            # Fleet-wide, not just to the asker: everyone who acked holds it.
 
     def on_status(self, sender: int, owned: list, now: float) -> None:
         self._heard(sender, now)
@@ -424,15 +586,29 @@ class Allocator:
         self._heard(sender, now)
         for task_id, cost in owned:
             t = self.tasks.setdefault(task_id, TaskView(task_id))
+            if t.state in (DONE, CANCELLED):
+                self._answer_final(t, sender, now)
+                continue
             self._assert_owner(t, sender, float(cost), now)
 
     def on_task_event(self, sender: int, task_id: int, kind: int, now: float) -> None:
         self._heard(sender, now)
+        if kind == COMPLETE and self.p.confirmed_completes:
+            # Acked even for a task we never heard of, or the owner would
+            # repeat it to us for ever.
+            self.out.append({"type": "Ack", "task_id": task_id, "of": "complete", "to": sender})
         t = self.tasks.get(task_id)
         if t is None:
             return
         if kind == COMPLETE:
-            t.state, t.finished_at = DONE, now
+            if t.state == CLAIMED and t.owner == self.id:
+                # We were sent to a task someone already delivered (a reclaim
+                # after a lost Complete): stop driving to the empty shelf.
+                self._event("stop_task", now, task_id=task_id, reason="done_elsewhere",
+                            committed=t.on_board)
+            if t.state != DONE:
+                t.state, t.finished_at = DONE, now
+            t.owner_missing = False
         elif kind == CANCEL:
             if t.owner == self.id and t.state == CLAIMED:
                 self._event("stop_task", now, task_id=task_id, reason="cancelled",
@@ -449,9 +625,11 @@ class Allocator:
         self.on_task_event(self.id, task_id, CANCEL, now)
 
     def complete(self, task_id: int, now: float) -> None:
-        self.tasks[task_id].state = DONE
-        self.tasks[task_id].finished_at = now
+        t = self.tasks[task_id]
+        t.state, t.finished_at, t.owner_missing = DONE, now, False
         self.out.append({"type": "TaskEvent", "task_id": task_id, "kind": COMPLETE})
+        if self.p.confirmed_completes:
+            t.done_acks, t.next_repeat = set(), now + self.p.ack_repeat_s
 
     def release(self, task_id: int, now: float) -> None:
         t = self.tasks[task_id]
@@ -507,10 +685,22 @@ class Allocator:
                 # committed: the item is on board, nobody else can do it.
                 # Without a majority for a lease the majority side may reclaim
                 # at lease + margin, so the same deadline applies.
+                # A confirmed pick that was announced but never granted is
+                # abandoned the same way: nothing was picked. Peers that acked
+                # hold it committed; the Release (now, or as the answer to
+                # their TaskQuery once we can reach them) re-auctions it.
                 if (quiet > self.p.task_lease_s or now - self._quorum_at() > self.p.task_lease_s) \
-                        and t.owner_cost > COMMITTED_COST:
+                        and not t.on_board and not t.pick_granted:
+                    announced = t.pick_acks is not None
                     t.state, t.owner, t.owner_cost = OPEN, None, math.inf
+                    t.pick_acks, t.next_repeat = None, -math.inf  # a later pick starts afresh
+                    if announced:
+                        self.out.append({"type": "TaskEvent", "task_id": t.task_id,
+                                         "kind": RELEASE})
                     self._event("stop_task", now, task_id=t.task_id, reason="lease_lost")
+                elif (t.pick_acks is not None and not t.pick_granted
+                      and now >= t.next_repeat):
+                    self._pick_claim(t, now)  # some acks still missing
             elif t.state == CLAIMED and now - t.last_renew > expiry:
                 if t.owner_cost <= COMMITTED_COST:
                     # Reclaiming would send a robot to an empty shelf. Report
@@ -519,6 +709,14 @@ class Allocator:
                     if not t.owner_missing:
                         t.owner_missing = True
                         self._event("owner_missing", now, task_id=t.task_id, owner=t.owner)
+                    if self.p.confirmed_completes and t.next_query is None:
+                        t.query_gap = self.p.query_s
+                        t.next_query = now  # ask straight away, then back off
+                    if self.p.confirmed_completes and now >= t.next_query:
+                        t.next_query = now + t.query_gap
+                        t.query_gap = min(2 * t.query_gap, self.p.query_max_s)
+                        self.out.append({"type": "TaskQuery", "task_id": t.task_id,
+                                         "owner": t.owner})
                     continue
                 if not q:
                     # Minority side of a split: the owner may be working it on
@@ -535,8 +733,21 @@ class Allocator:
                     continue
                 self._event("lease_expired", now, task_id=t.task_id, owner=t.owner)
                 self._open_bidding(t, now)
+            elif t.state == DONE and t.done_acks is not None:
+                if self._complete_confirmed(t, now):
+                    t.done_acks = None
+                    self._event("complete_confirmed", now, task_id=t.task_id)
+                elif now >= t.next_repeat:
+                    m = {"type": "TaskEvent", "task_id": t.task_id, "kind": COMPLETE}
+                    missing = self._missing(t.done_acks, now)
+                    if missing:  # else short of a majority with everyone heard acked: broadcast
+                        m["to"] = missing
+                    self.out.append(m)
+                    t.next_repeat = now + self.p.ack_repeat_s
+        # An unconfirmed completion is kept, and repeated, past retention.
         for tid in [tid for tid, t in self.tasks.items() if t.finished_at is not None
-                    and now - t.finished_at > self.p.finished_retention_s]:
+                    and now - t.finished_at > self.p.finished_retention_s
+                    and t.done_acks is None]:
             del self.tasks[tid]
 
 
@@ -556,6 +767,10 @@ def deliver(alloc: Allocator, sender: int, m: dict, now: float) -> bool:
         alloc.on_status(sender, m["owned"], now)
     elif typ == "LeaseBeacon":
         alloc.on_lease_renewal(sender, m["owned"], now)
+    elif typ == "Ack":
+        alloc.on_ack(sender, m["task_id"], m["of"], m["to"], now)
+    elif typ == "TaskQuery":
+        alloc.on_task_query(sender, m["task_id"], m.get("owner"), now)
     else:
         return False
     return True

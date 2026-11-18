@@ -21,6 +21,12 @@ protocol:
   # the 2-robot + gateway fleet. Change it with the fleet list: too small and
   # the cut-off side of a split reclaims; too large and nobody can claim.
   quorum_nodes: 3
+  # Team decision 2026-11-17 (commsim protocol.py docstring): the robot waits
+  # at the shelf (task_manager AWAIT_PICK) until a majority has acknowledged
+  # the pick, so a split can never put the item on a robot the rest of the
+  # fleet doesn't know holds it; and a Complete is repeated until acknowledged.
+  confirmed_picks: true
+  confirmed_completes: true
   # Battery (commsim protocol.py Params): placeholders until measured on the
   # real XLeRobot pack.
   battery_drain_pct_per_s: 0.05

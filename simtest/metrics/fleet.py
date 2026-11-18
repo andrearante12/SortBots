@@ -12,7 +12,7 @@ import statistics
 from . import Metric, register
 
 FINAL = {"DONE", "FAILED", "CANCELLED"}
-ACTIVE = {"NAV_TO_PICKUP", "PICKING", "NAV_TO_DROPOFF", "PLACING"}
+ACTIVE = {"NAV_TO_PICKUP", "AWAIT_PICK", "PICKING", "NAV_TO_DROPOFF", "PLACING"}
 
 
 def _pct(xs, q):
@@ -25,7 +25,8 @@ def _pct(xs, q):
 @register
 class FleetTasks(Metric):
     name = "fleet_tasks"
-    version = 1
+    # 2: AWAIT_PICK (confirmed picks, 2026-11-17) counts as working the task.
+    version = 2
     streams = {"announce", "task", "dispatch", "end"}
     summary = "Auctioned deliveries: completion, throughput, latency, duplicate work."
     params = {}

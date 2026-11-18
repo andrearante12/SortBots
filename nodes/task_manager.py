@@ -5,8 +5,15 @@ Owns one robot's task queue and drives it through (nav-only: a task is a drive
 to the pickup waypoint, a short pause, a drive to the dropoff waypoint, another
 pause — no arm, nothing physically picked up):
 
-    IDLE -> NAV_TO_PICKUP -> PICKING -> NAV_TO_DROPOFF -> PLACING -> DONE
+    IDLE -> NAV_TO_PICKUP [-> AWAIT_PICK] -> PICKING -> NAV_TO_DROPOFF -> PLACING -> DONE
                  \\-> FAILED (nav abort/reject) <-/
+
+AWAIT_PICK only for a dispatch with "await_pick": true (nodes/fleet_tasks.py
+with confirmed picks): the robot stands at the shelf until `<robot>/pick_permit`
+carries its task id, i.e. until a majority of the fleet has acknowledged that
+this robot is taking the item (commsim protocol.py). Picking first let a robot
+cut off by a split take an item the rest of the fleet then sent a second robot
+for. fleet_tasks cancels the task if the permit can't come.
 
 A "goto" task is the single-leg version, used by the operator view's move
 queue: IDLE -> NAV_TO_GOAL -> DONE. Any task, queued or running, can be
@@ -121,6 +128,7 @@ class Task:
         # fleet task whose dropoff leg failed): skip the pickup leg and its
         # dwell, drive straight to the dropoff.
         self.carrying = carrying and kind == "pickup"
+        self.await_pick = False   # hold in AWAIT_PICK for /<robot>/pick_permit
         self.first_try: float | None = None   # monotonic; see NAV_STARTUP_GRACE_SEC
 
     def summary(self) -> dict:
@@ -172,6 +180,12 @@ class TaskManager(Node):
         self.create_subscription(
             String, f"/{robot_id}/explore_status", self._on_explore_status, 10
         )
+        # A task id: fleet_tasks says the fleet's majority knows we are taking
+        # the item (see AWAIT_PICK in the module docstring).
+        self.create_subscription(
+            String, f"/{robot_id}/pick_permit", self._on_pick_permit, 10
+        )
+        self._pick_permits: set[str] = set()   # permits for the current task, if early
 
         self._nav_goal_handle = None
         self._nav_result_future = None
@@ -208,6 +222,7 @@ class TaskManager(Node):
             return
         task = Task(kind, [self.waypoints[n] for n in names], task_id=task_id,
                     carrying=bool(payload.get("carrying", False)))
+        task.await_pick = bool(payload.get("await_pick", False))
         self.queue.append(task)
         self.get_logger().info(
             f"queued {kind} task {task.task_id}: {' -> '.join(names)} "
@@ -234,6 +249,18 @@ class TaskManager(Node):
         elif dropped:
             self.get_logger().info(f"dropped {dropped} queued task(s) for {target!r}")
             self._publish_status()
+
+    def _on_pick_permit(self, msg: String) -> None:
+        task_id = msg.data.strip()
+        task = self.current_task
+        if task is None or task.task_id != task_id:
+            self._pick_permits.add(task_id)  # ahead of our arrival; used if it is ours
+            return
+        if self.state == "AWAIT_PICK":
+            self.get_logger().info(f"pick permitted for task {task_id}")
+            self._begin_dwell("PICKING")
+        else:
+            self._pick_permits.add(task_id)
 
     def _on_explore_status(self, msg: String) -> None:
         try:
@@ -342,7 +369,10 @@ class TaskManager(Node):
             return
 
         if self.state == "NAV_TO_PICKUP":
-            self._begin_dwell("PICKING")
+            if task.await_pick and task.task_id not in self._pick_permits:
+                self._set_state("AWAIT_PICK")  # until /<robot>/pick_permit
+            else:
+                self._begin_dwell("PICKING")
         elif self.state == "NAV_TO_DROPOFF":
             self._begin_dwell("PLACING")
         elif self.state == "NAV_TO_GOAL":
@@ -359,6 +389,8 @@ class TaskManager(Node):
     def _end_task(self, final: str) -> None:
         # DONE / FAILED / CANCELLED go out with the task id, then IDLE without.
         self._set_state(final)
+        if self.current_task is not None:
+            self._pick_permits.discard(self.current_task.task_id)
         self.current_task = None
         self._dwell_deadline = None
         self._nav_goal_handle = None

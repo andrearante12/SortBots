@@ -50,7 +50,7 @@ or heard from peers, and every byte of that travels the network model.
 
 | Piece | fleetsim | Real thing |
 |---|---|---|
-| Task auction, leases, commit, quorum, retry, restart adoption | **real**: `FleetTasks` + `commsim/core/protocol.py`, imported | `nodes/fleet_tasks.py` |
+| Task auction, leases, commit, quorum, confirmed picks and completes, retry, restart adoption | **real**: `FleetTasks` + `commsim/core/protocol.py`, imported | `nodes/fleet_tasks.py` |
 | Bid cost | the bidder's own A* path on its own belief (`robot.PathOracle`), so bid and drive agree | `nodes/grid_dist.py` Dijkstra on fused `/map` |
 | Task FSM | stand-in with task_manager's states, dwell and status JSON | `nodes/task_manager.py` |
 | Global planner | A* on the robot's belief, Nav2-style lethal band + exponential inflation (`planner.py`) | Nav2 NavFn |
@@ -172,21 +172,32 @@ uses one core).
 
 These came out of building this, and each one is worth a decision.
 
-1. **A pick inside the lease window still sends a second robot**
-   (`test_pickup_inside_the_lease_window_still_sends_a_second_robot`). An
-   owner cut off from the majority must stop within `task_lease_s`, unless it
-   picks the item up first, because a committed task never yields. The
-   majority never hears the commit and reclaims the task. commsim's DES
-   reports the same residual (0–2 duplicate episodes per partition run). A
-   possible fix: don't start a pick without a quorum.
-2. **A completion lost in a split is never repeated**
-   (`test_a_completion_lost_in_a_split_is_never_repeated`). The cut-off owner
-   delivers. Its `Complete` is lost, nothing resends it, and after the heal
-   the robot that knows the task is DONE ignores peers' claims for it
-   (`protocol.py` `_assert_owner` returns early for DONE). Robot after robot
-   is sent to the empty shelf. The DES can't see this: its robots never find
-   a shelf empty. A possible fix: answer a Claim or LeaseBeacon for a task you
-   know is DONE with a Complete.
+1. **A pick inside the lease window sent a second robot. Fixed 2026-11-17**
+   (confirmed picks, `commsim/core/protocol.py`). An owner cut off a few
+   seconds before the shelf still "had a quorum" for `status_timeout_s`,
+   picked, and became uncatchable: a committed task never yields, and the
+   majority never heard the commit. Now the owner announces the pick and
+   waits at the shelf (`AWAIT_PICK`) until a majority acks. Cut off, it
+   gets no acks and gives the task up at its lease with the item still on
+   the shelf (`test_no_pick_without_the_majority_knowing`; the old gap is
+   kept as a control with the switch off).
+2. **A completion lost in a split was never repeated. Fixed 2026-11-17**
+   (confirmed completes). A Complete is now acked, and repeated to the
+   peers that haven't acked until every peer the owner hears has. A node
+   that knows how a task ended answers anyone still talking about it, and
+   a node whose committed owner is missing asks with a `TaskQuery`
+   (`test_a_completion_made_during_a_split_reaches_everyone`).
+
+   What the two did at 50 robots (`fleet_scale`, seed 1, switches off →
+   on): 108 → **122** delivered, duplicate-work episodes 17 → **2**,
+   empty-shelf visits 8 → **0**, `/fleet/tasks` delivery 74 % → **97 %**,
+   and less traffic (10.1 → 8.8 kB per robot per second), because the
+   fleet stops redoing work. Small scenarios are unchanged. Two first cuts
+   made it much worse, and are now protocol rules ("Addressing"): acks and
+   repeats sent fleet-wide (n² copies per pick), and TaskQueries every 10 s
+   answered fleet-wide, which is n³ exactly when the radio is full, since
+   lost beacons are what make owners look missing. That run fell to 19
+   deliveries.
 3. **Fleet-wide Status does not scale.** At 50 robots, all-to-all Status
    at 5 Hz is 12,500 unicast copies a second. The radio model puts mean load
    at 324 %, and the fleet delivers nothing (`fleet_scale` with fleet-wide
@@ -237,8 +248,15 @@ These came out of building this, and each one is worth a decision.
      voltage-degradation instability that shows up as exactly this kind of
      random crash under sustained single-core load. The #155145 reporter is
      also on an i9, and a contributor on AMD couldn't reproduce it.
+  **2026-11-17: it happens under Python 3.12 too.** A scratch 3.12.15
+  venv (numpy 2.5.5) segfaulted in 2 of 6 runs of commsim + fleet_tasks +
+  fleetsim tests, both inside `planner.py`'s pure-Python A* loop, on the same
+  machine where 3.14 faults at a similar rate. A CPython 3.14 bug can't
+  explain a 3.12 crash, so the CPU (microcode 0x133 here; the update stops
+  the degradation but can't undo it) is now the leading explanation. The
+  remaining check is another machine.
   How to tell: run `python3 -m pytest fleetsim/tests` in a loop on another
-  machine, or under Python 3.12 (CI uses 3.12). A* uses integer costs
+  machine (CI uses 3.12). A* uses integer costs
   (`Costmap.wint`), which made the TypeError disappear in 15 runs. That may
   only have moved the fault elsewhere, and the segfaults since suggest it
   did.

@@ -378,12 +378,19 @@ class Sim:
                 if got is None:
                     continue
                 sender, m = got
-                self._send("tasks", src, self._all_nodes(), len(val) + 8, True,
+                # protocol.py "Addressing": an Ack goes to its one receiver, a
+                # repeat to the peers still missing; everything else fleet-wide.
+                to = m.get("to")
+                dsts = (self._all_nodes() if to is None
+                        else np.array(to if isinstance(to, list) else [to], dtype=np.int64))
+                self._send("tasks", src, dsts, len(val) + 8, True,
                            self._deliver_task, (sender, m))
             elif kind == "dispatch" and owner is not None:
                 owner.dispatch(val)
             elif kind == "cancel" and owner is not None:
                 owner.cancel(val)
+            elif kind == "pick" and owner is not None:
+                owner.permit_pick(val)
             elif kind == "log" and self.cfg["record"]["fleet_log"]:
                 self.record({"s": "fleet_log", "rid": "gateway" if owner is None else owner.rid,
                              "text": val})

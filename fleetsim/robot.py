@@ -5,7 +5,7 @@ What is real and what stands in:
 
   REAL      the auction, leases, commit, retry and restart rules —
             FleetTasks + commsim/core/protocol.py, imported, not copied.
-  STAND-IN  task_manager.py: same states (IDLE -> NAV_TO_PICKUP -> PICKING ->
+  STAND-IN  task_manager.py: same states (IDLE -> NAV_TO_PICKUP [-> AWAIT_PICK] -> PICKING ->
             NAV_TO_DROPOFF -> PLACING -> DONE / FAILED / CANCELLED), same
             fixed dwell, same status JSON fields FleetTasks reads.
   STAND-IN  Nav2: global A* on the robot's own belief (planner.py), a path
@@ -38,7 +38,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "nodes"))
 import fleet_tasks as ft  # noqa: E402
 
-ACTIVE = {"NAV_TO_PICKUP", "PICKING", "NAV_TO_DROPOFF", "PLACING"}
+ACTIVE = {"NAV_TO_PICKUP", "AWAIT_PICK", "PICKING", "NAV_TO_DROPOFF", "PLACING"}
 
 
 def wrap(a: float) -> float:
@@ -207,6 +207,12 @@ class Robot:
         else:
             self._status()
 
+    def permit_pick(self, task_id: str) -> None:
+        """/<robot>/pick_permit: the majority acked, task_manager may pick."""
+        if self.task is not None and self.task["task_id"] == task_id and self.state == "AWAIT_PICK":
+            self.dwell_until = self.sim.now + float(self.sim.cfg["tasks"]["dwell_s"])
+            self._set_state("PICKING")
+
     def _set_state(self, state: str, **extra) -> None:
         self.state = state
         self._status(**extra)
@@ -272,8 +278,11 @@ class Robot:
         if not ok:
             self._end_task("FAILED")
         elif self.state == "NAV_TO_PICKUP":
-            self.dwell_until = self.sim.now + float(self.sim.cfg["tasks"]["dwell_s"])
-            self._set_state("PICKING")
+            if self.task.get("await_pick"):
+                self._set_state("AWAIT_PICK")  # FleetTasks sends ("pick", id) when it may
+            else:
+                self.dwell_until = self.sim.now + float(self.sim.cfg["tasks"]["dwell_s"])
+                self._set_state("PICKING")
         elif self.state == "NAV_TO_DROPOFF":
             self.dwell_until = self.sim.now + float(self.sim.cfg["tasks"]["dwell_s"])
             self._set_state("PLACING")
