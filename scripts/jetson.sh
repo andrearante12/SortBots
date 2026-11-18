@@ -86,6 +86,18 @@ case "${1:-}" in
 
   console)
     preflight
+    # Wait for NTP before starting anything that speaks DDS. The Orin has no RTC battery, so it
+    # boots at the last saved time and NTP jumps the clock forward seconds later (40 min on
+    # 2026-11-16). Fast DDS times participant liveness on the wall clock: rosbridge started
+    # before the jump never discovered the robot pipeline started after it, and the page sat on
+    # "Waiting for the robots" with every topic flowing inside the container. Twice.
+    for _ in $(seq 120); do
+      [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" == "yes" ]] && break
+      [[ $_ == 1 ]] && echo "[jetson] waiting for the clock to sync (NTP) before starting the console..."
+      sleep 1
+    done
+    [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" == "yes" ]] || \
+      echo "[jetson] WARNING: clock still not NTP-synced after 2 min; starting anyway (a later jump can strand rosbridge)"
     if running; then
       echo "[jetson] container '$NAME' is already running:  scripts/jetson.sh logs"
       exit 0
@@ -143,6 +155,22 @@ case "${1:-}" in
     echo "[jetson] console starting in container '$NAME'."
     echo "         dashboard: $(dashboard_url)   logs: scripts/jetson.sh logs"
     echo "         (from any device signed in to the same Tailscale tailnet)"
+    # At boot (systemd sets INVOCATION_ID), start configs/jetson.yaml's `autostart` scenario
+    # once the console answers, so the robot comes up in the operator view on its own. A manual
+    # `jetson.sh console` leaves the robot stack to the operator, as before.
+    scenario=$(sed -n 's/^autostart:[[:space:]]*\([A-Za-z0-9_-]*\).*/\1/p' "$REPO_ROOT/configs/jetson.yaml" 2>/dev/null)
+    if [[ -n "${INVOCATION_ID:-}" && -n "$scenario" ]]; then
+      for _ in $(seq 60); do
+        curl -fsS -o /dev/null "http://localhost:$PORT/api/session" 2>/dev/null && break
+        sleep 1
+      done
+      if curl -fsS -X POST -H 'Content-Type: application/json' -d "{\"scenario\": \"$scenario\"}" \
+           "http://localhost:$PORT/api/session/start" -o /dev/null 2>/dev/null; then
+        echo "[jetson] boot: robot stack starting ($scenario)"
+      else
+        echo "[jetson] boot: could not start $scenario (start it from the operator view)"
+      fi
+    fi
     ;;
 
   shell)

@@ -234,6 +234,9 @@
   .cam .drive button:hover { background: rgba(10,12,16,.85); }
   .cam .drive button.held { background: rgba(255,255,255,.9); color: #15191e; }
   .cam .drive [data-drive="stop"] { color: #ff8a80; }
+  .cam .drive .lvl { font: 600 .62rem system-ui, sans-serif; }
+  .cam .drive .lvl[hidden] { display: none; }
+  .cam .drive .lvl.sel { background: rgba(255,255,255,.9); color: #15191e; }
   @media (pointer: coarse) { .cam .drive { grid-template-columns: repeat(3, 36px); } .cam .drive button { width: 36px; height: 32px; font-size: .9rem; } }
   /* The pick's phase and note in Arm mode (operator.js syncPickLine), under the mode switch. */
   .cam .pickline { position: absolute; top: 36px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 24px);
@@ -406,9 +409,38 @@
   #coverage[hidden] { display: none; }
   #empty { position: absolute; inset: 0; background: var(--scrim); display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; z-index: 3; text-align: center; padding: 24px; }
   #empty b { font-size: 1.15rem; font-weight: 600; }
+  /* "No robots found": a radar sweep while the page waits for any robot to report
+     (operator.js renderEmpty). Rings expand from the dot, staggered. */
+  #empty .radar { position: relative; width: 84px; height: 84px; margin-bottom: 6px; }
+  #empty .radar[hidden] { display: none; }
+  #empty .radar i { position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--info); opacity: 0;
+                    animation: radar-ping 2.4s cubic-bezier(.2,.6,.3,1) infinite; }
+  #empty .radar i:nth-child(2) { animation-delay: .8s; }
+  #empty .radar i:nth-child(3) { animation-delay: 1.6s; }
+  #empty .radar b { position: absolute; left: 50%; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%;
+                    background: var(--info); box-shadow: 0 0 0 4px color-mix(in srgb, var(--info) 25%, transparent); }
+  @keyframes radar-ping { 0% { transform: scale(.15); opacity: .9; } 100% { transform: scale(1); opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    #empty .radar i { animation: none; opacity: .35; } #empty .radar i:nth-child(1) { transform: scale(.4); }
+    #empty .radar i:nth-child(2) { transform: scale(.7); } #empty .radar i:nth-child(3) { transform: scale(1); }
+  }
   .empty-acts { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
   #toast { position: absolute; top: 16px; left: 50%; z-index: 3; transform: translateX(-50%); background: var(--ink); color: var(--on-ink); padding: 6px 14px; border-radius: 6px; font-size: .84rem; opacity: 0; transition: opacity .2s; pointer-events: none; }
   #toast.on { opacity: 1; }
+  #outage { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: var(--veil); }
+  #outage[hidden] { display: none; }
+  #outage .card { width: 440px; max-width: calc(100vw - 24px); background: var(--surface); color: var(--ink); border: 1px solid var(--border);
+                  border-radius: 12px; box-shadow: 0 12px 40px var(--shadow); padding: 18px 20px; display: grid; gap: 12px; }
+  #outage .hd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  #outage .hd b { font-size: 1rem; }
+  #outage time { font: 500 .8rem ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
+  #outage ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+  #outage li { display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; align-items: baseline; font-size: .88rem; color: var(--muted); }
+  #outage li i { font-style: normal; text-align: center; }
+  #outage li.ok { color: var(--ink); } #outage li.ok i { color: var(--go); }
+  #outage li.pend { color: var(--ink); } #outage li.pend i { color: var(--info); }
+  #outage .hint { margin: 0; font-size: .8rem; color: var(--warnink); background: var(--warnbg); border: 1px solid var(--warnline); border-radius: 6px; padding: 6px 9px; }
+  #outage .acts { display: flex; gap: 8px; justify-content: flex-end; }
   #link-down { position: absolute; top: 14px; right: 14px; background: var(--warnbg); border: 1px solid var(--warnline); color: var(--warnink); border-radius: 6px; padding: 5px 12px; font-size: .84rem; }
 
   /* Scrolls on its own: as a plain flex child it shrank but still painted its overflow
@@ -818,7 +850,7 @@
     <p id="rc-err" hidden></p>
   </div>
   <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
-  <div id="empty" hidden><b id="empty-title">Simulation not running</b><span class="muted" id="empty-sub">Start the simulation to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><div class="empty-acts"><button class="btn primary" id="empty-go">Start simulation</button><button class="btn" id="empty-test">Run a test</button><button class="btn" id="empty-robot" hidden title="The robot plugged into this machine: camera, driving, pick and place">Open the Robot view</button></div></div>
+  <div id="empty" hidden><div class="radar" id="empty-radar" hidden aria-hidden="true"><i></i><i></i><i></i><b></b></div><b id="empty-title">Simulation not running</b><span class="muted" id="empty-sub">Start the simulation to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><div class="empty-acts"><button class="btn primary" id="empty-go">Start simulation</button><button class="btn" id="empty-test">Run a test</button><button class="btn" id="empty-robot" hidden title="The robot plugged into this machine: camera, driving, pick and place">Open the Robot view</button></div></div>
   <div id="toast" role="status"></div>
 </main>
 
@@ -974,6 +1006,16 @@
           <pre id="session-log" title="Live output from scripts/run_demo.sh for this session (also saved to data/sessions/&lt;id&gt;/console.log)."></pre>
         </details>
       </div>
+  </div>
+</div>
+
+<!-- The robot's computer rebooting or off Wi-Fi: what has come back so far (operator.js outage). -->
+<div id="outage" hidden role="dialog" aria-live="polite" aria-label="Robot connection">
+  <div class="card">
+    <div class="hd"><b id="outage-title"></b><time id="outage-time"></time></div>
+    <ul id="outage-steps"></ul>
+    <p id="outage-hint" class="hint" hidden>Over 3 minutes: check the robot has power, and that nothing is plugged into its USB-C port (that hangs it at boot).</p>
+    <div class="acts"><button class="btn primary" id="outage-start" hidden>Start the robot stack&hellip;</button><button class="btn" id="outage-close">Hide</button></div>
   </div>
 </div>
 

@@ -20,6 +20,11 @@ head:
   pid: {p: 16, i: 0, d: 32}
   # Degrees inside each calibrated stop that a goal may reach (head.py limits()).
   margin_deg: 2.0
+  # Where nav mode holds the camera, in /head_cmd's convention (degrees, tilt > 0 looks
+  # down). It must match the mount in configs/sensors/d435_real.yaml (pan 0, pitch 0 there):
+  # mapping takes the camera's pose from that static mount, not from the head.
+  # 15 down (2026-11-17): level showed too little floor in front of the robot.
+  nav_pose: {pan_deg: 0.0, tilt_deg: 15.0}
 
 arm:
   calibration: configs/calibration/robots/so_follower/sortbots_arm.json
