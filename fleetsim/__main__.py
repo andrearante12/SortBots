@@ -98,8 +98,21 @@ def cmd_run(args) -> int:
     signal.signal(signal.SIGINT, signal.default_int_handler)
     scn = _resolve(args)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out = Path(args.out) if args.out else RESULTS_DIR / f"{stamp}_{scn['name']}"
-    out.mkdir(parents=True, exist_ok=True)
+    if args.out:
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+    else:
+        # Two runs started in the same second (a seed sweep in parallel) used to
+        # share one dir and corrupt each other's events.jsonl.gz (2026-11-17).
+        # mkdir without exist_ok claims the name atomically.
+        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+        for k in range(1, 1000):
+            out = RESULTS_DIR / (f"{stamp}_{scn['name']}" + (f"_{k}" if k > 1 else ""))
+            try:
+                out.mkdir()
+                break
+            except FileExistsError:
+                continue
     (out / "scenario.json").write_text(json.dumps(scn, indent=2, default=str))
     rec = ev_lib.Recorder(out / "events.jsonl.gz")
     n, net = scn["config"]["robots"]["count"], scn["config"]["network"]["model"]
