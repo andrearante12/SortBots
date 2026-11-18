@@ -219,8 +219,53 @@ These came out of building this, and each one is worth a decision.
    Decentralised parking is itself a protocol question.
 6. **Dead-end aisles deadlock** when many robots share one pickup behind a
    blockage. There's no traffic coordination beyond "lower priority replans
-   first". Intents and yielding (`fleet_radio.should_yield` exists and is
-   unused here) are the next nav-protocol step.
+   first". Path intents with yielding are now built (see "Path intents")
+   but, as measured, don't pay yet.
+
+## Path intents (2026-11-17): built, measured, off by default
+
+`intent.enabled` (`fleetsim/intent.py`). Each robot announces the next 20 s
+of its path as up to 8 timestamped points. Every 0.25 s it checks its own
+predicted path against the intents of peers that outrank it: carrying beats
+fetching beats going home, then time already spent yielding, then robot
+index. If they would be within 0.9 m of each other at the same moment, and
+there is a spot on its own path that keeps 1.1 m from the peer's whole
+intent, and the wait there is under 8 s, it holds at that spot. Anything
+else is left to the local layer. The points ride on `/fleet/status` once
+per path change, hold or second (`intent.transport: status`).
+
+What it did, seed 1, off → on:
+
+| Scenario | Robot-caused stops | Seconds stopped | Yields | Done | Mean delivery |
+|---|---|---|---|---|---|
+| `delivery_smoke` | 44 → 41 | 36 → 31 | 2 (6 s) | 12 → 12 | 217 → 217 s |
+| `walkers` | 186 → 218 | 179 → 224 | 6 (23 s) | 23 → 23 | 161 → 165 s |
+| `fleet_scale` (radio) | 3778 → 3397 | 3956 → 3791 | 223 (690 s) | 122 → 121 | 202 → 210 s |
+
+So as built it doesn't pay. Why, from counting every check (scratch
+instrumentation, `delivery_smoke`): most predicted conflicts with a moving
+peer are head-on meetings along one aisle, where the only spot clear of
+the peer is back at the aisle mouth and the wait is the peer's whole
+passage. Those are rightly left to the local layer's swerve, since a
+2.4 m aisle lets two robots pass. A third to half of robot-caused stops
+are for a peer that is standing still (blocked itself, parked, picking),
+which intents don't cover. And a robot holding still is itself something
+the others then stop for, which is why `walkers` got worse.
+
+Two things learnt on the way, both now the default:
+- **Intents ride on Status.** As their own message to robots within 20 m
+  they took the 50-robot radio down (194 MB of intents; Status was lost, so
+  every peer was then reported as an unknown mover, and obstacle notices
+  went from 65 k to 1.3 M copies): 0 deliveries. Airtime is per frame far
+  more than per byte.
+- **Carried once per change, not on every Status:** on every 3 Hz Status
+  the points added 40 % to the bytes; once per change, 2 %.
+
+Next steps that would address what the stops actually are: lane discipline
+(keep right of the aisle centre when travelling against a peer's intent,
+so head-on meetings pass without stopping), and detours that treat a
+higher-priority peer's intent as a temporary cost on the costmap (another
+aisle, rather than waiting).
 
 ## Known issues
 
@@ -275,7 +320,8 @@ These came out of building this, and each one is worth a decision.
 ## Not modelled yet
 
 - Pose drift / localisation error, and with it the peer-masking radius.
-- Intents and yielding (`/fleet/intent`, `fleet_radio.should_yield`), and
+- Intents on the robots (fleetsim's are above; the robots' `/fleet/intent`
+  is a goal plus a straight corridor and `fleet_radio.should_yield`), and
   the explorer and exploration-from-scratch tasks (the explorer's logic still
   imports rclpy at module scope).
 - Region *subscriptions* for map tiles. `recipients: radius` picks receivers

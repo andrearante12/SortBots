@@ -247,7 +247,8 @@ class MapDivergence(Metric):
 @register
 class Nav(Metric):
     name = "nav"
-    version = 1
+    # 2: robot-caused stops apart, and path-intent yields (2026-11-17).
+    version = 2
     streams = {"nav"}
     summary = "Replans by cause, blocking and give-ups of the local layer."
     params = {}
@@ -263,12 +264,18 @@ class Nav(Metric):
         "gave_up": "legs abandoned (blocked too long, or no path)",
         "recoveries": "random recovery pauses (nav.hiccup_rate_hz)",
         "empty_shelf": "picks that failed because another robot already had the item",
+        "blocked_robot": "stops for a peer robot (what path intents try to prevent)",
+        "blocked_robot_s": "total sim seconds stopped for a peer robot",
+        "yields": "holds at a safe spot for a peer's path intent (fleetsim/intent.py)",
+        "yield_s": "total sim seconds held for a peer's intent",
+        "yield_timeouts": "holds given up after intent.yield_max_s",
     }
 
     def __init__(self, ctx, **params):
         super().__init__(ctx, **params)
         self.c = {k: 0 for k in self.values}
-        self.c["blocked_s"] = 0.0
+        self.c["blocked_s"] = self.c["blocked_robot_s"] = self.c["yield_s"] = 0.0
+        self._by: dict = {}  # rid -> what its open stop is for
 
     def on_event(self, ev):
         e = ev["event"]
@@ -281,8 +288,19 @@ class Nav(Metric):
                 self.c[key] += 1
         elif e == "blocked":
             self.c["blocked"] += 1
+            self._by[ev.get("rid")] = ev.get("by")
+            if ev.get("by") == "robot":
+                self.c["blocked_robot"] += 1
         elif e == "unblocked":
             self.c["blocked_s"] += ev.get("after_s", 0.0)
+            if self._by.pop(ev.get("rid"), None) == "robot":
+                self.c["blocked_robot_s"] += ev.get("after_s", 0.0)
+        elif e == "yield":
+            self.c["yields"] += 1
+        elif e == "yield_end":
+            self.c["yield_s"] += ev.get("after_s", 0.0)
+        elif e == "yield_timeout":
+            self.c["yield_timeouts"] += 1
         elif e == "gave_up":
             self.c["gave_up"] += 1
         elif e == "recovery":
@@ -291,4 +309,5 @@ class Nav(Metric):
             self.c["empty_shelf"] += 1
 
     def result(self):
-        return {**self.c, "blocked_s": round(self.c["blocked_s"], 1)}
+        return {**self.c, **{k: round(self.c[k], 1)
+                             for k in ("blocked_s", "blocked_robot_s", "yield_s")}}

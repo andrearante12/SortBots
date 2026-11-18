@@ -15,6 +15,11 @@ What is real and what stands in:
             `block_replan_s`, and gives up after `block_fail_s`.
   STAND-IN  RTAB-Map + obstacle_detector: sensing.py.
 
+With `intent.enabled`, each robot also announces where its path takes it
+and when, and the lower-priority robot of a predicted conflict holds at a
+safe point until it clears (fleetsim/intent.py). The robots don't do this
+yet: /fleet/intent today carries a goal and a straight corridor.
+
 Peers are known three ways, as on the robots: seen in the camera cone,
 heard in their /fleet/status (pose, at the status rate, subject to the
 network), and as obstacle notices a peer shared. Never from ground truth.
@@ -30,6 +35,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import intent as I
 from .belief import Belief
 from .planner import INF, Costmap, path_length
 from .sensing import Sensor
@@ -137,18 +143,27 @@ class Robot:
         self.bumps: list[tuple] = []      # where it physically bumped into something
         self._last_share = -math.inf
         self.resync_wait: dict = {}       # (origin, tile) -> time a resync may go again
+        # path intents (fleetsim/intent.py)
+        self.icfg = cfg["intent"]
+        self.intents: dict[int, dict] = {}  # peer k -> {"prio", "pts" (n, 3) abs, "at"}
+        self._intent_dirty = False
+        self.hold = None                    # {"peer", "since"} while yielding
+        self.yield_leg_s = 0.0              # spent yielding on this leg (aging)
+        self.yield_cool: dict[int, float] = {}  # peer k -> until when we don't yield to it
         # schedules, phase-shifted per robot so the fleet doesn't tick in lockstep
         ph = self.rng.random()
         self.next_sense = ph / float(cfg["sensing"]["hz"])
         self._scan_pose = None
         self.next_status = ph / float(cfg["status"]["hz"])
+        self.next_intent = ph / float(cfg["intent"]["hz"])
+        self.next_intent_check = ph / float(cfg["intent"]["check_hz"])
         self.next_map_pub = ph * float(cfg["map_share"]["publish_s"])
         self.next_refresh = float(cfg["map_share"]["refresh_s"]) * (0.5 + ph)
         self.refresh_ptr = 0
         self.tokens = 0.0
         self.counters = {"replans": 0, "replan_sensed": 0, "replan_shared": 0,
                          "replan_blocked": 0, "plan_fail": 0, "blocked_s": 0.0,
-                         "stuck": 0, "shared_changed": 0}
+                         "stuck": 0, "shared_changed": 0, "yields": 0, "yield_s": 0.0}
 
     def _new_core(self) -> None:
         sim = self.sim
@@ -289,7 +304,117 @@ class Robot:
 
     # ---- navigation ---------------------------------------------------------
 
+    # ---- path intents ---------------------------------------------------------
+
+    def prio(self) -> tuple:
+        """(task class, -aging bucket, index): lower outranks. Carrying beats
+        fetching beats everything else; yielding climbs within the class."""
+        cls = 0 if self.state in ("NAV_TO_DROPOFF", "PLACING") else \
+            1 if self.state in ("NAV_TO_PICKUP", "AWAIT_PICK", "PICKING") else 2
+        return (cls, -int(self.yield_leg_s // float(self.icfg["aging_s"])), self.k)
+
+    def _v_nom(self) -> float:
+        return self.vmax * float(self.icfg["speed_factor"])
+
+    def _own_pts(self) -> list:
+        return [(self.x, self.y)] + self.path[self.seg + 1:] if self.path else [(self.x, self.y)]
+
+    def _announce(self, now: float) -> None:
+        """Rebuild the intent; send it now (transport: message) or leave it
+        for the next Status to carry (transport: status)."""
+        c = self.icfg
+        moving = self.goal is not None and self.path and self.hold is None
+        pts = I.announce(self._own_pts(), self._v_nom(), float(c["horizon_s"]),
+                         int(c["max_pts"])) if moving else \
+            [[round(self.x, 2), round(self.y, 2), 0.0]]
+        self.intent_msg = {"k": self.k, "prio": list(self.prio()), "pts": pts, "built": now}
+        if c["transport"] == "message":
+            self.sim.share_intent(self, self.intent_msg)
+        self.next_intent = now + 1.0 / float(c["hz"])
+        self._intent_dirty = False
+
+    def intent_for_status(self, now: float) -> dict | None:
+        """What this Status carries: the intent, offsets re-based to now."""
+        m = getattr(self, "intent_msg", None)
+        if m is None or not self.icfg["enabled"] or self.icfg["transport"] != "status":
+            return None
+        # Once per rebuild (a new path, a hold, or hz): every 3 Hz Status
+        # carrying the points added 40 % to the 50-robot fleet's bytes.
+        if m.get("carried"):
+            return None
+        m["carried"] = True
+        age = now - m["built"]
+        return {**m, "pts": [[x, y, round(dt - age, 2)] for x, y, dt in m["pts"]]}
+
+    def on_intent(self, m: dict, now: float) -> None:
+        p = np.array(m["pts"], dtype=float).reshape(-1, 3)
+        p[:, 2] += now  # offsets from the send: re-based on OUR clock at arrival
+        self.intents[int(m["k"])] = {"prio": tuple(m["prio"]), "pts": p, "at": now}
+
+    def _check_intents(self, now: float) -> None:
+        """Hold if a peer that outranks us will be where we are about to be,
+        and there is a safe spot to wait at and the wait is short."""
+        c = self.icfg
+        self.next_intent_check = now + 1.0 / float(c["check_hz"])
+        ttl = float(c["ttl_s"])
+        self.intents = {k: v for k, v in self.intents.items() if now - v["at"] <= ttl}
+        if self.goal is None or not self.path:
+            self._end_hold(now)
+            return
+        ds = float(c["sample_s"])
+        taus, own = I.along(self._own_pts(), self._v_nom(), float(c["horizon_s"]), ds)
+        times = now + taus
+        me, sep = self.prio(), float(c["sep_m"])
+        want = None
+        for j, it in self.intents.items():
+            if not I.outranks(it["prio"], me) or now < self.yield_cool.get(j, -math.inf):
+                continue
+            hit = I.first_conflict(own, times, it["pts"], sep)
+            if hit is None:
+                continue
+            i = I.safe_hold(own, hit, it["pts"], now, float(c["clear_m"]), ds)
+            if i is None:
+                continue  # we stand in its way already: the local layer's
+            # The wait starts when we reach the hold spot, not now: measured
+            # from now, a conflict 15 s out always looked like a long wait.
+            if I.clears_at(own, times, it["pts"], sep, hit) - taus[i] > float(c["max_wait_s"]):
+                continue  # a long passage (or it stops there): the local layer's swerve
+            if i <= 1:  # at (or a sample from) the last safe spot
+                want = j
+                break
+        if want is None:
+            self._end_hold(now)
+        elif self.hold is None or self.hold["peer"] != want:
+            self._end_hold(now)
+            self.hold = {"peer": want, "since": now}
+            self.counters["yields"] += 1
+            self.sim.record({"s": "nav", "rid": self.rid, "event": "yield", "to": f"robot_{want}"})
+            self._intent_dirty = True  # we stand still now: say so
+
+    def _end_hold(self, now: float) -> None:
+        if self.hold is None:
+            return
+        self.sim.record({"s": "nav", "rid": self.rid, "event": "yield_end",
+                         "after_s": round(now - self.hold["since"], 2)})
+        self.hold = None
+        self._intent_dirty = True
+
+    def _intent_tick(self, now: float) -> None:
+        if self.hold is not None and now - self.hold["since"] >= float(self.icfg["yield_max_s"]):
+            # Something in the prediction is wrong (it stopped, it replans in
+            # a loop): stop deferring to that peer for as long again.
+            j = self.hold["peer"]
+            self.yield_cool[j] = now + float(self.icfg["yield_max_s"])
+            self.sim.record({"s": "nav", "rid": self.rid, "event": "yield_timeout",
+                             "to": f"robot_{j}"})
+            self._end_hold(now)
+        if now >= self.next_intent_check:
+            self._check_intents(now)
+        if self._intent_dirty or now >= self.next_intent:
+            self._announce(now)
+
     def _record_path(self) -> None:
+        self._intent_dirty = True  # every new path is re-announced
         if self.sim.cfg["record"]["paths"]:
             self.sim.record({"s": "path", "rid": self.rid, "purpose": self.purpose,
                              "pts": [[round(x, 2), round(y, 2)] for x, y in self.path]})
@@ -307,6 +432,7 @@ class Robot:
 
     def set_goal(self, xy, purpose: str) -> None:
         self._clear_goal()
+        self.yield_leg_s = 0.0
         self.goal, self.purpose = tuple(xy), purpose
         self.next_periodic = self.sim.now + float(self.nav["replan_period_s"])
         self._replan("goal")
@@ -553,6 +679,11 @@ class Robot:
         if now < self.pause_until:
             self.v = 0.0
             return
+        if self.hold is not None:  # yielding to a peer's intent (fleetsim/intent.py)
+            self.v = 0.0
+            self.yield_leg_s += dt
+            self.counters["yield_s"] += dt
+            return
         rate = float(nav["hiccup_rate_hz"])
         if rate > 0 and self.rng.random() < rate * dt:
             self.pause_until = now + float(nav["hiccup_s"])
@@ -681,6 +812,8 @@ class Robot:
         self.core.set_pose((self.x, self.y), now)
         self.core_call(self.core.tick, now)
         self._fsm(now)
+        if self.icfg["enabled"]:
+            self._intent_tick(now)
         self._drive(dt, now)
         if self.core.battery_pct is not None:
             self.core.drive(dt, self.v > 0.02)

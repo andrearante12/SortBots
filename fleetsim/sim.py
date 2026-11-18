@@ -44,6 +44,7 @@ GW = 0
 MAP_HEADER_B = 32
 RESYNC_B = 24
 OBSTACLE_B = 64
+INTENT_HEADER_B = 24  # robot id, priority key, send time
 
 
 def deep_merge(base: dict, over: dict) -> dict:
@@ -422,10 +423,13 @@ class Sim:
             dsts = self._all_nodes()
         else:
             dsts = np.r_[GW, self._robots_near((r.x, r.y), float(cfg["radius_m"]))]
-        d, arr, _, _ = self.net.send("status", r.node, dsts, len(raw) + 8, False, self.now,
-                                     udp=True)
+        it = r.intent_for_status(self.now)
+        extra = 0 if it is None else 4 + 12 * len(it["pts"])  # fleetsim/intent.py points
+        d, arr, _, _ = self.net.send("status", r.node, dsts, len(raw) + 8 + extra, False,
+                                     self.now, udp=True)
         if len(d):
-            self._pending_status.append((r.k, d, arr, (r.x, r.y, r.mode(), r.core.battery_pct)))
+            self._pending_status.append((r.k, d, arr,
+                                         (r.x, r.y, r.mode(), r.core.battery_pct, it)))
 
     def _session_liveness(self) -> None:
         """status.session_liveness: a live zenoh session to a peer counts as
@@ -447,16 +451,20 @@ class Sim:
             return
         now, poll = self.now, float(self.cfg["status"]["liveness_poll_s"])
         keep = []
-        for src, d, arr, (x, y, mode, bat) in self._pending_status:
+        for src, d, arr, (x, y, mode, bat, it) in self._pending_status:
             due = arr <= now
             if not due.all():
-                keep.append((src, d[~due], arr[~due], (x, y, mode, bat)))
+                keep.append((src, d[~due], arr[~due], (x, y, mode, bat, it)))
             dd = d[due]
             if not len(dd):
                 continue
             rob = dd[dd > 0] - 1
             self.seen_t[rob, src] = now
             self.seen_xy[rob, src] = (x, y)
+            if it is not None:
+                for k in rob.tolist():
+                    if self.robots[k].alive:
+                        self.robots[k].on_intent(it, now)
             stale = dd[now - self.live_t[dd, src] >= poll]
             if not len(stale):
                 continue
@@ -539,6 +547,20 @@ class Sim:
         o = self.robots[node - 1]
         if o.alive:
             self._send_cells(o, tile, o.belief.snapshot(tile), True, np.array([asker]), budget=False)
+
+    def share_intent(self, r: Robot, m: dict) -> None:
+        """A path intent (fleetsim/intent.py): best-effort, like Status, to
+        robots within intent.radius_m. ~12 B a point plus a header."""
+        dsts = self._robots_near((r.x, r.y), float(self.cfg["intent"]["radius_m"]),
+                                 exclude=r.node)
+        if len(dsts):
+            self._send("intent", r.node, dsts, INTENT_HEADER_B + 12 * len(m["pts"]), False,
+                       self._deliver_intent, m)
+
+    def _deliver_intent(self, node: int, m: dict) -> None:
+        r = self.robots[node - 1]
+        if r.alive:
+            r.on_intent(m, self.now)
 
     def share_obstacle(self, r: Robot, o: dict) -> None:
         dsts = self._robots_near((r.x, r.y), float(self.cfg["obstacle_share"]["radius_m"]),

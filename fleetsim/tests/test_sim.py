@@ -176,6 +176,14 @@ def test_without_confirmed_completes_the_gateway_never_learns():
     assert gw_state is not None and gw_state.state != "done"
 
 
+def test_path_intents_run_clean_on_both_transports():
+    for transport in ("status", "message"):
+        s, _ = run(scenario(robots=5, config={"intent": {"enabled": True, "transport": transport}}))
+        v = score(s, [{"metric": "fleet_tasks"}, {"metric": "contacts"}, {"metric": "nav"}])
+        assert v["fleet_tasks"]["done"] == 3 and v["contacts"]["robot"] == 0, transport
+        assert v["nav"]["yield_timeouts"] == 0
+
+
 def test_radio_network_runs_and_reports_load():
     s, _ = run(scenario(config={"network": {"model": "radio"}}))
     v = score(s, [{"metric": "comms"}, {"metric": "fleet_tasks"}])

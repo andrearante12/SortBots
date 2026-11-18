@@ -119,6 +119,28 @@ obstacle_share:               # #18: tell peers about movers they may not see
   expiry_s: 3.0
   min_interval_s: 0.5
 
+intent:                       # path intents (fleetsim/intent.py; README "Path intents")
+  enabled: false              # off: the local layer alone, as on the robots today
+  # status: the points ride on /fleet/status (no frames of their own, to the
+  # Status recipients). message: their own best-effort message to robots
+  # within radius_m. At 50 robots the separate message took the radio down
+  # (intents 194 MB, Status lost, every peer then reported as an unknown
+  # mover); airtime is per frame far more than per byte (2026-11-17).
+  transport: status
+  hz: 1.0                     # re-announce rate; also sent on every replan
+  horizon_s: 20.0             # how far ahead an intent reaches (10 m at 0.5 m/s)
+  radius_m: 20.0              # sent to robots this close
+  ttl_s: 3.0                  # a peer's intent is trusted this long after it arrived
+  check_hz: 4.0               # conflict check rate
+  sample_s: 0.25              # time step of the conflict check
+  speed_factor: 0.85          # predicted speed = max_speed_mps x this (turns, acceleration)
+  sep_m: 0.9                  # closer than this at the same moment is a conflict
+  clear_m: 1.1                # a hold point keeps this far from a peer's whole intent
+  max_wait_s: 8.0             # yield only if the conflict clears within this; else the local layer
+  yield_max_s: 20.0           # holding longer for one peer: stop yielding to it for as long
+  aging_s: 15.0               # every this long spent yielding on a leg climbs one rank in class
+  max_pts: 8                  # points per intent (~12 B each on the wire)
+
 network:
   model: ideal                # ideal | radio (fleetsim/network.py)
   # enforced: the channel carries at most 95 % airtime; the excess is lost

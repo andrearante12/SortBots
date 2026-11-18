@@ -170,6 +170,8 @@ def _validate(s: dict) -> None:
         raise ScenarioError("config.world.cell_m: expected 0.05..0.5 m")
     if cfg["network"]["model"] not in ("ideal", "radio"):
         raise ScenarioError("config.network.model: ideal | radio")
+    if cfg["intent"]["transport"] not in ("status", "message"):
+        raise ScenarioError("config.intent.transport: status | message")
     if cfg["network"]["capacity"] not in ("enforced", "unlimited"):
         raise ScenarioError("config.network.capacity: enforced | unlimited")
     for key in ("status", "map_share"):
