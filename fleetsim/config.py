@@ -74,7 +74,13 @@ def merge_checked(base: dict, over: dict, path: tuple = ()) -> dict:
     for k, v in (over or {}).items():
         here = path + (k,)
         if _free(path):  # inside a free-form block: anything goes
-            out[k] = copy.deepcopy(v)
+            # ...but merged, not replaced: two `--set fleet_tasks.protocol.*`
+            # kept only the last, because the second replaced the whole
+            # protocol mapping the first had made (2026-11-17).
+            if isinstance(out.get(k), dict) and isinstance(v, dict):
+                out[k] = merge_checked(out[k], v, here)
+            else:
+                out[k] = copy.deepcopy(v)
             continue
         if k not in out:
             raise ScenarioError(f"config.{'.'.join(here)}: no such setting "
