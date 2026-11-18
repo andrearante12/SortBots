@@ -34,6 +34,7 @@ SETTABLE = {
     "map_share.prior": {"label": "Starting map", "options": ["none", "truth"]},
     "map_share.enabled": {"label": "Map sharing", "options": ["true", "false"]},
     "network.model": {"label": "Network", "options": ["ideal", "radio"]},
+    "network.capacity": {"label": "Radio capacity", "options": ["enforced", "unlimited"]},
     "network.radio.contention": {"label": "Radio contention", "options": ["global", "spatial"]},
     "status.recipients": {"label": "Status sent to", "options": ["all", "radius"]},
     "status.session_liveness": {"label": "Session liveness", "options": ["true", "false"]},

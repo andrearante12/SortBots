@@ -38,6 +38,16 @@ CSMA/CA contention, TCP windows and zenoh sessions) — and what that costs:
   * One band. batman OGM airtime is charged (it is what grows as n^2);
     zenoh keepalives on idle sessions are not.
 
+Capacity (`network.capacity`). `enforced` is everything above: the channel
+holds at most LOAD_CAP of airtime and the excess is lost or queued.
+`unlimited` is the counterfactual of a channel that never fills: airtime is
+still counted, so `load` reports the OFFERED load (3.2 = 320 % of what the
+radio can carry) and `over_cap` the share of nodes past the cap, but load
+costs nothing: no contention delay, no over-cap loss, no queue. Path loss,
+frame errors, routing and failures still apply. Comparing the two runs
+separates "the protocol is wrong" from "the protocol is right but the radio
+can't carry it".
+
 Every copy is unicast: zenoh routes one copy per subscriber, and Status
 over UDP is sent to each recipient — so fleet-wide traffic costs n copies,
 which is what the DES found breaks first at scale.
@@ -88,6 +98,7 @@ class Network:
         self.restore_delay_s = 0.0
         self.rto_s = float(cfg.get("rto_s", 0.2))
         self.lease_s = float(cfg.get("transport_lease_s", 4.0))
+        self.unlimited = str(cfg.get("capacity", "enforced")) == "unlimited"
         self.stats = defaultdict(lambda: {"sent": 0, "delivered": 0, "lost": 0,
                                           "bytes": 0, "lat": []})
         n = n_nodes
@@ -214,6 +225,8 @@ class Network:
         wire = size - (UDP_SAVING_B * frames if udp else 0)
         air = self.air_f[src, dsts] * frames + self.air_b[src, dsts] * wire
         rho = np.maximum(self.load[src], self.load[dsts])
+        if self.unlimited:
+            rho = np.zeros_like(rho)  # an endless channel: load is reported, never paid
         slow = 1.0 / (1.0 - np.minimum(rho, LOAD_CAP))
         lat = (STACK_BASE_S + self.rng.exponential(STACK_JITTER_S, len(dsts))
                + self.lat0[src, dsts] + air * slow)
@@ -267,6 +280,8 @@ class Network:
         pairs = max(1, n_alive * (n_alive - 1))
         return {"load_max": round(float(self.load.max()), 3),
                 "load_mean": round(float(self.load[self.alive_phys].mean()), 3) if n_alive else 0.0,
+                "over_cap": round(float((self.load[self.alive_phys] > LOAD_CAP).mean()), 3)
+                if n_alive else 0.0,
                 "reach_frac": round((int(reach.sum()) - n_alive) / pairs, 3),
                 "hops_max": int(np.where(reach, self.hops, 0).max())}
 
@@ -329,6 +344,8 @@ class RadioNetwork(Network):
         else:
             self.load[:] = float(air[self.alive_phys].sum()) / epoch + self.background
         over = np.maximum(self.load - LOAD_CAP, 0.0)
+        if self.unlimited:
+            over[:] = 0.0
         self.backlog = np.maximum(0.0, self.backlog + over * epoch - np.where(over > 0, 0.0, epoch))
         self.air[:] = 0.0
 

@@ -121,6 +121,12 @@ obstacle_share:               # #18: tell peers about movers they may not see
 
 network:
   model: ideal                # ideal | radio (fleetsim/network.py)
+  # enforced: the channel carries at most 95 % airtime; the excess is lost
+  # (best-effort) or queued (reliable). unlimited: what the run would do if
+  # the radio could carry everything offered. Load is still measured and
+  # reported (comms load_max, over_cap_s) but never delays or drops a frame.
+  # Radio model only: the ideal network has no load.
+  capacity: enforced
   rto_s: 0.2                  # reliable retransmit timer (Linux TCP minimum RTO), doubling
   transport_lease_s: 4.0      # commsim base.yaml zenoh transport_lease_ms
   ideal:

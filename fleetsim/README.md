@@ -88,6 +88,17 @@ or heard from peers, and every byte of that travels the network model.
    docstring of `network.py` lists exactly what it simplifies and what that
    costs. Status is UDP, `/fleet/tasks` is reliable and in order per pair,
    map patches are best-effort.
+7. **Capacity can be lifted** (`network.capacity`, radio model only).
+   `enforced` (default) is the radio as modelled: past 95 % airtime the
+   excess is lost or queued. `unlimited` asks what the protocol would do if
+   the radio could carry everything offered: load is still measured
+   (`comms.load_max` is then the offered load, and `over_cap_s` counts the
+   seconds some node was past the cap) but costs no delay, loss or queueing.
+   Path loss, frame errors, routing and failures still apply. Run a scenario
+   both ways to split "the protocol is wrong" from "the radio can't carry it".
+   The operator view's run form offers it as **Radio capacity**. It does not
+   lift `map_share.rate_cap_bps`, which is the robots' own self-imposed
+   budget rather than the radio's limit.
 
 The body is a 0.25 m disc, half the length of the 0.5 × 0.4 m footprint.
 The circumscribed 0.32 m disc made robots unable to pass each other in a
@@ -155,6 +166,7 @@ uses one core).
 | `walkers` | #18: walkers stepping out of rack aisles | robot-driven contacts 0–1 per run; **notices made no measurable difference** (seeds 1–4) |
 | `fleet_scale` | 50 robots, radio, neighbour-only Status | 108/140 done, 9× real time; **fails** its criteria (finding 4) |
 | `fleet_scale` + `--set status.recipients=all --set status.hz=5 --set status.session_liveness=false` | the same with today's fleet-wide Status | **0/140 done**: `/fleet/tasks` delivery 0.01 %, mean load 324 % |
+| the same + `--set network.capacity=unlimited` | is that the radio, or the protocol? | 117/140 done, every kind delivered >99 %, offered load 265 % mean / 511 % peak: the radio. **2 duplicates** with near-perfect delivery, so not only the radio |
 
 ## Findings so far
 

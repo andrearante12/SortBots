@@ -180,11 +180,12 @@ def test_ideal_network_delivers_in_order_and_partitions_cut():
     assert 2 not in d.tolist() and {0, 3} <= set(d.tolist())
 
 
-def _radio(positions, occ=None, g=None):
+def _radio(positions, occ=None, g=None, capacity="enforced"):
     if g is None:
         g = G.Grid(300, 100, 0.2, 0.0, 0.0)
         occ = np.zeros((g.height, g.width), dtype=bool)
-    net = N.RadioNetwork(len(positions), {"radio": {}}, np.random.default_rng(1), occ, g)
+    net = N.RadioNetwork(len(positions), {"radio": {}, "capacity": capacity},
+                         np.random.default_rng(1), occ, g)
     net.update(np.array(positions, dtype=float), 0.0)
     return net
 
@@ -213,6 +214,34 @@ def test_radio_load_grows_with_traffic_and_slows_delivery():
     assert net.load.max() > 0.5
     _, busy, _, _ = net.send("status", 0, np.array([1]), 200, False, 1.0)
     assert len(busy) == 0 or (busy[0] - 1.0) > quiet[0]
+
+
+def _flooded(capacity):
+    net = _radio([(10, 10), (12, 10), (14, 10)], capacity=capacity)
+    _, quiet, _, _ = net.send("status", 0, np.array([1]), 200, False, 0.0)
+    for _ in range(40000):  # ~3x what the channel can carry in the 1-s epoch
+        net.send("map", 0, np.array([1, 2]), 1400, False, 0.0)
+    net.update(net.pos, 1.0)
+    net.take_stats()
+    got = [len(net.send("map", 0, np.array([1, 2]), 1400, False, 1.0)[0]) for _ in range(500)]
+    _, busy, _, _ = net.send("tasks", 0, np.array([1]), 200, True, 1.0)
+    # None: queued past the transport lease, so the reliable copy was dropped
+    return net, quiet[0], (busy[0] - 1.0) if len(busy) else None, sum(got) / 1000
+
+
+def test_capacity_enforced_drops_and_slows_traffic_past_the_cap():
+    net, quiet, busy, delivered = _flooded("enforced")
+    assert net.load.max() > 2.0 and net.summary()["over_cap"] == 1.0
+    assert delivered < 0.5          # best-effort loses the excess
+    assert busy is None or busy > 10 * quiet  # reliable waits behind the queue, or times out
+
+
+def test_capacity_unlimited_reports_the_load_but_never_pays_it():
+    net, quiet, busy, delivered = _flooded("unlimited")
+    assert net.load.max() > 2.0 and net.summary()["over_cap"] == 1.0  # offered load, still measured
+    assert delivered > 0.99
+    assert busy is not None and busy < 3 * quiet
+    assert net.backlog.max() == 0.0
 
 
 def test_vectorised_crossings_match_layout():

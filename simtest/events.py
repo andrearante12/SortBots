@@ -48,7 +48,7 @@ STREAMS = {
     "nav": "fleetsim: local-layer / planner event: {rid, event: replan|blocked|unblocked|"
            "gave_up|plan_failed|recovery, cause?, by?, after_s?}",
     "net": "fleetsim, 1 Hz: {model, kinds: {kind: {sent, delivered, lost, bytes, p50_ms, "
-           "p95_ms}}, load_max, load_mean, reach_frac, hops_max}",
+           "p95_ms}}, load_max, load_mean, over_cap, reach_frac, hops_max}",
     "belief": "fleetsim: each robot's map vs the truth: {free_cells, cell_m, robots: {rid: "
               "{known_free, wrong_free, wrong_occ, known}}}",
     "board": "fleetsim: the gateway's task board, counted: {tasks: {state: n}, alarms, "

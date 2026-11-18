@@ -126,7 +126,7 @@ class Contacts(Metric):
 @register
 class Comms(Metric):
     name = "comms"
-    version = 1
+    version = 2
     streams = {"net"}
     summary = "Delivery ratio and latency per traffic kind, channel load, reachability."
     params = {}
@@ -139,6 +139,9 @@ class Comms(Metric):
         "status_p95_ms": "worst 1-s window's p95 /fleet/status latency, ms",
         "load_max": "highest per-node channel load factor seen (1.0 = saturated)",
         "load_mean": "mean over samples of the fleet's mean load factor",
+        "over_cap_s": "seconds (1-Hz samples) in which some node's offered load was past the "
+                      "95 % cap; with network.capacity: unlimited, how long the real radio "
+                      "would have been saturated",
         "reach_min": "lowest share of node pairs with a route",
         "bytes_per_robot_s": "mean bytes offered per robot per second, all kinds",
     }
@@ -148,6 +151,7 @@ class Comms(Metric):
         self.tot: dict[str, list] = {}
         self.p95: dict[str, float] = {}
         self.loads, self.load_max, self.reach_min = [], 0.0, None
+        self.over_cap = 0
         self.bytes, self.t0, self.t1 = 0, None, None
 
     def on_event(self, ev):
@@ -162,6 +166,7 @@ class Comms(Metric):
                 self.p95[kind] = max(self.p95.get(kind, 0.0), st["p95_ms"])
         self.loads.append(ev["load_mean"])
         self.load_max = max(self.load_max, ev["load_max"])
+        self.over_cap += ev.get("over_cap", 0.0) > 0  # absent before comms v2
         r = ev.get("reach_frac")
         if r is not None:
             self.reach_min = r if self.reach_min is None else min(self.reach_min, r)
@@ -183,6 +188,7 @@ class Comms(Metric):
             "load_max": round(self.load_max, 3),
             "load_mean": round(statistics.fmean(self.loads), 3) if self.loads else None,
             "reach_min": self.reach_min,
+            "over_cap_s": self.over_cap,
             "bytes_per_robot_s": round(self.bytes / span / robots, 1) if span else None,
         }
 
