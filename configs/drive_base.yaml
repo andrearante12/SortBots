@@ -19,6 +19,12 @@ wheel_radius_m: 0.05
 base_radius_m: 0.125
 # Wheels mounted at these angles (deg) minus 90, in left/back/right order.
 wheel_angles_deg: [240, 0, 120]
+# +1 drives toward LeKiwi's front; -1 if this robot's front (where the head camera looks in
+# nav mode) is the other way. Operator view, 2026-11-17: forward and back came out swapped.
+# Strafe and turn are untouched; if strafe is swapped too, the whole base is mounted 180°
+# round and y wants the same flip.
+forward_sign: -1
+
 # Per-wheel ceiling in raw Goal_Velocity steps/s (4096 steps a turn): all three are
 # scaled down together past it, so the direction of travel is kept.
 max_raw: 3000
