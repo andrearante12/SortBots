@@ -31,7 +31,9 @@ and a servo board takes one owner: anything that moves either goes through here.
 Nav and manipulation are robot states. Manipulation pauses RTAB-Map's mapping (a full core on
 the Orin, 2026-11-16, and the robot isn't exploring while it picks); nav resumes it on the same
 map. Odometry runs in both: the place backs the base off, and the robot must stay localized.
-A pick or rest switches to manipulation by itself; nav is refused while one runs.
+A pick or rest switches to manipulation by itself; nav is refused while one runs. Nav also
+holds the head at head.nav_pose and ignores /head_cmd: the camera's TF is a static mount, so
+a head turned while mapping would put the map's walls in the wrong place.
 
 During a pick the pads are paused (their goal re-sends would fight it) and any arm pad touch
 aborts it, as any key did on handeye's page. An abort holds the arm and never drops the magnet.
@@ -160,6 +162,11 @@ class Head:
         self.max_dps = float(h.get("max_dps", 90.0))
         self.pid = h.get("pid") or {"p": 16, "i": 0, "d": 32}
         self.lim = head_limits(self.cal, float(h.get("margin_deg", 2.0)))
+        # Where nav mode holds the camera, in /head_cmd's radians: the static base_link ->
+        # camera_link mount (configs/sensors/d435_real.yaml) is what mapping assumes.
+        nav = h.get("nav_pose") or {}
+        self.nav = {"head_pan_joint": math.radians(float(nav.get("pan_deg", 0.0))),
+                    "head_tilt_joint": math.radians(float(nav.get("tilt_deg", 0.0)))}
         self.opener = opener or (lambda port, timeout_s=0.02: ft.Bus(port, timeout_s=timeout_s))
         self.holders_of = holders_of
         self.bus = None
@@ -197,6 +204,13 @@ class Head:
             self.target = tgt
         if self.bus is None and now >= self.next_open:
             self._open(now)
+
+    def hold_nav(self, now):
+        """Nav mode: aim at the nav pose and keep it there. Called at STATE_HZ, so a board
+        plugged in (or freed by another process) later is opened and aimed by itself."""
+        want = {HEAD_JOINTS[n]: self.to_deg(HEAD_JOINTS[n], rad) for n, rad in self.nav.items()}
+        if self.bus is None or self.target != want:
+            self.command(self.nav, now)
 
     def _open(self, now):
         self.next_open = now + RETRY_OPEN_S
@@ -718,6 +732,8 @@ def run_node(robot_id: str, cfg: dict):
     steady = Clock(clock_type=ClockType.STEADY_TIME)
 
     def on_head(msg):
+        if mode["mode"] == "nav":
+            return                     # nav holds the camera at the mount mapping assumes
         head.command(dict(zip(msg.name, msg.position)), time.monotonic())
 
     def on_arm(msg):
@@ -980,13 +996,16 @@ def run_node(robot_id: str, cfg: dict):
         now = time.monotonic()
         # Latched, and re-sent at 1 Hz too: rosbridge doesn't hand a latched message to a page
         # that subscribes later, so without this the operator view never saw the pick (2026-11-16).
-        if pick["last"] is not None and now - last.get("pick_pub", 0.0) >= 1.0:
-            pick_pub.publish(pick["last"])
+        if now - last.get("pick_pub", 0.0) >= 1.0:
+            if pick["last"] is not None:
+                pick_pub.publish(pick["last"])
             apply_mode()
             publish_mode()       # latched too, but rosbridge doesn't replay it to a late page
             last["pick_pub"] = now
         if pick["thread"] is not None:
             return                     # the pick reads the board itself
+        if mode["mode"] == "nav":
+            head.hold_nav(now)
         head.poll(now)
         head_pub.publish(String(data=json.dumps(head.status())))
         if arm is not None:

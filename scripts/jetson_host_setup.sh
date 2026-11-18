@@ -25,6 +25,13 @@
 #     on whatever branch and commit are checked out. Boot never pulls: a power
 #     blip must not swap a branch under test for main (2026-11-16). Update by
 #     hand with `scripts/jetson.sh update [BRANCH]`.
+#  8. sortbots-efi-watchdog.service: about 1 boot in 4 (2026-11-16), a call into the board's
+#     UEFI firmware (efi_rts_wq) never returns. It pins a CPU in the kernel, tailscaled hangs
+#     unkillably behind it, and the console waits on tailscaled, so the robot looks alive (LED,
+#     fan, Wi-Fi) but is unreachable. The service follows the kernel log for that one signature
+#     and forces a reboot (sysrq b; with the firmware lock held, the kernel resets through PSCI
+#     instead), logging each one to /var/lib/sortbots/efi-resets.log first. The reboot watchdog
+#     also drops to 60 s: a reboot stuck the same way waited out systemd's 10 min default.
 #  7. The checkout is shared by every user (all in the owner's group), but
 #     without setgid dirs each user's new files land in THEIR group: 247 of
 #     liam's files were unwritable to andre, and a branch switch half-applied
@@ -144,11 +151,47 @@ chmod -R g+rwX "$REPO_ROOT"
 find "$REPO_ROOT" -type d -exec chmod g+s {} +
 sudo -u "$OWNER" git -C "$REPO_ROOT" config core.sharedRepository group
 
+# 8 --------------------------------------------------------------------------
+mkdir -p /var/lib/sortbots /etc/systemd/system.conf.d
+cat > /usr/local/sbin/sortbots-efi-watchdog <<'WDOG'
+#!/bin/bash
+# Installed by scripts/jetson_host_setup.sh (step 8): edit that, not this.
+# Waits for the kernel's RCU stall report naming the UEFI runtime-services workqueue (a firmware
+# call that never returned), then forces a reboot. Nothing else triggers it.
+# The stall dump's own line, not the bare word: systemd can log a unit's start message into the
+# kernel log early in boot, and a unit description mentioning the word would trigger this.
+dmesg --follow --nopager 2>/dev/null | grep -m1 -q "Workqueue: efi_rts_wq" || exit 0
+logger -p user.crit -t efi-watchdog "UEFI runtime call stuck (efi_rts_wq RCU stall): forcing a reboot"
+echo "$(date -Is) uptime $(cut -d' ' -f1 /proc/uptime)s: efi_rts_wq stall, forced reboot" >> /var/lib/sortbots/efi-resets.log
+journalctl --sync 2>/dev/null; sync
+echo s > /proc/sysrq-trigger; sleep 1
+echo b > /proc/sysrq-trigger
+WDOG
+chmod 755 /usr/local/sbin/sortbots-efi-watchdog
+cat > /etc/systemd/system/sortbots-efi-watchdog.service <<'UNIT'
+[Unit]
+Description=SortBots: reboot when a UEFI firmware call hangs
+After=local-fs.target systemd-journald.service
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/sortbots-efi-watchdog
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+UNIT
+cat > /etc/systemd/system.conf.d/sortbots-watchdog.conf <<'CONF'
+[Manager]
+# A reboot stuck in the firmware waited out the 10 min default before the hardware reset it.
+RebootWatchdogSec=60s
+CONF
+
 systemctl daemon-reload
 systemctl reload NetworkManager
 systemctl enable docker tailscaled >/dev/null
 systemctl enable --now sortbots-net-watchdog.timer
 systemctl enable sortbots-console.service
+systemctl enable --now sortbots-efi-watchdog.service
+systemctl daemon-reexec   # picks up RebootWatchdogSec
 # Start it now too, unless a console is already up (jetson.sh console is a
 # no-op then, so this is safe either way).
 systemctl start sortbots-console.service || echo "WARNING: console didn't start — journalctl -u sortbots-console"
@@ -158,4 +201,5 @@ echo "  wifi     : $(nmcli -g connection.autoconnect,connection.autoconnect-retr
 echo "  journal  : $(ls -d /var/log/journal/*/ >/dev/null 2>&1 && echo persistent || echo 'NOT persistent yet')"
 echo "  watchdog : $(systemctl is-active sortbots-net-watchdog.timer)"
 echo "  console  : $(systemctl is-enabled sortbots-console.service), $(systemctl is-active sortbots-console.service)"
+echo "  efi wdog : $(systemctl is-active sortbots-efi-watchdog.service) (forced reboots so far: $(wc -l < /var/lib/sortbots/efi-resets.log 2>/dev/null || echo 0))"
 echo "Also: Tailscale admin console → Machines → $(hostname) → Disable key expiry."

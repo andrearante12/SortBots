@@ -75,7 +75,7 @@ stop_console() {
   pkill -INT -f "sortbots_webui.launch.py" 2>/dev/null || true
   sleep 1
   for p in rosbridge_websocket web_video_server "webui/serve.py" \
-           webui_url.py web_video_watchdog.sh; do
+           webui_url.py web_video_watchdog.sh rosbridge_watchdog.py; do
     pkill -9 -f "$p" 2>/dev/null || true
   done
 }
@@ -144,7 +144,7 @@ cleanup() {
   kill -INT "$LAUNCH_PID" 2>/dev/null || true
   pkill -INT -f "sortbots_webui.launch.py" 2>/dev/null || true
   sleep 1
-  for p in rosbridge_websocket web_video_server web_video_watchdog.sh; do
+  for p in rosbridge_watchdog.py rosbridge_websocket web_video_server web_video_watchdog.sh; do
     pkill -9 -f "$p" 2>/dev/null || true
   done
 }

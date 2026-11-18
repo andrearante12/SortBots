@@ -113,6 +113,7 @@ def body_to_wheel_raw(x, y, w, cfg):
     wheel, all three scale down together so the robot still goes where it was told.
     """
     r_wheel, r_base = float(cfg["wheel_radius_m"]), float(cfg["base_radius_m"])
+    x *= float(cfg.get("forward_sign", 1.0))   # where this robot's camera faces (drive_base.yaml)
     degps = []
     for a in cfg["wheel_angles_deg"]:
         a = math.radians(a - 90)

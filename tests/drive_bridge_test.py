@@ -43,6 +43,12 @@ def test_forward_leaves_the_back_wheel_still_and_opposes_the_sides():
     assert back == 0 and left == -right != 0
 
 
+def test_forward_sign_flips_forward_only():
+    plus, minus = {**CFG, "forward_sign": 1}, {**CFG, "forward_sign": -1}
+    assert db.body_to_wheel_raw(0.2, 0, 0, minus) == db.body_to_wheel_raw(-0.2, 0, 0, plus)
+    assert db.body_to_wheel_raw(0, 0.2, 0.5, minus) == db.body_to_wheel_raw(0, 0.2, 0.5, plus)
+
+
 def test_strafe_left_is_mostly_the_back_wheel():
     left, back, right = db.body_to_wheel_raw(0, 0.2, 0, CFG)
     assert abs(back) > abs(left) and left == right
@@ -57,7 +63,7 @@ def test_matches_lerobot_lekiwi_where_it_is_installed():
     for x, y, w in [(0.2, 0, 0), (0, 0.1, 0), (0.1, -0.2, 1.0), (0.3, 0.3, 3.0)]:
         # LeKiwi takes the turn in deg/s, the bridge in rad/s; it only touches static helpers.
         want = LeKiwi._body_to_wheel_raw(LeKiwi, x, y, math.degrees(w))
-        assert db.body_to_wheel_raw(x, y, w, CFG) == [want["base_left_wheel"], want["base_back_wheel"], want["base_right_wheel"]]
+        assert db.body_to_wheel_raw(x, y, w, {**CFG, "forward_sign": 1}) == [want["base_left_wheel"], want["base_back_wheel"], want["base_right_wheel"]]
 
 
 def test_past_max_raw_all_wheels_scale_together():

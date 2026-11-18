@@ -66,12 +66,75 @@
   let knownBox = null; // [minX, minY, maxX, maxY] of non-unknown cells, world metres
   let dirty = true;
 
+  // -- the robot's computer rebooting or dropping off Wi-Fi ----------------------------------
+  // The page is served by the robot's own console, so while it is down nothing at this address
+  // answers: a fresh load can only show the browser's error. A page that is ALREADY open can do
+  // better, and say what has come back as the robot boots (2026-11-16: it sat on a stale view).
+  // Stages: the GUI server answers (/api/session), the live link (rosbridge), the robot stack
+  // (session + robots online). Shown once the server has been gone OUTAGE_SHOW_MS, so a Wi-Fi
+  // blip doesn't flash it; it closes by itself OUTAGE_DONE_MS after the robots are back.
+  const OUTAGE_SHOW_MS = 4000, OUTAGE_DONE_MS = 2500;
+  const outage = {
+    downAt: null, serverAt: null, rosAt: null, rosUp: false, doneAt: null, timer: null, dismissed: false,
+    server(ok) {
+      const now = performance.now();
+      if (!ok && this.downAt === null) { this.downAt = now; this.serverAt = this.rosAt = this.doneAt = null; this.dismissed = false; }
+      if (ok && this.downAt !== null && this.serverAt === null) {
+        this.serverAt = now;
+        // the console restarted: what it serves may have changed (branch, consoles, robots)
+        refreshRoster(); loadVersion(); loadConsoles();
+      }
+      this.tick();
+    },
+    ros(up) {
+      this.rosUp = up;
+      if (up && this.downAt !== null && this.rosAt === null) this.rosAt = performance.now();
+      this.tick();
+    },
+    tick() {
+      if (this.downAt === null) return;
+      const now = performance.now(), el = $("#outage");
+      if (!el) return;
+      const mmss = (ms) => { const t = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; };
+      const since = (t) => (t === null ? "" : mmss(t - this.downAt));
+      const list = [...robots.values()], up = list.filter(online).length;
+      const running = session && session.state === "running", starting = session && session.state === "starting";
+      let stack, stackOk = false;
+      if (this.serverAt === null) stack = "";
+      else if (!controlAvailable) { stack = "no session control on this console"; stackOk = true; }
+      else if (running && list.length && up === list.length) { stack = `${up} of ${list.length} online`; stackOk = true; }
+      else if (running) stack = `starting: ${up} of ${list.length || "?"} robots online`;
+      else if (starting) stack = PHASE_TEXT[session.phase] || session.phase_label || "starting";
+      else { stack = "not started"; stackOk = true; }
+      const done = this.serverAt !== null && this.rosUp && stackOk;
+      if (done && this.doneAt === null) this.doneAt = now;
+      if (!done) this.doneAt = null;
+      if (this.doneAt !== null && now - this.doneAt > OUTAGE_DONE_MS) {
+        this.downAt = null; el.hidden = true; clearInterval(this.timer); this.timer = null; return;
+      }
+      if (now - this.downAt < OUTAGE_SHOW_MS || this.dismissed) return;
+      el.hidden = false;
+      if (!this.timer) this.timer = setInterval(() => this.tick(), 1000);
+      const row = (ok, pend, text, at) => `<li class="${ok ? "ok" : pend ? "pend" : "wait"}"><i>${ok ? "&#10003;" : pend ? "&hellip;" : "&middot;"}</i><span>${text}</span><time>${at}</time></li>`;
+      $("#outage-title").textContent = done ? "Robot back online" : this.serverAt === null ? "Robot offline: rebooting or out of Wi-Fi" : "Robot coming back";
+      $("#outage-time").textContent = mmss(now - this.downAt);
+      $("#outage-steps").innerHTML =
+        row(this.serverAt !== null, this.serverAt === null, this.serverAt === null ? "Waiting for the robot's computer (a boot takes about a minute)" : "GUI server back", since(this.serverAt)) +
+        row(this.rosUp && this.rosAt !== null, this.serverAt !== null && !this.rosUp, "Live link (rosbridge)", since(this.rosAt)) +
+        row(stackOk && this.serverAt !== null, this.serverAt !== null && !stackOk, `Robot stack${stack ? ": " + esc(stack) : ""}`, "");
+      const late = this.serverAt === null && now - this.downAt > 180000;
+      $("#outage-hint").hidden = !late;
+      $("#outage-start").hidden = !(this.serverAt !== null && controlAvailable && !running && !starting);
+    },
+  };
+
   // -- rosbridge --------------------------------------------------------------
 
   const ros = new ROSLIB.Ros({ url: ROSBRIDGE_URL });
-  ros.on("connection", () => { $("#link-down").hidden = true; });
+  ros.on("connection", () => { $("#link-down").hidden = true; outage.ros(true); });
   ros.on("close", () => {
     $("#link-down").hidden = false;
+    outage.ros(false);
     setTimeout(() => ros.connect(ROSBRIDGE_URL), 2000);
   });
   ros.on("error", (e) => { $("#link-down").hidden = false; console.error("rosbridge error", e); });
@@ -732,7 +795,7 @@
       syncArmPads();
     });
     // Nav / manipulation (arm_driver): every page follows the robot's mode, so the pad in front
-    // is the one that mode is for. Head stays as the operator picked it.
+    // is the one that mode is for. Head is a manipulation pad, so manip leaves it in front.
     sub(`/${id}/robot_mode`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
       let m;
       try { m = JSON.parse(msg.data); } catch (e) { return; }
@@ -740,7 +803,8 @@
       r.mode = m;
       if (m.note && m.note !== wasNote) toast(`${nameOf(id)}: ${m.note}`);
       const c = cams.get(id);
-      if (c && m.mode !== was && c.padMode !== "head") { c.padMode = m.mode === "manip" ? "arm" : "drive"; applyPadMode(c); }
+      if (c && m.mode !== was && !(m.mode === "manip" && c.padMode === "head")) { c.padMode = m.mode === "manip" ? "arm" : "drive"; applyPadMode(c); }
+      if (c) syncHeadLock(c, r);
       if (m.mode !== was) drawCamObstacles(id);   // clear or restore the boxes now, not on the next obstacle message
       if (c) syncPickLine(c);
     });
@@ -1166,6 +1230,7 @@
         <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
         <button type="button" data-drive="rot-left" aria-label="Rotate left">&#8634;</button><button type="button" data-drive="back" aria-label="Back">&#9660;</button><button type="button" data-drive="rot-right" aria-label="Rotate right">&#8635;</button>
+        <button type="button" class="lvl" data-drive-level="0" title="Speed L1: 0.1 m/s, 30 deg/s" hidden>L1</button><button type="button" class="lvl" data-drive-level="1" title="Speed L2: 0.2 m/s, 60 deg/s" hidden>L2</button><button type="button" class="lvl" data-drive-level="2" title="Speed L3: 0.3 m/s, 90 deg/s" hidden>L3</button>
       </div>
       <div class="headpad" role="group" aria-label="Aim the head" title="Aim the head: hold an arrow; the dot centres it" hidden>
         <span></span><button type="button" data-headpad="up" aria-label="Look up">&#9650;</button><span></span>
@@ -1259,6 +1324,13 @@
     pad.addEventListener("pointerdown", () => { pad.classList.add("on"); clearTimeout(fade); });
     pad.addEventListener("pointerup", () => { clearTimeout(fade); fade = setTimeout(() => pad.classList.remove("on"), 3000); });
   }
+  // Nav holds the real head forward (arm_driver ignores head_cmd there): the sliders say so
+  // instead of springing back. The sim has no robot_mode, so its head stays free.
+  function syncHeadLock(c, r) {
+    const locked = !!(r && r.mode && r.mode.mode === "nav");
+    for (const s of c.head.querySelectorAll("[data-head]")) s.disabled = locked;
+    c.head.title = locked ? "Nav mode holds the camera forward (mapping assumes it). Head or Manip to aim it." : "";
+  }
   function syncHeads() {
     for (const [id, c] of cams) {
       // The sim's ground truth, or the real head's own report (arm_driver's head_state).
@@ -1294,10 +1366,22 @@
   const drives = new Map(); // id -> {held: Set, timer}
   const driveOf = (id) => drives.get(id) || drives.set(id, { held: new Set(), timer: null }).get(id);
 
+  // The real base's speed levels: XLeRobot's three, the same as configs/drive_base.yaml's
+  // speed_levels and the Robot view's gamepad. base_driver clamps to the top one whatever is sent.
+  // Each page starts at L1, so a stray touch after a reload never starts fast. The sim keeps
+  // DRIVE_LINEAR_MPS (its base's URDF limit): the levels are a real-robot thing.
+  const DRIVE_LEVELS = [[0.1, 30], [0.2, 60], [0.3, 90]];
+  function driveScale(id) {
+    if (platform !== "real") return [1, 1];
+    const [mps, dps] = DRIVE_LEVELS[driveOf(id).level || 0];
+    return [mps / DRIVE_LINEAR_MPS, (dps * Math.PI / 180) / DRIVE_ANGULAR_RADPS];
+  }
   function drivePublish(id) {
     const d = driveOf(id);
     let x = 0, y = 0, z = 0;
     for (const cmd of d.held) { const v = DRIVE_VECTORS[cmd]; x += v[0]; y += v[1]; z += v[2]; }
+    const [kl, ka] = driveScale(id);
+    x *= kl; y *= kl; z *= ka;
     publish(`/${id}/cmd_vel`, "geometry_msgs/Twist", { linear: { x, y, z: 0 }, angular: { x: 0, y: 0, z } });
     const c = cams.get(id);
     if (c) for (const b of c.el.querySelectorAll("[data-drive]")) b.classList.toggle("held", d.held.has(b.dataset.drive));
@@ -1330,6 +1414,19 @@
     drivePublish(id);
   }
   function wireDrivePad(id, pad) {
+    const levels = pad.querySelectorAll("[data-drive-level]");
+    const showLevel = () => levels.forEach((b) => {
+      b.hidden = platform !== "real";
+      b.classList.toggle("sel", Number(b.dataset.driveLevel) === (driveOf(id).level || 0));
+    });
+    for (const b of levels) b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      driveOf(id).level = Number(b.dataset.driveLevel);
+      showLevel();
+      if (driveOf(id).held.size) drivePublish(id);   // a held arrow changes speed right away
+    });
+    pad.showLevel = showLevel;
+    showLevel();
     for (const b of pad.querySelectorAll("[data-drive]")) {
       const cmd = b.dataset.drive;
       b.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); b.setPointerCapture(e.pointerId); driveStart(id, cmd); });
@@ -1450,9 +1547,10 @@
       e.stopPropagation();
       c.padMode = b.dataset.padmode;
       try { localStorage.setItem(PAD_MODE_KEY, c.padMode); } catch (err) { /* per-page only */ }
-      // Nav and Manip are the ROBOT's mode (arm_driver pauses mapping in manipulation); Head
-      // only changes the pad. Without an arm there is no mode to set (the sim, a bare base).
-      const robotMode = { drive: "nav", arm: "manip" }[c.padMode];
+      // Nav and Manip are the ROBOT's mode (arm_driver pauses mapping in manipulation). Head
+      // is manipulation too: nav holds the camera at its mount pose and ignores head_cmd.
+      // Without an arm there is no mode to set (the sim, a bare base).
+      const robotMode = { drive: "nav", head: "manip", arm: "manip" }[c.padMode];
       if (robotMode && c.hasArm) publishString(`/${id}/robot_mode_cmd`, JSON.stringify({ mode: robotMode }));
       applyPadMode(c);
     });
@@ -1821,6 +1919,7 @@
         $('#tools [data-t="tp"]').hidden = platform !== "sim";
         if (platform !== "sim" && tool === "tp") setTool("select");
         $('#view [data-v="sim"]').hidden = platform !== "sim";
+        for (const c of cams.values()) { const pad = c.el.querySelector(".drive"); if (pad && pad.showLevel) pad.showLevel(); }
         if (platform !== "sim" && stageView === "sim") setView("2d");
         try { if (platform === "sim" && stageView === "2d" && localStorage.getItem("sortbots.mapView") === "sim") setView("sim"); } catch (e) { /* stay on the map */ }
       }
@@ -2135,14 +2234,23 @@
     if (!show) return;
     const starting = !!boot || (session && session.state === "stopping");
     const real = platform === "real", what = real ? "robot stack" : "simulation";
-    $("#empty-title").textContent = boot ? "Starting up" : session && session.state === "stopping" ? "Stopping"
-      : controlAvailable ? `${real ? "Robot stack" : "Simulation"} not running` : "Waiting for the robots";
-    $("#empty-sub").textContent = boot ? boot.text : starting ? "" : controlAvailable
-      ? `Start the ${what} to see your robots and give them tasks.`
-      : "No robot is reporting yet. Check that the robot console is running.";
+    // Searching: the stack is up (or this console can't start one) and no robot is reporting.
+    // Before it's up, the start-up phases keep their progress bar.
+    const list = [...robots.values()];
+    const searching = (session && session.state === "running") || !controlAvailable;
+    $("#empty-radar").hidden = !searching;
+    $("#empty-boot").hidden = searching || !boot;
+    if (searching) {
+      $("#empty-title").textContent = "No robots found";
+      $("#empty-sub").textContent = list.length ? `Searching… (${list.filter(online).length} of ${list.length} online)` : "Searching for robots…";
+    } else {
+      $("#empty-title").textContent = boot ? "Starting up" : session && session.state === "stopping" ? "Stopping"
+        : `${real ? "Robot stack" : "Simulation"} not running`;
+      $("#empty-sub").textContent = boot ? boot.text : starting ? "" : `Start the ${what} to see your robots and give them tasks.`;
+    }
     $("#empty-go").textContent = `Start ${what}`;
-    $("#empty-go").hidden = starting || !controlAvailable;
-    $("#empty-test").hidden = starting || !controlAvailable || real; // tests drive Isaac
+    $("#empty-go").hidden = starting || searching || !controlAvailable;
+    $("#empty-test").hidden = starting || searching || !controlAvailable || real; // tests drive Isaac
   }
 
   // A session started with demo: true (the Fleet demo preset) runs the task demo by
@@ -2207,9 +2315,10 @@
           refreshRoster();
         }
       }
-    } catch (e) { /* the console is down; keep the last known state */ }
+      outage.server(true);
+    } catch (e) { outage.server(false); /* the console is down; keep the last known state */ }
     renderHeader();
-    sessionTimer = setTimeout(pollSession, sessionActive() && session.state !== "running" ? 1000 : 3000);
+    sessionTimer = setTimeout(pollSession, outage.downAt !== null || (sessionActive() && session.state !== "running") ? 1000 : 3000);
   }
 
   function openSession() {
@@ -2465,6 +2574,8 @@
     stopCall("/api/session/finish", { name }, `Saving ${name}, then shutting the sim down…`);
   });
   $("#session-chip").addEventListener("click", openSession);
+  $("#outage-start").addEventListener("click", () => { $("#outage").hidden = true; openSession(); });
+  $("#outage-close").addEventListener("click", () => { outage.dismissed = true; $("#outage").hidden = true; });
   $("#empty-go").addEventListener("click", openSession);
   $("#sp-x").addEventListener("click", closeSession);
   $("#session").addEventListener("click", (e) => { if (e.target.id === "session") closeSession(); });

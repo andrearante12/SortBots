@@ -369,3 +369,33 @@ def test_wrist_flex_and_level():
     z0 = arm3.kin.pose(arm3.q)[2]
     run_arm(arm3, bus3, 0.0, 1.0, jog={"up": 1})
     assert arm3.kin.pose(arm3.q)[2] - z0 > 2 * slow        # L4 is 4x L1, joint-capped
+
+
+def test_nav_pose_aims_and_holds_the_head():
+    head, bus = make(present={"head_pan": 2600})
+    head.nav = {"head_pan_joint": 0.0, "head_tilt_joint": math.radians(5)}
+    head.hold_nav(0.0)
+    assert head.state == "holding"
+    assert head.target == {"head_pan": 0.0, "head_tilt": pytest.approx(5.0)}
+    head.command({"head_pan_joint": 0.5}, 1.0)        # moved by hand meanwhile: nav puts it back
+    head.hold_nav(1.5)
+    assert head.target["head_pan"] == 0.0
+
+
+def test_nav_pose_opens_a_board_that_shows_up_later():
+    plugged = {"in": False}
+
+    class Unplugged(FakeBus):
+        def open(self):
+            if not plugged["in"]:
+                raise OSError(2, "No such file or directory")   # ft.Bus opens the port here
+            super().open()
+    bus = Unplugged(CFG["head"]["cal"])
+    head = ad.Head(CFG, opener=lambda port, **kw: bus, holders_of=lambda port: [])
+    head.hold_nav(0.0)
+    assert head.bus is None
+    plugged["in"] = True
+    head.hold_nav(0.5)                                  # inside the retry gap: not yet
+    assert head.bus is None
+    head.hold_nav(ad.RETRY_OPEN_S + 0.1)
+    assert head.state == "holding" and head.bus is bus and bus.open_

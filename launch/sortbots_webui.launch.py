@@ -62,6 +62,9 @@ def generate_launch_description():
             executable="rosbridge_websocket",
             name="rosbridge_websocket",
             output="screen",
+            # Respawned: nodes/rosbridge_watchdog.py kills it when it stops forwarding.
+            respawn=True,
+            respawn_delay=1.0,
             parameters=[{
                 "port": 9090,
                 # RTAB-Map's cloud_map (3D reconstruction panel) easily exceeds
@@ -97,6 +100,12 @@ def generate_launch_description():
         # for anything else (rviz plugins, curl, old tabs) opening streams.
         ExecuteProcess(
             cmd=["bash", os.path.join(REPO_ROOT, "nodes", "web_video_watchdog.sh")],
+            output="screen",
+        ),
+        # Restarts rosbridge when it is up but forwards nothing while the robot pipeline runs
+        # (seen twice on the Jetson, 2026-11-16: the page waited on robots that were publishing).
+        ExecuteProcess(
+            cmd=["python3", os.path.join(REPO_ROOT, "nodes", "rosbridge_watchdog.py")],
             output="screen",
         ),
         ExecuteProcess(

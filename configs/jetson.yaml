@@ -1,0 +1,7 @@
+# The robot's own computer (scripts/jetson.sh).
+
+# Started by itself at every boot, once the dashboard console is up, so the robot shows up in
+# the operator view with nobody pressing Start (2026-11-16). A `platform: real` scenario from
+# configs/scenarios/. Empty: the console waits for Start, as before. Starting it moves nothing:
+# the drivers sit idle until someone drives, aims or picks.
+autostart: real_map_fresh

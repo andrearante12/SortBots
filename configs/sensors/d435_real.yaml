@@ -26,7 +26,9 @@ profile: "848,480,30"
 #   xyz in metres, rpy in radians (pitch > 0 tilts the camera DOWN).
 mount:
   xyz: [0.0, 0.0, 1.0]
-  rpy: [0.0, 0.0, 0.0]
+  # pitch = the head's nav tilt (configs/arm_board.yaml head.nav_pose, 15 deg): nav mode
+  # holds the head there, and mapping only knows the camera's pose from this line.
+  rpy: [0.0, 0.2618, 0.0]
 
 # Post-processing on the Jetson's CPU. Off by default: each one costs frames
 # on the Orin Nano, and RTAB-Map already copes with raw D435 depth. The
