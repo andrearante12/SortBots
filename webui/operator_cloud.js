@@ -1,13 +1,16 @@
 // 3D view for the operator map (webui/operator.html): the fused fleet point cloud
 // (/fleet/recon_cloud, nodes/recon_cloud_merge.py) with a marker per robot, as the
-// alternative to the 2D map. A trimmed-down sibling of app.js's 3D panel: points only
-// (no voxels, no splats), because this view is for "where is everything", not for
-// inspecting the reconstruction.
+// alternative to the 2D map. Two modes, switched by the bar over the view:
+//   cloud  the live fused point cloud: points only (no voxels), because this is for
+//          "where is everything", not for inspecting the reconstruction;
+//   splat  a Gaussian splat of a SAVED map, trained post-run on the workstation
+//          (operator_splat.js, splat/worker.py). Photoreal, but never live.
 //
-// Subscribed ONLY while the 3D view is showing. The cloud is up to a few MB of
-// base64 per message, so a hidden view must not keep rosbridge encoding it.
+// The cloud is subscribed ONLY while the 3D view is showing in cloud mode. It is up to a
+// few MB of base64 per message, so a hidden view (or one covered by the splat) must not
+// keep rosbridge encoding it.
 //
-// window.sortbotsCloud = { mount(container, ros), show(), hide(), setRobots(list) }
+// window.sortbotsCloud = { mount(container, ros), show(), hide(), setRobots(list), setMode(m), mode }
 // where list is [{id, color, pose: {x, y, yaw} | null}].
 
 (() => {
@@ -24,6 +27,24 @@
   let renderer = null, scene, camera, controls, points = null, sub = null;
   let needsRender = true, fitted = false, visible = false;
   const markers = new Map(); // robot id -> Mesh
+  // ?recon=splat opens straight into splat mode (as on the old dashboard); otherwise the
+  // last choice, except on software GL, where splat is never restored by itself (below).
+  const QS = new URLSearchParams(location.search);
+  let mode = QS.get("recon") === "splat" ? "splat" : "cloud";
+  let splat = null, softwareGL = false, lastBounds = null;
+
+  // A software rasteriser (SwiftShader / llvmpipe: the Jetson's snap Chromium) blends a
+  // million translucent quads per frame on the CPU the robot's SLAM needs. Never the
+  // default there and labelled so nobody picks it expecting it to be usable; not
+  // disabled, an explicit choice (or ?recon=splat, which the offline test uses) wins.
+  function isSoftwareGL() {
+    try {
+      const gl = renderer.getContext();
+      const ext = gl.getExtension("WEBGL_debug_renderer_info");
+      const name = ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : "";
+      return /swiftshader|llvmpipe|software/i.test(name);
+    } catch (e) { return false; }
+  }
 
   function mount(el, rosConn) {
     container = el; ros = rosConn;
@@ -57,7 +78,88 @@
 
     new ResizeObserver(size).observe(container);
     size();
+    mountBar();
     requestAnimationFrame(loop);
+  }
+
+  // The bar's markup is static in operator.html (#cloud .cl-bar); this wires it.
+  function mountBar() {
+    softwareGL = isSoftwareGL();
+    const $ = (sel) => container.querySelector(sel);
+    const splatBtn = $('#cl-mode [data-m="splat"]');
+    if (softwareGL && splatBtn) {
+      splatBtn.textContent = "Splat (slow: no GPU)";
+      splatBtn.title = "This browser renders on the CPU (no GPU WebGL), so a splat is very slow here and competes with the robot's SLAM. View it from the workstation or a laptop";
+    }
+    if (!QS.has("recon")) {
+      try { if (localStorage.getItem("sortbots.cloudMode") === "splat" && !softwareGL) mode = "splat"; } catch (e) { /* cloud */ }
+    }
+    if (window.sortbotsSplat) {
+      splat = window.sortbotsSplat.createPanel(container, {
+        pick: $("#splat-pick"), mapSel: $("#splat-map"), build: $("#splat-build"),
+        status: $("#splat-status"), msg: $("#splat-msg"),
+      }, {
+        requestRender: () => { needsRender = true; },
+        frame: fitSplat,
+        setInfo: (t) => { if (mode === "splat") { info.textContent = t; info.hidden = false; } },
+      });
+    } else if (splatBtn) splatBtn.hidden = true;
+    for (const b of container.querySelectorAll("#cl-mode button")) {
+      b.addEventListener("click", () => setMode(b.dataset.m));
+    }
+    syncMode();
+  }
+
+  function setMode(m) {
+    if (m !== "splat" && m !== "cloud") return;
+    if (m === "splat" && !splat) m = "cloud";
+    // Back from a splat the camera stands inside the room it framed: look at the cloud
+    // from its overview corner again.
+    if (m === "cloud" && mode === "splat" && lastBounds) fit(lastBounds.min, lastBounds.max);
+    mode = m;
+    try { localStorage.setItem("sortbots.cloudMode", m); } catch (e) { /* this tab only */ }
+    syncMode();
+  }
+
+  // #stage.splatting hides the "waiting for the robots" / link-down cards (operator.html):
+  // a splat is a saved map, so no robot has to be online for it to be worth looking at.
+  function markStage() {
+    const stage = container && container.parentElement;
+    if (stage) stage.classList.toggle("splatting", visible && mode === "splat" && !!splat);
+  }
+
+  function syncMode() {
+    if (!renderer) return;
+    markStage();
+    const on = mode === "splat";
+    for (const b of container.querySelectorAll("#cl-mode button")) b.classList.toggle("active", b.dataset.m === mode);
+    const ctl = container.querySelector("#splat-ctl");
+    if (ctl) ctl.hidden = !on;
+    if (!visible) return;
+    if (on) {
+      unsubscribe();
+      splat.show();
+    } else {
+      if (splat) splat.hide();
+      subscribe();
+      info.textContent = lastBounds ? info.dataset.cloud || "" : "Waiting for the point cloud…";
+    }
+    needsRender = true;
+  }
+
+  // A splat of a warehouse is a closed room: framed from outside like the cloud, all you
+  // see is the back of its walls and roof. Stand inside instead, near one corner at about
+  // the head camera's height (the trainer only ever saw it from there), looking across.
+  // Bounds are the 2nd-98th percentile from the renderer, so one floater 200 m out
+  // doesn't frame empty space.
+  function fitSplat(b) {
+    if (!b) return;
+    const { min, max } = b;
+    const cx = (min[0] + max[0]) / 2, cy = (min[1] + max[1]) / 2, floor = min[2];
+    controls.target.set(cx, cy, floor + 1.2);
+    camera.position.set(cx - 0.35 * (max[0] - min[0]), cy - 0.35 * (max[1] - min[1]), floor + 1.6);
+    controls.update();
+    needsRender = true;
   }
 
   function size() {
@@ -74,7 +176,8 @@
     if (controls.update()) needsRender = true; // damping keeps it moving after a drag
     if (!needsRender) return;
     needsRender = false;
-    renderer.render(scene, camera);
+    if (mode === "splat" && splat) splat.render(camera);
+    else renderer.render(scene, camera);
   }
 
   function b64ToBytes(b64) {
@@ -117,7 +220,9 @@
     // to see a whole warehouse are far below a pixel and the view reads as empty.
     if (points) { points.geometry.dispose(); points.geometry = geom; points.visible = true; }
     else { points = new THREE.Points(geom, new THREE.PointsMaterial({ size: 2.5, sizeAttenuation: false, vertexColors: true })); scene.add(points); }
-    info.textContent = `${k.toLocaleString()} points${stride > 1 ? ` (1 in ${stride})` : ""}`;
+    info.dataset.cloud = `${k.toLocaleString()} points${stride > 1 ? ` (1 in ${stride})` : ""}`;
+    lastBounds = { min, max };
+    if (mode === "cloud") info.textContent = info.dataset.cloud;
     if (!fitted) { fit(min, max); fitted = true; }
     needsRender = true;
   }
@@ -149,17 +254,26 @@
     }
   }
 
-  function show() {
-    visible = true;
+  function subscribe() {
     if (!renderer || sub) return;
     sub = new ROSLIB.Topic({ ros, name: TOPIC, messageType: "sensor_msgs/PointCloud2", throttle_rate: THROTTLE_MS, queue_length: 1, reconnect_on_close: true });
     sub.subscribe(onCloud);
+  }
+  function unsubscribe() {
+    if (sub) { sub.unsubscribe(); sub = null; }
+  }
+  function show() {
+    visible = true;
+    if (!renderer) return;
     size();
+    syncMode(); // subscribes in cloud mode, starts the worker polls in splat mode
   }
   function hide() {
     visible = false;
-    if (sub) { sub.unsubscribe(); sub = null; }
+    markStage();
+    unsubscribe();
+    if (splat) splat.hide(); // stops polling the worker
   }
 
-  window.sortbotsCloud = { mount, show, hide, setRobots };
+  window.sortbotsCloud = { mount, show, hide, setRobots, setMode, get mode() { return mode; } };
 })();
