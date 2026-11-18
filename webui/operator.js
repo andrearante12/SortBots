@@ -795,7 +795,7 @@
       syncArmPads();
     });
     // Nav / manipulation (arm_driver): every page follows the robot's mode, so the pad in front
-    // is the one that mode is for. Head stays as the operator picked it.
+    // is the one that mode is for. Head is a manipulation pad, so manip leaves it in front.
     sub(`/${id}/robot_mode`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
       let m;
       try { m = JSON.parse(msg.data); } catch (e) { return; }
@@ -803,7 +803,8 @@
       r.mode = m;
       if (m.note && m.note !== wasNote) toast(`${nameOf(id)}: ${m.note}`);
       const c = cams.get(id);
-      if (c && m.mode !== was && c.padMode !== "head") { c.padMode = m.mode === "manip" ? "arm" : "drive"; applyPadMode(c); }
+      if (c && m.mode !== was && !(m.mode === "manip" && c.padMode === "head")) { c.padMode = m.mode === "manip" ? "arm" : "drive"; applyPadMode(c); }
+      if (c) syncHeadLock(c, r);
       if (m.mode !== was) drawCamObstacles(id);   // clear or restore the boxes now, not on the next obstacle message
       if (c) syncPickLine(c);
     });
@@ -1323,6 +1324,13 @@
     pad.addEventListener("pointerdown", () => { pad.classList.add("on"); clearTimeout(fade); });
     pad.addEventListener("pointerup", () => { clearTimeout(fade); fade = setTimeout(() => pad.classList.remove("on"), 3000); });
   }
+  // Nav holds the real head forward (arm_driver ignores head_cmd there): the sliders say so
+  // instead of springing back. The sim has no robot_mode, so its head stays free.
+  function syncHeadLock(c, r) {
+    const locked = !!(r && r.mode && r.mode.mode === "nav");
+    for (const s of c.head.querySelectorAll("[data-head]")) s.disabled = locked;
+    c.head.title = locked ? "Nav mode holds the camera forward (mapping assumes it). Head or Manip to aim it." : "";
+  }
   function syncHeads() {
     for (const [id, c] of cams) {
       // The sim's ground truth, or the real head's own report (arm_driver's head_state).
@@ -1539,9 +1547,10 @@
       e.stopPropagation();
       c.padMode = b.dataset.padmode;
       try { localStorage.setItem(PAD_MODE_KEY, c.padMode); } catch (err) { /* per-page only */ }
-      // Nav and Manip are the ROBOT's mode (arm_driver pauses mapping in manipulation); Head
-      // only changes the pad. Without an arm there is no mode to set (the sim, a bare base).
-      const robotMode = { drive: "nav", arm: "manip" }[c.padMode];
+      // Nav and Manip are the ROBOT's mode (arm_driver pauses mapping in manipulation). Head
+      // is manipulation too: nav holds the camera at its mount pose and ignores head_cmd.
+      // Without an arm there is no mode to set (the sim, a bare base).
+      const robotMode = { drive: "nav", head: "manip", arm: "manip" }[c.padMode];
       if (robotMode && c.hasArm) publishString(`/${id}/robot_mode_cmd`, JSON.stringify({ mode: robotMode }));
       applyPadMode(c);
     });
