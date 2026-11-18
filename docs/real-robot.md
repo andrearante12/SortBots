@@ -162,19 +162,56 @@ after a reboot stop it again before starting the Robot view.
 
 ## Gaussian splats
 
-The 3D panel's **splat** mode shows a photoreal Gaussian splat of a saved map. It
-is trained after the run, **on the workstation GPU only, never the Jetson**, in its
-own conda env `splat`. The pipeline: `rtabmap-export` dumps keyframes and poses,
-gsplat trains, and the result is anchored into the fleet `map` frame.
+The operator view's **3D cloud** view has a **Splat** mode (`webui/operator_splat.js`): a
+photoreal Gaussian splat of a saved map, next to the live point cloud. It is trained after
+the run, **on a workstation GPU only, never the Jetson**, by the splat worker
+(`splat/worker.py`, :8082). The pipeline: the map's RTAB-Map DB becomes keyframes + poses
+(`splat/extract.py`), gsplat trains, and the result is anchored into the fleet `map` frame.
 
 ```bash
-scripts/install_splat.sh [--check]     # once (pinned torch 2.4 / gsplat 1.5.3 prebuilt wheels)
+scripts/install_splat.sh [--check]     # once: conda env `splat`, or a uv venv where there is no conda
 scripts/splat.sh serve                 # worker on :8082
 scripts/sim_ctl.sh stop --save-map NAME --splat                     # sim
 scripts/splat.sh build NAME --from http://jetson-orin.<tailnet>:8081 --wait   # real robot's map
 scripts/splat.sh status | log JOB
 ```
 
-A 1,157-keyframe map takes about 4 min and produces about 42 MB. Jobs wait while
-Isaac holds the GPU. Output goes to `~/.cache/sortbots/splats/`. On the robot, set
-`worker_url` in `configs/splat.yaml` to the workstation.
+Or from the GUI: 3D cloud → **Splat**, pick a saved map, **Build**. Progress shows in the
+bar and the splat loads when it's done. `?recon=splat` opens straight into that mode.
+The "waiting for the robots" card is hidden in splat mode: a saved map needs no robot online.
+
+**The env.** `requirements-splat.txt` is the one package list (Python 3.10, torch 2.4.1+cu124,
+gsplat 1.5.3: the newest pair gsplat ships prebuilt CUDA wheels for, so no `nvcc` is
+needed). `install_splat.sh` uses conda when it exists and otherwise `uv` into
+`~/.local/share/sortbots/splat-venv` (`scripts/_splat_env.sh`; `SORTBOTS_SPLAT_PYTHON`
+overrides). A bare venv also needs `packaging` and `setuptools<70`, or gsplat's CUDA
+backend fails to import; conda's pip happened to bring them.
+
+**No ROS needed.** `extract.backend` in `configs/splat.yaml` (`auto`, the default) is
+`splat/rtabmap_db.py` on every machine: it reads the sqlite DB directly (numpy + Pillow
++ scipy). Jazzy has no Ubuntu 26.04 packages, so on the RTX 4070 laptop it is the only
+way, and it is the default where Jazzy exists too: `rtabmap-export` (opt in with
+`backend: rtabmap-export`) always exports the optimized graph, which on the sim map below
+was 6x less self-consistent than the poses the reader picked. It re-solves the pose graph (the DB keeps
+only odometry poses), and with `dataset.poses: auto` it trains on whichever pose set,
+optimized or odometry, agrees better with the keyframes' own depth. On
+`fleet_warehouse_test` (Isaac) odometry won, 0.60 cm median disagreement vs 3.81 cm,
+because that map's loop closures were ~10 cm off. A real robot's drifting visual odometry
+should pick the optimized graph. The job log says which one it used.
+
+**The real robot.** Save the map on the Jetson as usual. Open the Jetson's operator view
+from the machine running the worker: `worker_url: http://localhost:8082` then reaches it,
+and **Build** sends the Jetson's address as the source, so the worker pulls the DB over
+the tailnet (`GET /api/maps/<name>/db`, sha256-checked). From any other browser, set
+`?splat_worker=http://<workstation>:8082` or `worker_url`. The worker answers Chrome's
+private-network preflight, which a Jetson-origin page calling `localhost` needs.
+
+**Measured** (RTX 4070 Laptop, 2026-11-17): `fleet_warehouse_test`, 79 keyframes, 3 s
+extract + 186 s training (15k steps), 1.42 M gaussians, 29.1 dB on the training views,
+45 MB `.splat`. Earlier: the 1,157-keyframe `warehouse`, about 4 min and 42 MB. Jobs wait
+while Isaac holds the GPU. Output goes to `~/.cache/sortbots/splats/`.
+
+```bash
+/usr/bin/python3 -m pytest tests/splat_*_test.py   # extract, dataset, convert, worker (no GPU)
+node webui/tests/splat_test.mjs                     # renderer + Splat mode in headless Chrome
+```
