@@ -66,12 +66,14 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(maps_lib, "MAPS_DIR", maps_dir)
     monkeypatch.setattr(W, "GPU_POLL_S", 0.01)
     monkeypatch.setattr(W, "HEADROOM_BYTES", 0)
-    exports = []
+    exports, export_opts = [], []
 
-    def fake_export(db, out_dir, prefix, log, timeout=3600):
+    def fake_export(db, out_dir, prefix, log, timeout=3600, *, backend="python", poses="auto"):
         assert Path(db).read_bytes() == DB_BYTES       # local or downloaded, intact
         exports.append((Path(db), prefix))
+        export_opts.append({"backend": backend, "poses": poses})
         make_export(out_dir, prefix, {1: (0, 0, 1.2), 2: (1, 0, 1.2)})
+        return {"poses": "optimized" if poses == "auto" else poses, "frames": 2}
 
     monkeypatch.setattr(extract, "run_export", fake_export)
     script = tmp_path / "fake_train.py"
@@ -83,7 +85,8 @@ def env(tmp_path, monkeypatch):
         return W.Worker(cfg, tmp_path / "splats", isaac_check=isaac,
                         train_argv=lambda ds, job: [sys.executable, str(script), str(ds), str(job.dir)])
 
-    return {"maps": maps_dir, "make": make, "exports": exports, "root": tmp_path / "splats"}
+    return {"maps": maps_dir, "make": make, "exports": exports, "export_opts": export_opts,
+            "cfg": cfg, "root": tmp_path / "splats"}
 
 
 def run_next(worker):
@@ -102,6 +105,9 @@ def test_local_job_end_to_end(env):
     assert (job.dir / "model.splat").stat().st_size == 64
     # Local DB read in place, not copied.
     assert env["exports"] == [(env["maps"] / "warehouse" / "map.db", "robot_0")]
+    # No `extract:`/`dataset.poses` in the config: auto backend, auto poses.
+    assert env["export_opts"][0]["poses"] == "auto"
+    assert env["export_opts"][0]["backend"] in ("python", "rtabmap-export")
     # Intermediates cleaned up; the model and log stay.
     assert not (job.dir / "export").exists() and not (job.dir / "dataset").exists()
     assert (job.dir / "job.log").is_file()
@@ -313,6 +319,8 @@ def test_http_cors_and_routes(env):
         with urllib.request.urlopen(req) as r:
             assert r.status == 204
             assert r.headers["Access-Control-Allow-Origin"] == "*"
+            # The Jetson's page calling a worker on the viewer's laptop (Chrome PNA).
+            assert r.headers["Access-Control-Allow-Private-Network"] == "true"
         with urllib.request.urlopen(base + "/api/splats") as r:
             assert r.headers["Access-Control-Allow-Origin"] == "*"
             assert json.loads(r.read())["splats"][0]["job"] == job.id
@@ -331,3 +339,27 @@ def test_http_cors_and_routes(env):
             assert e.code == 400
     finally:
         srv.shutdown()
+
+
+def test_extract_backend_auto_is_python_even_with_jazzy(monkeypatch):
+    # auto must not depend on the machine: only the python backend picks its poses,
+    # and rtabmap-export's optimized graph was 6x less consistent on the sim map
+    # (extract.py docstring). rtabmap-export only when asked for by name.
+    for jazzy in (False, True):
+        monkeypatch.setattr(extract, "jazzy_available", lambda: jazzy)
+        assert extract.pick_backend("auto") == "python"
+    assert extract.pick_backend("rtabmap-export") == "rtabmap-export"
+    assert extract.pick_backend("python") == "python"
+    with pytest.raises(ValueError):
+        extract.pick_backend("rtabmap")
+
+
+def test_dataset_poses_reaches_the_export(env):
+    seed_map(env["maps"], "warehouse")
+    env["cfg"]["dataset"]["poses"] = "odometry"
+    env["cfg"]["extract"] = {"backend": "python"}
+    w = env["make"]()
+    w.submit("warehouse")
+    job = run_next(w)
+    assert job.state == "done", job.error
+    assert env["export_opts"] == [{"backend": "python", "poses": "odometry"}]

@@ -59,7 +59,7 @@ This is **not a colcon workspace** — there is no `src/`, no `package.xml`, no
 | `hardware/` | the real magnet end effector's CAD (`magnet_effector/`, CadQuery in its own `hardware/.venv`, never the sim/ROS/lerobot envs); `params.py` is the source of truth for the TCP offset `simtest/magnet.py` uses |
 | pick and place | `nodes/{package_detector,package_vision,box_geometry,magnet_pick,pick_planner,arm_kin}.py`: camera → plate pose → dock → IK, numpy only (no torch in the stack). The `pick_*` tests, `--perception oracle`, the envelope numbers and what is not yet verified live: `docs/manipulation.md` |
 | `maps/` | saved map library — named, committed snapshots of explored maps |
-| `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own conda env `splat`, never on the Jetson (`scripts/splat.sh`, `docs/real-robot.md`) |
+| `splat/` | optional Gaussian-splat reconstruction of saved maps; runs on the WORKSTATION in its own env (conda `splat`, or a uv venv where there is no conda; `scripts/install_splat.sh`), never on the Jetson; no ROS needed (`splat/rtabmap_db.py`). Shown in the operator view's 3D cloud → Splat (`scripts/splat.sh`, `docs/real-robot.md`) |
 | `commsim/` | fleet comms simulation (mesh, Zenoh, task auction), system python3 only; `core/protocol.py` is the allocator `nodes/fleet_tasks.py` runs, `viz/demo.py` the model behind the operator's Comms overlay (`docs/commsim.md`) |
 | `docs/` | the project docs, one page per topic; `README.md` indexes them |
 

@@ -1250,7 +1250,7 @@ async function main() {
     { name: 'Jetson', url: location.origin + '/', platform: 'real' },
     { name: 'Workstation', url: 'http://workstation.example:8081/', platform: 'sim' }] }; window.__operator.loadConsoles()`);
   await sleep(200);
-  check('platform: REAL, in the go colour, on the robot\\'s console',
+  check('platform: REAL, in the go colour, on the robot\'s console',
         (await $text('#platform-label')) === 'REAL' && await page.eval(`document.getElementById('platform-chip').dataset.platform === 'real'`));
   await page.eval(`document.getElementById('platform-chip').click()`); await sleep(100);
   check('platform: the menu opens and marks this page, linking only the other console',

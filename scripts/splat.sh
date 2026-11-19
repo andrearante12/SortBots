@@ -16,7 +16,8 @@
 #       robot: scripts/splat.sh build warehouse --from http://jetson-orin.tail0d28f9.ts.net:8081
 #   scripts/splat.sh log JOB_ID            # a job's log
 #
-# One-time setup: scripts/install_splat.sh (creates the `splat` conda env).
+# One-time setup: scripts/install_splat.sh (the `splat` conda env, or a uv venv
+# where there is no conda; scripts/_splat_env.sh).
 #
 # EXIT CODES (stable):
 #   0   success (build --wait: job done)
@@ -37,6 +38,9 @@ WORKER_PATTERN="[s]plat/worker.py"
 # System python3 for the small JSON helpers below: conda's leads PATH.
 PY=/usr/bin/python3
 
+# shellcheck source=scripts/_splat_env.sh
+source "$SCRIPT_DIR/_splat_env.sh"
+
 die() { echo "[splat] $1" >&2; exit "${2:-1}"; }
 
 json_field() { "$PY" -c "import json,sys; d=json.load(sys.stdin); print(d$1)"; }
@@ -48,10 +52,8 @@ cmd_serve() {
   # Same guard as install_splat.sh: a sourced Jazzy's PYTHONPATH shadows the
   # env's numpy; the worker sources ROS itself, only for rtabmap-export.
   [[ -n "${AMENT_PREFIX_PATH:-}" ]] && die "ROS 2 is sourced in this shell; use a clean one" 1
-  local conda_base py
-  conda_base="$(conda info --base 2>/dev/null || echo "$HOME/miniconda3")"
-  py="$conda_base/envs/splat/bin/python"
-  [[ -x "$py" ]] || die "no \`splat\` conda env — run scripts/install_splat.sh" 1
+  local py
+  py="$(splat_python)" || die "no splat env — run scripts/install_splat.sh" 1
   cd "$REPO_ROOT" || exit 1
   setsid "$py" splat/worker.py --port "$PORT" >"$LOG" 2>&1 </dev/null &
   for _ in $(seq 1 40); do

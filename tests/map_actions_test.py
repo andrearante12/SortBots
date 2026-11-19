@@ -105,3 +105,22 @@ def test_load_lfs_pointer_refused(lib):
     with pytest.raises(maps_lib.MapError):
         sm.load_map_blocking("aisle")
     assert calls == []
+
+
+def test_map_mode_switches_live_and_is_remembered_per_session(lib):
+    _, calls = lib
+    assert sm.map_mode("robot_0", "s1") is None              # never switched: the scenario's mode
+    assert sm.set_map_mode_blocking("localize", "robot_0", "s1")["mode"] == "localize"
+    assert calls[-1][:2] == ("/robot_0/rtabmap/set_mode_localization", "std_srvs/srv/Empty")
+    assert sm.map_mode("robot_0", "s1") == "localize"
+    assert sm.map_mode("robot_0", "s2") is None              # a new session starts over
+    sm.set_map_mode_blocking("mapping", "robot_0", "s1")
+    assert calls[-1][0] == "/robot_0/rtabmap/set_mode_mapping"
+
+
+@pytest.mark.parametrize("mode", ["", "Localize", "reset; rm -rf /"])
+def test_map_mode_rejects_unknown_modes(lib, mode):
+    _, calls = lib
+    with pytest.raises(maps_lib.MapError):
+        sm.set_map_mode_blocking(mode, "robot_0")
+    assert not calls
