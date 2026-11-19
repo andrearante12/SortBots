@@ -7,6 +7,12 @@ goal_timeout_s: 180.0
 stuck_window_s: 30.0
 stuck_min_displacement_m: 0.1
 startup_spin_timeout_s: 120.0
-max_goal_distance_m: 5.0
+max_goal_distance_m: 3.5
+# Plan to a frontier before sending the robot there: an unreachable one is blacklisted at
+# once instead of after stuck_window_s of standing still (2026-11-19, two 30 s stalls).
+precheck_path: true
+# Prefer near frontiers harder than the sim's 1.0 (score = size / distance**alpha): short,
+# reachable hops through a cluttered lab, and visual odometry drifts less over short ones.
+alpha: 2.0
 max_run_time_s: 1800
 hard_escape_cooldown_s: 180.0

@@ -28,6 +28,10 @@
   local_costmap:
     ros__parameters:
       update_frequency: 5.0
+      # The real base, 0.45 x 0.4 m (the sim's is 0.5 x 0.4). Inflation stays the sim's 0.65:
+      # it doesn't close gaps (only the 0.2 m inscribed radius is lethal), and 0.4 is what made
+      # the sim base scrape and dither (nav2_params.yaml has the story).
+      footprint: "[[0.225, 0.2], [0.225, -0.2], [-0.225, -0.2], [-0.225, 0.2]]"
       obstacle_layer:
         observation_sources: obstacles
         obstacles:
@@ -44,6 +48,7 @@
   global_costmap:
     ros__parameters:
       update_frequency: 2.0
+      footprint: "[[0.225, 0.2], [0.225, -0.2], [-0.225, -0.2], [-0.225, 0.2]]"
       obstacle_layer:
         observation_sources: obstacles
         obstacles:

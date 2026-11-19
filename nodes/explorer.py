@@ -61,7 +61,7 @@ import yaml
 from action_msgs.msg import GoalStatus
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped
-from nav2_msgs.action import NavigateToPose, Spin
+from nav2_msgs.action import ComputePathToPose, NavigateToPose, Spin
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.clock import Clock, ClockType
@@ -105,6 +105,7 @@ STATUS_QOS = QoSProfile(
 )
 
 DEFAULTS = {
+    "precheck_path": False,        # plan before committing to a frontier (on for the real robot)
     "min_frontier_cells": 8,       # discard frontier clusters smaller than this
     "alpha": 1.5,                  # score = size / distance**alpha; higher = prefer nearby
     "inflate_radius_m": 0.4,       # matches nav2_params.yaml inflation_layer; keep goals off walls
@@ -368,6 +369,11 @@ class ExplorerNode(Node):
 
         self.nav_client = ActionClient(self, NavigateToPose, f"/{robot_id}/navigate_to_pose")
         self.spin_client = ActionClient(self, Spin, f"/{robot_id}/spin")
+        # precheck_path: ask the planner for a path BEFORE committing to a frontier. Without it
+        # an unreachable frontier went through the BT's recoveries while the robot stood still,
+        # until stuck_window_s blacklisted it: 30 s of nothing per goal on the real robot in a
+        # cluttered lab (2026-11-19). The planner answers in well under a second.
+        self.plan_client = ActionClient(self, ComputePathToPose, f"/{robot_id}/compute_path_to_pose")
 
         # Operator steering queue: [[x, y, activated_ts|None], ...]. Entry 0 is
         # the region being worked; the rest wait their turn. Deliberately NOT
@@ -1605,7 +1611,7 @@ class ExplorerNode(Node):
         self._goal_generation += 1
         gen = self._goal_generation
         target = (gx, gy)
-        self._goal_target = target
+        self._goal_target = target   # set now: _tick treats the pre-check as an active goal
         self._goal_frontier = (fx, fy)
         self._goal_map_seq = self._map_seq
         self._goal_start_pose = (rx, ry)
@@ -1615,12 +1621,52 @@ class ExplorerNode(Node):
         self._publish_intent(gx, gy, corridor=self._own_corridor(gx, gy))
         self.get_logger().info(f"exploring -> ({gx:.2f}, {gy:.2f})")
 
+        if self.cfg.get("precheck_path") and self.plan_client.server_is_ready():
+            req = ComputePathToPose.Goal()
+            req.goal = goal.pose
+            req.use_start = False          # from where the robot is now
+            self.plan_client.send_goal_async(req).add_done_callback(
+                lambda f: self._on_precheck_accepted(f, gen, target, goal))
+        else:
+            self._dispatch_nav_goal(goal, gen, target)
+        self._publish_status()
+        return True
+
+    def _dispatch_nav_goal(self, goal, gen: int, target: tuple[float, float]):
         send_future = self.nav_client.send_goal_async(goal)
         send_future.add_done_callback(
             lambda f: self._on_goal_response(f, gen, target)
         )
+
+    def _on_precheck_accepted(self, future, gen, target, goal):
+        if gen != self._goal_generation:
+            return
+        handle = future.result()
+        if not handle.accepted:
+            self._dispatch_nav_goal(goal, gen, target)   # planner busy: let Nav2 itself try
+            return
+        handle.get_result_async().add_done_callback(
+            lambda f: self._on_precheck_result(f, gen, target, goal))
+
+    def _on_precheck_result(self, future, gen, target, goal):
+        if gen != self._goal_generation:
+            return
+        res = future.result()
+        path = getattr(res.result, "path", None) if res is not None else None
+        if res is not None and res.status == GoalStatus.STATUS_SUCCEEDED and path is not None and len(path.poses) > 1:
+            self._dispatch_nav_goal(goal, gen, target)
+            return
+        # No path from here: a genuine unreachable frontier, not a Nav2 hiccup. Blacklist it
+        # and let the next tick pick another, without the robot ever standing still for it.
+        self.get_logger().info(f"no path to {target} — blacklisted, trying the next frontier")
+        self._blacklist_point(*target)
+        self._goals_failed += 1
+        self._goal_target = None
+        self._goal_frontier = None
+        self._goal_map_seq = None
+        self._goal_start_pose = None
+        self._goal_sent_at = None
         self._publish_status()
-        return True
 
     def _on_goal_response(self, future, gen: int, target: tuple[float, float]):
         if gen != self._goal_generation:
