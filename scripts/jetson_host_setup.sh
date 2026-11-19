@@ -160,11 +160,15 @@ cat > /usr/local/sbin/sortbots-efi-watchdog <<'WDOG'
 # call that never returned), then forces a reboot. Nothing else triggers it.
 # The stall dump's own line, not the bare word: systemd can log a unit's start message into the
 # kernel log early in boot, and a unit description mentioning the word would trigger this.
-dmesg --follow --nopager 2>/dev/null | grep -m1 -q "Workqueue: efi_rts_wq" || exit 0
-logger -p user.crit -t efi-watchdog "UEFI runtime call stuck (efi_rts_wq RCU stall): forcing a reboot"
+# /dev/kmsg itself, not `dmesg --follow | grep`: into a pipe dmesg block-buffers, the stall
+# line never reached grep, and a hung boot (2026-11-19 15:15) sat unreachable with this running.
+# A read can end with EPIPE when the ring buffer wraps; open it again (a match is this boot's).
+until grep -m1 -q "Workqueue: efi_rts_wq" < /dev/kmsg; do sleep 1; done
+# The reboot first, on a timer: anything below may block behind the same stuck firmware call.
+( sleep 10; echo b > /proc/sysrq-trigger ) &
 echo "$(date -Is) uptime $(cut -d' ' -f1 /proc/uptime)s: efi_rts_wq stall, forced reboot" >> /var/lib/sortbots/efi-resets.log
-journalctl --sync 2>/dev/null; sync
-echo s > /proc/sysrq-trigger; sleep 1
+timeout 3 logger -p user.crit -t efi-watchdog "UEFI runtime call stuck (efi_rts_wq RCU stall): forcing a reboot"
+timeout 3 journalctl --sync 2>/dev/null; echo s > /proc/sysrq-trigger; sleep 2
 echo b > /proc/sysrq-trigger
 WDOG
 chmod 755 /usr/local/sbin/sortbots-efi-watchdog
