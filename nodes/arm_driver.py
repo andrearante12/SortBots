@@ -90,6 +90,7 @@ from drive_bridge import busy_message, holders  # noqa: E402
 CONTROL_HZ = 50
 STATE_HZ = 5
 RETRY_OPEN_S = 2.0
+MAGNET_PROBE_S = 5.0
 PEEK_S = 1.0  # while not holding the board: read where the head is this often, torque untouched
 POSE_STALE_S = 5.0  # a pose older than this isn't reported (a failed peek keeps the last one)
 # The arm board's link dropped out for ~1-2 s at a time (2026-11-16: ~25% of reads lost in
@@ -180,6 +181,12 @@ class Head:
         self.read_fail_since = None
         self.goal_sent_at = -1e9
         self.state, self.message = "idle", ""
+        # The board as the operator view shows it (feetech.probe's words), from the peek while
+        # not holding it: unplugged or unpowered showed only once a press failed (2026-11-19).
+        # The arm's ids are pinged too: one board, and a dead arm cable is worth saying.
+        arm_cal = (cfg.get("arm") or {}).get("cal") or {}
+        self.arm_ids = [int(c["id"]) for c in arm_cal.values() if isinstance(c, dict) and "id" in c]
+        self.board, self.missing = "unknown", []
 
     # -- conversions: the sim's radians <-> head.py's degrees -----------------------------------
     def to_deg(self, m, rad):
@@ -290,6 +297,9 @@ class Head:
         if self.bus is None:
             if self.state == "connecting" and now >= self.next_open:
                 self._open(now)
+            elif self.state == "error" and self.target is not None and self.board == "ok" \
+                    and now >= self.next_open:
+                self._open(now)       # the board came back (the peek saw it): hold again
             return
         if self.target is None:
             return
@@ -324,12 +334,15 @@ class Head:
             finally:
                 self.bus.timeout_s = saved
             self.read_fail_since = None
+            self.board, self.missing = "ok", []
         except OSError as e:
+            self.board = "no_usb"
             self._lost(now, f"arm board gone: {e}")
         except ft.BusError as e:
             # A dropout: keep holding (the goal frames are re-sent) unless it has gone on.
             self.read_fail_since = self.read_fail_since if self.read_fail_since is not None else now
             if now - self.read_fail_since >= LINK_LOST_S:
+                self.board = "no_power"
                 self._lost(now, f"arm board silent for {LINK_LOST_S:.0f} s: {e}")
 
     def _peek(self, now):
@@ -340,14 +353,27 @@ class Head:
             return
         self.next_peek = now + PEEK_S
         if self.holders_of(self.port):
+            self.board = "busy"
             return
         bus = self.opener(self.port, timeout_s=PEEK_TIMEOUT_S)
         try:
             bus.open()
             time.sleep(PEEK_SETTLE_S)
-            self.pos, self.pos_at = self._read(bus), now
-        except (OSError, ft.BusError):
-            pass  # keep the last pose; status() drops it once it is POSE_STALE_S old
+            missing = []
+            try:
+                self.pos, self.pos_at = self._read(bus), now
+            except ft.BusError:
+                missing += list(self.ids.values())  # keep the last pose; status() ages it out
+            for sid in self.arm_ids:
+                try:
+                    bus.read(sid, ft.MODEL_NUMBER, retries=0)
+                except ft.BusError:
+                    missing.append(sid)
+            n = len(self.ids) + len(self.arm_ids)
+            self.board = "no_power" if len(missing) == n else "partial" if missing else "ok"
+            self.missing = missing
+        except OSError:
+            self.board, self.missing = "no_usb", []
         finally:
             try:
                 bus.close()
@@ -381,7 +407,9 @@ class Head:
 
     def status(self, now=None):
         now = time.monotonic() if now is None else now
-        s = {"held": self.bus is not None, "state": self.state, "message": self.message}
+        s = {"held": self.bus is not None, "state": self.state, "message": self.message,
+             "board": "ok" if self.bus is not None and self.read_fail_since is None else self.board,
+             "missing": self.missing}
         if self.pos and now - self.pos_at <= POSE_STALE_S:
             s["pan"] = round(self.to_rad("head_pan", self.pos["head_pan"]), 4)
             s["tilt"] = round(self.to_rad("head_tilt", self.pos["head_tilt"]), 4)
@@ -682,11 +710,13 @@ class Magnet:
     def _run(self):
         next_rearm = None
         while not self._stop.is_set():
-            timeout = None if next_rearm is None else max(0.0, next_rearm - time.monotonic())
+            # Idle, it asks the board's status every MAGNET_PROBE_S: an unplugged or re-plugged
+            # magnet shows on the page by itself, not only at the next press (2026-11-19).
+            timeout = MAGNET_PROBE_S if next_rearm is None else max(0.0, next_rearm - time.monotonic())
             try:
                 cmd = self.q.get(timeout=timeout)
             except queue.Empty:
-                cmd = "on"  # re-arm
+                cmd = "on" if next_rearm is not None else "status"  # re-arm, or the idle check
             if cmd is None:
                 break
             done = None

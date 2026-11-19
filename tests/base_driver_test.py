@@ -124,3 +124,29 @@ def test_stop_once_without_board(tmp_path, capsys):
     cfg = {**CFG, "port": str(tmp_path / "nope")}
     assert bd.stop_once(cfg) == 0
     assert "nothing to stop" in capsys.readouterr().out
+
+
+def test_probe_reports_the_board_and_a_returning_board_clears_the_error():
+    seq = iter([("no_usb", [7, 8, 9]), ("no_power", [7, 8, 9]), ("ok", [])])
+    d = bd.Drive(CFG, opener=lambda port, ids: FakeBus(), releaser=lambda bus, ids: None,
+                 holders_of=lambda port: [], prober=lambda port, ids: next(seq))
+    d.state, d.message = "error", "wheel board gone"
+    d.probe(0.0)
+    assert d.status()["board"] == "no_usb" and d.state == "error"
+    d.probe(1.0)                                         # not due yet: no second probe
+    assert d.board == "no_usb"
+    d.probe(bd.PROBE_S)
+    assert d.board == "no_power" and d.missing == [7, 8, 9]
+    d.probe(2 * bd.PROBE_S)
+    assert d.board == "ok" and d.state == "idle" and d.message == ""
+    d.command(0.2, 0, 0, 2 * bd.PROBE_S)
+    d.tick(2 * bd.PROBE_S, DT)                           # the next press drives at once
+    assert d.state == "driving"
+
+
+def test_probe_leaves_a_held_board_alone():
+    calls = []
+    d = bd.Drive(CFG, opener=lambda port, ids: FakeBus(), releaser=lambda bus, ids: None,
+                 holders_of=lambda port: [(42, "handeye")], prober=lambda *a: calls.append(a))
+    d.probe(0.0)
+    assert d.board == "busy" and not calls

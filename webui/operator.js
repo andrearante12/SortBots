@@ -779,8 +779,10 @@
       // blanking it hid the sliders and the head pad every other second (2026-11-16).
       if (typeof h.pan !== "number" && r.head && typeof r.head.pan === "number") { h.pan = r.head.pan; h.tilt = r.head.tilt; }
       else if (typeof h.pan === "number") r.headAt = performance.now();
-      r.head = h;
+      const wasBoard = r.head && r.head.board;
+      r.head = h; r.headMsgAt = performance.now();
       if ((h.state === "busy" || h.state === "error") && h.state !== was) toast(`${nameOf(id)}: head ${h.state}. ${h.message || ""}`);
+      noteBoard(id, "arm/head board", wasBoard, h);
       syncHeads();
     });
     // The real arm and magnet (arm_driver's arm_state): shows the arm pad, reports refusals.
@@ -818,9 +820,10 @@
     sub(`/${id}/base_status`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
       let b;
       try { b = JSON.parse(msg.data); } catch (e) { return; }
-      const was = r.base && r.base.state;
-      r.base = b;
+      const was = r.base && r.base.state, wasBoard = r.base && r.base.board;
+      r.base = b; r.baseAt = performance.now();
       if ((b.state === "busy" || b.state === "error") && b.state !== was) toast(`${nameOf(id)}: base ${b.state}. ${b.message || ""}`);
+      noteBoard(id, "wheel board", wasBoard, b);
     });
 
     // Only the twist is used (speed / turn rate on the card); the pose comes from /tf.
@@ -1163,9 +1166,28 @@
       turn: tw ? `${Math.round((tw.angular.z * 180) / Math.PI)}°/s` : "—",
       togo,
       batt: battOf(r) == null ? "—" : `${battOf(r).toFixed(0)}%`,
+      hw: hardwareOf(r),
     };
   }
-  const FACTS = [["pos", "Position"], ["heading", "Heading"], ["speed", "Speed"], ["turn", "Turn rate"], ["togo", "To go"], ["obst", "Obstacles"], ["batt", "Battery"]];
+  const FACTS = [["pos", "Position"], ["heading", "Heading"], ["speed", "Speed"], ["turn", "Turn rate"], ["togo", "To go"], ["obst", "Obstacles"], ["batt", "Battery"], ["hw", "Hardware"]];
+  // The real robot's boards, as the drivers' own checks see them (feetech.probe's words). The
+  // drivers look every few seconds and reconnect by themselves; this line and the toasts are
+  // how the operator knows, instead of finding out from a press that did nothing (2026-11-19).
+  const BOARD_WORD = { ok: "ok", no_usb: "unplugged", no_power: "no power", busy: "in use by another program", unknown: "checking…" };
+  const boardWord = (b) => b.board === "partial" ? `servo${b.missing.length > 1 ? "s" : ""} ${b.missing.join(", ")} not answering` : BOARD_WORD[b.board] || b.board;
+  const BOARD_TTL_MS = 5000;
+  function noteBoard(id, what, was, b) {
+    if (!b.board || b.board === was || !was || was === "unknown" || b.board === "unknown") return;
+    toast(`${nameOf(id)}: ${what} ${b.board === "ok" ? "connected" : boardWord(b)}`);
+  }
+  function hardwareOf(r) {
+    const now = performance.now(), parts = [];
+    if (r.head && r.head.board && now - r.headMsgAt < BOARD_TTL_MS) parts.push(`Arm/head ${boardWord(r.head)}`);
+    if (r.base && r.base.board && now - r.baseAt < BOARD_TTL_MS) parts.push(`Wheels ${boardWord(r.base)}`);
+    const m = r.arm && r.arm.magnet;
+    if (m && now - r.armAt < BOARD_TTL_MS) parts.push(`Magnet ${m.state === "error" ? "not answering" : m.state === "ok" ? "ok" : "checking…"}`);
+    return parts.length ? parts.join(" · ") : "—";
+  }
   // Only the board knows it (fleet_tasks.py: a real BatteryState, or the sim model).
   const battOf = (r) => { const fr = fleetOf(r); return fr && typeof fr.battery_pct === "number" ? fr.battery_pct : null; };
 
@@ -1194,7 +1216,7 @@
         <div class="l2">${st.tag === "on a task" ? tile.title + (tile.sub ? ` · ${tile.sub}` : "") : esc(st.detail) + (r.queueDepth ? ` · ${r.queueDepth} waiting` : "")}</div>
         ${isOpen ? `<div class="more">
           <div class="cam-slot" data-cam="${esc(r.id)}"></div>
-          <dl class="facts" data-id="${esc(r.id)}">${FACTS.map(([k, label]) => `<div${k === "pos" ? ' class="wide"' : k === "obst" ? ' class="full"' : ""}><dt>${label}</dt><dd data-f="${k}">${esc(f[k])}</dd></div>`).join("")}</dl>
+          <dl class="facts" data-id="${esc(r.id)}">${FACTS.map(([k, label]) => `<div${k === "pos" ? ' class="wide"' : k === "obst" || k === "hw" ? ' class="full"' : ""}><dt>${label}</dt><dd data-f="${k}">${esc(f[k])}</dd></div>`).join("")}</dl>
           <div class="acts"><button class="btn small" data-act="stop">Stop</button>
             <button class="btn small" data-act="explore">${st.tag === "exploring" ? "Stop exploring" : "Explore"}</button>
             ${busy ? `<button class="btn small" data-act="clear" title="Cancel this robot's current task and everything queued behind it">Clear tasks</button>` : ""}</div>

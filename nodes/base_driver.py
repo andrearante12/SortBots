@@ -45,6 +45,7 @@ CONTROL_HZ = 50
 RESEND_S = 0.2       # Goal_Velocity re-sent this often unchanged: a sync write is never acked
 RETRY_OPEN_S = 2.0   # a busy or missing board is retried this often while commands come in
 STATUS_HZ = 2.0
+PROBE_S = 3.0        # not driving: look for the board (plugged in? powered?) this often
 
 ROS_DEFAULTS = {"speed_level": 0, "watchdog_s": 0.5, "idle_release_s": 3.0}
 
@@ -64,7 +65,7 @@ class Drive:
     run it on a fake clock."""
 
     def __init__(self, cfg: dict, opener=feetech.open_wheels, releaser=feetech.release_wheels,
-                 holders_of=holders):
+                 holders_of=holders, prober=feetech.probe):
         self.cfg, self.ros = cfg, ros_settings(cfg)
         self.port = cfg["port"]
         self.ids = [int(cfg["wheels"][w]) for w in WHEELS]
@@ -76,6 +77,9 @@ class Drive:
         self.stopped_since = None
         self.next_open = 0.0
         self.state, self.message = "idle", ""
+        # What the operator view shows for the board, kept current while nothing drives (probe):
+        # unplugged or unpowered used to show only once a drive press failed (2026-11-19).
+        self.prober, self.board, self.missing, self.next_probe = prober, "unknown", [], 0.0
 
     def command(self, x, y, w, now):
         self.target = clamp_cmd(x, y, w, self.ros["max_xy"], self.ros["max_w"])
@@ -117,6 +121,24 @@ class Drive:
                 self.release()
                 self.state, self.message = "idle", ""
 
+    def probe(self, now):
+        """Not holding the board: is it there and powered? A board that comes back clears the
+        last error by itself, so the page stops saying it's gone without a restart."""
+        if self.bus is not None:
+            self.board, self.missing = "ok", []
+            return
+        if now < self.next_probe:
+            return
+        self.next_probe = now + PROBE_S
+        if self.holders_of(self.port):
+            self.board = "busy"
+            return
+        was = self.board
+        self.board, self.missing = self.prober(self.port, self.ids)
+        if self.board == "ok" and was != "ok" and self.state == "error":
+            self.state, self.message = "idle", ""
+            self.next_open = now      # back: the next press opens it at once
+
     def _open(self, now):
         self.next_open = now + RETRY_OPEN_S
         held = self.holders_of(self.port)
@@ -153,6 +175,7 @@ class Drive:
 
     def status(self):
         return {"state": self.state, "message": self.message, "port": self.port,
+                "board": self.board, "missing": self.missing,
                 "max_mps": self.ros["max_xy"], "max_dps": round(math.degrees(self.ros["max_w"])),
                 "speed_level": self.ros["speed_level"], "wheels_raw": self.raw}
 
@@ -214,6 +237,10 @@ def run_node(robot_id: str, cfg: dict):
             last["state"] = drive.state
 
     def on_status():
+        was = drive.board
+        drive.probe(time.monotonic())
+        if drive.board != was:
+            log.info(f"wheel board: {drive.board}{' (no reply from ' + str(drive.missing) + ')' if drive.missing else ''}")
         status_pub.publish(String(data=json.dumps(drive.status())))
 
     # Steady clock, not the node clock: this loop is the deadman, it must not stretch with

@@ -283,3 +283,33 @@ def release_wheels(bus: Bus, ids: list[int]):
                 pass
     finally:
         bus.close()
+
+
+def probe(port: str, ids, opener=None, timeout_s: float = 0.03) -> tuple[str, list[int]]:
+    """Is the board there, and powered? -> (board, ids that didn't answer), board one of:
+    "no_usb" (no such port: unplugged), "no_power" (the USB chip is there but no servo answers:
+    the board's own supply is off, it is powered separately from USB), "partial" (some ids
+    missing: a loose servo cable) or "ok". Opens, pings (one model-number read each, no
+    retry) and closes; never writes. The caller checks first that no one else holds it."""
+    if not os.path.exists(port):
+        return "no_usb", list(ids)
+    bus = (opener or Bus)(port, timeout_s=timeout_s)
+    try:
+        bus.open()
+    except OSError:
+        return "no_usb", list(ids)
+    try:
+        missing = []
+        for sid in ids:
+            try:
+                bus.read(sid, MODEL_NUMBER, retries=0)
+            except BusError:
+                missing.append(sid)
+        return ("no_power" if len(missing) == len(ids) else "partial" if missing else "ok"), missing
+    except OSError:
+        return "no_usb", list(ids)
+    finally:
+        try:
+            bus.close()
+        except OSError:
+            pass

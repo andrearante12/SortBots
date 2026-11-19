@@ -172,3 +172,11 @@ def test_degrees_match_lerobot_head_calibration():
 def test_deg_to_raw_truncates_like_lerobot():
     # 0.1 deg past the pan mid (1989.5): 1989.5 + 1.1375 = 1990.64 -> lerobot's int() gives 1990.
     assert ft.deg_to_raw(0.1, 567, 3412) == 1990
+
+
+def test_probe_names_what_is_wrong(servos, tmp_path):
+    assert ft.probe(str(tmp_path / "no_such_tty"), [7]) == ("no_usb", [7])
+    assert ft.probe(servos.path, [7, 8, 9], timeout_s=0.2) == ("ok", [])
+    assert ft.probe(servos.path, [7, 10], timeout_s=0.2) == ("partial", [10])
+    assert ft.probe(servos.path, [20, 21], timeout_s=0.05) == ("no_power", [20, 21])
+    assert not servos.writes and not servos.syncs        # a probe never writes
