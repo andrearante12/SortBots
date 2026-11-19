@@ -14,7 +14,7 @@ One job = one saved map (maps/<name>/), through these phases:
               serve.py): GET /api/maps for the manifest, then each robot's DB
               from GET /api/maps/<name>/db?robot=<rid>, sha256-checked against
               the manifest. This is the ONLY thing that ever leaves the robot.
-  extracting  rtabmap-export per robot DB (splat/extract.py).
+  extracting  per robot DB: rtabmap-export, or splat/rtabmap_db.py without ROS (splat/extract.py).
   building    keyframe set in the fleet `map` frame (splat/dataset.py).
   training    splat/train.py as a subprocess (an OOM or CUDA fault must not take
               the server down); progress comes from its progress.json.
@@ -458,8 +458,10 @@ class Worker:
         scene = anchor_scene(manifest, platform)
         sources = []
         for rid, db in db_files.items():
-            log(f"rtabmap-export {rid}: {db}")
-            extract.run_export(db, export_dir, rid, logf)
+            backend = extract.pick_backend(self.cfg.get("extract", {}).get("backend", "auto"))
+            log(f"export {rid} ({backend}): {db}")
+            extract.run_export(db, export_dir, rid, logf, backend=backend,
+                               poses=dcfg.get("poses", "auto"))
             sources.append({"export_dir": export_dir, "prefix": rid, "robot_id": rid,
                             "anchor": dataset.spawn_anchor(scene, rid)})
         # The downloaded DBs are the biggest thing in the job; the export has
@@ -538,6 +540,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # Chrome's Private Network Access: a page from the Jetson's tailnet address
+        # calling a worker on the viewer's own machine (worker_url localhost:8082)
+        # is a request into a MORE private network, and the preflight must say yes.
+        self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
