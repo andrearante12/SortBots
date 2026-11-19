@@ -1404,7 +1404,16 @@
     for (const cmd of d.held) { const v = DRIVE_VECTORS[cmd]; x += v[0]; y += v[1]; z += v[2]; }
     const [kl, ka] = driveScale(id);
     x *= kl; y *= kl; z *= ka;
-    publish(`/${id}/cmd_vel`, "geometry_msgs/Twist", { linear: { x, y, z: 0 }, angular: { x: 0, y: 0, z } });
+    if (platform === "real") {
+      // Stamped with the send time on its own topic: nodes/base_driver.py drops a command
+      // that arrives backlogged (rosbridge behind under load) instead of replaying it late.
+      const t = Date.now();
+      publish(`/${id}/cmd_vel_teleop`, "geometry_msgs/TwistStamped", {
+        header: { stamp: { sec: Math.floor(t / 1000), nanosec: (t % 1000) * 1e6 }, frame_id: "teleop" },
+        twist: { linear: { x, y, z: 0 }, angular: { x: 0, y: 0, z } } });
+    } else {
+      publish(`/${id}/cmd_vel`, "geometry_msgs/Twist", { linear: { x, y, z: 0 }, angular: { x: 0, y: 0, z } });
+    }
     const c = cams.get(id);
     if (c) for (const b of c.el.querySelectorAll("[data-drive]")) b.classList.toggle("held", d.held.has(b.dataset.drive));
   }

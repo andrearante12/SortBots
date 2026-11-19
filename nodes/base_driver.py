@@ -20,6 +20,11 @@ Safety, in the order it bites:
   released (wheels 0, torque off) after `ros.idle_release_s` stopped, so the Robot view's
   drive bridge and `handeye pick` can take it the rest of the time. A board some other
   process holds is never opened underneath it; base_status names the holder.
+- Stale pad commands. The operator view's pad sends /<id>/cmd_vel_teleop (TwistStamped, the
+  browser's send time). Its delay is measured against the best delay of the last minute (so
+  the laptop's and the Jetson's clocks needn't agree), and a command more than TELEOP_STALE_S
+  staler than that is dropped: a rosbridge backlog under load must not replay a second of
+  old presses into the wheels (2026-11-19: "the robot reacts late"). A stop always applies.
 - E-stop. /<id>/estop (std_msgs/Bool) true latches it HERE, not in the page: the wheels
   brake to 0 at `estop_decel_mps2` and every cmd_vel (pad, Nav2, explorer) is ignored until
   a false arrives. The board stays held while latched, so the wheels hold at 0 (braked)
@@ -49,7 +54,9 @@ CONTROL_HZ = 50
 RESEND_S = 0.2       # Goal_Velocity re-sent this often unchanged: a sync write is never acked
 RETRY_OPEN_S = 2.0   # a busy or missing board is retried this often while commands come in
 STATUS_HZ = 2.0
-PROBE_S = 3.0        # not driving: look for the board (plugged in? powered?) this often
+PROBE_S = 3.0
+TELEOP_STALE_S = 0.3   # a pad command this much later than the best recent delay is dropped
+TELEOP_BASE_S = 60.0   # how long the best delay is remembered (the two clocks' offset)        # not driving: look for the board (plugged in? powered?) this often
 
 ROS_DEFAULTS = {"speed_level": 0, "watchdog_s": 0.5, "idle_release_s": 3.0}
 
@@ -62,6 +69,33 @@ def ros_settings(cfg: dict) -> dict:
     s["max_w"] = math.radians(float(levels[lvl]["theta_dps"]))
     s["speed_level"] = lvl
     return s
+
+
+class TeleopLag:
+    """How late the pad's commands arrive, against the best of the last TELEOP_BASE_S. The
+    best one stands for the clock offset plus the link's floor, so `stale` is pure backlog."""
+
+    def __init__(self):
+        self.window = []          # (arrival time, raw delay)
+        self.recent = []          # stale values since the last report
+        self.dropped = 0
+
+    def stale(self, now, raw_delay):
+        self.window = [(t, d) for t, d in self.window if now - t <= TELEOP_BASE_S]
+        self.window.append((now, raw_delay))
+        s = raw_delay - min(d for _, d in self.window)
+        self.recent.append(s)
+        return s
+
+    def report(self):
+        """{median_ms, max_ms, n, dropped} since the last report, or None with no commands."""
+        if not self.recent:
+            return None
+        v = sorted(self.recent)
+        out = {"median_ms": round(v[len(v) // 2] * 1000), "max_ms": round(v[-1] * 1000),
+               "n": len(v), "dropped": self.dropped}
+        self.recent, self.dropped = [], 0
+        return out
 
 
 class Drive:
@@ -254,6 +288,24 @@ def run_node(robot_id: str, cfg: dict):
 
     from std_msgs.msg import Bool
     node.create_subscription(Bool, f"/{robot_id}/estop", on_estop, 10)
+
+    from geometry_msgs.msg import TwistStamped
+    lag = TeleopLag()
+    lag_state = {"last": None, "at": 0.0}
+
+    def on_teleop(msg):
+        now_wall = time.time()
+        sent = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        t = msg.twist
+        stop = not (t.linear.x or t.linear.y or t.angular.z)
+        if lag.stale(now_wall, now_wall - sent) > TELEOP_STALE_S and not stop:
+            lag.dropped += 1          # backlog: never drive on an old press
+            return
+        drive.command(t.linear.x, t.linear.y, t.angular.z, time.monotonic())
+
+    # The pad's own topic, stamped; Nav2 and everything else keep plain cmd_vel. Depth 1:
+    # if this node falls behind, only the newest command matters.
+    node.create_subscription(TwistStamped, f"/{robot_id}/cmd_vel_teleop", on_teleop, 1)
     status_pub = node.create_publisher(String, f"/{robot_id}/base_status", 10)
     last = {"t": time.monotonic(), "state": None}
 
@@ -272,11 +324,19 @@ def run_node(robot_id: str, cfg: dict):
             last["state"] = drive.state
 
     def on_status():
+        now = time.monotonic()
+        if now - lag_state["at"] >= 5.0:
+            lag_state["at"] = now
+            rep_ = lag.report()
+            if rep_ is not None:
+                lag_state["last"] = rep_
+                log.info(f"pad lag (5 s): median {rep_['median_ms']} ms, max {rep_['max_ms']} ms, "
+                         f"{rep_['n']} cmds, {rep_['dropped']} stale dropped")
         was = drive.board
         drive.probe(time.monotonic())
         if drive.board != was:
             log.info(f"wheel board: {drive.board}{' (no reply from ' + str(drive.missing) + ')' if drive.missing else ''}")
-        status_pub.publish(String(data=json.dumps(drive.status())))
+        status_pub.publish(String(data=json.dumps({**drive.status(), "teleop_lag": lag_state["last"]})))
 
     # Steady clock, not the node clock: this loop is the deadman, it must not stretch with
     # use_sim_time (CLAUDE.md, "A ROS timer follows use_sim_time").

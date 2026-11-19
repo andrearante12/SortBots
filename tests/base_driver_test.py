@@ -184,3 +184,20 @@ def test_estop_without_the_board_never_opens_it():
     d.set_estop(True, 0.0)
     run(d, 0.0, 1.0, cmd=(0.3, 0, 0))
     assert st["opened"] == 0 and d.state == "estop"
+
+
+def test_teleop_lag_is_measured_against_the_best_recent_delay():
+    lag = bd.TeleopLag()
+    # The laptop's clock is 2.0 s behind: every raw delay carries it, and none of it counts.
+    for i in range(10):
+        assert lag.stale(100.0 + i * 0.1, 2.0 + 0.01) == pytest.approx(0.0)
+    assert lag.stale(101.5, 2.01 + 0.5) == pytest.approx(0.5)   # a backlogged command
+    assert lag.stale(101.6, 2.01 + 0.5) > bd.TELEOP_STALE_S
+    rep_ = lag.report()
+    assert rep_["n"] == 12 and rep_["max_ms"] == 500 and lag.report() is None
+
+
+def test_teleop_lag_forgets_an_old_best_delay():
+    lag = bd.TeleopLag()
+    lag.stale(0.0, 1.0)                                   # an old, very short delay
+    assert lag.stale(bd.TELEOP_BASE_S + 1.0, 1.3) == pytest.approx(0.0)   # long gone: new baseline
