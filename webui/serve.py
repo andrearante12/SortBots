@@ -244,6 +244,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_scenarios()
         elif route == "/api/maps":
             self._serve_maps()
+        elif route == "/api/map/mode":
+            self._with_control(self._serve_map_mode)
         elif route.startswith("/api/maps/") and route.endswith("/db"):
             self._serve_map_db(route[len("/api/maps/"):-len("/db")])
         elif route == "/api/demo_tasks":
@@ -312,6 +314,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_control(self._clear_map)
         elif route == "/api/map/load":
             self._with_control(self._load_map)
+        elif route == "/api/map/mode":
+            self._with_control(self._set_map_mode)
         elif route == "/api/tests/run":
             self._with_tests(self._start_test)
         elif route == "/api/tests/cancel":
@@ -778,6 +782,28 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except OSError as exc:
             self._serve_error(500, f"failed to clear map: {exc}")
 
+    def _session_id(self):
+        return (SESSIONS.status() or {}).get("session_id")
+
+    def _serve_map_mode(self):
+        """{"mode": "localize" | "mapping" | null}: null = never switched in this session, so
+        whatever the scenario started it in (the session's run.localize)."""
+        rid = parse_qs(urlsplit(self.path).query).get("robot_id", ["robot_0"])[0]
+        self._serve_json({"mode": session_mod.map_mode(rid, self._session_id()), "robot_id": rid})
+
+    def _set_map_mode(self):
+        """Localize only <-> mapping, live (RTAB-Map's set_mode_* services)."""
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            self._serve_json(session_mod.set_map_mode_blocking(
+                str(body.get("mode", "")), body.get("robot_id") or "robot_0", self._session_id()))
+        except maps_lib.MapError as exc:
+            self._serve_error(400, str(exc))
+        except OSError as exc:
+            self._serve_error(500, f"failed to switch the map mode: {exc}")
+
     def _load_map(self):
         """Load a library entry into the running RTAB-Map (from a copy)."""
         body = self._read_json_body()
@@ -788,8 +814,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_error(400, "name must be a string")
             return
         try:
-            self._serve_json(session_mod.load_map_blocking(
-                name, body.get("robot_id") or "robot_0"))
+            out = session_mod.load_map_blocking(name, body.get("robot_id") or "robot_0")
+            if body.get("mode") in session_mod.MAP_MODES:
+                out.update(session_mod.set_map_mode_blocking(
+                    body["mode"], out["robot_id"], self._session_id()))
+            self._serve_json(out)
         except maps_lib.MapError as exc:
             self._serve_error(400, str(exc))
         except OSError as exc:

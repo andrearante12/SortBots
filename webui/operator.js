@@ -1953,7 +1953,30 @@
       for (const b of $("#maps-pop").querySelectorAll("button")) b.disabled = false;
     }
   }
+  // Extend (mapping) or Localize only, live (serve.py /api/map/mode -> RTAB-Map's set_mode_*).
+  // Never switched in this session: whatever the scenario started it in.
+  let mapsMode = "mapping";
+  function showMapsMode() {
+    for (const b of $("#maps-mode").querySelectorAll("[data-mode]")) b.classList.toggle("active", b.dataset.mode === mapsMode);
+  }
+  async function fetchMapsMode() {
+    let m = null;
+    try { m = (await (await fetch(`/api/map/mode?robot_id=${encodeURIComponent(mapsRobot())}`)).json()).mode; } catch (e) { /* fall back */ }
+    mapsMode = m || (session && session.run && session.run.localize ? "localize" : "mapping");
+    showMapsMode();
+  }
+  for (const b of document.querySelectorAll("#maps-mode [data-mode]")) b.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (b.dataset.mode === mapsMode) return;
+    const out = await mapsCall("/api/map/mode", { mode: b.dataset.mode, robot_id: mapsRobot() },
+      b.dataset.mode === "localize" ? "Switching to localize only…" : "Switching to mapping…");
+    if (!out) return;
+    mapsMode = out.mode; showMapsMode();
+    mapsMsg(mapsMode === "localize" ? "Localize only: the map is used as it is and never changes." : "Mapping: the map grows as the robot drives.");
+    toast(mapsMode === "localize" ? "Map: localize only" : "Map: extending");
+  });
   async function refreshMaps() {
+    fetchMapsMode();
     const loaded = session && session.map_name;
     $("#maps-current").textContent = loaded ? `· loaded from ${loaded}` : "· not saved yet";
     const name = $("#maps-name");
@@ -1973,8 +1996,12 @@
     for (const b of list.querySelectorAll("[data-load]")) b.addEventListener("click", async (e) => {
       e.stopPropagation();
       if (!armConfirm(b, "Load", "Replace live map?")) return mapsMsg("Loading replaces the live map: anything not saved is lost. Click again to load.");
-      const out = await mapsCall("/api/map/load", { name: b.dataset.load, robot_id: mapsRobot() }, `Loading ${b.dataset.load}…`);
-      if (out) { mapsMsg(`Loaded ${b.dataset.load}.`); toast(`Map ${b.dataset.load} loaded`); pollSession(); }
+      // Loaded in whichever mode the toggle shows: Extend keeps adding to it, Localize only uses it as is.
+      const out = await mapsCall("/api/map/load", { name: b.dataset.load, robot_id: mapsRobot(), mode: mapsMode }, `Loading ${b.dataset.load}…`);
+      if (out) {
+        mapsMsg(`Loaded ${b.dataset.load} (${mapsMode === "localize" ? "localize only" : "extending it"}). Point the camera at somewhere it has seen and the robot snaps into the map.`);
+        toast(`Map ${b.dataset.load} loaded`); pollSession();
+      }
     });
   }
   $("#maps-btn").addEventListener("click", (e) => {

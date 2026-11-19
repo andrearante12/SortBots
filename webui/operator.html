@@ -143,6 +143,8 @@
               background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px var(--shadow); padding: 12px; }
   #maps-pop h3 { margin: 4px 0 8px; font-size: .9rem; }
   #maps-pop h3 .muted { font-weight: 400; color: var(--muted); font-size: .8rem; }
+  #maps-pop #maps-mode { display: flex; margin-bottom: 10px; }
+  #maps-pop #maps-mode button { flex: 1; }
   #maps-pop .row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
   #maps-pop .row.end { justify-content: flex-end; margin: 10px 0 0; }
   #maps-pop input { flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--ink); font: inherit; }
@@ -760,6 +762,10 @@
   </div>
   <div id="maps-pop" hidden role="dialog" aria-label="Maps">
     <h3>Live map <span id="maps-current" class="muted"></span></h3>
+    <div class="seg" id="maps-mode" role="group" aria-label="What RTAB-Map does with the map">
+      <button type="button" data-mode="mapping" title="Mapping: the map grows as the robot drives. After a Load, it keeps adding to the loaded map (only the live copy; the library entry changes when you Save)">Extend</button>
+      <button type="button" data-mode="localize" title="Localization only: the robot finds itself in the map and never changes it. After a Load, the saved map is used exactly as it is">Localize only</button>
+    </div>
     <form id="maps-save" class="row">
       <input id="maps-name" type="text" spellcheck="false" autocomplete="off" pattern="[a-z0-9][a-z0-9_-]{0,63}" title="lowercase letters, digits, - and _" aria-label="Map name">
       <button class="btn small" type="submit">Save</button>

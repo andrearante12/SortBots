@@ -945,6 +945,29 @@ def clear_map_blocking(robot_id: str = "robot_0") -> dict:
     return {"cleared": True, "robot_id": rid}
 
 
+# What set_map_mode_blocking last put each robot's RTAB-Map in, keyed (session_id, robot_id):
+# RTAB-Map has no service that reports it, and a new session starts in its scenario's mode.
+_MAP_MODE: dict[tuple, str] = {}
+MAP_MODES = {"localize": "set_mode_localization", "mapping": "set_mode_mapping"}
+
+
+def set_map_mode_blocking(mode: str, robot_id: str = "robot_0", session_id=None) -> dict:
+    """Switch the running RTAB-Map between mapping (the graph grows; a loaded map is extended)
+    and localization only (the map is used as it is, never changed), live, through RTAB-Map's
+    own set_mode_* services: no restart, unlike a localize scenario."""
+    if mode not in MAP_MODES:
+        raise maps_lib.MapError(f"mode must be one of {sorted(MAP_MODES)}")
+    rid = _check_robot_id(robot_id)
+    _ros_service_call(f"/{rid}/rtabmap/{MAP_MODES[mode]}", "std_srvs/srv/Empty", "{}")
+    _MAP_MODE[(session_id, rid)] = mode
+    return {"mode": mode, "robot_id": rid}
+
+
+def map_mode(robot_id: str = "robot_0", session_id=None):
+    """The mode set_map_mode_blocking set in this session, or None (the scenario's own)."""
+    return _MAP_MODE.get((session_id, str(robot_id)))
+
+
 def load_map_blocking(name: str, robot_id: str = "robot_0") -> dict:
     """Swap the running RTAB-Map onto a COPY of a library entry's database.
 
