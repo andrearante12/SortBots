@@ -20,6 +20,10 @@ and a servo board takes one owner: anything that moves either goes through here.
                                               base_link: x, y, z m, pitch rad), "magnet"
     /<id>/pick_request std_msgs/String (JSON) {"cmd": "auto"} the one-button pick and place
                                               (scripts/pick_core.py, handeye.py's PICK);
+                                              {"cmd": "pick_hold"} the pick without the place:
+                                              it holds the package and hands the arm back to
+                                              the pad; {"cmd": "save_place"} saves where the
+                                              arm is now as the place pose;
                                               {"cmd": "rest"} back to the taught rest pose,
                                               releasing the magnet first if it's on;
                                               {"cmd": "cancel"} holds the arm where it is
@@ -885,7 +889,9 @@ def run_node(robot_id: str, cfg: dict):
                     result = raise_result or ("rest" if core.go_rest() else ("aborted" if abort.is_set() else "failed"))
                 else:
                     core.start()
-                    result = core.auto_pick()
+                    result = core.auto_pick(place=action != "pick_hold")
+                    if action == "pick_hold" and result == "picked":
+                        core.say("holding it: drive the arm to the place spot with the pad, then Save place", 1e9)
             except Exception as e:   # the thread must always end in a status, never silently
                 note = f"{type(e).__name__}: {e}"
                 log.error(f"pick crashed: {note}")
@@ -953,11 +959,42 @@ def run_node(robot_id: str, cfg: dict):
 
     def on_pick_request(msg):
         cmd = _json(msg.data) or {}
-        if cmd.get("cmd") in ("auto", "rest"):
+        if cmd.get("cmd") in ("auto", "rest", "pick_hold"):
             set_mode("manip")
             start_pick(cmd["cmd"])
+        elif cmd.get("cmd") == "save_place":
+            save_place()
         elif cmd.get("cmd") in ("cancel", "stop", "abort"):
             pick["abort"].set()
+
+    def save_place():
+        """Where the arm is now becomes the place pose: handeye's pick_place_pose.json, in the
+        repo's calibration copy that load_robot reads (commit it to keep it). The next pick
+        loads it fresh."""
+        import pick_core
+        import pick_ros
+        if pick["thread"] is not None:
+            return pick_status("BUSY", "a pick is running: save the place pose once it's done", busy=True)
+        if arm is None:
+            return pick_status("FAILED", "no arm configured")
+        now = time.monotonic()
+        if head.bus is None:
+            head._open(now)
+        if head.bus is None:
+            return pick_status("FAILED", f"arm board not available: {head.message}")
+        try:
+            deg = pick_ros.BusArmIO(head.bus, head.cal, arm.cal).read()
+        except (OSError, ft.BusError) as e:
+            return pick_status("FAILED", f"could not read the arm: {e}")
+        path = pick_core.CALIBRATION_DIR / "robots" / "sortbots_head" / "pick_place_pose.json"
+        rec = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "arm_deg": [round(deg[j], 4) for j in pick_ros.ARM]}
+        try:
+            path.write_text(json.dumps(rec, indent=1))
+        except OSError as e:
+            return pick_status("FAILED", f"could not save the place pose: {e}")
+        pick["robot"] = None          # the next pick reloads the poses
+        log.info(f"place pose saved: {rec['arm_deg']}")
+        pick_status("SAVED", "place pose saved: release the magnet, then Rest", busy=False)
 
     node.create_subscription(String, f"/{robot_id}/pick_request", on_pick_request, 10)
 
