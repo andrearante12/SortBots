@@ -25,9 +25,12 @@ profile: "848,480,30"
 # base_link origin is the chassis center on the floor.
 #   xyz in metres, rpy in radians (pitch > 0 tilts the camera DOWN).
 mount:
-  xyz: [0.0, 0.0, 1.0]
-  # pitch = the head's nav tilt (configs/arm_board.yaml head.nav_pose, 15 deg): nav mode
-  # holds the head there, and mapping only knows the camera's pose from this line.
+  # z measured 2026-11-19: 1.165 m from the floor fit (the depth origin, head tilted down).
+  xyz: [0.0, 0.0, 1.17]
+  # pitch = the camera's REAL pitch at the head's nav pose (configs/arm_board.yaml
+  # head.nav_pose, 32 deg on the head's own scale = 15 deg down measured): nav mode holds the
+  # head there, and mapping only knows the camera's pose from this line. Roll measured -1.3
+  # deg, left at 0.
   rpy: [0.0, 0.2618, 0.0]
 
 # Post-processing on the Jetson's CPU. Off by default: each one costs frames

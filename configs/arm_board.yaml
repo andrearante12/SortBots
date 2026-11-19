@@ -23,8 +23,11 @@ head:
   # Where nav mode holds the camera, in /head_cmd's convention (degrees, tilt > 0 looks
   # down). It must match the mount in configs/sensors/d435_real.yaml (pan 0, pitch 0 there):
   # mapping takes the camera's pose from that static mount, not from the head.
-  # 15 down (2026-11-17): level showed too little floor in front of the robot.
-  nav_pose: {pan_deg: 0.0, tilt_deg: 15.0}
+  # The head's tilt reads ~17 deg more than the camera's real pitch: measured 2026-11-19 by
+  # fitting the floor in the D435's depth, head at 56.0 -> camera 39.1 deg down (3 fits within
+  # 0.3 deg). So 32 here puts the camera ~15 deg down, which is what d435_real.yaml's mount
+  # says. At 15 here (2026-11-17) the camera was really level and the map came out slanted.
+  nav_pose: {pan_deg: 0.0, tilt_deg: 32.0}
 
 arm:
   calibration: configs/calibration/robots/so_follower/sortbots_arm.json
