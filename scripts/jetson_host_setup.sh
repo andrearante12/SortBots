@@ -32,6 +32,13 @@
 #     and forces a reboot (sysrq b; with the firmware lock held, the kernel resets through PSCI
 #     instead), logging each one to /var/lib/sortbots/efi-resets.log first. The reboot watchdog
 #     also drops to 60 s: a reboot stuck the same way waited out systemd's 10 min default.
+#  9. logind keeps the owner's shared memory. The robot stack runs as the owner, but in a
+#     system service, not a login: with logind's default RemoveIPC=yes, the moment the
+#     owner's last SSH session closed, logind deleted every /dev/shm file of theirs, Fast DDS's
+#     live segments included. Nodes already talking kept going; anything that joined later
+#     (rosbridge's restarts, a page, `ros2 topic echo`) found the publishers and got no data.
+#     That was the "stuck after boot" seen since 2026-11-16 (found 2026-11-19). Lingering
+#     keeps the owner logged in for logind's purposes; RemoveIPC=no covers the rest.
 #  7. The checkout is shared by every user (all in the owner's group), but
 #     without setgid dirs each user's new files land in THEIR group: 247 of
 #     liam's files were unwritable to andre, and a branch switch half-applied
@@ -190,6 +197,16 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 UNIT
+# 9 --------------------------------------------------------------------------
+mkdir -p /etc/systemd/logind.conf.d
+cat > /etc/systemd/logind.conf.d/sortbots-keep-ipc.conf <<'CONF'
+[Login]
+# The robot stack's Fast DDS segments in /dev/shm belong to the owner; don't delete them
+# when the owner's last SSH session closes (scripts/jetson_host_setup.sh step 9).
+RemoveIPC=no
+CONF
+loginctl enable-linger "$OWNER"
+
 cat > /etc/systemd/system.conf.d/sortbots-watchdog.conf <<'CONF'
 [Manager]
 # A reboot stuck in the firmware waited out the 10 min default before the hardware reset it.
@@ -212,5 +229,6 @@ echo "  wifi     : $(nmcli -g connection.autoconnect,connection.autoconnect-retr
 echo "  journal  : $(ls -d /var/log/journal/*/ >/dev/null 2>&1 && echo persistent || echo 'NOT persistent yet')"
 echo "  watchdog : $(systemctl is-active sortbots-net-watchdog.timer)"
 echo "  console  : $(systemctl is-enabled sortbots-console.service), $(systemctl is-active sortbots-console.service)"
+echo "  keep ipc : linger $(loginctl show-user "$OWNER" -p Linger --value), RemoveIPC=no from the next logind start"
 echo "  efi wdog : $(systemctl is-active sortbots-efi-watchdog.service) (forced reboots so far: $(wc -l < /var/lib/sortbots/efi-resets.log 2>/dev/null || echo 0))"
 echo "Also: Tailscale admin console → Machines → $(hostname) → Disable key expiry."
