@@ -382,6 +382,12 @@ class ExplorerNode(Node):
         # map_merge running.
         self.create_subscription(OccupancyGrid, map_topic, self._on_map, MAP_QOS)
         self.create_subscription(String, f"/{robot_id}/explore_cmd", self._on_cmd, 10)
+        # The operator view's E-STOP (nodes/base_driver.py latches the wheels): stop exploring
+        # here too, so a released e-stop doesn't find the robot still chasing its last goal.
+        from std_msgs.msg import Bool
+        self.create_subscription(
+            Bool, f"/{robot_id}/estop",
+            lambda m: self._on_cmd(String(data="stop")) if m.data and self.state != "stopped" else None, 10)
         self.create_subscription(String, f"/{robot_id}/explore_hint", self._on_hint, 10)
         # Mesh broadcasts (sim: shared ROS topics). Not /{robot_id}/-namespaced.
         self.create_subscription(

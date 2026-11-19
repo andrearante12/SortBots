@@ -29,6 +29,10 @@ and a servo board takes one owner: anything that moves either goes through here.
                                               {"cmd": "cancel"} holds the arm where it is
     /<id>/pick_status  std_msgs/String (JSON, latched) phase/busy/note/result, the keys the
                                               sim's magnet_pick.py publishes
+    /<id>/estop        std_msgs/Bool           true latches the e-stop (nodes/base_driver.py
+                                              brakes the wheels): a running pick is aborted
+                                              (the arm holds, the magnet is NOT dropped),
+                                              and arm jogs and picks are refused until false
     /<id>/robot_mode_cmd std_msgs/String (JSON) {"mode": "nav" | "manip"}
     /<id>/robot_mode   std_msgs/String (JSON)  {"mode", "mapping": running|paused|unavailable}
 
@@ -778,6 +782,14 @@ def run_node(robot_id: str, cfg: dict):
         if not isinstance(cmd, dict):
             return
         now = time.monotonic()
+        if estop["on"]:
+            if arm is not None:
+                arm.stop()
+            if magnet is not None and cmd.get("magnet") == "off":
+                magnet.set(False)        # letting go is never blocked
+            elif cmd.get("jog") or cmd.get("magnet") == "on":
+                arm_msg["note"] = "e-stop is latched: release it to move the arm"
+            return
         if pick["thread"] is not None:
             # handeye's page: any key aborts a pick. A pad touch or the stop button does here.
             if (isinstance(cmd.get("jog"), dict) and any(cmd["jog"].values())) or cmd.get("stop"):
@@ -797,6 +809,20 @@ def run_node(robot_id: str, cfg: dict):
                 magnet.set(cmd["magnet"] == "on")
 
     arm_msg = {"note": ""}
+    estop = {"on": False}
+
+    def on_estop(msg):
+        on = bool(msg.data)
+        if on != estop["on"]:
+            log.warning(f"e-stop {'LATCHED: pick aborted, arm holding' if on else 'released'}")
+        estop["on"] = on
+        if on:
+            pick["abort"].set()          # pick_core holds where it is; the magnet stays as it is
+            if arm is not None:
+                arm.stop()
+
+    from std_msgs.msg import Bool
+    node.create_subscription(Bool, f"/{robot_id}/estop", on_estop, 10)
 
     # -- the one-button pick (nodes/pick_ros.py around scripts/pick_core.py) ------------------
     from rclpy.qos import (DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data)
@@ -959,6 +985,8 @@ def run_node(robot_id: str, cfg: dict):
 
     def on_pick_request(msg):
         cmd = _json(msg.data) or {}
+        if cmd.get("cmd") in ("auto", "rest", "pick_hold") and estop["on"]:
+            return pick_status("FAILED", "e-stop is latched: release it first")
         if cmd.get("cmd") in ("auto", "rest", "pick_hold"):
             set_mode("manip")
             start_pick(cmd["cmd"])

@@ -1889,6 +1889,7 @@
     consoles = body.consoles || [];
     chip.hidden = false;
     chip.dataset.platform = plat;
+    $("#estop-latch").hidden = plat !== "real";
     $("#platform-label").textContent = plat === "real" ? "REAL" : "SIM";
     chip.title = plat === "real" ? "Driving the real robot (this console runs on the robot)" : "Driving the Isaac simulation";
     const here = location.host;
@@ -2653,6 +2654,40 @@
       saveWaypoints(waypoints.filter((w) => w.name !== del));
     }
   });
+  // E-STOP (real robot): latch /<id>/estop on every robot (nodes/base_driver.py brakes and then
+  // ignores all driving; arm_driver aborts a pick; the explorer stops), and cancel goals here
+  // too. Sent three times: a Bool lost on a flaky link must not leave the robot moving. The
+  // button reads the latch back from base_status, so every open page shows it, and release
+  // takes a second click within 4 s.
+  function sendEstop(on) {
+    for (const id of robots.keys()) {
+      for (let i = 0; i < 3; i++) setTimeout(() => publish(`/${id}/estop`, "std_msgs/Bool", { data: on }), i * 150);
+      if (on) stopRobot(id);
+    }
+  }
+  const estopLatched = () => [...robots.values()].some((r) => r.base && r.base.estop && performance.now() - (r.baseAt || 0) < 5000);
+  function syncEstop() {
+    const b = $("#estop-latch");
+    const on = estopLatched();
+    b.classList.toggle("latched", on);
+    if (!b.dataset.armed) b.textContent = on ? "E-STOPPED · Release" : "E-STOP";
+    b.title = on ? "E-stop is latched on the robot: wheels braked, all driving refused. Click twice to release"
+                 : "Emergency stop: brake every robot's wheels NOW and refuse all driving (pad, Nav2, explore) until released";
+  }
+  $("#estop-latch").addEventListener("click", () => {
+    const b = $("#estop-latch");
+    if (!estopLatched()) { sendEstop(true); b.classList.add("latched"); b.textContent = "E-STOPPED · Release"; toast("E-STOP: every robot braked"); return; }
+    if (!b.dataset.armed) {
+      b.dataset.armed = "1"; b.textContent = "Release? Click again";
+      setTimeout(() => { delete b.dataset.armed; syncEstop(); }, 4000);
+      return;
+    }
+    delete b.dataset.armed;
+    sendEstop(false);
+    toast("E-stop released: driving allowed again");
+  });
+  setInterval(syncEstop, 500);
+
   // Stop all: halt every robot NOW (it is still the emergency button), then end the
   // sim, asking only what can't be undone: whether this run's map is kept. Same server
   // calls as the session panel's Stop and Save & finish, so nobody has to go through

@@ -20,6 +20,10 @@ Safety, in the order it bites:
   released (wheels 0, torque off) after `ros.idle_release_s` stopped, so the Robot view's
   drive bridge and `handeye pick` can take it the rest of the time. A board some other
   process holds is never opened underneath it; base_status names the holder.
+- E-stop. /<id>/estop (std_msgs/Bool) true latches it HERE, not in the page: the wheels
+  brake to 0 at `estop_decel_mps2` and every cmd_vel (pad, Nav2, explorer) is ignored until
+  a false arrives. The board stays held while latched, so the wheels hold at 0 (braked)
+  instead of being released to roll. base_status carries "estop", so every open page shows it.
 - An STS3215 keeps its last speed if this process is SIGKILLed mid-drive. SIGINT/SIGTERM
   release the wheels, and run_robot.sh stop runs `--stop` after its pkill -9 sweep. The
   base's power switch is the e-stop for everything software can't reach.
@@ -80,8 +84,20 @@ class Drive:
         # What the operator view shows for the board, kept current while nothing drives (probe):
         # unplugged or unpowered used to show only once a drive press failed (2026-11-19).
         self.prober, self.board, self.missing, self.next_probe = prober, "unknown", [], 0.0
+        self.estop = False
+
+    def set_estop(self, on: bool, now: float):
+        """Latch (on) or release the e-stop. Latching drops the target at once; tick() brakes."""
+        self.estop = bool(on)
+        if self.estop:
+            self.target, self.target_at = (0.0, 0.0, 0.0), now
+            self.state, self.message = "estop", "E-stop: release it in the operator view to drive again"
+        elif self.state == "estop":
+            self.state, self.message = "idle", ""
 
     def command(self, x, y, w, now):
+        if self.estop:
+            return                      # latched: nothing drives until it is released
         self.target = clamp_cmd(x, y, w, self.ros["max_xy"], self.ros["max_w"])
         self.target_at = now
 
@@ -93,16 +109,23 @@ class Drive:
     def tick(self, now, dt):
         tgt = self._wanted(now)
         moving_wanted = any(abs(v) > 1e-6 for v in tgt)
+        if self.estop:
+            tgt, moving_wanted = (0.0, 0.0, 0.0), False
         if self.bus is None:
             self.vel = (0.0, 0.0, 0.0)
+            if self.estop:
+                self.state, self.message = "estop", "E-stop: release it in the operator view to drive again"
+                return
             if moving_wanted and now >= self.next_open:
                 self._open(now)
             elif not moving_wanted:
                 # busy/error describe the last attempt to drive; with no one asking, idle.
                 self.state, self.message = "idle", ""
             return
-        a = float(self.cfg.get("accel_mps2", 1.0)) * dt
-        al = math.radians(float(self.cfg.get("alpha_dps2", 180))) * dt
+        # The e-stop brakes harder than the drive ramp, but still ramps: a step to 0 on this
+        # tall base is the tip-over the ramp exists for.
+        a = float(self.cfg.get("estop_decel_mps2" if self.estop else "accel_mps2", 3.0 if self.estop else 1.0)) * dt
+        al = math.radians(float(self.cfg.get("alpha_dps2", 180)) * (3.0 if self.estop else 1.0)) * dt
         self.vel = (ramp(self.vel[0], tgt[0], a), ramp(self.vel[1], tgt[1], a), ramp(self.vel[2], tgt[2], al))
         raw = body_to_wheel_raw(*self.vel, self.cfg)
         if raw != self.raw or now - self.sent_at >= RESEND_S:
@@ -112,7 +135,11 @@ class Drive:
                 self._lost(now, f"wheel board write failed: {e}")
                 return
             self.raw, self.sent_at = raw, now
-        if any(raw) or moving_wanted:
+        if self.estop:
+            # Braking, then holding 0 with the board kept (never released while latched).
+            self.stopped_since = None
+            self.state, self.message = "estop", "E-stop: release it in the operator view to drive again"
+        elif any(raw) or moving_wanted:
             self.stopped_since = None
             self.state, self.message = "driving", ""
         else:
@@ -175,7 +202,7 @@ class Drive:
 
     def status(self):
         return {"state": self.state, "message": self.message, "port": self.port,
-                "board": self.board, "missing": self.missing,
+                "board": self.board, "missing": self.missing, "estop": self.estop,
                 "max_mps": self.ros["max_xy"], "max_dps": round(math.degrees(self.ros["max_w"])),
                 "speed_level": self.ros["speed_level"], "wheels_raw": self.raw}
 
@@ -219,6 +246,14 @@ def run_node(robot_id: str, cfg: dict):
         drive.command(msg.linear.x, msg.linear.y, msg.angular.z, time.monotonic())
 
     node.create_subscription(Twist, f"/{robot_id}/cmd_vel", on_cmd, 10)
+
+    def on_estop(msg):
+        if bool(msg.data) != drive.estop:
+            log.warning(f"e-stop {'LATCHED' if msg.data else 'released'}")
+        drive.set_estop(bool(msg.data), time.monotonic())
+
+    from std_msgs.msg import Bool
+    node.create_subscription(Bool, f"/{robot_id}/estop", on_estop, 10)
     status_pub = node.create_publisher(String, f"/{robot_id}/base_status", 10)
     last = {"t": time.monotonic(), "state": None}
 

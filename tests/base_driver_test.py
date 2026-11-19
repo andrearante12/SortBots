@@ -1,6 +1,8 @@
 """nodes/base_driver.py's Drive: cmd_vel -> wheel frames on a fake clock and a fake bus.
 No ROS, no hardware."""
 import math
+
+import pytest
 import sys
 from pathlib import Path
 
@@ -150,3 +152,35 @@ def test_probe_leaves_a_held_board_alone():
                  holders_of=lambda port: [(42, "handeye")], prober=lambda *a: calls.append(a))
     d.probe(0.0)
     assert d.board == "busy" and not calls
+
+
+def test_estop_brakes_ignores_commands_and_holds_until_released():
+    d, st = make()
+    t = run(d, 0.0, 1.0, cmd=(0.3, 0, 0))                # driving
+    assert d.state == "driving" and any(st["bus"].frames[-1].values())
+    d.set_estop(True, t)
+    t = run(d, t, 0.2, cmd=(0.3, 0, 0))                  # the pad keeps pushing: ignored
+    assert d.state == "estop" and not any(st["bus"].frames[-1].values())
+    assert d.vel == (0.0, 0.0, 0.0)
+    t = run(d, t, d.ros["idle_release_s"] + 1.0)         # latched: held braked, never released
+    assert st["released"] == 0 and d.bus is not None and d.status()["estop"] is True
+    d.set_estop(False, t)
+    t = run(d, t, 0.5, cmd=(0.2, 0, 0))                  # released: drives again
+    assert d.state == "driving" and any(st["bus"].frames[-1].values())
+
+
+def test_estop_brakes_harder_than_the_drive_ramp():
+    d, st = make()
+    t = run(d, 0.0, 1.0, cmd=(0.3, 0, 0))
+    d.set_estop(True, t)
+    d.tick(t, DT)
+    one_tick = 0.3 - d.vel[0]
+    assert one_tick == pytest.approx(CFG.get("estop_decel_mps2", 3.0) * DT, rel=1e-3)
+    assert one_tick > CFG["accel_mps2"] * DT
+
+
+def test_estop_without_the_board_never_opens_it():
+    d, st = make()
+    d.set_estop(True, 0.0)
+    run(d, 0.0, 1.0, cmd=(0.3, 0, 0))
+    assert st["opened"] == 0 and d.state == "estop"

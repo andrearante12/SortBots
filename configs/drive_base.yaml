@@ -41,6 +41,9 @@ speed_levels:
 # step change; 1 m/s^2 still stops from the top speed in 0.3 s.
 accel_mps2: 1.0
 alpha_dps2: 180
+# The operator view's E-STOP (nodes/base_driver.py): brakes harder than the ramp above, but
+# still ramps (0.3 m/s to 0 in 0.1 s), then holds the wheels at 0 until it is released.
+estop_decel_mps2: 3.0
 
 # No command for this long and the wheels are ramped to a stop: a closed tab, a
 # dropped Wi-Fi link or a crashed browser must never leave the robot driving.
