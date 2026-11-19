@@ -41,7 +41,14 @@ set -euo pipefail
 
 [[ $(id -u) == 0 ]] || { echo "run with sudo: sudo $0 $*"; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="${SORTBOTS_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# Run from a copy (/tmp/setup.sh), "the repo" was / and step 7 ran chgrp -R over the whole
+# filesystem as root (2026-11-19). Refuse anything that isn't a SortBots checkout.
+if [[ ! -d "$REPO_ROOT/.git" || ! -x "$REPO_ROOT/scripts/jetson.sh" ]]; then
+  echo "[setup] $REPO_ROOT is not a SortBots checkout: run scripts/jetson_host_setup.sh from"
+  echo "        the repo, or set SORTBOTS_REPO=/path/to/SortBots for a copy of this script."
+  exit 1
+fi
 OWNER="$(stat -c %U "$REPO_ROOT")"
 WIFI="${1:-eduroam}"
 WIFI_DEV="$(nmcli -t -f DEVICE,TYPE dev | awk -F: '$2=="wifi"{print $1; exit}')"
