@@ -569,6 +569,16 @@ def test_without_a_place_pose_it_stops_holding():
     assert core.go_rest() is False  # still refuses: magnet on
 
 
+def test_pick_and_hold_skips_the_saved_place():
+    # The operator view's Pick & hold, for teaching a new place spot: a place pose is saved,
+    # but it stops holding the package and leaves the arm to the pad.
+    core, bus, mag, _ = make_core()
+    assert core.st["place_q"] is not None
+    core.go_rest()
+    assert core.auto_pick(10, place=False) == "picked"
+    assert mag.coil and core.st["state"] == "holding"
+
+
 # ---- the marker detector on a rendered image -------------------------------------------------
 def _render(K, R, c, marker_id=10, marker_m=0.02, wh=(1280, 720)):
     """A DICT_4X4_50 marker on a plane (marker frame R, centre c, camera frame) into a white

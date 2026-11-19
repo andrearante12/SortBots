@@ -20,6 +20,10 @@ and a servo board takes one owner: anything that moves either goes through here.
                                               base_link: x, y, z m, pitch rad), "magnet"
     /<id>/pick_request std_msgs/String (JSON) {"cmd": "auto"} the one-button pick and place
                                               (scripts/pick_core.py, handeye.py's PICK);
+                                              {"cmd": "pick_hold"} the pick without the place:
+                                              it holds the package and hands the arm back to
+                                              the pad; {"cmd": "save_place"} saves where the
+                                              arm is now as the place pose;
                                               {"cmd": "rest"} back to the taught rest pose,
                                               releasing the magnet first if it's on;
                                               {"cmd": "cancel"} holds the arm where it is
@@ -90,6 +94,7 @@ from drive_bridge import busy_message, holders  # noqa: E402
 CONTROL_HZ = 50
 STATE_HZ = 5
 RETRY_OPEN_S = 2.0
+MAGNET_PROBE_S = 5.0
 PEEK_S = 1.0  # while not holding the board: read where the head is this often, torque untouched
 POSE_STALE_S = 5.0  # a pose older than this isn't reported (a failed peek keeps the last one)
 # The arm board's link dropped out for ~1-2 s at a time (2026-11-16: ~25% of reads lost in
@@ -180,6 +185,12 @@ class Head:
         self.read_fail_since = None
         self.goal_sent_at = -1e9
         self.state, self.message = "idle", ""
+        # The board as the operator view shows it (feetech.probe's words), from the peek while
+        # not holding it: unplugged or unpowered showed only once a press failed (2026-11-19).
+        # The arm's ids are pinged too: one board, and a dead arm cable is worth saying.
+        arm_cal = (cfg.get("arm") or {}).get("cal") or {}
+        self.arm_ids = [int(c["id"]) for c in arm_cal.values() if isinstance(c, dict) and "id" in c]
+        self.board, self.missing = "unknown", []
 
     # -- conversions: the sim's radians <-> head.py's degrees -----------------------------------
     def to_deg(self, m, rad):
@@ -290,6 +301,9 @@ class Head:
         if self.bus is None:
             if self.state == "connecting" and now >= self.next_open:
                 self._open(now)
+            elif self.state == "error" and self.target is not None and self.board == "ok" \
+                    and now >= self.next_open:
+                self._open(now)       # the board came back (the peek saw it): hold again
             return
         if self.target is None:
             return
@@ -324,12 +338,15 @@ class Head:
             finally:
                 self.bus.timeout_s = saved
             self.read_fail_since = None
+            self.board, self.missing = "ok", []
         except OSError as e:
+            self.board = "no_usb"
             self._lost(now, f"arm board gone: {e}")
         except ft.BusError as e:
             # A dropout: keep holding (the goal frames are re-sent) unless it has gone on.
             self.read_fail_since = self.read_fail_since if self.read_fail_since is not None else now
             if now - self.read_fail_since >= LINK_LOST_S:
+                self.board = "no_power"
                 self._lost(now, f"arm board silent for {LINK_LOST_S:.0f} s: {e}")
 
     def _peek(self, now):
@@ -340,14 +357,27 @@ class Head:
             return
         self.next_peek = now + PEEK_S
         if self.holders_of(self.port):
+            self.board = "busy"
             return
         bus = self.opener(self.port, timeout_s=PEEK_TIMEOUT_S)
         try:
             bus.open()
             time.sleep(PEEK_SETTLE_S)
-            self.pos, self.pos_at = self._read(bus), now
-        except (OSError, ft.BusError):
-            pass  # keep the last pose; status() drops it once it is POSE_STALE_S old
+            missing = []
+            try:
+                self.pos, self.pos_at = self._read(bus), now
+            except ft.BusError:
+                missing += list(self.ids.values())  # keep the last pose; status() ages it out
+            for sid in self.arm_ids:
+                try:
+                    bus.read(sid, ft.MODEL_NUMBER, retries=0)
+                except ft.BusError:
+                    missing.append(sid)
+            n = len(self.ids) + len(self.arm_ids)
+            self.board = "no_power" if len(missing) == n else "partial" if missing else "ok"
+            self.missing = missing
+        except OSError:
+            self.board, self.missing = "no_usb", []
         finally:
             try:
                 bus.close()
@@ -381,7 +411,9 @@ class Head:
 
     def status(self, now=None):
         now = time.monotonic() if now is None else now
-        s = {"held": self.bus is not None, "state": self.state, "message": self.message}
+        s = {"held": self.bus is not None, "state": self.state, "message": self.message,
+             "board": "ok" if self.bus is not None and self.read_fail_since is None else self.board,
+             "missing": self.missing}
         if self.pos and now - self.pos_at <= POSE_STALE_S:
             s["pan"] = round(self.to_rad("head_pan", self.pos["head_pan"]), 4)
             s["tilt"] = round(self.to_rad("head_tilt", self.pos["head_tilt"]), 4)
@@ -682,11 +714,13 @@ class Magnet:
     def _run(self):
         next_rearm = None
         while not self._stop.is_set():
-            timeout = None if next_rearm is None else max(0.0, next_rearm - time.monotonic())
+            # Idle, it asks the board's status every MAGNET_PROBE_S: an unplugged or re-plugged
+            # magnet shows on the page by itself, not only at the next press (2026-11-19).
+            timeout = MAGNET_PROBE_S if next_rearm is None else max(0.0, next_rearm - time.monotonic())
             try:
                 cmd = self.q.get(timeout=timeout)
             except queue.Empty:
-                cmd = "on"  # re-arm
+                cmd = "on" if next_rearm is not None else "status"  # re-arm, or the idle check
             if cmd is None:
                 break
             done = None
@@ -855,7 +889,9 @@ def run_node(robot_id: str, cfg: dict):
                     result = raise_result or ("rest" if core.go_rest() else ("aborted" if abort.is_set() else "failed"))
                 else:
                     core.start()
-                    result = core.auto_pick()
+                    result = core.auto_pick(place=action != "pick_hold")
+                    if action == "pick_hold" and result == "picked":
+                        core.say("holding it: drive the arm to the place spot with the pad, then Save place", 1e9)
             except Exception as e:   # the thread must always end in a status, never silently
                 note = f"{type(e).__name__}: {e}"
                 log.error(f"pick crashed: {note}")
@@ -923,11 +959,42 @@ def run_node(robot_id: str, cfg: dict):
 
     def on_pick_request(msg):
         cmd = _json(msg.data) or {}
-        if cmd.get("cmd") in ("auto", "rest"):
+        if cmd.get("cmd") in ("auto", "rest", "pick_hold"):
             set_mode("manip")
             start_pick(cmd["cmd"])
+        elif cmd.get("cmd") == "save_place":
+            save_place()
         elif cmd.get("cmd") in ("cancel", "stop", "abort"):
             pick["abort"].set()
+
+    def save_place():
+        """Where the arm is now becomes the place pose: handeye's pick_place_pose.json, in the
+        repo's calibration copy that load_robot reads (commit it to keep it). The next pick
+        loads it fresh."""
+        import pick_core
+        import pick_ros
+        if pick["thread"] is not None:
+            return pick_status("BUSY", "a pick is running: save the place pose once it's done", busy=True)
+        if arm is None:
+            return pick_status("FAILED", "no arm configured")
+        now = time.monotonic()
+        if head.bus is None:
+            head._open(now)
+        if head.bus is None:
+            return pick_status("FAILED", f"arm board not available: {head.message}")
+        try:
+            deg = pick_ros.BusArmIO(head.bus, head.cal, arm.cal).read()
+        except (OSError, ft.BusError) as e:
+            return pick_status("FAILED", f"could not read the arm: {e}")
+        path = pick_core.CALIBRATION_DIR / "robots" / "sortbots_head" / "pick_place_pose.json"
+        rec = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "arm_deg": [round(deg[j], 4) for j in pick_ros.ARM]}
+        try:
+            path.write_text(json.dumps(rec, indent=1))
+        except OSError as e:
+            return pick_status("FAILED", f"could not save the place pose: {e}")
+        pick["robot"] = None          # the next pick reloads the poses
+        log.info(f"place pose saved: {rec['arm_deg']}")
+        pick_status("SAVED", "place pose saved: release the magnet, then Rest", busy=False)
 
     node.create_subscription(String, f"/{robot_id}/pick_request", on_pick_request, 10)
 

@@ -32,6 +32,13 @@
 #     and forces a reboot (sysrq b; with the firmware lock held, the kernel resets through PSCI
 #     instead), logging each one to /var/lib/sortbots/efi-resets.log first. The reboot watchdog
 #     also drops to 60 s: a reboot stuck the same way waited out systemd's 10 min default.
+#  9. logind keeps the owner's shared memory. The robot stack runs as the owner, but in a
+#     system service, not a login: with logind's default RemoveIPC=yes, the moment the
+#     owner's last SSH session closed, logind deleted every /dev/shm file of theirs, Fast DDS's
+#     live segments included. Nodes already talking kept going; anything that joined later
+#     (rosbridge's restarts, a page, `ros2 topic echo`) found the publishers and got no data.
+#     That was the "stuck after boot" seen since 2026-11-16 (found 2026-11-19). Lingering
+#     keeps the owner logged in for logind's purposes; RemoveIPC=no covers the rest.
 #  7. The checkout is shared by every user (all in the owner's group), but
 #     without setgid dirs each user's new files land in THEIR group: 247 of
 #     liam's files were unwritable to andre, and a branch switch half-applied
@@ -41,7 +48,14 @@ set -euo pipefail
 
 [[ $(id -u) == 0 ]] || { echo "run with sudo: sudo $0 $*"; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="${SORTBOTS_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+# Run from a copy (/tmp/setup.sh), "the repo" was / and step 7 ran chgrp -R over the whole
+# filesystem as root (2026-11-19). Refuse anything that isn't a SortBots checkout.
+if [[ ! -d "$REPO_ROOT/.git" || ! -x "$REPO_ROOT/scripts/jetson.sh" ]]; then
+  echo "[setup] $REPO_ROOT is not a SortBots checkout: run scripts/jetson_host_setup.sh from"
+  echo "        the repo, or set SORTBOTS_REPO=/path/to/SortBots for a copy of this script."
+  exit 1
+fi
 OWNER="$(stat -c %U "$REPO_ROOT")"
 WIFI="${1:-eduroam}"
 WIFI_DEV="$(nmcli -t -f DEVICE,TYPE dev | awk -F: '$2=="wifi"{print $1; exit}')"
@@ -160,11 +174,15 @@ cat > /usr/local/sbin/sortbots-efi-watchdog <<'WDOG'
 # call that never returned), then forces a reboot. Nothing else triggers it.
 # The stall dump's own line, not the bare word: systemd can log a unit's start message into the
 # kernel log early in boot, and a unit description mentioning the word would trigger this.
-dmesg --follow --nopager 2>/dev/null | grep -m1 -q "Workqueue: efi_rts_wq" || exit 0
-logger -p user.crit -t efi-watchdog "UEFI runtime call stuck (efi_rts_wq RCU stall): forcing a reboot"
+# /dev/kmsg itself, not `dmesg --follow | grep`: into a pipe dmesg block-buffers, the stall
+# line never reached grep, and a hung boot (2026-11-19 15:15) sat unreachable with this running.
+# A read can end with EPIPE when the ring buffer wraps; open it again (a match is this boot's).
+until grep -m1 -q "Workqueue: efi_rts_wq" < /dev/kmsg; do sleep 1; done
+# The reboot first, on a timer: anything below may block behind the same stuck firmware call.
+( sleep 10; echo b > /proc/sysrq-trigger ) &
 echo "$(date -Is) uptime $(cut -d' ' -f1 /proc/uptime)s: efi_rts_wq stall, forced reboot" >> /var/lib/sortbots/efi-resets.log
-journalctl --sync 2>/dev/null; sync
-echo s > /proc/sysrq-trigger; sleep 1
+timeout 3 logger -p user.crit -t efi-watchdog "UEFI runtime call stuck (efi_rts_wq RCU stall): forcing a reboot"
+timeout 3 journalctl --sync 2>/dev/null; echo s > /proc/sysrq-trigger; sleep 2
 echo b > /proc/sysrq-trigger
 WDOG
 chmod 755 /usr/local/sbin/sortbots-efi-watchdog
@@ -179,6 +197,16 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 UNIT
+# 9 --------------------------------------------------------------------------
+mkdir -p /etc/systemd/logind.conf.d
+cat > /etc/systemd/logind.conf.d/sortbots-keep-ipc.conf <<'CONF'
+[Login]
+# The robot stack's Fast DDS segments in /dev/shm belong to the owner; don't delete them
+# when the owner's last SSH session closes (scripts/jetson_host_setup.sh step 9).
+RemoveIPC=no
+CONF
+loginctl enable-linger "$OWNER"
+
 cat > /etc/systemd/system.conf.d/sortbots-watchdog.conf <<'CONF'
 [Manager]
 # A reboot stuck in the firmware waited out the 10 min default before the hardware reset it.
@@ -201,5 +229,6 @@ echo "  wifi     : $(nmcli -g connection.autoconnect,connection.autoconnect-retr
 echo "  journal  : $(ls -d /var/log/journal/*/ >/dev/null 2>&1 && echo persistent || echo 'NOT persistent yet')"
 echo "  watchdog : $(systemctl is-active sortbots-net-watchdog.timer)"
 echo "  console  : $(systemctl is-enabled sortbots-console.service), $(systemctl is-active sortbots-console.service)"
+echo "  keep ipc : linger $(loginctl show-user "$OWNER" -p Linger --value), RemoveIPC=no from the next logind start"
 echo "  efi wdog : $(systemctl is-active sortbots-efi-watchdog.service) (forced reboots so far: $(wc -l < /var/lib/sortbots/efi-resets.log 2>/dev/null || echo 0))"
 echo "Also: Tailscale admin console → Machines → $(hostname) → Disable key expiry."

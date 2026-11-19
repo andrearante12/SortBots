@@ -1150,14 +1150,17 @@ class PickCore:
         for j in PRESS_JOINTS:
             self.io.set_torque_limit(j, FULL_TORQUE)
 
-    def auto_pick(self, marker_id=10):
+    def auto_pick(self, marker_id=10, place=True):
         """handeye cmd_pick.auto_pick: hold, rest, find the marker, lock (stepping aside), plan,
         raise clear if not from rest, GO, descend and pick, place if a place pose is set. The
         first refusal or abort stops the chain where it is, the reason in a report.
         -> "placed" | "picked" (holding it, no place pose or the place refused) | "failed" | "aborted".
-        `abort` is cleared on entry: a stop pressed before this pick doesn't cancel it."""
+        `abort` is cleared on entry: a stop pressed before this pick doesn't cancel it.
+        place=False stops once it holds the package: the operator drives it to a new place spot
+        by hand and saves that as the place pose (the operator view's Pick & hold)."""
         st = self.st
         self.marker_id = marker_id
+        self.place_after = place
         self.abort.clear()
         if not self.mag.magnet:
             self.say("no magnet board: plug in the ESP32 and restart", 20.0)
@@ -1191,7 +1194,7 @@ class PickCore:
         if not self.do_go():
             return "failed"
         self.descend_and_pick()
-        if st["state"] == "holding" and st["place_q"] is not None:
+        if st["state"] == "holding" and st["place_q"] is not None and getattr(self, "place_after", True):
             if self.do_place():
                 return "placed"
         return "picked" if st["state"] == "holding" else "failed"

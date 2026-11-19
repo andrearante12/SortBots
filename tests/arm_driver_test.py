@@ -399,3 +399,46 @@ def test_nav_pose_opens_a_board_that_shows_up_later():
     assert head.bus is None
     head.hold_nav(ad.RETRY_OPEN_S + 0.1)
     assert head.state == "holding" and head.bus is bus and bus.open_
+
+
+class PowerBus(FakeBus):
+    """The arm board with its supply switched: the USB chip answers opens, servos only reads
+    while powered."""
+    powered = True
+
+    def read(self, sid, reg, sign_bit=None, retries=2):
+        if not PowerBus.powered:
+            raise ft.BusError(f"servo {sid}: no reply")
+        return super().read(sid, reg, sign_bit, retries)
+
+
+def test_peek_names_the_board_and_a_powered_board_is_held_again():
+    bus = PowerBus({**CFG["head"]["cal"], **CFG["arm"]["cal"]})
+    head = ad.Head(CFG, opener=lambda port, **kw: bus, holders_of=lambda port: [])
+    PowerBus.powered = True
+    try:
+        head.command({"head_pan_joint": 0.0}, 0.0)
+        assert head.state == "holding" and head.status(now=0.0)["board"] == "ok"
+        head._lost(1.0, "arm board silent")                 # the supply went off
+        PowerBus.powered = False
+        head.poll(1.0)
+        assert head.board == "no_power" and head.status(now=1.0)["board"] == "no_power"
+        head.tick(1.0 + ad.RETRY_OPEN_S, DT)                # nothing answers: not reopened
+        assert head.bus is None
+        PowerBus.powered = True
+        head.poll(1.0 + ad.PEEK_S)
+        assert head.board == "ok"
+        head.tick(1.0 + ad.PEEK_S + ad.RETRY_OPEN_S, DT)    # back: held again, no restart
+        assert head.state == "holding" and head.bus is bus
+    finally:
+        PowerBus.powered = True
+
+
+def test_peek_names_silent_arm_servos_and_a_busy_board():
+    bus = FakeBus(CFG["head"]["cal"])                       # the arm's ids don't answer
+    head = ad.Head(CFG, opener=lambda port, **kw: bus, holders_of=lambda port: [])
+    head.poll(0.0)
+    assert head.board == "partial" and sorted(head.missing) == sorted(head.arm_ids)
+    busy = ad.Head(CFG, opener=lambda port, **kw: bus, holders_of=lambda port: [(9, "handeye")])
+    busy.poll(0.0)
+    assert busy.board == "busy"
