@@ -15,7 +15,11 @@
 # 848x480 @ 30 matches d435.json and is the D435's best depth resolution.
 # On USB 2 the camera refuses this pair; `lsusb -t` should show the D435 at
 # 5000M. If it shows 480M, re-seat the cable in a USB 3 port.
-profile: "848,480,30"
+# 15 fps, not 30 (2026-11-19): with Nav2 up the Orin ran 6 cores flat out (load 27) and the
+# drive pad lagged; odometry, the driver, the obstacle cloud, the tracker and the collision
+# monitor all work per frame. At the explorer's 0.15 m/s and 0.6 rad/s that is still ~2 deg
+# of turn per frame, which visual odometry tracks.
+profile: "848,480,15"
 
 # Physical mount: <robot_id>/base_link -> <robot_id>/camera_link, where
 # camera_link is RealSense's own body frame (x forward, y left, z up; its

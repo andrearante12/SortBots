@@ -7,6 +7,8 @@
 # - Obstacles: the real stack publishes /<id>/obstacles (nodes/obstacle_cloud.py: raw D435
 #   depth in base_link, already cut to 0.05-1.5 m above the floor), not the sim's
 #   depth_static / dynamic / predicted clouds (dynamic_obstacle_filter is off on the Orin).
+# - Floor: obstacles start 0.12 m up, not 0.05 (nodes/obstacle_cloud.py --min-height-m in the
+#   bringup too): far floor read 5-10 cm high and was marked as obstacles.
 # - Speed: slow on purpose for a first autonomous run of a 1.2 m tall base on visual
 #   odometry, under nodes/base_driver.py's own cap (configs/drive_base.yaml, 0.3 m/s).
 # - CPU: MPPI at the sim's 2000 samples x 56 steps x 20 Hz is about a core on the Orin
@@ -40,7 +42,7 @@
           marking: true
           clearing: true
           max_obstacle_height: 1.5
-          min_obstacle_height: 0.05
+          min_obstacle_height: 0.12
           obstacle_max_range: 3.5
           raytrace_max_range: 4.0
 
@@ -57,7 +59,7 @@
           marking: true
           clearing: true
           max_obstacle_height: 1.5
-          min_obstacle_height: 0.05
+          min_obstacle_height: 0.12
           obstacle_max_range: 3.5
           raytrace_max_range: 4.0
 
@@ -79,6 +81,6 @@
     obstacles:
       type: "pointcloud"
       topic: "/robot_0/obstacles"
-      min_height: 0.05
+      min_height: 0.12
       max_height: 1.5
       enabled: true

@@ -230,7 +230,8 @@ def _make_per_robot_actions(
                 "python3",
                 os.path.join(REPO_ROOT, "nodes", "obstacle_detector.py"),
                 "--robot-id", rid,
-            ],
+            ] + (["--overlay", os.path.join(REPO_ROOT, "configs", "obstacle_detector_real.yaml")]
+                 if platform == "real" else []),
             output="screen",
         ))
         # The magnet plates in front of the robot, in the map frame (/<id>/packages):
@@ -282,6 +283,10 @@ def _make_per_robot_actions(
                     "python3",
                     os.path.join(REPO_ROOT, "nodes", "obstacle_cloud.py"),
                     "--robot-id", rid,
+                    # 12 cm, not 5: a 1 deg camera-pitch error lifts the floor ~5 cm at 3 m,
+                    # and ~6k floor points a frame (1.5-4.4 m out) were marked as obstacles
+                    # (2026-11-19). Matches configs/nav2_real.yaml's min_obstacle_height.
+                    "--min-height-m", "0.12",
                 ],
                 output="screen",
             ))
