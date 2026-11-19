@@ -20,7 +20,7 @@ Safety, in the order it bites:
   released (wheels 0, torque off) after `ros.idle_release_s` stopped, so the Robot view's
   drive bridge and `handeye pick` can take it the rest of the time. A board some other
   process holds is never opened underneath it; base_status names the holder.
-- Stale pad commands. The operator view's pad sends /<id>/cmd_vel_teleop (TwistStamped, the
+- Stale pad commands. The operator view's pad sends /<id>/cmd_vel_pad (TwistStamped, the
   browser's send time). Its delay is measured against the best delay of the last minute (so
   the laptop's and the Jetson's clocks needn't agree), and a command more than TELEOP_STALE_S
   staler than that is dropped: a rosbridge backlog under load must not replay a second of
@@ -303,9 +303,11 @@ def run_node(robot_id: str, cfg: dict):
             return
         drive.command(t.linear.x, t.linear.y, t.angular.z, time.monotonic())
 
-    # The pad's own topic, stamped; Nav2 and everything else keep plain cmd_vel. Depth 1:
+    # The pad's own topic, stamped; Nav2 and everything else keep plain cmd_vel. Not
+    # "cmd_vel_teleop": that is Nav2's own (assisted teleop, a plain Twist), and rosbridge
+    # refused every stamped press on it (2026-11-19). Depth 1:
     # if this node falls behind, only the newest command matters.
-    node.create_subscription(TwistStamped, f"/{robot_id}/cmd_vel_teleop", on_teleop, 1)
+    node.create_subscription(TwistStamped, f"/{robot_id}/cmd_vel_pad", on_teleop, 1)
     status_pub = node.create_publisher(String, f"/{robot_id}/base_status", 10)
     last = {"t": time.monotonic(), "state": None}
 

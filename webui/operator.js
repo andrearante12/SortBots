@@ -1408,7 +1408,7 @@
       // Stamped with the send time on its own topic: nodes/base_driver.py drops a command
       // that arrives backlogged (rosbridge behind under load) instead of replaying it late.
       const t = Date.now();
-      publish(`/${id}/cmd_vel_teleop`, "geometry_msgs/TwistStamped", {
+      publish(`/${id}/cmd_vel_pad`, "geometry_msgs/TwistStamped", {
         header: { stamp: { sec: Math.floor(t / 1000), nanosec: (t % 1000) * 1e6 }, frame_id: "teleop" },
         twist: { linear: { x, y, z: 0 }, angular: { x: 0, y: 0, z } } });
     } else {
