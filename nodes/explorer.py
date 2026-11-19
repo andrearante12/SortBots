@@ -1853,6 +1853,8 @@ def main() -> None:
     )
     parser.add_argument("--robot-id", default="robot_0")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--overlay", type=Path, default=None,
+                        help="YAML whose keys override --config's (configs/explorer_real.yaml on the real robot)")
     parser.add_argument(
         "--autostart",
         action="store_true",
@@ -1868,6 +1870,9 @@ def main() -> None:
     args = parser.parse_args(remove_ros_args(args=sys.argv)[1:])
 
     cfg = load_config(args.config)
+    if args.overlay and args.overlay.exists():
+        with open(args.overlay) as f:
+            cfg.update(yaml.safe_load(f) or {})
 
     rclpy.init(args=sys.argv)
     node = ExplorerNode(args.robot_id, cfg, args.autostart, args.map_topic)

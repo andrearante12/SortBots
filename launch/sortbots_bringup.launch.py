@@ -365,9 +365,13 @@ def _make_per_robot_actions(
                 output="screen",
             ))
 
+        nav2_args = {"robot_id": rid, "use_sim_time": use_sim_time}
+        if platform == "real":
+            # Slow, CPU-light, on the real obstacle cloud: configs/nav2_real.yaml says why.
+            nav2_args["overlay_file"] = os.path.join(REPO_ROOT, "configs", "nav2_real.yaml")
         actions.append(IncludeLaunchDescription(
             _include("sortbots_nav2.launch.py"),
-            launch_arguments={"robot_id": rid, "use_sim_time": use_sim_time}.items(),
+            launch_arguments=nav2_args.items(),
             condition=IfCondition(nav2),
         ))
 
@@ -437,6 +441,8 @@ def _make_per_robot_actions(
         explorer_cmd = lambda autostart: [
             "python3", os.path.join(REPO_ROOT, "nodes", "explorer.py"), "--robot-id", rid,
             *(["--autostart"] if autostart else []),
+            # Wall-clock budgets for the real base's speed (configs/explorer_real.yaml).
+            *(["--overlay", os.path.join(REPO_ROOT, "configs", "explorer_real.yaml")] if platform == "real" else []),
             "--ros-args", "-p", ["use_sim_time:=", use_sim_time],
         ]
         if shared:

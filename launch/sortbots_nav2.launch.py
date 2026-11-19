@@ -71,7 +71,17 @@ def _substitute_robot_0(node, robot_id: str):
     return node
 
 
-def _rewrite_robot_0(params_path: str, robot_id: str) -> str:
+def _deep_merge(base, over):
+    """`over` merged into `base`, dicts recursively, anything else replaced."""
+    if isinstance(base, dict) and isinstance(over, dict):
+        out = dict(base)
+        for k, v in over.items():
+            out[k] = _deep_merge(base.get(k), v) if k in base else v
+        return out
+    return over
+
+
+def _rewrite_robot_0(params_path: str, robot_id: str, overlay_path: str = "") -> str:
     """Return a copy of `params_path` with every "robot_0" substring in a
     string VALUE replaced by `robot_id`. A value-level substring replace,
     not a key-name substitution — see the module docstring for why: it only
@@ -88,6 +98,11 @@ def _rewrite_robot_0(params_path: str, robot_id: str) -> str:
     """
     with open(params_path) as f:
         data = yaml.safe_load(f)
+    # A platform's overrides (configs/nav2_real.yaml) over the shared file, before the
+    # robot_0 rewrite, so the overlay's own robot_0 values are rewritten too.
+    if overlay_path:
+        with open(overlay_path) as f:
+            data = _deep_merge(data, yaml.safe_load(f) or {})
     data = _substitute_robot_0(data, robot_id)
     out = tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", prefix=f"nav2_params_{robot_id}_", delete=False
@@ -97,9 +112,10 @@ def _rewrite_robot_0(params_path: str, robot_id: str) -> str:
     return out.name
 
 
-def _make_nav2_group(context, use_sim_time, params_file):
+def _make_nav2_group(context, use_sim_time, params_file, overlay_file):
     robot_id = LaunchConfiguration("robot_id").perform(context)
-    rewritten_params = _rewrite_robot_0(params_file.perform(context), robot_id)
+    rewritten_params = _rewrite_robot_0(params_file.perform(context), robot_id,
+                                        overlay_file.perform(context))
 
     # Reactive-replanning BT (see the file's header for what it changes vs
     # the stock tree). Injected as a parameter override rather than written
@@ -245,8 +261,14 @@ def generate_launch_description():
             default_value=default_params,
             description="Full path to the Nav2 params file (rewritten per-robot before use).",
         ),
+        DeclareLaunchArgument(
+            "overlay_file",
+            default_value="",
+            description="Optional YAML merged over params_file first (configs/nav2_real.yaml on the real robot).",
+        ),
         OpaqueFunction(
             function=_make_nav2_group,
-            args=[LaunchConfiguration("use_sim_time"), LaunchConfiguration("params_file")],
+            args=[LaunchConfiguration("use_sim_time"), LaunchConfiguration("params_file"),
+                  LaunchConfiguration("overlay_file")],
         ),
     ])
