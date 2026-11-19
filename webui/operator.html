@@ -138,6 +138,21 @@
   #platform-pop .console[data-platform="sim"] b { color: var(--info); }
   #platform-pop .console .url { font-size: .76rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #platform-pop .hint { margin: 8px 0 0; font-size: .8rem; color: var(--muted); }
+  #maps-btn { padding: 3px 10px; font-size: .84rem; }
+  #maps-pop { position: fixed; top: 54px; left: 50%; transform: translateX(-50%); z-index: 6; width: 380px; max-width: calc(100vw - 24px);
+              background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px var(--shadow); padding: 12px; }
+  #maps-pop h3 { margin: 4px 0 8px; font-size: .9rem; }
+  #maps-pop h3 .muted { font-weight: 400; color: var(--muted); font-size: .8rem; }
+  #maps-pop .row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+  #maps-pop .row.end { justify-content: flex-end; margin: 10px 0 0; }
+  #maps-pop input { flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--ink); font: inherit; }
+  #maps-pop ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; max-height: 40vh; overflow: auto; }
+  #maps-pop li { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; }
+  #maps-pop li:hover { background: var(--hover2); }
+  #maps-pop li .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #maps-pop li .sub { font-size: .76rem; color: var(--muted); white-space: nowrap; }
+  #maps-pop .hint { margin: 8px 0 0; font-size: .8rem; color: var(--muted); }
+  #maps-pop .hint.bad { color: var(--stop); }
   #alarms { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
   #alarms .dot { background: var(--faint); }
   #alarms.on { color: var(--stop); border-color: var(--stopb); font-weight: 600; }
@@ -738,6 +753,22 @@
          only ever draws on the map; the robot cards and alarms stay the real fleet's. -->
     <button id="comms-toggle" type="button" role="switch" aria-checked="false" title="Overlay the comms model on the map: predicted radio links, mesh routes and every message hop, for where the robots are now"><span class="sw"></span>Comms</button>
     <span id="coverage" hidden title="Area of the map the fleet has seen"><b id="cov-n"></b> mapped</span>
+    <!-- The live map: save it to the library, load one, or start over, all while the stack
+         runs (serve.py /api/map/{save,load,clear}: RTAB-Map's own backup, load_database and
+         reset services). Before 2026-11-19 the only way in was Stop all's save dialog. -->
+    <button class="btn" id="maps-btn" hidden aria-haspopup="true" aria-expanded="false" title="Save, load or clear the live map without restarting">Maps</button>
+  </div>
+  <div id="maps-pop" hidden role="dialog" aria-label="Maps">
+    <h3>Live map <span id="maps-current" class="muted"></span></h3>
+    <form id="maps-save" class="row">
+      <input id="maps-name" type="text" spellcheck="false" autocomplete="off" pattern="[a-z0-9][a-z0-9_-]{0,63}" title="lowercase letters, digits, - and _" aria-label="Map name">
+      <button class="btn small" type="submit">Save</button>
+    </form>
+    <h3>Library</h3>
+    <ul id="maps-list"></ul>
+    <p id="maps-empty" class="hint" hidden>No saved maps yet.</p>
+    <div class="row end"><button class="btn small stop" id="maps-clear" type="button" title="Wipe the live map and restart odometry at the origin. What isn't saved is lost">Clear map</button></div>
+    <p id="maps-msg" class="hint" hidden></p>
   </div>
   <span class="spacer"></span>
 <div id="test-chip" hidden title="A scored test is driving the sim"><span class="tp-dot"></span><span class="k">Test</span>

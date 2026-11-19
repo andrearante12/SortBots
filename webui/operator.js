@@ -1922,6 +1922,92 @@
     if (!pop.hidden && !pop.contains(e.target)) { pop.hidden = true; $("#platform-chip").setAttribute("aria-expanded", "false"); }
   });
 
+  // -- the live map: save / load / clear without a restart ------------------------------------------
+  // serve.py's /api/map/{save,load,clear}: RTAB-Map's backup, load_database (on a COPY of the
+  // library file) and reset + reset_odom. Load and Clear throw away whatever wasn't saved, so
+  // both take a second click within CONFIRM_MS.
+  const MAPS_CONFIRM_MS = 4000;
+  const mapsRobot = () => (selected && robots.has(selected) ? selected : "robot_0");
+  const mapsLive = () => !!(session && session.state === "running" && !session.read_only);
+  function mapsMsg(text, bad) { const m = $("#maps-msg"); m.textContent = text || ""; m.hidden = !text; m.classList.toggle("bad", !!bad); }
+  function syncMapsBtn() { $("#maps-btn").hidden = !mapsLive(); if (!mapsLive()) $("#maps-pop").hidden = true; }
+  function armConfirm(btn, label, armedLabel) {
+    // First click arms (the label asks), a second within MAPS_CONFIRM_MS returns true.
+    if (btn.dataset.armed) { clearTimeout(btn._t); delete btn.dataset.armed; btn.textContent = label; return true; }
+    btn.dataset.armed = "1"; btn.textContent = armedLabel;
+    btn._t = setTimeout(() => { delete btn.dataset.armed; btn.textContent = label; }, MAPS_CONFIRM_MS);
+    return false;
+  }
+  async function mapsCall(url, body, busyText) {
+    mapsMsg(busyText);
+    for (const b of $("#maps-pop").querySelectorAll("button")) b.disabled = true;
+    try {
+      const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(out.error || res.statusText);
+      return out;
+    } catch (e) {
+      mapsMsg(`Failed: ${e.message}`, true);
+      return null;
+    } finally {
+      for (const b of $("#maps-pop").querySelectorAll("button")) b.disabled = false;
+    }
+  }
+  async function refreshMaps() {
+    const loaded = session && session.map_name;
+    $("#maps-current").textContent = loaded ? `· loaded from ${loaded}` : "· not saved yet";
+    const name = $("#maps-name");
+    if (!name.value) {
+      const d = new Date(), p2 = (n) => String(n).padStart(2, "0");
+      name.value = loaded || `map-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}`;
+    }
+    let maps = [];
+    try { maps = (await (await fetch("/api/maps")).json()).maps || []; } catch (e) { /* list stays empty */ }
+    const list = $("#maps-list");
+    list.innerHTML = maps.map((m) => {
+      const area = m.coverage && m.coverage.known_m2 != null ? `${Math.round(m.coverage.known_m2)} m²` : "";
+      const when = (m.updated || m.created || "").slice(0, 10);
+      return `<li><span class="nm" title="${esc(m.description || m.title || m.name)}">${esc(m.name)}</span><span class="sub">${esc([area, when].filter(Boolean).join(" · "))}</span><button class="btn small" type="button" data-load="${esc(m.name)}">Load</button></li>`;
+    }).join("");
+    $("#maps-empty").hidden = maps.length > 0;
+    for (const b of list.querySelectorAll("[data-load]")) b.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!armConfirm(b, "Load", "Replace live map?")) return mapsMsg("Loading replaces the live map: anything not saved is lost. Click again to load.");
+      const out = await mapsCall("/api/map/load", { name: b.dataset.load, robot_id: mapsRobot() }, `Loading ${b.dataset.load}…`);
+      if (out) { mapsMsg(`Loaded ${b.dataset.load}.`); toast(`Map ${b.dataset.load} loaded`); pollSession(); }
+    });
+  }
+  $("#maps-btn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const pop = $("#maps-pop");
+    pop.hidden = !pop.hidden;
+    $("#maps-btn").setAttribute("aria-expanded", String(!pop.hidden));
+    if (!pop.hidden) { mapsMsg(""); $("#maps-name").value = ""; refreshMaps(); }
+  });
+  document.addEventListener("click", (e) => {
+    const pop = $("#maps-pop");
+    if (!pop.hidden && !pop.contains(e.target) && e.target.id !== "maps-btn") { pop.hidden = true; $("#maps-btn").setAttribute("aria-expanded", "false"); }
+  });
+  $("#maps-save").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = $("#maps-name").value.trim();
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) return mapsMsg("Name: lowercase letters, digits, - and _", true);
+    // Blocking on the server: the grid off /map plus RTAB-Map's own backup of its database.
+    const out = await mapsCall("/api/map/save", { name, robot_id: mapsRobot() }, `Saving ${name}… (tens of seconds)`);
+    if (!out) return;
+    const pending = out.db_state && out.db_state !== "complete";
+    mapsMsg(pending ? `Saved ${name}: the grid is in, the pose graph is still pending (it completes on the next stop).` : `Saved ${name}.`);
+    toast(`Map saved as ${name}`);
+    refreshMaps();
+  });
+  $("#maps-clear").addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const b = e.currentTarget;
+    if (!armConfirm(b, "Clear map", "Wipe it? Click again")) return mapsMsg("Clearing wipes the live map and restarts at the origin: anything not saved is lost.");
+    const out = await mapsCall("/api/map/clear", { robot_id: mapsRobot() }, "Clearing…");
+    if (out) { mapsMsg("Cleared: mapping starts over from here."); toast("Map cleared"); }
+  });
+
   // -- gateway pin (comms overlay) -------------------------------------------------------------------
   // Where the fleet's gateway / access point stands, per platform (serve.py:
   // data/comms_gateway.json). Not a waypoint: nothing drives there.
@@ -2352,6 +2438,7 @@
       outage.server(true);
     } catch (e) { outage.server(false); /* the console is down; keep the last known state */ }
     renderHeader();
+    syncMapsBtn();
     sessionTimer = setTimeout(pollSession, outage.downAt !== null || (sessionActive() && session.state !== "running") ? 1000 : 3000);
   }
 
