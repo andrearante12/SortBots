@@ -359,70 +359,64 @@ def _build_camera_graph(
     prims with semantics show up in it (spawn_warehouse labels world actors).
     """
     keys = og.Controller.Keys
+    nodes = [
+        ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+        ("CreateRenderProduct", "isaacsim.core.nodes.IsaacCreateRenderProduct"),
+        ("RGBPublish", "isaacsim.ros2.bridge.ROS2CameraHelper"),
+        ("DepthPublish", "isaacsim.ros2.bridge.ROS2CameraHelper"),
+        ("CameraInfoPublish", "isaacsim.ros2.bridge.ROS2CameraInfoHelper"),
+    ]
+    values = [
+        ("CreateRenderProduct.inputs:cameraPrim", [usdrt.Sdf.Path(camera_prim_path)]),
+        ("CreateRenderProduct.inputs:width", width),
+        ("CreateRenderProduct.inputs:height", height),
+        ("RGBPublish.inputs:type", "rgb"),
+        ("RGBPublish.inputs:topicName", rgb_topic),
+        ("RGBPublish.inputs:nodeNamespace", namespace),
+        ("RGBPublish.inputs:frameId", frame_id),
+        ("RGBPublish.inputs:resetSimulationTimeOnStop", True),
+        ("DepthPublish.inputs:type", "depth"),
+        ("DepthPublish.inputs:topicName", depth_topic),
+        ("DepthPublish.inputs:nodeNamespace", namespace),
+        ("DepthPublish.inputs:frameId", frame_id),
+        ("DepthPublish.inputs:resetSimulationTimeOnStop", True),
+        ("CameraInfoPublish.inputs:topicName", camera_info_topic),
+        ("CameraInfoPublish.inputs:nodeNamespace", namespace),
+        ("CameraInfoPublish.inputs:frameId", frame_id),
+        ("CameraInfoPublish.inputs:resetSimulationTimeOnStop", True),
+    ]
+    connect = [
+        ("OnPlaybackTick.outputs:tick", "CreateRenderProduct.inputs:execIn"),
+        ("CreateRenderProduct.outputs:execOut", "RGBPublish.inputs:execIn"),
+        ("CreateRenderProduct.outputs:execOut", "DepthPublish.inputs:execIn"),
+        ("CreateRenderProduct.outputs:execOut", "CameraInfoPublish.inputs:execIn"),
+        ("CreateRenderProduct.outputs:renderProductPath", "RGBPublish.inputs:renderProductPath"),
+        ("CreateRenderProduct.outputs:renderProductPath", "DepthPublish.inputs:renderProductPath"),
+        ("CreateRenderProduct.outputs:renderProductPath", "CameraInfoPublish.inputs:renderProductPath"),
+    ]
+    # In the SAME edit, not a second og.Controller.edit(graph_path, ...): a
+    # later edit resolves "CreateRenderProduct.outputs:execOut" as a USD path
+    # attribute rather than a node in this graph and refuses the connection
+    # (first live --instance-seg run, 2026-11-20).
+    if instance_seg_topic:
+        nodes.append(("InstanceSegPublish", "isaacsim.ros2.bridge.ROS2CameraHelper"))
+        values += [
+            ("InstanceSegPublish.inputs:type", "instance_segmentation"),
+            ("InstanceSegPublish.inputs:topicName", instance_seg_topic),
+            ("InstanceSegPublish.inputs:nodeNamespace", namespace),
+            ("InstanceSegPublish.inputs:frameId", frame_id),
+            ("InstanceSegPublish.inputs:enableSemanticLabels", True),
+            ("InstanceSegPublish.inputs:semanticLabelsTopicName", f"{instance_seg_topic}_labels"),
+            ("InstanceSegPublish.inputs:resetSimulationTimeOnStop", True),
+        ]
+        connect += [
+            ("CreateRenderProduct.outputs:execOut", "InstanceSegPublish.inputs:execIn"),
+            ("CreateRenderProduct.outputs:renderProductPath", "InstanceSegPublish.inputs:renderProductPath"),
+        ]
     og.Controller.edit(
         {"graph_path": graph_path, "evaluator_name": "execution"},
-        {
-            keys.CREATE_NODES: [
-                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
-                ("CreateRenderProduct", "isaacsim.core.nodes.IsaacCreateRenderProduct"),
-                ("RGBPublish", "isaacsim.ros2.bridge.ROS2CameraHelper"),
-                ("DepthPublish", "isaacsim.ros2.bridge.ROS2CameraHelper"),
-                ("CameraInfoPublish", "isaacsim.ros2.bridge.ROS2CameraInfoHelper"),
-            ],
-            keys.SET_VALUES: [
-                ("CreateRenderProduct.inputs:cameraPrim", [usdrt.Sdf.Path(camera_prim_path)]),
-                ("CreateRenderProduct.inputs:width", width),
-                ("CreateRenderProduct.inputs:height", height),
-                ("RGBPublish.inputs:type", "rgb"),
-                ("RGBPublish.inputs:topicName", rgb_topic),
-                ("RGBPublish.inputs:nodeNamespace", namespace),
-                ("RGBPublish.inputs:frameId", frame_id),
-                ("RGBPublish.inputs:resetSimulationTimeOnStop", True),
-                ("DepthPublish.inputs:type", "depth"),
-                ("DepthPublish.inputs:topicName", depth_topic),
-                ("DepthPublish.inputs:nodeNamespace", namespace),
-                ("DepthPublish.inputs:frameId", frame_id),
-                ("DepthPublish.inputs:resetSimulationTimeOnStop", True),
-                ("CameraInfoPublish.inputs:topicName", camera_info_topic),
-                ("CameraInfoPublish.inputs:nodeNamespace", namespace),
-                ("CameraInfoPublish.inputs:frameId", frame_id),
-                ("CameraInfoPublish.inputs:resetSimulationTimeOnStop", True),
-            ],
-            keys.CONNECT: [
-                ("OnPlaybackTick.outputs:tick", "CreateRenderProduct.inputs:execIn"),
-                ("CreateRenderProduct.outputs:execOut", "RGBPublish.inputs:execIn"),
-                ("CreateRenderProduct.outputs:execOut", "DepthPublish.inputs:execIn"),
-                ("CreateRenderProduct.outputs:execOut", "CameraInfoPublish.inputs:execIn"),
-                ("CreateRenderProduct.outputs:renderProductPath", "RGBPublish.inputs:renderProductPath"),
-                ("CreateRenderProduct.outputs:renderProductPath", "DepthPublish.inputs:renderProductPath"),
-                ("CreateRenderProduct.outputs:renderProductPath", "CameraInfoPublish.inputs:renderProductPath"),
-            ],
-        },
+        {keys.CREATE_NODES: nodes, keys.SET_VALUES: values, keys.CONNECT: connect},
     )
-    if instance_seg_topic:
-        og.Controller.edit(
-            graph_path,
-            {
-                keys.CREATE_NODES: [
-                    ("InstanceSegPublish", "isaacsim.ros2.bridge.ROS2CameraHelper"),
-                ],
-                keys.SET_VALUES: [
-                    ("InstanceSegPublish.inputs:type", "instance_segmentation"),
-                    ("InstanceSegPublish.inputs:topicName", instance_seg_topic),
-                    ("InstanceSegPublish.inputs:nodeNamespace", namespace),
-                    ("InstanceSegPublish.inputs:frameId", frame_id),
-                    ("InstanceSegPublish.inputs:enableSemanticLabels", True),
-                    ("InstanceSegPublish.inputs:semanticLabelsTopicName",
-                     f"{instance_seg_topic}_labels"),
-                    ("InstanceSegPublish.inputs:resetSimulationTimeOnStop", True),
-                ],
-                keys.CONNECT: [
-                    ("CreateRenderProduct.outputs:execOut", "InstanceSegPublish.inputs:execIn"),
-                    ("CreateRenderProduct.outputs:renderProductPath",
-                     "InstanceSegPublish.inputs:renderProductPath"),
-                ],
-            },
-        )
 
 
 def _build_tf_graph(
