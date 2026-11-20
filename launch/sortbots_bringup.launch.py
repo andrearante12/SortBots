@@ -126,16 +126,27 @@ def _make_per_robot_actions(
     shared_map_cfg,
     robot_stagger_cfg,
     perception_cfg,
+    dynamic_seg_cfg,
+    seg_policy_cfg,
 ):
     primary_robot_id = robot_id_cfg.perform(context)
     perception = perception_cfg.perform(context)
     if perception not in ("camera", "oracle"):
         raise ValueError(f"perception:={perception!r} — expected camera or oracle")
+    dynamic_seg = dynamic_seg_cfg.perform(context)
+    if dynamic_seg not in ("off", "model", "oracle"):
+        raise ValueError(f"dynamic_seg:={dynamic_seg!r} — expected off, model or oracle")
+    seg_policy = seg_policy_cfg.perform(context)
+    if seg_policy not in ("open", "strict"):
+        raise ValueError(f"seg_policy:={seg_policy!r} — expected open or strict")
     raw = robot_ids_cfg.perform(context).strip()
     robot_ids = [r.strip() for r in raw.split(",") if r.strip()] if raw else [primary_robot_id]
     platform = platform_cfg.perform(context)
     if platform not in ("sim", "real"):
         raise ValueError(f"platform:={platform!r} — expected sim or real")
+    if dynamic_seg == "oracle" and platform == "real":
+        raise ValueError("dynamic_seg:=oracle is the simulator's ground truth; "
+                         "use model on platform:=real")
     # A real robot has no warehouse scene; its anchor is the `real` spawn
     # entry. Forced rather than trusted so a forgotten scene:= can't anchor
     # hardware at a sim spawn pose (the fused /map would be offset by it).
@@ -282,17 +293,31 @@ def _make_per_robot_actions(
             ))
 
         # Before RTAB-Map: strip movers from depth so SLAM never sees them.
-        # Skipped on the real robot: one robot means no peer to paint into the
-        # map, Nav2 (the other consumer) is off, and on the Orin Nano the
-        # filter was ~1 core plus a 1.6 MB republish per frame (measured
-        # 2026-10-02) — SLAM reads raw camera/depth instead.
-        depth_filter = platform != "real"
+        # Skipped on the real robot unless dynamic_seg is on: one robot means
+        # no peer to paint into the map, Nav2 (the other consumer) is off, and
+        # on the Orin Nano the filter was ~1 core plus a 1.6 MB republish per
+        # frame (measured 2026-10-02) — SLAM reads raw camera/depth instead.
+        # People and carts are the reason to pay that on hardware: with
+        # dynamic_seg the filter is what keeps them out of the map.
+        depth_filter = platform != "real" or dynamic_seg != "off"
         if depth_filter:
+            filter_cmd = [
+                "python3",
+                os.path.join(REPO_ROOT, "nodes", "dynamic_obstacle_filter.py"),
+                "--robot-id", rid,
+            ]
+            if dynamic_seg != "off":
+                filter_cmd += ["--dynamic-seg", "--map-conflict", "--seg-policy", seg_policy]
+            actions.append(ExecuteProcess(cmd=filter_cmd, output="screen"))
+        # Open-vocab detector + SAM over the motion/conflict prompts →
+        # camera/dynamic_seg, which the filter above unions into its mask.
+        if dynamic_seg != "off":
             actions.append(ExecuteProcess(
                 cmd=[
                     "python3",
-                    os.path.join(REPO_ROOT, "nodes", "dynamic_obstacle_filter.py"),
-                    "--robot-id", rid,
+                    os.path.join(REPO_ROOT, "nodes", "dynamic_segment.py"),
+                    "--robot-id", rid, "--platform", platform,
+                    "--mode", dynamic_seg,
                 ],
                 output="screen",
             ))
@@ -537,8 +562,32 @@ def generate_launch_description():
     shared_map = LaunchConfiguration("shared_map")
     robot_stagger_s = LaunchConfiguration("robot_stagger_s")
     perception = LaunchConfiguration("perception")
+    dynamic_seg = LaunchConfiguration("dynamic_seg")
+    seg_policy = LaunchConfiguration("seg_policy")
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "dynamic_seg",
+            default_value="off",
+            description=(
+                "Keep people and other movers out of the map with segment masks "
+                "(nodes/dynamic_segment.py): `off`, `model` (open-vocab detector + "
+                "SAM over the depth filter's motion and map-conflict prompts), or "
+                "`oracle` (the simulator's instance segmentation of its actors; sim "
+                "only, separates the depth-filter half from the model). Anything but "
+                "off also runs the depth filter on platform:=real."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "seg_policy",
+            default_value="open",
+            description=(
+                "dynamic_seg only. open: a frame with no fresh mask goes to SLAM "
+                "unmasked (as without dynamic_seg). strict: depth_static waits for "
+                "each frame's own mask, so fewer frames reach SLAM but none "
+                "unmasked; use it when recording a map to keep."
+            ),
+        ),
         DeclareLaunchArgument(
             "perception",
             default_value="camera",
@@ -735,6 +784,8 @@ def generate_launch_description():
                 shared_map,
                 robot_stagger_s,
                 perception,
+                dynamic_seg,
+                seg_policy,
             ],
         ),
     ])

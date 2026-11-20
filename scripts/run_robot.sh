@@ -14,6 +14,7 @@
 # Usage:
 #   scripts/run_robot.sh [--robot-id robot_0] [--localize | --resume]
 #                        [--map PATH] [--keep-console] [--slam-role all|robot]
+#                        [--dynamic-seg off|model] [--seg-policy open|strict]
 #   scripts/run_robot.sh stop [--keep-console]
 #
 # Map lifecycle is the same three modes as run_demo.sh: default = fresh map,
@@ -25,6 +26,10 @@
 # compressed keyframe stream here; RTAB-Map mapping runs on the workstation
 # (launch/sortbots_slam_workstation.launch.py, tasks/slam_offload.md@6501799). The
 # default `all` maps on the Jetson as before, at lower CPU priority.
+#
+# --dynamic-seg model keeps people and carts out of the map: the depth filter
+# runs (it is otherwise off on hardware) and nodes/dynamic_segment.py masks
+# what it finds with the TensorRT engines under models/ (docs/mapping-movers.md).
 #
 # Not started, on purpose: Nav2, task_manager, magnet_pick and the explorer.
 # nodes/base_driver.py drives the wheels from /<id>/cmd_vel (the dashboard's
@@ -53,7 +58,7 @@ PIPELINE_PATTERNS=(realsense2_camera_node rtabmap_slam rgbd_odometry rtabmap_viz
                    task_manager.py scripted_pick.py magnet_pick.py explorer.py \
                    rtabmap_cloud_pump.py recon_cloud_relay.py \
                    map_merge.py static_transform_publisher \
-                   fleet_radio.py fleet_tasks.py dynamic_obstacle_filter.py recon_cloud_merge.py \
+                   fleet_radio.py fleet_tasks.py dynamic_obstacle_filter.py dynamic_segment.py recon_cloud_merge.py \
                    depth_colorizer.py feature_overlay.py obstacle_cloud.py \
                    obstacle_detector.py package_detector.py map_handoff.py rtabmap_sync \
                    base_driver.py arm_driver.py \
@@ -97,6 +102,7 @@ if [[ "${1:-}" == "stop" ]]; then
 fi
 
 ROBOT_ID=robot_0; LOCALIZE=false; RESUME=false; MAP_DB=""; SLAM_ROLE=all
+DYNAMIC_SEG=off; SEG_POLICY=open
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
@@ -105,7 +111,12 @@ while [[ $# -gt 0 ]]; do
     --map)      MAP_DB="$2"; shift 2;;
     --keep-console) KEEP_CONSOLE=true; shift;;
     --slam-role) SLAM_ROLE="$2"; shift 2;;
-    -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    # oracle is the simulator's ground truth; there is none on hardware.
+    --dynamic-seg) [[ "$2" =~ ^(off|model)$ ]] || { echo "[run_robot] --dynamic-seg is off or model, not: $2"; exit 2; }
+                DYNAMIC_SEG="$2"; shift 2;;
+    --seg-policy) [[ "$2" =~ ^(open|strict)$ ]] || { echo "[run_robot] --seg-policy is open or strict, not: $2"; exit 2; }
+                SEG_POLICY="$2"; shift 2;;
+    -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "[run_robot] unknown arg: $1"; exit 2;;
   esac
 done
@@ -172,7 +183,8 @@ setsid bash -c "$ROS_ENV; \
        nav2:=false task_manager:=false scripted_pick:=false explore:=false \
        webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
-       delete_db_on_start:=$DELETE_DB_ON_START slam_role:=$SLAM_ROLE" \
+       delete_db_on_start:=$DELETE_DB_ON_START slam_role:=$SLAM_ROLE \
+       dynamic_seg:=$DYNAMIC_SEG seg_policy:=$SEG_POLICY" \
   >"$BRINGUP_LOG" 2>&1 &
 
 # Wait for the camera for real rather than sleeping a fixed time: the D435

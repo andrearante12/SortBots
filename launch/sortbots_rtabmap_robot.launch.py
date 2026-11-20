@@ -563,7 +563,10 @@ def generate_launch_description():
             }],
             remappings=[
                 ("rgb/image", ["/", robot_id, "/camera/rgb"]),
-                ("depth/image", ["/", robot_id, "/camera/depth"]),
+                # depth_static when the filter runs (dynamic_seg on hardware), so
+                # the workstation's map never gets the movers either. It keeps
+                # the raw header stamp, so exact sync still holds.
+                ("depth/image", ["/", robot_id, depth_source]),
                 ("rgb/camera_info", ["/", robot_id, "/camera/camera_info"]),
             ],
         ),

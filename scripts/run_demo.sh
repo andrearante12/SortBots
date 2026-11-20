@@ -23,6 +23,7 @@
 #                       [--render-every N] [--lite-render] [--half-res-cams]
 #                       [--map PATH] [--explore] [--world NAME] [--keep-console]
 #                       [--perception camera|oracle]
+#                       [--dynamic-seg off|model|oracle] [--seg-policy open|strict]
 #   scripts/run_demo.sh stop [--keep-console]   # tear the pipeline down
 #
 # --robots N spawns N robots in Isaac (configs/robots.yaml order) AND brings
@@ -43,6 +44,14 @@
 # aims at: the head camera's plate detections (default), or the simulator's ground
 # truth. Oracle is a sim-only diagnostic: run a failing pick test both ways to tell a
 # perception failure from a dock or arm one (docs/manipulation.md).
+#
+# --dynamic-seg off|model|oracle keeps people and other movers out of the map:
+# nodes/dynamic_segment.py segments them (open-vocab detector + SAM over the
+# depth filter's motion and map-conflict prompts) and the depth filter strips
+# them from depth_static. oracle uses Isaac's instance segmentation of the
+# world's actors instead of the model, which costs one more render product per
+# robot camera. --seg-policy strict holds back frames with no mask yet; use it
+# when recording a map to keep (docs/mapping-movers.md).
 #
 # Default is --robots 2: SortBots is a fleet project, so the plain demo comes
 # up as a collaborative fleet. Pass --robots 1 for the single-robot case
@@ -127,7 +136,7 @@ PIPELINE_PATTERNS=(rtabmap_slam rtabmap_viz rtabmap_util point_cloud_xyzrgb rviz
                    explorer.py \
                    rtabmap_cloud_pump.py recon_cloud_relay.py wasd_teleop \
                    map_merge.py static_transform_publisher \
-                   fleet_radio.py fleet_tasks.py dynamic_obstacle_filter.py recon_cloud_merge.py \
+                   fleet_radio.py fleet_tasks.py dynamic_obstacle_filter.py dynamic_segment.py recon_cloud_merge.py \
                    depth_colorizer.py feature_overlay.py obstacle_detector.py package_detector.py \
                    map_handoff.py sortbots_bringup.launch.py mem_guard.py \
                    "spawn_warehouse.py")
@@ -216,6 +225,7 @@ CHASE_CAM_ARGS=""
 # --half-res-cams is for large fleets: see spawn_warehouse.py --help.
 RENDER_ARGS=""
 LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false; WORLD_ARGS=""; PERCEPTION="camera"
+DYNAMIC_SEG="off"; SEG_POLICY="open"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
@@ -241,6 +251,10 @@ while [[ $# -gt 0 ]]; do
                 WORLD_ARGS="--world $2"; shift 2;;
     --perception) [[ "$2" == "camera" || "$2" == "oracle" ]] || { echo "[run_demo] --perception is camera or oracle, not: $2"; exit 2; }
                 PERCEPTION="$2"; shift 2;;
+    --dynamic-seg) [[ "$2" =~ ^(off|model|oracle)$ ]] || { echo "[run_demo] --dynamic-seg is off, model or oracle, not: $2"; exit 2; }
+                DYNAMIC_SEG="$2"; shift 2;;
+    --seg-policy) [[ "$2" =~ ^(open|strict)$ ]] || { echo "[run_demo] --seg-policy is open or strict, not: $2"; exit 2; }
+                SEG_POLICY="$2"; shift 2;;
     # Set by webui/session.py when the Scenarios tab launches a run: the
     # dashboard console is already up and owns rosbridge/web_video_server, so
     # don't kill it on teardown and don't start a second copy in the bringup.
@@ -254,6 +268,10 @@ if [[ "$LOCALIZE" == "true" && "$RESUME" == "true" ]]; then
   echo "ERROR: --localize and --resume are mutually exclusive (read-only vs. keep-mapping)."
   exit 2
 fi
+
+# The oracle needs Isaac to render instance segmentation of the world's actors:
+# one more render product per robot camera, so only when asked for.
+[[ "$DYNAMIC_SEG" == "oracle" ]] && RENDER_ARGS+=" --instance-seg"
 
 # --robot-ids threads straight through to the bringup's robot_ids:= (which
 # brings up a full RTAB-Map + Nav2 + task_manager + explorer stack per id —
@@ -396,7 +414,8 @@ setsid "$ROS_BASH" -c "source '$ROS_SETUP'; \
        webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
        delete_db_on_start:=$DELETE_DB_ON_START shared_map:=$SHARED_MAP \
-       explore:=true explore_autostart:=$EXPLORE perception:=$PERCEPTION" \
+       explore:=true explore_autostart:=$EXPLORE perception:=$PERCEPTION \
+       dynamic_seg:=$DYNAMIC_SEG seg_policy:=$SEG_POLICY" \
   >"$BRINGUP_LOG" 2>&1 &
 BRINGUP_PID=$!  # setsid execs, as for SIM_PID; ros_bash.sh stays up as long as the launch does
 sleep 12

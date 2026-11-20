@@ -89,3 +89,14 @@ def test_detect_platform_env_override(monkeypatch):
     monkeypatch.setenv("SORTBOTS_PLATFORM", "bogus")
     with pytest.raises(ValueError):
         sm.detect_platform()
+
+
+def test_dynamic_seg_and_policy_flags():
+    assert sm.build_argv({"dynamic_seg": "model", "seg_policy": "strict"}, "sim") == [
+        "--dynamic-seg", "model", "--seg-policy", "strict"]
+    assert sm.build_argv({"dynamic_seg": "off", "seg_policy": "open"}, "sim") == []
+    assert sm.build_argv({"dynamic_seg": "model"}, "real") == ["--dynamic-seg", "model"]
+    with pytest.raises(sm.ScenarioError, match="expected one of"):
+        sm.build_argv({"dynamic_seg": "oracle"}, "real")   # no simulator on hardware
+    with pytest.raises(sm.ScenarioError, match="expected one of"):
+        sm.build_argv({"seg_policy": "lenient"}, "sim")

@@ -310,6 +310,12 @@ RUN_FLAGS = {
     # diagnostic that separates perception failures from dock/arm ones). Stock value
     # emits no flag, so every existing scenario's argv is unchanged.
     "perception": _omit_at("camera", _choice("--perception", {"camera", "oracle"})),
+    # Keep movers out of the map (nodes/dynamic_segment.py + the depth filter):
+    # `model` is the open-vocab detector + SAM, `oracle` Isaac's instance
+    # segmentation of the world's actors (one more render product per camera).
+    # Stock values emit no flag, like perception.
+    "dynamic_seg": _omit_at("off", _choice("--dynamic-seg", {"off", "model", "oracle"})),
+    "seg_policy": _omit_at("open", _choice("--seg-policy", {"open", "strict"})),
 }
 
 RUN_DEFAULTS = {
@@ -330,6 +336,8 @@ RUN_DEFAULTS = {
     "map": None,
     "world": None,
     "perception": "camera",
+    "dynamic_seg": "off",
+    "seg_policy": "open",
 }
 
 
@@ -345,6 +353,9 @@ REAL_RUN_FLAGS = {
     # all = map on the Jetson; robot = map on the workstation from the robot's
     # keyframe stream (tasks/slam_offload.md@6501799). Real-only: sim has no Jetson.
     "slam_role": _choice("--slam-role", {"all", "robot"}),
+    # No oracle on hardware: there is no simulator to ask.
+    "dynamic_seg": _omit_at("off", _choice("--dynamic-seg", {"off", "model"})),
+    "seg_policy": RUN_FLAGS["seg_policy"],
 }
 
 REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all"}
