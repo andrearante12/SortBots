@@ -681,12 +681,12 @@ def main(argv=None):
             self._tf_misses = 0
             self._grid = FreeSpaceGrid() if args.map_conflict else None
             self._next_conflict = 0.0
-            if args.seg_policy:
-                self._cfg["seg_policy"] = args.seg_policy
             self._segs: deque = deque(maxlen=16)     # (stamp s, bool mask)
             self._pending: deque = deque()           # strict: (stamp, msg, depth, mask)
             self._seg_stats = {"used": 0, "stale": 0, "dropped": 0}
             self._cfg = dict(DEFAULTS)
+            if args.seg_policy:
+                self._cfg["seg_policy"] = args.seg_policy
             self._peers: dict[str, tuple[tuple[float, float], float]] = {}
             self._tf = Buffer()
             # Own spin thread: the warp waits up to tf_timeout_s for the
