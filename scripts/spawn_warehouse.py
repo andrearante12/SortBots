@@ -337,6 +337,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--instance-seg",
+        action="store_true",
+        help=(
+            "Publish instance segmentation of the world's actors on each robot's "
+            "head camera (<robot>/camera/instance_seg, ids -> prim paths on "
+            "<robot>/camera/instance_seg_labels), for dynamic_seg:=oracle "
+            "(nodes/dynamic_segment.py). An extra annotator on the existing "
+            "render product, not a new one; measure with scripts/bench_sim.sh."
+        ),
+    )
+    p.add_argument(
         "--world",
         default=None,
         metavar="NAME",
@@ -1373,6 +1384,21 @@ def _author_marker(stage, path: str, pkg: dict, materials: dict) -> None:
     emit(f"  world package {pkg['id']}: ArUco marker {pkg['marker']}")
 
 
+def _label_actor(prim, actor_id: str) -> None:
+    """Semantic label on an actor, so instance segmentation (--instance-seg)
+    reports it: Replicator only lists prims that carry semantics. Harmless
+    without the annotator. The API moved between Isaac releases, hence both."""
+    try:
+        from isaacsim.core.utils.semantics import add_labels
+        add_labels(prim, labels=[f"actor:{actor_id}"], instance_name="class")
+    except ImportError:
+        try:
+            from isaacsim.core.utils.semantics import add_update_semantics
+            add_update_semantics(prim, f"actor:{actor_id}")
+        except Exception as exc:  # noqa: BLE001 - optional; oracle runs only
+            emit(f"  world actor {actor_id}: no semantic label ({exc})")
+
+
 def _spawn_world(stage, w: dict) -> tuple[dict, dict]:
     """Author a world's props, actors and packages.
 
@@ -1445,6 +1471,7 @@ def _spawn_world(stage, w: dict) -> tuple[dict, dict]:
             geom = _author_world_shape(stage, path, shape, collider=False)
             _bind(geom, _world_color_material(stage, materials, actor["color"]))
         actors[actor["id"]] = (t_op, r_op)
+        _label_actor(xf.GetPrim(), actor["id"])
         emit(f"  world actor {actor['id']}: {shape['shape']}, {actor['path']['mode']} over "
              f"{len(actor['path']['waypoints'])} waypoints at {actor['path']['speed_mps']} m/s")
 
@@ -1939,6 +1966,7 @@ def main() -> int:
             rgb_resolution=(d435["width"], d435["height"]),
             base_to_camera=base_to_camera,
             base_to_imu=base_to_imu,
+            instance_seg_topic="camera/instance_seg" if args.instance_seg else None,
         )
         emit(f"  graphs built for {name}")
 

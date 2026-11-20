@@ -312,7 +312,7 @@ RUN_FLAGS = {
     "perception": _omit_at("camera", _choice("--perception", {"camera", "oracle"})),
     # Keep movers out of the map (nodes/dynamic_segment.py + the depth filter):
     # `model` is the open-vocab detector + SAM, `oracle` Isaac's instance
-    # segmentation of the world's actors (one more render product per camera).
+    # segmentation of the world's actors (an extra annotator per camera).
     # Stock values emit no flag, like perception.
     "dynamic_seg": _omit_at("off", _choice("--dynamic-seg", {"off", "model", "oracle"})),
     "seg_policy": _omit_at("open", _choice("--seg-policy", {"open", "strict"})),

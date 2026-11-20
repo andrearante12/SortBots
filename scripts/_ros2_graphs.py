@@ -148,8 +148,12 @@ def build_robot_graphs(
     rgb_resolution: Tuple[int, int] = (640, 480),
     base_to_camera: Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]] = None,
     base_to_imu: Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]] = None,
+    instance_seg_topic: Optional[str] = None,
 ) -> None:
     """Author Odometry + Camera + TF + CmdVel (+ optional IMU) graphs.
+
+    ``instance_seg_topic`` adds an instance-segmentation publisher to the head
+    camera's render product (dynamic_seg:=oracle, nodes/dynamic_segment.py).
 
     Parameters
     ----------
@@ -210,6 +214,7 @@ def build_robot_graphs(
         width=width,
         height=height,
         frame_id=camera_frame_id,
+        instance_seg_topic=instance_seg_topic,
     )
 
     _build_tf_graph(
@@ -343,8 +348,16 @@ def _build_camera_graph(
     width: int,
     height: int,
     frame_id: str,
+    instance_seg_topic: Optional[str] = None,
 ) -> None:
-    """One render product feeds three ROS2 publishers (rgb, depth, camera_info)."""
+    """One render product feeds three ROS2 publishers (rgb, depth, camera_info),
+    plus instance segmentation when `instance_seg_topic` is set.
+
+    The segmentation is another annotator on the SAME render product, not a new
+    render product, so it costs an extra AOV and its readback, not another
+    render. Its id -> prim-path table goes to `<topic>_labels` as JSON; only
+    prims with semantics show up in it (spawn_warehouse labels world actors).
+    """
     keys = og.Controller.Keys
     og.Controller.edit(
         {"graph_path": graph_path, "evaluator_name": "execution"},
@@ -386,6 +399,30 @@ def _build_camera_graph(
             ],
         },
     )
+    if instance_seg_topic:
+        og.Controller.edit(
+            graph_path,
+            {
+                keys.CREATE_NODES: [
+                    ("InstanceSegPublish", "isaacsim.ros2.bridge.ROS2CameraHelper"),
+                ],
+                keys.SET_VALUES: [
+                    ("InstanceSegPublish.inputs:type", "instance_segmentation"),
+                    ("InstanceSegPublish.inputs:topicName", instance_seg_topic),
+                    ("InstanceSegPublish.inputs:nodeNamespace", namespace),
+                    ("InstanceSegPublish.inputs:frameId", frame_id),
+                    ("InstanceSegPublish.inputs:enableSemanticLabels", True),
+                    ("InstanceSegPublish.inputs:semanticLabelsTopicName",
+                     f"{instance_seg_topic}_labels"),
+                    ("InstanceSegPublish.inputs:resetSimulationTimeOnStop", True),
+                ],
+                keys.CONNECT: [
+                    ("CreateRenderProduct.outputs:execOut", "InstanceSegPublish.inputs:execIn"),
+                    ("CreateRenderProduct.outputs:renderProductPath",
+                     "InstanceSegPublish.inputs:renderProductPath"),
+                ],
+            },
+        )
 
 
 def _build_tf_graph(

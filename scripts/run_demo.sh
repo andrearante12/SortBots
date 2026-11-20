@@ -49,8 +49,8 @@
 # nodes/dynamic_segment.py segments them (open-vocab detector + SAM over the
 # depth filter's motion and map-conflict prompts) and the depth filter strips
 # them from depth_static. oracle uses Isaac's instance segmentation of the
-# world's actors instead of the model, which costs one more render product per
-# robot camera. --seg-policy strict holds back frames with no mask yet; use it
+# world's actors instead of the model: an extra annotator on each robot camera's
+# render product (not a new render product; measure with scripts/bench_sim.sh). --seg-policy strict holds back frames with no mask yet; use it
 # when recording a map to keep (docs/mapping-movers.md).
 #
 # Default is --robots 2: SortBots is a fleet project, so the plain demo comes
@@ -270,7 +270,7 @@ if [[ "$LOCALIZE" == "true" && "$RESUME" == "true" ]]; then
 fi
 
 # The oracle needs Isaac to render instance segmentation of the world's actors:
-# one more render product per robot camera, so only when asked for.
+# an extra annotator per robot camera, so only when asked for.
 [[ "$DYNAMIC_SEG" == "oracle" ]] && RENDER_ARGS+=" --instance-seg"
 
 # --robot-ids threads straight through to the bringup's robot_ids:= (which
