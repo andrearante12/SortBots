@@ -1,0 +1,51 @@
+# A test case (simtest/spec.py has the schema; docs/testing.md the how-to).
+#
+# robot_0 maps a fresh map, drives south out of its aisle and turns to face
+# the line the actor walks along, watching it stop, move and stop again. Then
+# it keeps looking after the actor has left, which is what lets a clearing
+# reconstruction (recon_source: octomap) drop where the actor used to stand.
+#
+# Variants are the comparison this test exists for: `off` is today's depth
+# filter alone and is EXPECTED to fail the contamination criteria — it is the
+# baseline the others are measured against (docs/mapping-movers.md).
+
+name: mapping_walk_stop_walk
+title: Mapping while a person stops and moves — kept out of the map?
+section: Mapping
+description: Maps with a person in view who stands, walks and stands again; they must not end up in the map.
+
+scenario: mapping_movers
+overrides:
+  world: walk_stop_walk
+
+warmup_s: 5
+
+goals:
+  - robot: robot_0
+    pose: [-8.0, 3.0, 1.5708]    # out of the aisle, then turn to face the actor's line
+    timeout_s: 90
+
+stop:
+  sim_s: 75                       # the actor leaves its second stop at ~36 s
+  settle_s: 3
+
+metrics:
+  - metric: map_contamination
+    pass:
+      occupied_frac: {lte: 0.02}
+      observed_frac: {gte: 0.3}
+  - metric: recon_contamination
+    pass:
+      actor_voxels: {lte: 20}
+  - metric: goals
+  - metric: run_stats
+
+record: [recon]
+repeats: 1
+pass_rate: 1.0
+
+variants:
+  - {label: "off", set: {overrides.dynamic_seg: "off"}}
+  - {label: oracle, set: {overrides.dynamic_seg: oracle}}
+  - {label: model, set: {overrides.dynamic_seg: model}}
+  - {label: model_octomap, set: {overrides.dynamic_seg: model, overrides.recon_source: octomap}}

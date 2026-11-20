@@ -47,6 +47,7 @@ from simtest import events as ev_lib  # noqa: E402
 from simtest import metrics as metrics_lib  # noqa: E402
 
 MAP_EVERY_S = 5.0       # sim seconds between recorded /map samples
+RECON_EVERY_S = 10.0    # ...and /fleet/recon_cloud samples (bigger, changes slower)
 EXPLORE_EVERY_S = 1.0
 DYN_EVERY_S = 0.2       # 5 Hz per robot
 TRK_EVERY_S = 0.2       # 5 Hz per robot: obstacle_tracks publishes at 10
@@ -81,6 +82,7 @@ class ProbeCore:
         self.reason = None
         self._last = {}                     # throttle bookkeeping: key -> t
         self._pending_map = None
+        self._pending_recon = None
 
     def _ctx(self):
         from simtest import spec
@@ -153,6 +155,14 @@ class ProbeCore:
         if not self.throttled("map", MAP_EVERY_S):
             self.emit({"s": "map", "grid": grid})
             self._pending_map = None
+
+    def on_recon(self, cloud) -> None:
+        if self.t0 is None:
+            return
+        self._pending_recon = cloud
+        if not self.throttled("recon", RECON_EVERY_S):
+            self.emit({"s": "recon", "cloud": cloud})
+            self._pending_recon = None
 
     def on_task(self, rid: str, obj: dict) -> None:
         tid = obj.get("task_id")
@@ -285,6 +295,8 @@ class ProbeCore:
         self.reason = reason
         if self._pending_map is not None:
             self.emit({"s": "map", "grid": self._pending_map})
+        if self._pending_recon is not None:
+            self.emit({"s": "recon", "cloud": self._pending_recon})
         el = self.elapsed()
         self.emit({"s": "end", "reason": reason, "sim_s": round(el or 0.0, 3),
                    "wall_s": round(wall_s, 2)})
@@ -361,6 +373,8 @@ def run(variant_path: Path, out_dir: Path, startup_timeout: float) -> int:
             self.world_cmd = self.create_publisher(String, "/sim/world_cmd", 10)
             if "map" in streams:
                 self.create_subscription(OccupancyGrid, "/map", self._on_map, latched)
+            if "recon" in streams:
+                self.create_subscription(PointCloud2, "/fleet/recon_cloud", self._on_recon, latched)
             self.nav, self.handles, self.dispatch = {}, {}, {}
             for rid in resolved["robots"]:
                 # functools.partial, never `lambda m, r=rid:` — rclpy counts the
@@ -406,6 +420,16 @@ def run(variant_path: Path, out_dir: Path, startup_timeout: float) -> int:
             o = m.info.origin.position
             core.on_map(MapGrid(m.info.width, m.info.height, m.info.resolution, o.x, o.y,
                                 np.asarray(m.data, dtype=np.int8)))
+
+        def _on_recon(self, m):
+            from sensor_msgs_py import point_cloud2
+
+            from simtest.events import VoxelCloud
+
+            if m.width == 0 or core.t0 is None:
+                return
+            pts = point_cloud2.read_points_numpy(m, field_names=("x", "y", "z"), skip_nans=True)
+            core.on_recon(VoxelCloud.from_points(pts, 0.1))
 
         def _on_json(self, kind, rid, m):
             try:

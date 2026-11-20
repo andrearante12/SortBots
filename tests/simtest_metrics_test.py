@@ -532,3 +532,38 @@ def test_recorded_events_rescore_identically(tmp_path):
     assert replay.score() == live.score()
     assert events.recorded_streams(tmp_path / "events.jsonl.gz") == {"start", "gt", "map",
                                                                       "end"}
+
+
+# -- recon_contamination ----------------------------------------------------------
+
+def _recon(t, pts):
+    return {"s": "recon", "t": t, "cloud": events.VoxelCloud.from_points(np.asarray(pts, float), 0.1)}
+
+
+def _block(x0, x1, y0, y1, z0, z1, v=0.1):
+    return np.mgrid[x0:x1:v, y0:y1:v, z0:z1:v].reshape(3, -1).T + v / 2
+
+
+def test_recon_contamination_ghost_then_cleared():
+    ms = metrics.MetricSet(metrics.validate_list([{"metric": "recon_contamination"}]), ctx())
+    crate = _block(-0.5, 0.5, 4.5, 5.5, 0.0, 1.0)              # the prop, mapped
+    ghost = _block(1.0, 1.4, -0.2, 0.2, 0.0, 1.7)               # the walker, baked in
+    floor = _block(-4, 4, -0.5, 0.5, -0.1, 0.0)                 # floor: below min height
+    ms.feed(_recon(1.0, np.vstack([crate, floor, ghost])))
+    ms.feed(_recon(2.0, np.vstack([crate, floor])))
+    v = ms.score()["metrics"][0]["values"]
+    assert v["actor_voxels"] == 0 and v["peak_actor_voxels"] == int((ghost[:, 2] >= 0.1).sum())
+    assert v["props_kept_frac"] == 1.0 and v["samples"] == 2
+
+
+def test_recon_contamination_flags_a_lost_prop_and_ignores_far_points():
+    ms = metrics.MetricSet(metrics.validate_list([{"metric": "recon_contamination"}]), ctx())
+    ms.feed(_recon(1.0, _block(2.0, 2.4, 3.0, 3.4, 0.0, 1.0)))   # off the walker's band
+    v = ms.score()["metrics"][0]["values"]
+    assert v["actor_voxels"] == 0 and v["props_kept_frac"] == 0.0
+
+
+def test_recon_events_round_trip():
+    ev = _recon(1.0, _block(0, 0.3, 0, 0.3, 0, 0.3))
+    back = events.decode(events.encode(ev))
+    assert np.array_equal(back["cloud"].ijk, ev["cloud"].ijk) and back["cloud"].voxel == 0.1

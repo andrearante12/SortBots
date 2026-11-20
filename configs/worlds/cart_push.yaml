@@ -1,0 +1,29 @@
+# A world layout (simtest/world.py has the full schema). walk_stop_walk's
+# timing with a CART instead of a person: a plain box, no NVIDIA asset, no
+# walk cycle. The generalization check: nothing about it is a person, so only
+# the class-agnostic cues (motion, map conflict) or the detector's `cart`
+# (an if_moving class, so it needs motion behind it) can keep it out.
+
+name: cart_push
+title: Aisle mouth — a cart rolls, parks, rolls on
+description: >
+  A waist-high cart (a primitive box) parks at the aisle mouth, rolls 2 m,
+  parks 15 s, then rolls across robot_0's route and parks at the far side.
+  Same as walk_stop_walk without a person: checks the masking is not just a
+  person detector.
+
+scenes: [nvidia]
+autostart: true
+
+actors:
+  - id: cart_0
+    label: cart
+    shape: box
+    size: [0.9, 0.6, 0.95]
+    color: [0.20, 0.35, 0.65]
+    path:
+      waypoints: [[-12.0, 6.5], [-10.0, 6.5], [-5.5, 6.5]]
+      speed_mps: 0.8
+      mode: once
+      start_at_s: 0.0
+      dwell_s: 15.0

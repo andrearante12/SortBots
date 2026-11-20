@@ -1,0 +1,35 @@
+# Scenario definition for the dashboard's Scenarios tab — see the header of
+# configs/scenarios/explore_fresh.yaml for the schema. `world:` names a layout
+# in configs/worlds/ (simtest/world.py has that schema).
+
+name: mapping_movers
+
+title: Mapping with movers — keep people and carts out of the map (test base)
+description: >
+  robot_0 MAPPING a fresh warehouse map (not localizing on a saved one, as
+  the avoidance tests do) while the world's actors walk, stop and walk on in
+  front of it. What the mapping_* tests in configs/tests/ run on, comparing
+  dynamic_seg off / oracle / model: does the person end up in /map and in
+  the 3D reconstruction, once or twice, and do the props stay?
+  docs/mapping-movers.md.
+
+status: ready
+
+run:
+  scene: nvidia
+  robots: 1
+  robot_id: robot_0
+  headless: true
+  chase_cam: false
+  explore: false         # one goal per test: every run should look at the same places
+  resume: false          # fresh map: the point is what gets INTO a map
+  localize: false
+  teleop: false
+  map: null
+  world: walk_stop_walk
+
+overrides: [world, robots, dynamic_seg, seg_policy, recon_source, headless, chase_cam,
+            render_every, lite_render]
+
+capture:
+  bag: false

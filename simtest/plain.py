@@ -45,6 +45,14 @@ SENTENCES = {
         lambda x, p: "Finishes the job it was given" if x >= 1 else f"Finishes at least {_pct(x)} of its jobs",
     ("map_contamination", "occupied_frac", "lte"):
         lambda x, p: f"At most {_pct(x)} of the walkers' floor ends up on the map as an obstacle",
+    ("map_contamination", "observed_frac", "gte"):
+        lambda x, p: f"Actually sees at least {_pct(x)} of the walkers' floor",
+    ("recon_contamination", "actor_voxels", "lte"):
+        lambda x, p: "Nothing of the movers is left in the 3D reconstruction" if x == 0
+        else f"At most {int(x)} small cubes of the movers are left in the 3D reconstruction",
+    ("recon_contamination", "props_kept_frac", "gte"):
+        lambda x, p: "Every crate and box stack stays in the 3D reconstruction" if x >= 1
+        else f"At least {_pct(x)} of the crates and box stacks stay in the 3D reconstruction",
     ("detection", "recall", "gte"):
         lambda x, p: f"Detects walkers in at least {_pct(x)} of the frames they are in view",
     ("goals", "max_detour_ratio", "lte"):

@@ -47,6 +47,8 @@ STREAMS = {
     "trk": "/<rid>/obstacle_tracks in the map frame, <=5 Hz: {rid, stamp, tracks: "
            "[{id, moving, hits, pos: [x, y], vel: [vx, vy], cov: [sxx, sxy, syy], "
            "pred: [[h_s, x, y], ...], extent_m, height_m}]}",
+    "recon": "/fleet/recon_cloud (the fused 3D reconstruction, map frame), throttled "
+             "(every 10 sim-s, plus the last), as occupied 0.1 m voxels: {cloud: VoxelCloud}",
     "detect": "/<rid>/packages (nodes/package_detector.py), throttled to 2 Hz, map frame: "
               "{rid, plates: [{x, y, z, nx, ny, nz, conf}]} — each plate's centre and "
               "OUTWARD normal, what the pick controller aims at (no image data)",
@@ -98,9 +100,49 @@ class MapGrid:
                    np.frombuffer(raw, dtype=np.int8))
 
 
+class VoxelCloud:
+    """A point cloud as its set of occupied voxels (int ijk, `voxel` metres).
+    The fused reconstruction is ~200k points; as unique 0.1 m voxels, int16 and
+    zlib'd, one sample is tens of kB in events.jsonl.gz instead of megabytes."""
+
+    __slots__ = ("voxel", "ijk")
+
+    def __init__(self, voxel, ijk):
+        import numpy as np
+
+        self.voxel = float(voxel)
+        self.ijk = np.asarray(ijk, dtype=np.int16).reshape(-1, 3)
+
+    @classmethod
+    def from_points(cls, xyz, voxel: float = 0.1) -> "VoxelCloud":
+        import numpy as np
+
+        xyz = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
+        xyz = xyz[np.isfinite(xyz).all(axis=1)]
+        ijk = np.unique(np.floor(xyz / voxel).astype(np.int64), axis=0)
+        ijk = ijk[(np.abs(ijk) < 32767).all(axis=1)]
+        return cls(voxel, ijk)
+
+    def centres(self):
+        return (self.ijk.astype("float64") + 0.5) * self.voxel
+
+    def to_json(self) -> dict:
+        raw = self.ijk.astype("<i2").tobytes()
+        return {"v": self.voxel, "z": base64.b64encode(zlib.compress(raw, 6)).decode("ascii")}
+
+    @classmethod
+    def from_json(cls, obj: dict) -> "VoxelCloud":
+        import numpy as np
+
+        raw = zlib.decompress(base64.b64decode(obj["z"]))
+        return cls(obj["v"], np.frombuffer(raw, dtype="<i2"))
+
+
 def encode(ev: dict) -> str:
     if ev.get("s") == "map":
         ev = {**ev, "grid": ev["grid"].to_json()}
+    elif ev.get("s") == "recon":
+        ev = {**ev, "cloud": ev["cloud"].to_json()}
     return json.dumps(ev, separators=(",", ":"))
 
 
@@ -108,6 +150,8 @@ def decode(line: str) -> dict:
     ev = json.loads(line)
     if ev.get("s") == "map":
         ev["grid"] = MapGrid.from_json(ev["grid"])
+    elif ev.get("s") == "recon":
+        ev["cloud"] = VoxelCloud.from_json(ev["cloud"])
     return ev
 
 

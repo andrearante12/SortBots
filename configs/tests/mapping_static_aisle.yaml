@@ -1,0 +1,45 @@
+# A test case (simtest/spec.py has the schema; docs/testing.md the how-to).
+#
+# The false-positive half of the mapping_* tests: nothing moves, three box
+# stacks stand beside the route. Every variant must keep every stack in the
+# 3D reconstruction. Boxes are an if_moving class: the detector sees them
+# here, and only motion or a live track may get them masked.
+
+name: mapping_static_aisle
+title: Mapping past stacked boxes — nothing static gets masked
+section: Mapping
+description: Maps past three box stacks with nothing moving; every stack must stay in the map.
+
+scenario: mapping_movers
+overrides:
+  world: static_aisle
+
+warmup_s: 5
+
+goals:
+  - robot: robot_0
+    pose: [-8.0, 3.0, 1.5708]
+    timeout_s: 90
+
+stop:
+  sim_s: 60
+  until: [goals_done]
+  settle_s: 5
+
+metrics:
+  - metric: recon_contamination
+    pass:
+      props_kept_frac: {gte: 1.0}
+  - metric: goals
+    pass:
+      success_rate: {gte: 1.0}
+  - metric: run_stats
+
+record: [recon]
+repeats: 1
+pass_rate: 1.0
+
+variants:
+  - {label: "off", set: {overrides.dynamic_seg: "off"}}
+  - {label: model, set: {overrides.dynamic_seg: model}}
+  - {label: model_octomap, set: {overrides.dynamic_seg: model, overrides.recon_source: octomap}}
