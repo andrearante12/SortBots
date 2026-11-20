@@ -165,6 +165,12 @@ class TrackSet:
         self.tracks: list[Track] = []
         self._next = 1
 
+    def prune(self, now: float) -> list[Track]:
+        """Drop tracks unsupported for longer than track_ttl_s. Called before
+        prompting too, or an expired track would be re-prompted one last time."""
+        self.tracks = [t for t in self.tracks if now - t.support_s <= self.c["track_ttl_s"]]
+        return self.tracks
+
     def update(self, results: list[tuple[Prompt, list[float], dict]], now: float) -> list[Track]:
         """results: (prompt, accepted mask bbox, extra) per accepted mask, where
         extra may carry depth_m and center_odom. Returns the live tracks."""
@@ -201,8 +207,7 @@ class TrackSet:
             track.depth_m = extra.get("depth_m", track.depth_m)
             track.center_odom = extra.get("center_odom", track.center_odom)
             used.add(track.id)
-        self.tracks = [t for t in self.tracks if now - t.support_s <= self.c["track_ttl_s"]]
-        return self.tracks
+        return self.prune(now)
 
 
 def predict_box(track: Track, K, R_cam_odom, t_cam_odom) -> list[float]:

@@ -61,3 +61,8 @@ commsim/ws/log/
 # Full SO-101 arm assembly (20 MB). Fetched by hardware/setup_cad.sh at a pinned
 # commit; only build.py --arm and the whole-arm tests need it.
 hardware/magnet_effector/reference/SO101_Assembly.step
+
+# dynamic_segment weights and engines: fetched/exported/built per machine by
+# scripts/dynamic_seg_models.sh, never committed (an .engine only runs on the
+# GPU and TensorRT version that built it).
+/models/

@@ -1,0 +1,39 @@
+# nodes/dynamic_segment.py — open-vocab detector + SAM masks of movers, for the
+# depth filter to strip from depth_static (docs/mapping-movers.md).
+# Top-level keys apply everywhere; the `sim:` / `real:` block is laid over them.
+
+# Frames per second the models run on (wall clock, steady). RTAB-Map takes a
+# keyframe at ~2 Hz, so anything above that is margin for seg_policy: open,
+# whose depth frames use the newest mask. Bounded by the Orin Nano budget.
+rate_hz: 5.0
+
+# Class lists live in seg_tracks.DEFAULTS too; these override them. The
+# detector's vocabulary is BAKED INTO the exported engine (YOLO-World
+# set_classes before export), so changing a list means re-running
+# scripts/dynamic_seg_models.sh export. Every name here must be in the export.
+always: [person, forklift, pallet jack, robot]
+if_moving: [box, cart, pallet, trolley, bin]
+
+score_min: 0.25
+nms_iou: 0.5
+max_prompts: 8
+track_ttl_s: 10.0
+blob_max_age_s: 0.5     # motion/conflict blobs older than this vs the rgb frame are ignored
+
+detector:
+  model: models/yolo_world.onnx    # the class list in the same order as the export
+  classes: [person, forklift, pallet jack, robot, box, cart, pallet, trolley, bin]
+  size: 640
+segmenter:
+  encoder: models/nanosam_encoder.onnx
+  decoder: models/nanosam_decoder.onnx
+  size: 1024
+
+sim:
+  # The desktop has a GPU but no TensorRT engines unless built there; ort
+  # with the CUDA provider if onnxruntime-gpu is installed, else CPU (slow).
+  backend: ort
+real:
+  # Engines are built on the Jetson from the ONNX files above
+  # (scripts/dynamic_seg_models.sh engines); .onnx -> .engine next to them.
+  backend: trt
