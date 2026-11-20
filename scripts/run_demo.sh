@@ -50,8 +50,9 @@
 # depth filter's motion and map-conflict prompts) and the depth filter strips
 # them from depth_static. oracle uses Isaac's instance segmentation of the
 # world's actors instead of the model: an extra annotator on each robot camera's
-# render product (not a new render product; measure with scripts/bench_sim.sh). --seg-policy strict holds back frames with no mask yet; use it
-# when recording a map to keep (docs/mapping-movers.md).
+# render product (not a new render product; measure with scripts/bench_sim.sh).
+# --seg-policy strict holds back frames with no mask yet; use it when recording
+# a map to keep (docs/mapping-movers.md).
 #
 # Default is --robots 2: SortBots is a fleet project, so the plain demo comes
 # up as a collaborative fleet. Pass --robots 1 for the single-robot case
