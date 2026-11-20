@@ -838,7 +838,11 @@ def main(argv=None):
             """strict: publish each held depth frame whose own mask has arrived;
             drop the ones whose mask is now too late to come."""
             c = self._cfg
-            newest = self._segs[-1][0] if self._segs else -np.inf
+            # Age against the newest DEPTH frame too: with the segmenter down no
+            # mask ever arrives, and judging only by mask stamps would hold every
+            # 1.6 MB depth frame forever.
+            newest = max(self._segs[-1][0] if self._segs else -np.inf,
+                         self._pending[-1][0] if self._pending else -np.inf)
             keep = deque()
             for stamp, msg, depth, mask in self._pending:
                 hit = seg_for_stamp(self._segs, stamp, c["seg_match_s"])
