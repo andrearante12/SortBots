@@ -65,6 +65,12 @@ DEFAULTS = {
     # mask rather than an unwarped one: an unwarped diff on a moving robot is
     # exactly v1's shelf-edge bug.
     "tf_timeout_s": 0.03,
+    # Map-conflict cue (nodes/map_conflict.py), only with --map-conflict. It
+    # ray-traces every Nth pixel, ~50 ms a pass, so it runs at a fraction of
+    # the camera rate; RTAB-Map only takes keyframes at ~2 Hz anyway.
+    "conflict_rate_hz": 2.0,
+    "conflict_stride": 8,
+    "conflict_min_px": 3,      # decimated points per conflict blob
     # Footprint corner reach is 0.32 m (0.5 x 0.4 m); the rest is margin for
     # the 5 Hz status lag and the two robots' localization disagreeing.
     "peer_radius_m": 0.5,
@@ -368,6 +374,18 @@ def select_dynamic_blobs(
     return full, blobs
 
 
+def conflict_blobs(conflict: np.ndarray, depth: np.ndarray, stride: int,
+                   min_px: int) -> list[dict]:
+    """Per-point conflict flags (row-major over depth[::stride, ::stride]) →
+    blob summaries in full-resolution pixels, like select_dynamic_blobs'."""
+    d = depth[::stride, ::stride]
+    m = conflict.reshape(d.shape)
+    labels, sizes = label_blobs(_morph_close(m, 1))
+    ok = np.asarray(sizes) >= min_px
+    ok[0] = False
+    return blob_summaries(np.where(ok[labels], labels, 0), d, stride)
+
+
 def blob_summaries(labels: np.ndarray, depth: np.ndarray, scale: int = 1) -> list[dict]:
     """One dict per nonzero label: full-res bbox [u0, v0, u1, v1) , centroid
     [u, v], pixel count and median depth. Pixel coordinates are multiplied by
@@ -505,6 +523,8 @@ def depth_to_points(
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot-id", default="robot_0")
+    parser.add_argument("--map-conflict", action="store_true",
+                        help="also publish map-conflict blobs (nodes/map_conflict.py)")
     args = parser.parse_args(argv)
 
     import json
@@ -521,6 +541,7 @@ def main(argv=None):
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from fleet_radio import STATUS_TOPIC, parse_status
+    from map_conflict import FreeSpaceGrid, backproject_odom
 
     robot_id = args.robot_id
     odom_frame = f"{robot_id}/odom"
@@ -548,6 +569,8 @@ def main(argv=None):
             self._prev = None       # (depth, stamp, frame_id) of the last frame
             self._info = None
             self._tf_misses = 0
+            self._grid = FreeSpaceGrid() if args.map_conflict else None
+            self._next_conflict = 0.0
             self._cfg = dict(DEFAULTS)
             self._peers: dict[str, tuple[tuple[float, float], float]] = {}
             self._tf = Buffer()
@@ -571,10 +594,11 @@ def main(argv=None):
             self.dyn_pub = self.create_publisher(
                 PointCloud2, f"/{robot_id}/dynamic_obstacles", qos
             )
-            # Motion blobs as SAM prompts for nodes/dynamic_segment.py. JSON on
-            # String like the rest of the fleet protocol, never an image.
+            # Motion and map-conflict blobs as SAM prompts for
+            # nodes/dynamic_segment.py, one message per source per frame. JSON
+            # on String like the rest of the fleet protocol, never an image.
             self.blob_pub = self.create_publisher(
-                String, f"/{robot_id}/camera/motion_blobs", qos
+                String, f"/{robot_id}/camera/dynamic_blobs", qos
             )
             self.get_logger().info(
                 f"dynamic filter: depth -> depth_static + dynamic_obstacles "
@@ -604,18 +628,18 @@ def main(argv=None):
                     np.array([t.x, t.y, t.z], dtype=np.float32))
 
         def _motion(self, msg: Image, depth: np.ndarray):
-            """(mask, blobs) from the warped previous frame, or no motion when
-            either pose is unknown (an unwarped diff is v1's shelf-edge bug)."""
+            """(mask, blobs, odom pose) from the warped previous frame, or no
+            motion when either pose is unknown (an unwarped diff is v1's
+            shelf-edge bug)."""
             prev, self._prev = self._prev, (depth.copy(), msg.header.stamp, msg.header.frame_id)
-            empty = np.zeros(depth.shape, dtype=bool), []
+            empty = np.zeros(depth.shape, dtype=bool), [], None
             if prev is None or self._info is None or prev[2] != msg.header.frame_id:
                 return empty
             K = self._info.k
             Kt = (float(K[0]), float(K[4]), float(K[2]), float(K[5]))
             frame = msg.header.frame_id
-            rel = self._lookup(frame, prev[1], frame, msg.header.stamp)
-            odom = rel and self._lookup(odom_frame, msg.header.stamp, frame,
-                                        msg.header.stamp)
+            odom = self._lookup(odom_frame, msg.header.stamp, frame, msg.header.stamp)
+            rel = odom and self._lookup(frame, prev[1], frame, msg.header.stamp)
             if not rel or not odom:
                 self._tf_misses += 1
                 if self._tf_misses in (1, 30) or self._tf_misses % 300 == 0:
@@ -623,9 +647,31 @@ def main(argv=None):
                         f"no exact-stamp TF {frame} via {odom_frame} "
                         f"({self._tf_misses} frames without a motion mask)")
                 return empty
-            return select_dynamic_blobs(depth, prev[0], self._cfg, K=Kt,
-                                        R_prev_cur=rel[0], t_prev_cur=rel[1],
-                                        R_odom_cam=odom[0], t_odom_cam=odom[1])
+            mask, blobs = select_dynamic_blobs(depth, prev[0], self._cfg, K=Kt,
+                                               R_prev_cur=rel[0], t_prev_cur=rel[1],
+                                               R_odom_cam=odom[0], t_odom_cam=odom[1])
+            return mask, blobs, odom
+
+        def _conflict(self, msg: Image, depth: np.ndarray, odom) -> list[dict]:
+            now = time.monotonic()
+            if self._grid is None or odom is None or now < self._next_conflict:
+                return []
+            self._next_conflict = now + 1.0 / float(self._cfg["conflict_rate_hz"])
+            K = self._info.k
+            Kt = (float(K[0]), float(K[4]), float(K[2]), float(K[5]))
+            stride = int(self._cfg["conflict_stride"])
+            pts = backproject_odom(depth, Kt, odom[0], odom[1], stride)
+            st = msg.header.stamp
+            flags = self._grid.update(pts, odom[1], st.sec + st.nanosec * 1e-9)
+            return conflict_blobs(flags, depth, stride, int(self._cfg["conflict_min_px"]))
+
+        def _publish_blobs(self, msg: Image, source: str, blobs: list[dict]):
+            if not blobs:
+                return
+            st = msg.header.stamp
+            self.blob_pub.publish(String(data=json.dumps({
+                "stamp": st.sec + st.nanosec * 1e-9, "source": source,
+                "frame_id": msg.header.frame_id, "blobs": blobs})))
 
         def _peer_mask(self, msg: Image, depth: np.ndarray):
             now = time.monotonic()
@@ -662,12 +708,9 @@ def main(argv=None):
                 raw = np.frombuffer(msg.data, dtype=np.uint16).reshape(h, w)
                 depth = raw.astype(np.float32) * 0.001  # typical mm→m; sim is 32FC1
 
-            mask, blobs = self._motion(msg, depth)
-            if blobs:
-                st = msg.header.stamp
-                self.blob_pub.publish(String(data=json.dumps({
-                    "stamp": st.sec + st.nanosec * 1e-9, "source": "motion",
-                    "frame_id": msg.header.frame_id, "blobs": blobs})))
+            mask, blobs, odom = self._motion(msg, depth)
+            self._publish_blobs(msg, "motion", blobs)
+            self._publish_blobs(msg, "conflict", self._conflict(msg, depth, odom))
             peers = self._peer_mask(msg, depth)
             if peers is not None:
                 mask |= peers
