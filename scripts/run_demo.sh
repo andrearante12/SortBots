@@ -23,7 +23,7 @@
 #                       [--render-every N] [--lite-render] [--half-res-cams]
 #                       [--map PATH] [--explore] [--world NAME] [--keep-console]
 #                       [--perception camera|oracle]
-#                       [--dynamic-seg off|model|oracle] [--seg-policy open|strict]
+#                       [--recon-source cloud_map|octomap] [--dynamic-seg off|model|oracle] [--seg-policy open|strict]
 #   scripts/run_demo.sh stop [--keep-console]   # tear the pipeline down
 #
 # --robots N spawns N robots in Isaac (configs/robots.yaml order) AND brings
@@ -226,7 +226,7 @@ CHASE_CAM_ARGS=""
 # --half-res-cams is for large fleets: see spawn_warehouse.py --help.
 RENDER_ARGS=""
 LOCALIZE=false; RESUME=false; MAP_DB=""; EXPLORE=false; WORLD_ARGS=""; PERCEPTION="camera"
-DYNAMIC_SEG="off"; SEG_POLICY="open"
+DYNAMIC_SEG="off"; SEG_POLICY="open"; RECON_SOURCE="cloud_map"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
@@ -256,6 +256,8 @@ while [[ $# -gt 0 ]]; do
                 DYNAMIC_SEG="$2"; shift 2;;
     --seg-policy) [[ "$2" =~ ^(open|strict)$ ]] || { echo "[run_demo] --seg-policy is open or strict, not: $2"; exit 2; }
                 SEG_POLICY="$2"; shift 2;;
+    --recon-source) [[ "$2" =~ ^(cloud_map|octomap)$ ]] || { echo "[run_demo] --recon-source is cloud_map or octomap, not: $2"; exit 2; }
+                RECON_SOURCE="$2"; shift 2;;
     # Set by webui/session.py when the Scenarios tab launches a run: the
     # dashboard console is already up and owns rosbridge/web_video_server, so
     # don't kill it on teardown and don't start a second copy in the bringup.
@@ -416,7 +418,7 @@ setsid "$ROS_BASH" -c "source '$ROS_SETUP'; \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
        delete_db_on_start:=$DELETE_DB_ON_START shared_map:=$SHARED_MAP \
        explore:=true explore_autostart:=$EXPLORE perception:=$PERCEPTION \
-       dynamic_seg:=$DYNAMIC_SEG seg_policy:=$SEG_POLICY" \
+       dynamic_seg:=$DYNAMIC_SEG seg_policy:=$SEG_POLICY recon_source:=$RECON_SOURCE" \
   >"$BRINGUP_LOG" 2>&1 &
 BRINGUP_PID=$!  # setsid execs, as for SIM_PID; ros_bash.sh stays up as long as the launch does
 sleep 12

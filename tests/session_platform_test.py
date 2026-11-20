@@ -100,3 +100,10 @@ def test_dynamic_seg_and_policy_flags():
         sm.build_argv({"dynamic_seg": "oracle"}, "real")   # no simulator on hardware
     with pytest.raises(sm.ScenarioError, match="expected one of"):
         sm.build_argv({"seg_policy": "lenient"}, "sim")
+
+
+def test_recon_source_flag():
+    assert sm.build_argv({"recon_source": "octomap"}, "sim") == ["--recon-source", "octomap"]
+    assert sm.build_argv({"recon_source": "cloud_map"}, "real") == []
+    with pytest.raises(sm.ScenarioError, match="expected one of"):
+        sm.build_argv({"recon_source": "splat"}, "sim")

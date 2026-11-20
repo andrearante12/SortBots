@@ -14,7 +14,7 @@
 # Usage:
 #   scripts/run_robot.sh [--robot-id robot_0] [--localize | --resume]
 #                        [--map PATH] [--keep-console] [--slam-role all|robot]
-#                        [--dynamic-seg off|model] [--seg-policy open|strict]
+#                        [--recon-source cloud_map|octomap] [--dynamic-seg off|model] [--seg-policy open|strict]
 #   scripts/run_robot.sh stop [--keep-console]
 #
 # Map lifecycle is the same three modes as run_demo.sh: default = fresh map,
@@ -102,7 +102,7 @@ if [[ "${1:-}" == "stop" ]]; then
 fi
 
 ROBOT_ID=robot_0; LOCALIZE=false; RESUME=false; MAP_DB=""; SLAM_ROLE=all
-DYNAMIC_SEG=off; SEG_POLICY=open
+DYNAMIC_SEG=off; SEG_POLICY=open; RECON_SOURCE=cloud_map
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
@@ -116,6 +116,8 @@ while [[ $# -gt 0 ]]; do
                 DYNAMIC_SEG="$2"; shift 2;;
     --seg-policy) [[ "$2" =~ ^(open|strict)$ ]] || { echo "[run_robot] --seg-policy is open or strict, not: $2"; exit 2; }
                 SEG_POLICY="$2"; shift 2;;
+    --recon-source) [[ "$2" =~ ^(cloud_map|octomap)$ ]] || { echo "[run_robot] --recon-source is cloud_map or octomap, not: $2"; exit 2; }
+                RECON_SOURCE="$2"; shift 2;;
     -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "[run_robot] unknown arg: $1"; exit 2;;
   esac
@@ -184,7 +186,7 @@ setsid bash -c "$ROS_ENV; \
        webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
        delete_db_on_start:=$DELETE_DB_ON_START slam_role:=$SLAM_ROLE \
-       dynamic_seg:=$DYNAMIC_SEG seg_policy:=$SEG_POLICY" \
+       dynamic_seg:=$DYNAMIC_SEG seg_policy:=$SEG_POLICY recon_source:=$RECON_SOURCE" \
   >"$BRINGUP_LOG" 2>&1 &
 
 # Wait for the camera for real rather than sleeping a fixed time: the D435

@@ -29,6 +29,14 @@ Two things it does:
      offset-driven: webui/operator_cloud.js reads msg.point_step and builds its
      own offset table from msg.fields.
 
+--source octomap relays RTAB-Map's octomap_occupied_space instead of cloud_map,
+and also octomap_empty_space as /<id>/recon_empty (at 10 cm, its own budget).
+cloud_map only ever grows: every keyframe's cloud stacked, so a person captured
+once stays in it after they leave, and a second capture makes two of them. The
+OctoMap ray-traces each keyframe, so a later look through that space clears
+it; the empty space lets nodes/recon_cloud_merge.py clear one robot's ghost
+with another robot's look (recon_fuse.free_space_erase). docs/mapping-movers.md.
+
 Unlike nodes/rtabmap_cloud_pump.py this must NOT wait for any service — a
 plain subscription tolerates rtabmap starting late, or restarting under it.
 The two are deliberately separate processes: the pump is timer-driven and
@@ -73,6 +81,10 @@ DEFAULT_VOXEL_SIZE = 0.05  # matches Grid/CellSize; a near no-op on first pass
 # while a dashboard that happened to be open earlier looks fine. Transient-local
 # only helps subscribers that ask for it, and the browser's roslib can't.
 DEFAULT_KEEPALIVE_SEC = 5.0
+# Empty space is a volume: millions of 5 cm voxels. The merge tests free space
+# on a 10 cm grid (recon_fuse.DEFAULT_FREE_VOXEL), so that is the leaf here.
+DEFAULT_EMPTY_MAX_POINTS = 300_000
+DEFAULT_EMPTY_VOXEL = 0.10
 MIN_LEAF_GROWTH = 1.1      # floor on the per-retry multiplier, to guarantee progress
 MAX_LEAF_RETRIES = 8
 NO_COLOR_FILL = 0xB0B0B0   # neutral gray when the source cloud has no rgb
@@ -82,18 +94,25 @@ OUT_POINT_STEP = 16        # x@0, y@4, z@8, rgb@12 — no padding
 
 class ReconCloudRelay(Node):
     def __init__(self, robot_id: str, max_points: int, voxel_size: float,
-                 keepalive_sec: float):
+                 keepalive_sec: float, source: str = "cloud_map"):
         super().__init__("recon_cloud_relay")
         self.max_points = max_points
         self.voxel_size = voxel_size
+        src = "cloud_map" if source == "cloud_map" else "octomap_occupied_space"
         self.last_cloud = None      # last built message, for the keepalive
         self.published_since_tick = False
         self.pub = self.create_publisher(
             PointCloud2, f"/{robot_id}/recon_cloud", CLOUD_QOS
         )
         self.create_subscription(
-            PointCloud2, f"/{robot_id}/cloud_map", self._on_cloud, CLOUD_QOS
+            PointCloud2, f"/{robot_id}/{src}", self._on_cloud, CLOUD_QOS
         )
+        self.last_empty = None
+        if source == "octomap":
+            self.empty_pub = self.create_publisher(
+                PointCloud2, f"/{robot_id}/recon_empty", CLOUD_QOS)
+            self.create_subscription(
+                PointCloud2, f"/{robot_id}/octomap_empty_space", self._on_empty, CLOUD_QOS)
         # Dashboard "clear map": RTAB-Map publishes nothing for an emptied map,
         # so the latched cloud_map, our keepalive copy and the browser would
         # all keep showing the old cloud. A reset drops the copy and sends one
@@ -103,13 +122,14 @@ class ReconCloudRelay(Node):
         if keepalive_sec > 0:
             self.create_timer(keepalive_sec, self._keepalive)
         self.get_logger().info(
-            f"relaying /{robot_id}/cloud_map -> /{robot_id}/recon_cloud "
+            f"relaying /{robot_id}/{src} -> /{robot_id}/recon_cloud "
             f"(budget {max_points} pts, leaf {voxel_size} m, "
             f"keepalive {keepalive_sec}s)"
         )
 
     def _on_reset(self, _msg):
         self.last_cloud = None
+        self.last_empty = None
         self.published_since_tick = True
         empty = PointCloud2()
         empty.header.stamp = self.get_clock().now().to_msg()
@@ -118,15 +138,34 @@ class ReconCloudRelay(Node):
         empty.width = 0
         empty.point_step = OUT_POINT_STEP
         self.pub.publish(empty)
+        if hasattr(self, "empty_pub"):
+            self.empty_pub.publish(empty)
         self.get_logger().info("recon_reset: dropped cached cloud, sent empty")
 
     def _keepalive(self):
         """Re-send the last cloud if nothing new arrived since the last tick."""
+        if self.last_empty is not None:
+            self.empty_pub.publish(self.last_empty)
         if self.published_since_tick:
             self.published_since_tick = False
             return
         if self.last_cloud is not None:
             self.pub.publish(self.last_cloud)
+
+    def _on_empty(self, msg: PointCloud2):
+        if msg.is_bigendian:
+            return
+        try:
+            xyz, _ = self._unpack(msg)
+        except (KeyError, ValueError) as exc:
+            self.get_logger().warn(f"could not decode empty space: {exc}")
+            return
+        idx, _ = self._downsample(xyz, DEFAULT_EMPTY_MAX_POINTS, DEFAULT_EMPTY_VOXEL,
+                                  force=True)
+        if idx is not None:
+            xyz = xyz[idx]
+        self.last_empty = self._build(msg, xyz, None)
+        self.empty_pub.publish(self.last_empty)
 
     # -- decode ------------------------------------------------------------
     @staticmethod
@@ -164,15 +203,20 @@ class ReconCloudRelay(Node):
         return xyz, rgb
 
     # -- downsample --------------------------------------------------------
-    def _downsample(self, xyz: np.ndarray):
-        """Voxel-dedupe indices under the point budget. Returns (idx, leaf)."""
+    def _downsample(self, xyz: np.ndarray, max_points: int | None = None,
+                    voxel: float | None = None, force: bool = False):
+        """Voxel-dedupe indices under the point budget. Returns (idx, leaf).
+        `force` dedupes at `voxel` even when the cloud already fits."""
+        max_points = self.max_points if max_points is None else max_points
         n = len(xyz)
-        if n <= self.max_points:
+        if n <= max_points and not force:
             return None, 0.0  # None = keep everything
+        if n == 0:
+            return None, 0.0
 
         lo = xyz.min(axis=0)
         span = xyz.max(axis=0) - lo
-        leaf = self.voxel_size
+        leaf = self.voxel_size if voxel is None else voxel
         for _ in range(MAX_LEAF_RETRIES):
             keys = ((xyz - lo) / leaf).astype(np.int64)
             # Pack 3 axis indices into one int64 so np.unique collapses voxels
@@ -181,14 +225,14 @@ class ReconCloudRelay(Node):
             dims = np.maximum(keys.max(axis=0) + 1, 1)
             packed = (keys[:, 0] * dims[1] + keys[:, 1]) * dims[2] + keys[:, 2]
             idx = np.unique(packed, return_index=True)[1]
-            if len(idx) <= self.max_points:
+            if len(idx) <= max_points:
                 return np.sort(idx), leaf
             # These clouds are surfaces — 2D manifolds embedded in 3D — so the
             # voxel count falls off as leaf**-2, not leaf**-3. Estimating the
             # next leaf from that lands within a few percent of the budget in
             # one or two passes; a fixed multiplier instead overshoots and
             # throws away resolution we were entitled to keep.
-            leaf *= max(MIN_LEAF_GROWTH, (len(idx) / self.max_points) ** 0.5)
+            leaf *= max(MIN_LEAF_GROWTH, (len(idx) / max_points) ** 0.5)
 
         # Voxelization plateaued (e.g. a genuinely dense flat surface).
         # Fall back to stride decimation so the budget is never exceeded.
@@ -196,7 +240,7 @@ class ReconCloudRelay(Node):
             f"voxel dedupe stalled at leaf {leaf:.3f} m ({len(idx)} pts) — "
             f"falling back to stride decimation, span {span.round(1)}"
         )
-        return np.sort(idx)[:: int(np.ceil(len(idx) / self.max_points))], leaf
+        return np.sort(idx)[:: int(np.ceil(len(idx) / max_points))], leaf
 
     # -- encode ------------------------------------------------------------
     @staticmethod
@@ -284,11 +328,18 @@ def main():
         help="republish the last cloud this often when idle, 0 to disable "
              "(default: %(default)s)",
     )
+    parser.add_argument(
+        "--source",
+        choices=("cloud_map", "octomap"),
+        default="cloud_map",
+        help="cloud_map (grows forever) or octomap (clears space seen through; "
+             "also relays empty space as recon_empty)",
+    )
     args = parser.parse_args()
 
     rclpy.init()
     node = ReconCloudRelay(args.robot_id, args.max_points, args.voxel_size,
-                           args.keepalive_sec)
+                           args.keepalive_sec, args.source)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

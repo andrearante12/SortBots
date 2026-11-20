@@ -28,7 +28,7 @@ from sensor_msgs.msg import PointCloud2, PointField
 from std_msgs.msg import Header
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from recon_fuse import fuse_clouds  # noqa: E402
+from recon_fuse import fuse_clouds, fuse_clouds_clearing  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "recon_merge.yaml"
@@ -45,6 +45,12 @@ DEFAULTS = {
     "max_points": 200_000,
     "voxel_size": 0.05,
     "keepalive_sec": 5.0,
+    # One robot's ray-traced empty space erases another's stale voxels
+    # (recon_fuse.free_space_erase). Needs the relays on --source octomap,
+    # which publish /<id>/recon_empty; --clear-with-free turns it on.
+    "clear_with_free": False,
+    "free_voxel": 0.10,
+    "min_free_nbrs": 4,
 }
 
 
@@ -114,6 +120,7 @@ class ReconCloudMergeNode(Node):
         self.robot_ids = robot_ids
         self.cfg = cfg
         self._clouds: dict[str, tuple[np.ndarray, np.ndarray | None]] = {}
+        self._empty: dict[str, np.ndarray] = {}
         self._last_out: PointCloud2 | None = None
         self._published_since_tick = False
         self._prev_n = -1
@@ -131,6 +138,10 @@ class ReconCloudMergeNode(Node):
                 CLOUD_QOS,
             )
 
+        if cfg["clear_with_free"]:
+            for rid in robot_ids:
+                self.create_subscription(PointCloud2, f"/{rid}/recon_empty",
+                                         self._make_on_empty(rid), CLOUD_QOS)
         self.create_timer(float(cfg["publish_period_s"]), self._tick)
         keep = float(cfg.get("keepalive_sec", 0))
         if keep > 0:
@@ -170,6 +181,19 @@ class ReconCloudMergeNode(Node):
 
         return _cb
 
+    def _make_on_empty(self, rid: str):
+        def _cb(msg: PointCloud2):
+            if msg.is_bigendian:
+                return
+            if msg.width == 0:
+                self._empty.pop(rid, None)
+                return
+            try:
+                self._empty[rid] = unpack_cloud(msg)[0]
+            except (KeyError, ValueError) as exc:
+                self.get_logger().warn(f"{rid}: empty-space decode failed: {exc}")
+        return _cb
+
     def _lookup_anchor(self, rid: str):
         try:
             tr = self.tf_buffer.lookup_transform(
@@ -192,17 +216,27 @@ class ReconCloudMergeNode(Node):
             if xf is None:
                 continue
             xyz, rgb = cloud
-            sources.append((xyz, rgb, xf))
+            sources.append((xyz, rgb, self._empty.get(rid), xf))
             contributors.append(rid)
 
         if not sources:
             return
 
-        xyz, rgb, leaf = fuse_clouds(
-            sources,
-            max_points=int(self.cfg["max_points"]),
-            voxel_size=float(self.cfg["voxel_size"]),
-        )
+        erased = 0
+        if self.cfg["clear_with_free"]:
+            xyz, rgb, leaf, erased = fuse_clouds_clearing(
+                sources,
+                max_points=int(self.cfg["max_points"]),
+                voxel_size=float(self.cfg["voxel_size"]),
+                free_voxel=float(self.cfg["free_voxel"]),
+                min_free_nbrs=int(self.cfg["min_free_nbrs"]),
+            )
+        else:
+            xyz, rgb, leaf = fuse_clouds(
+                [(x, r, xf) for x, r, _, xf in sources],
+                max_points=int(self.cfg["max_points"]),
+                voxel_size=float(self.cfg["voxel_size"]),
+            )
         header = Header()
         header.stamp = self.get_clock().now().to_msg()
         header.frame_id = "map"
@@ -215,6 +249,8 @@ class ReconCloudMergeNode(Node):
         if key != (self._prev_n, self._prev_contributors):
             self._prev_n, self._prev_contributors = key
             note = f", leaf {leaf:.3f} m" if leaf else ""
+            if erased:
+                note += f", {erased} pts cleared by another robot's free space"
             self.get_logger().info(
                 f"fused {len(contributors)} robot(s) {list(contributors)} -> "
                 f"{len(xyz)} pts in map{note}"
@@ -236,12 +272,16 @@ def main(argv=None):
         help="Comma-separated robot ids, e.g. robot_0,robot_1",
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--clear-with-free", action="store_true",
+                        help="erase stale voxels with other robots' free space")
     args = parser.parse_args(remove_ros_args(args=argv or sys.argv[1:]))
     robot_ids = [r.strip() for r in args.robot_ids.split(",") if r.strip()]
     if not robot_ids:
         parser.error("--robot-ids must list at least one id")
 
     cfg = load_config(args.config)
+    if args.clear_with_free:
+        cfg["clear_with_free"] = True
     rclpy.init(args=argv)
     node = ReconCloudMergeNode(robot_ids, cfg)
     try:

@@ -165,6 +165,7 @@ def generate_launch_description():
     rtabmap_args = LaunchConfiguration("rtabmap_args")
     camera_odometry = LaunchConfiguration("camera_odometry")
     depth_filter = LaunchConfiguration("depth_filter")
+    recon_source = LaunchConfiguration("recon_source")
     wait_imu_to_init = LaunchConfiguration("wait_imu_to_init")
     slam_role = LaunchConfiguration("slam_role")
     keyframe_rate = LaunchConfiguration("keyframe_rate")
@@ -230,6 +231,17 @@ def generate_launch_description():
     ])
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "recon_source",
+            default_value="cloud_map",
+            description=(
+                "What the 3D reconstruction relays: cloud_map (every keyframe's "
+                "cloud stacked; a person captured once stays) or octomap (RTAB-Map's "
+                "ray-traced OctoMap, which clears space a later keyframe looks "
+                "through, plus its empty space for cross-robot clearing). See "
+                "nodes/recon_cloud_relay.py."
+            ),
+        ),
         DeclareLaunchArgument(
             "depth_filter",
             default_value="true",
@@ -599,7 +611,7 @@ def generate_launch_description():
             cmd=[
                 "python3",
                 os.path.join(REPO_ROOT, "nodes", "recon_cloud_relay.py"),
-                "--robot-id", robot_id,
+                "--robot-id", robot_id, "--source", recon_source,
             ],
             output="screen",
         ),

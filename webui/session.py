@@ -316,6 +316,9 @@ RUN_FLAGS = {
     # Stock values emit no flag, like perception.
     "dynamic_seg": _omit_at("off", _choice("--dynamic-seg", {"off", "model", "oracle"})),
     "seg_policy": _omit_at("open", _choice("--seg-policy", {"open", "strict"})),
+    # 3D reconstruction from RTAB-Map's OctoMap, which clears space seen through,
+    # instead of the ever-growing cloud_map (nodes/recon_cloud_relay.py).
+    "recon_source": _omit_at("cloud_map", _choice("--recon-source", {"cloud_map", "octomap"})),
 }
 
 RUN_DEFAULTS = {
@@ -338,6 +341,7 @@ RUN_DEFAULTS = {
     "perception": "camera",
     "dynamic_seg": "off",
     "seg_policy": "open",
+    "recon_source": "cloud_map",
 }
 
 
@@ -356,6 +360,7 @@ REAL_RUN_FLAGS = {
     # No oracle on hardware: there is no simulator to ask.
     "dynamic_seg": _omit_at("off", _choice("--dynamic-seg", {"off", "model"})),
     "seg_policy": RUN_FLAGS["seg_policy"],
+    "recon_source": RUN_FLAGS["recon_source"],
 }
 
 REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all"}

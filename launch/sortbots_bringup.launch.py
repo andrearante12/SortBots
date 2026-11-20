@@ -128,6 +128,7 @@ def _make_per_robot_actions(
     perception_cfg,
     dynamic_seg_cfg,
     seg_policy_cfg,
+    recon_source_cfg,
 ):
     primary_robot_id = robot_id_cfg.perform(context)
     perception = perception_cfg.perform(context)
@@ -139,6 +140,9 @@ def _make_per_robot_actions(
     seg_policy = seg_policy_cfg.perform(context)
     if seg_policy not in ("open", "strict"):
         raise ValueError(f"seg_policy:={seg_policy!r} — expected open or strict")
+    recon_source = recon_source_cfg.perform(context)
+    if recon_source not in ("cloud_map", "octomap"):
+        raise ValueError(f"recon_source:={recon_source!r} — expected cloud_map or octomap")
     raw = robot_ids_cfg.perform(context).strip()
     robot_ids = [r.strip() for r in raw.split(",") if r.strip()] if raw else [primary_robot_id]
     platform = platform_cfg.perform(context)
@@ -323,7 +327,8 @@ def _make_per_robot_actions(
             ))
 
         rtabmap_args = {"robot_id": rid, "use_sim_time": use_sim_time, "rviz": rviz,
-                        "depth_filter": "true" if depth_filter else "false"}
+                        "depth_filter": "true" if depth_filter else "false",
+                        "recon_source": recon_source}
         if platform == "real":
             # Camera-only hardware: no odom publisher and no IMU yet, so
             # RTAB-Map supplies odom itself and must not wait on /imu.
@@ -534,6 +539,9 @@ def _make_per_robot_actions(
             "python3",
             os.path.join(REPO_ROOT, "nodes", "recon_cloud_merge.py"),
             "--robot-ids", ",".join(robot_ids),
+            # octomap relays also publish each robot's empty space, which lets
+            # one robot's look clear another robot's ghost (recon_fuse).
+            *(["--clear-with-free"] if recon_source == "octomap" else []),
             "--ros-args", "-p", ["use_sim_time:=", use_sim_time],
         ],
         output="screen",
@@ -564,8 +572,19 @@ def generate_launch_description():
     perception = LaunchConfiguration("perception")
     dynamic_seg = LaunchConfiguration("dynamic_seg")
     seg_policy = LaunchConfiguration("seg_policy")
+    recon_source = LaunchConfiguration("recon_source")
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "recon_source",
+            default_value="cloud_map",
+            description=(
+                "3D reconstruction source: cloud_map (grows forever, the default "
+                "until octomap clearing is verified live) or octomap (clears space "
+                "seen through, and fuses robots with each other's free space). "
+                "See nodes/recon_cloud_relay.py and nodes/recon_fuse.py."
+            ),
+        ),
         DeclareLaunchArgument(
             "dynamic_seg",
             default_value="off",
@@ -786,6 +805,7 @@ def generate_launch_description():
                 perception,
                 dynamic_seg,
                 seg_policy,
+                recon_source,
             ],
         ),
     ])
