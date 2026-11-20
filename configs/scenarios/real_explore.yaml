@@ -1,0 +1,26 @@
+# Real-robot scenario with Nav2 and the explorer (scripts/run_robot.sh --nav): the robot
+# card's Explore button drives it. See real_map_fresh.yaml for the format.
+name: real_explore
+
+title: Real robot — autonomous explore, fresh map
+description: >
+  real_map_fresh plus Nav2 and the frontier explorer, slow (0.15 m/s, configs/nav2_real.yaml)
+  on the D435's live obstacle cloud. Press Explore on the robot card to start, Stop
+  exploring to stop, and keep the E-STOP button in reach: it brakes the wheels and refuses
+  all driving until released. Start in open floor with the camera's view clear. Nav2 adds
+  real CPU on the Orin; watch for the Jetson dropping off under load.
+
+platform: real
+status: ready
+
+run:
+  robot_id: robot_0
+  resume: false
+  localize: false
+  map: null
+  nav: true
+
+overrides: [resume]
+
+capture:
+  bag: false

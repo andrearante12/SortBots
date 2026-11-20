@@ -31,9 +31,12 @@
 # runs (it is otherwise off on hardware) and nodes/dynamic_segment.py masks
 # what it finds with the TensorRT engines under models/ (docs/mapping-movers.md).
 #
-# Not started, on purpose: Nav2, task_manager, magnet_pick and the explorer.
-# nodes/base_driver.py drives the wheels from /<id>/cmd_vel (the dashboard's
-# drive pad), capped at configs/drive_base.yaml's ros.speed_level.
+# --nav adds Nav2 and the explorer (configs/nav2_real.yaml, explorer_real.yaml): the
+# operator view's Explore button then works as in the sim. Off by default: Nav2 is real
+# CPU on the Orin next to RTAB-Map, and the Jetson has browned out under load. Never
+# started: task_manager and magnet_pick (the arm's pick is nodes/arm_driver.py's).
+# nodes/base_driver.py drives the wheels from /<id>/cmd_vel (the drive pad, or Nav2),
+# capped at configs/drive_base.yaml's ros.speed_level and latched by /<id>/estop.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -101,7 +104,7 @@ if [[ "${1:-}" == "stop" ]]; then
   exit 0
 fi
 
-ROBOT_ID=robot_0; LOCALIZE=false; RESUME=false; MAP_DB=""; SLAM_ROLE=all
+ROBOT_ID=robot_0; LOCALIZE=false; RESUME=false; MAP_DB=""; SLAM_ROLE=all; NAV=false
 DYNAMIC_SEG=off; SEG_POLICY=open; RECON_SOURCE=cloud_map
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -118,7 +121,8 @@ while [[ $# -gt 0 ]]; do
                 SEG_POLICY="$2"; shift 2;;
     --recon-source) [[ "$2" =~ ^(cloud_map|octomap)$ ]] || { echo "[run_robot] --recon-source is cloud_map or octomap, not: $2"; exit 2; }
                 RECON_SOURCE="$2"; shift 2;;
-    -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    --nav)      NAV=true; shift;;
+    -h|--help) sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "[run_robot] unknown arg: $1"; exit 2;;
   esac
 done
@@ -182,7 +186,7 @@ setsid bash -c "$ROS_ENV; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
        platform:=real robot_id:=$ROBOT_ID robot_ids:=$ROBOT_ID \
        use_sim_time:=false rviz:=false \
-       nav2:=false task_manager:=false scripted_pick:=false explore:=false \
+       nav2:=$NAV task_manager:=false scripted_pick:=false explore:=$NAV explore_autostart:=false \
        webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
        delete_db_on_start:=$DELETE_DB_ON_START slam_role:=$SLAM_ROLE \

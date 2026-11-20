@@ -107,3 +107,10 @@ def test_recon_source_flag():
     assert sm.build_argv({"recon_source": "cloud_map"}, "real") == []
     with pytest.raises(sm.ScenarioError, match="expected one of"):
         sm.build_argv({"recon_source": "splat"}, "sim")
+
+
+def test_real_nav_flag_reaches_run_robot():
+    # real_explore: Nav2 + the explorer on the robot (run_robot.sh --nav); off by default.
+    import session as sm
+    assert "--nav" in sm.build_argv({**sm.REAL_RUN_DEFAULTS, "nav": True}, "real")
+    assert "--nav" not in sm.build_argv(dict(sm.REAL_RUN_DEFAULTS), "real")

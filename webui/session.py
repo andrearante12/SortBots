@@ -361,9 +361,11 @@ REAL_RUN_FLAGS = {
     "dynamic_seg": _omit_at("off", _choice("--dynamic-seg", {"off", "model"})),
     "seg_policy": RUN_FLAGS["seg_policy"],
     "recon_source": RUN_FLAGS["recon_source"],
+    # Nav2 + the explorer (run_robot.sh --nav): the Explore button on the real robot.
+    "nav": _switch("--nav", when=True),
 }
 
-REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all"}
+REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all", "nav": False}
 
 PLATFORM_FLAGS = {"sim": RUN_FLAGS, "real": REAL_RUN_FLAGS}
 
