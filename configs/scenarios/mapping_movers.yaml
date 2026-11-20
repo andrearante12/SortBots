@@ -6,9 +6,9 @@ name: mapping_movers
 
 title: Mapping with movers — keep people and carts out of the map (test base)
 description: >
-  robot_0 MAPPING (extending a copy of the saved fleet_warehouse_test map,
-  not localizing read-only on it as the avoidance tests do) while the
-  world's actors walk, stop and walk on in front of it. What the mapping_* tests in configs/tests/ run on, comparing
+  robot_0 MAPPING a fresh map (not localizing read-only on a saved one, as
+  the avoidance tests do) while the world's actors walk, stop and walk on
+  in front of it at the aisle mouth. What the mapping_* tests in configs/tests/ run on, comparing
   dynamic_seg off / oracle / model: does the person end up in /map and in
   the 3D reconstruction, once or twice, and do the props stay?
   docs/mapping-movers.md.
@@ -22,16 +22,16 @@ run:
   headless: true
   chase_cam: false
   explore: false         # one goal per test: every run should look at the same places
-  # Extend a saved map rather than start an empty one: on a fresh map Nav2's
-  # global costmap is only as big as what has been mapped, so the test's goal
-  # across the open floor aborted at ~11 s and the robot never drove (first
-  # live run, 2026-11-20). resume keeps RTAB-Map learning, so a person still
-  # gets INTO the map; run_demo.sh copies the map first, so the library entry
-  # is never written.
-  resume: true
+  # A fresh map, and the tests keep everything inside what robot_0 maps from
+  # its spawn pose. Both ways out tried live on 2026-11-20 failed: a goal
+  # across the open floor aborts on a fresh map (Nav2's global costmap is only
+  # as big as the map), and resuming a saved map does NOT put it in /map —
+  # RTAB-Map starts a new session that only joins the old graph on a loop
+  # closure, so /map stayed the size of what this run had seen.
+  resume: false
   localize: false
   teleop: false
-  map: fleet_warehouse_test
+  map: null
   world: walk_stop_walk
 
 overrides: [world, robots, dynamic_seg, seg_policy, recon_source, headless, chase_cam,

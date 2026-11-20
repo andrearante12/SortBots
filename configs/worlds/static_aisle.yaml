@@ -3,6 +3,8 @@
 # moving. An `if_moving` class (box) must not be masked without motion behind
 # it, a SAM mask must not swallow a stack, and the cross-robot free-space
 # erase must not clear one — every stack has to stay in the reconstruction.
+# All three are inside the view of robot_0 parked at (-7.15, 10.0) facing
+# south (mapping_movers' tests), 2.6-4.4 m away.
 
 name: static_aisle
 title: Aisle mouth — boxes stacked beside the route, nothing moving
@@ -20,17 +22,17 @@ props:
     label: boxes
     shape: box
     size: [0.6, 0.6, 0.6]
-    pose: [-10.4, 7.4, 0.0]
+    pose: [-9.2, 7.4, 0.0]
     color: [0.62, 0.52, 0.36]
   - id: stack_tall
     label: boxes
     shape: box
     size: [0.8, 0.6, 1.2]
-    pose: [-10.4, 5.4, 0.0]
+    pose: [-5.6, 7.2, 0.0]
     color: [0.58, 0.48, 0.33]
   - id: stack_east
     label: boxes
     shape: box
     size: [0.6, 0.6, 0.9]
-    pose: [-6.4, 5.0, 0.0]
+    pose: [-7.2, 5.6, 0.0]
     color: [0.65, 0.55, 0.38]

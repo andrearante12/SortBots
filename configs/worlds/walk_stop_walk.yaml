@@ -1,8 +1,10 @@
 # A world layout (simtest/world.py has the full schema). Coordinates as in
 # person_crossing.yaml: robot_0's aisle opens south onto clear floor at y ~ 8.
+# The actor's line is y = 7.8, ~2 m in front of where mapping_movers' tests
+# park robot_0 (-7.15, 10.0, facing south), inside what it maps from spawn.
 #
 # The "mapped twice" case. A person stands at the aisle mouth from t = 0,
-# walks 2 m east, stands there again for 15 s, then walks on across robot_0's
+# walks 1.2 m east, stands there again for 15 s, then walks on across robot_0's
 # route and keeps standing at the far end (mode: once holds it). Frame
 # differencing sees them only while they walk; standing still they used to
 # get painted into the map at every place they stopped. dwell_s applies
@@ -24,7 +26,7 @@ actors:
     label: person
     preset: person
     path:
-      waypoints: [[-12.0, 6.5], [-10.0, 6.5], [-5.5, 6.5]]
+      waypoints: [[-9.8, 7.8], [-8.6, 7.8], [-5.6, 7.8]]
       speed_mps: 1.0
       mode: once
       start_at_s: 0.0

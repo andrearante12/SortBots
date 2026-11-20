@@ -18,8 +18,8 @@ warmup_s: 5
 
 goals:
   - robot: robot_0
-    pose: [-8.0, 3.0, 1.5708]
-    timeout_s: 90
+    pose: [-7.15, 10.0, -1.5708]   # turn from the rack, face down the aisle at the mouth
+    timeout_s: 60
 
 stop:
   sim_s: 60

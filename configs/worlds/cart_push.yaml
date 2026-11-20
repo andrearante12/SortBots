@@ -1,4 +1,5 @@
 # A world layout (simtest/world.py has the full schema). walk_stop_walk's
+# line (y = 7.8, ~2 m in front of mapping_movers' parked robot_0) and
 # timing with a CART instead of a person: a plain box, no NVIDIA asset, no
 # walk cycle. The generalization check: nothing about it is a person, so only
 # the class-agnostic cues (motion, map conflict) or the detector's `cart`
@@ -22,7 +23,7 @@ actors:
     size: [0.9, 0.6, 0.95]
     color: [0.20, 0.35, 0.65]
     path:
-      waypoints: [[-12.0, 6.5], [-10.0, 6.5], [-5.5, 6.5]]
+      waypoints: [[-9.8, 7.8], [-8.6, 7.8], [-5.6, 7.8]]
       speed_mps: 0.8
       mode: once
       start_at_s: 0.0
