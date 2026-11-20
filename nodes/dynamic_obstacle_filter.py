@@ -6,9 +6,21 @@ other robots. This node invalidates mover pixels in a `depth_static` Image
 (NaN) for SLAM, and republishes those points as `/<id>/dynamic_obstacles`
 PointCloud2 for an ephemeral Nav2 ObstacleLayer.
 
-Detection v1: frame-to-frame depth change in the robot-height band, then
-connected-component blobs of roughly robot footprint size. No peer TF
-oracle.
+Detection v2: each current pixel is back-projected, moved into the PREVIOUS
+camera frame by odometry, and compared with what the previous frame saw along
+that ray. Only "something is now closer than the ray used to reach" counts,
+then connected-component blobs. No peer TF oracle.
+
+Why the warp and the sign: v1 diffed raw frames pixel by pixel, so the moment
+the robot moved, every depth edge shifted in the image and shelf edges were
+NaN'd out of depth_static as "movers" (found reading the code 2026-11-20, while
+planning person masking). The signed backward test cannot fire on a static
+scene from parallax: a static point the previous camera could see has
+previous-depth = its depth; one it could not see was hidden by something
+CLOSER, which makes the difference negative. The cost is that an object moving
+straight away from the camera only shows at its edges. The segment masks
+(`dynamic_seg`, nodes/dynamic_segment.py) fill whole objects in from those
+edges, and the peer mask covers robots.
 
 Plus peers by radio: frame differencing misses a robot that stands still or
 creeps, so RTAB-Map painted it into the shared map as a wall. Live on
@@ -34,14 +46,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Defaults tuned for XLeRobot-ish body in the NVIDIA warehouse aisle.
 DEFAULTS = {
-    "change_m": 0.12,          # |z - z_prev| to count as motion
+    "change_m": 0.12,          # prev-ray depth minus warped depth to count as motion
+    # Heights are metres above `<id>/odom` (the floor), applied only when the
+    # camera's odom pose is known. 2.2 m covers a standing adult's head; v1's
+    # 1.35 m cut people off at the shoulders and was never applied anyway.
     "min_height_m": 0.08,      # keep near-floor noise out of mover mask
-    "max_height_m": 1.35,      # below shelf tops; covers peer chassis+mast
+    "max_height_m": 2.2,
     "min_range_m": 0.35,
     "max_range_m": 4.5,
+    # Blob sizes are FULL-resolution pixels; motion runs at 1/stride and the
+    # thresholds are scaled to match. Stride 2 keeps the warp + labelling
+    # inside a 30 Hz frame budget at 848x480.
+    "motion_stride": 2,
     "min_blob_px": 40,         # reject speckles
     "max_blob_px": 25000,      # reject whole-wall flashes
     "morph_close": 2,          # dilate/erode iterations to knit blob
+    # Exact-stamp TF wait for the warp. On a miss the frame gets no motion
+    # mask rather than an unwarped one: an unwarped diff on a moving robot is
+    # exactly v1's shelf-edge bug.
+    "tf_timeout_s": 0.03,
     # Footprint corner reach is 0.32 m (0.5 x 0.4 m); the rest is margin for
     # the 5 Hz status lag and the two robots' localization disagreeing.
     "peer_radius_m": 0.5,
@@ -49,36 +72,123 @@ DEFAULTS = {
 }
 
 
+def _pixel_rays(h: int, w: int, fx: float, fy: float, cx: float, cy: float):
+    """Per-pixel (x/z, y/z) of the optical ray, as broadcastable row/column."""
+    rx = (np.arange(w, dtype=np.float32) - cx) / fx
+    ry = (np.arange(h, dtype=np.float32) - cy) / fy
+    return rx[None, :], ry[:, None]
+
+
+def _min3(img: np.ndarray) -> np.ndarray:
+    """3x3 minimum, NaN treated as +inf (an invalid neighbour never wins)."""
+    a = np.where(np.isfinite(img), img, np.inf).astype(np.float32)
+    p = np.pad(a, 1, mode="constant", constant_values=np.inf)
+    h, w = a.shape
+    out = a.copy()
+    for dy in (0, 1, 2):
+        for dx in (0, 1, 2):
+            np.minimum(out, p[dy:dy + h, dx:dx + w], out=out)
+    return out
+
+
+def warp_into_prev(
+    depth: np.ndarray,
+    prev: np.ndarray,
+    K: tuple[float, float, float, float],
+    R_prev_cur: np.ndarray,
+    t_prev_cur: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Where each current pixel's 3D point lands in the PREVIOUS frame.
+
+    Returns (z_prev, seen), both HxW float32, NaN where there is no answer:
+      z_prev  that point's depth in the previous optical frame
+      seen    what the previous frame actually measured along the ray to it
+
+    `seen` is the 3x3 minimum around the reprojected pixel, not the nearest
+    sample. Nearest-pixel sampling at a depth edge picks the far side half the
+    time, which reads as "something came closer" along every edge the robot
+    drives past. The minimum makes the test answer yes only when the whole
+    neighbourhood was farther.
+    """
+    fx, fy, cx, cy = K
+    h, w = depth.shape
+    d = depth.astype(np.float32, copy=False)
+    rx, ry = _pixel_rays(h, w, fx, fy, cx, cy)
+    x, y = rx * d, ry * d
+    R = np.asarray(R_prev_cur, dtype=np.float32)
+    t = np.asarray(t_prev_cur, dtype=np.float32)
+    X = R[0, 0] * x + R[0, 1] * y + R[0, 2] * d + t[0]
+    Y = R[1, 0] * x + R[1, 1] * y + R[1, 2] * d + t[1]
+    Z = R[2, 0] * x + R[2, 1] * y + R[2, 2] * d + t[2]
+    ok = np.isfinite(d) & (d > 0) & np.isfinite(Z) & (Z > 0.05)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        u2 = np.rint(fx * X / Z + cx)
+        v2 = np.rint(fy * Y / Z + cy)
+    ok &= (u2 >= 0) & (u2 < w) & (v2 >= 0) & (v2 < h)
+    z_prev = np.full((h, w), np.nan, dtype=np.float32)
+    seen = np.full((h, w), np.nan, dtype=np.float32)
+    z_prev[ok] = Z[ok]
+    pmin = _min3(prev)
+    s = pmin[v2[ok].astype(np.intp), u2[ok].astype(np.intp)]
+    seen[ok] = np.where(np.isfinite(s), s, np.nan)
+    return z_prev, seen
+
+
+def point_heights(
+    depth: np.ndarray,
+    K: tuple[float, float, float, float],
+    R_odom_cam: np.ndarray,
+    t_odom_cam: np.ndarray,
+) -> np.ndarray:
+    """Height above `<id>/odom` of every pixel's point (NaN where invalid)."""
+    fx, fy, cx, cy = K
+    h, w = depth.shape
+    d = depth.astype(np.float32, copy=False)
+    rx, ry = _pixel_rays(h, w, fx, fy, cx, cy)
+    R = np.asarray(R_odom_cam, dtype=np.float32)
+    z = (R[2, 0] * rx + R[2, 1] * ry + R[2, 2]) * d + float(t_odom_cam[2])
+    return np.where(np.isfinite(d) & (d > 0), z, np.nan).astype(np.float32)
+
+
 def depth_motion_mask(
     depth: np.ndarray,
     prev: np.ndarray | None,
     *,
     change_m: float = DEFAULTS["change_m"],
-    min_height_m: float = DEFAULTS["min_height_m"],
-    max_height_m: float = DEFAULTS["max_height_m"],
     min_range_m: float = DEFAULTS["min_range_m"],
     max_range_m: float = DEFAULTS["max_range_m"],
+    K: tuple[float, float, float, float] | None = None,
+    R_prev_cur: np.ndarray | None = None,
+    t_prev_cur: np.ndarray | None = None,
+    heights: np.ndarray | None = None,
+    min_height_m: float = DEFAULTS["min_height_m"],
+    max_height_m: float = DEFAULTS["max_height_m"],
 ) -> np.ndarray:
-    """Boolean mask of candidate dynamic pixels (optical frame z = depth)."""
+    """Boolean mask of pixels that are now closer than the previous frame's ray.
+
+    With `K` and the prev<-cur camera motion the previous frame is warped; with
+    no `K` the frames are compared pixel for pixel, which is only right for a
+    camera that did not move (the tests, and a robot parked on its odometry).
+    `heights` (from point_heights) gates to the body band when known.
+    """
     d = depth.astype(np.float32, copy=False)
-    valid = np.isfinite(d) & (d >= min_range_m) & (d <= max_range_m)
-    # Without camera tilt model, treat depth as approximate range and gate
-    # by range band that corresponds to body-scale returns (sim D435 looking
-    # forward). Height gate approximated by excluding very near floor clutter
-    # via min_range and very far structure via max_range; optional prev frame
-    # is the real dynamic signal.
     if prev is None or prev.shape != d.shape:
         return np.zeros(d.shape, dtype=bool)
-    p = prev.astype(np.float32, copy=False)
-    prev_valid = np.isfinite(p) & (p >= min_range_m) & (p <= max_range_m)
-    changed = valid & prev_valid & (np.abs(d - p) >= change_m)
-    # Drop slow map growth (large distant surfaces jittering): prefer mid-field.
-    mid = (d >= min_range_m) & (d <= max_range_m)
-    # Soft height proxy: close returns that jumped are more body-like.
-    bodyish = (d >= min_height_m) | (p >= min_height_m)
-    bodyish &= (d <= max_range_m)
-    _ = max_height_m  # reserved for RGB-D projection height once available
-    return changed & mid & bodyish
+    if K is None:
+        z_prev = d
+        seen = _min3(prev)
+        seen = np.where(np.isfinite(seen), seen, np.nan)
+    else:
+        R = np.eye(3, dtype=np.float32) if R_prev_cur is None else R_prev_cur
+        t = np.zeros(3, dtype=np.float32) if t_prev_cur is None else t_prev_cur
+        z_prev, seen = warp_into_prev(d, prev, K, R, t)
+    valid = np.isfinite(d) & (d >= min_range_m) & (d <= max_range_m)
+    valid &= np.isfinite(seen) & (seen >= min_range_m)
+    with np.errstate(invalid="ignore"):
+        moved = valid & (seen - z_prev >= change_m)
+        if heights is not None:
+            moved &= (heights >= min_height_m) & (heights <= max_height_m)
+    return moved
 
 
 def _morph_close(mask: np.ndarray, iterations: int) -> np.ndarray:
@@ -204,32 +314,88 @@ def label_blobs(mask: np.ndarray) -> tuple[np.ndarray, list[int]]:
     return labels, [int(s) for s in sizes]
 
 
-def select_dynamic_mask(
+def select_dynamic_blobs(
     depth: np.ndarray,
     prev: np.ndarray | None,
     cfg: dict | None = None,
-) -> np.ndarray:
-    """Full v1 pipeline → boolean mask of pixels to treat as dynamic."""
+    *,
+    K: tuple[float, float, float, float] | None = None,
+    R_prev_cur: np.ndarray | None = None,
+    t_prev_cur: np.ndarray | None = None,
+    R_odom_cam: np.ndarray | None = None,
+    t_odom_cam: np.ndarray | None = None,
+) -> tuple[np.ndarray, list[dict]]:
+    """Full v2 pipeline → (full-res boolean mask, blob summaries).
+
+    Runs at 1/motion_stride. Blob summaries are in full-resolution pixels and
+    are what nodes/dynamic_segment.py prompts SAM with (see blob_summaries).
+    """
     c = {**DEFAULTS, **(cfg or {})}
+    s = max(1, int(c["motion_stride"]))
+    h, w = depth.shape
+    d = depth[::s, ::s]
+    p = prev[::s, ::s] if prev is not None and prev.shape == depth.shape else None
+    Ks = None if K is None else (K[0] / s, K[1] / s, K[2] / s, K[3] / s)
+    heights = None
+    if Ks is not None and R_odom_cam is not None and t_odom_cam is not None:
+        heights = point_heights(d, Ks, R_odom_cam, t_odom_cam)
     raw = depth_motion_mask(
-        depth,
-        prev,
+        d, p,
         change_m=c["change_m"],
-        min_height_m=c["min_height_m"],
-        max_height_m=c["max_height_m"],
         min_range_m=c["min_range_m"],
         max_range_m=c["max_range_m"],
+        K=Ks, R_prev_cur=R_prev_cur, t_prev_cur=t_prev_cur,
+        heights=heights,
+        min_height_m=c["min_height_m"],
+        max_height_m=c["max_height_m"],
     )
     closed = _morph_close(raw, int(c["morph_close"]))
     labels, sizes = label_blobs(closed)
-    lo, hi = int(c["min_blob_px"]), int(c["max_blob_px"])
+    area = s * s
+    lo, hi = c["min_blob_px"] / area, c["max_blob_px"] / area
     # One lookup-table index rather than a `keep |= labels == lab` pass per
     # label: that loop walked the whole 848x480 image once per blob, so a
     # speckly frame (which is the common case, and the reason min_blob_px
     # exists) cost hundreds of full-image comparisons.
     size_ok = (np.asarray(sizes) >= lo) & (np.asarray(sizes) <= hi)
     size_ok[0] = False  # label 0 is background
-    return size_ok[labels]
+    small = size_ok[labels]
+    blobs = blob_summaries(np.where(small, labels, 0), d, s)
+    if s > 1:
+        full = np.repeat(np.repeat(small, s, axis=0), s, axis=1)[:h, :w]
+    else:
+        full = small
+    return full, blobs
+
+
+def blob_summaries(labels: np.ndarray, depth: np.ndarray, scale: int = 1) -> list[dict]:
+    """One dict per nonzero label: full-res bbox [u0, v0, u1, v1) , centroid
+    [u, v], pixel count and median depth. Pixel coordinates are multiplied by
+    `scale` so a blob found at 1/stride still points at the full image."""
+    out = []
+    ids = np.unique(labels)
+    for lab in ids[ids > 0].tolist():
+        vs, us = np.nonzero(labels == lab)
+        z = depth[vs, us]
+        z = z[np.isfinite(z)]
+        out.append({
+            "bbox": [int(us.min()) * scale, int(vs.min()) * scale,
+                     (int(us.max()) + 1) * scale, (int(vs.max()) + 1) * scale],
+            "centroid": [float(us.mean()) * scale, float(vs.mean()) * scale],
+            "px": int(us.size) * scale * scale,
+            "depth_m": float(np.median(z)) if z.size else None,
+        })
+    return out
+
+
+def select_dynamic_mask(
+    depth: np.ndarray,
+    prev: np.ndarray | None,
+    cfg: dict | None = None,
+    **pose,
+) -> np.ndarray:
+    """Boolean mask of pixels to treat as dynamic (select_dynamic_blobs' mask)."""
+    return select_dynamic_blobs(depth, prev, cfg, **pose)[0]
 
 
 def peer_mask(
@@ -341,6 +507,7 @@ def main(argv=None):
     parser.add_argument("--robot-id", default="robot_0")
     args = parser.parse_args(argv)
 
+    import json
     import time
 
     import rclpy
@@ -356,6 +523,7 @@ def main(argv=None):
     from fleet_radio import STATUS_TOPIC, parse_status
 
     robot_id = args.robot_id
+    odom_frame = f"{robot_id}/odom"
 
     def pack_cloud(header: Header, pts: np.ndarray) -> PointCloud2:
         msg = PointCloud2()
@@ -377,12 +545,16 @@ def main(argv=None):
     class DynamicObstacleFilter(Node):
         def __init__(self):
             super().__init__(f"{robot_id}_dynamic_obstacle_filter")
-            self._prev = None
+            self._prev = None       # (depth, stamp, frame_id) of the last frame
             self._info = None
+            self._tf_misses = 0
             self._cfg = dict(DEFAULTS)
             self._peers: dict[str, tuple[tuple[float, float], float]] = {}
             self._tf = Buffer()
-            self._tf_listener = TransformListener(self._tf, self)
+            # Own spin thread: the warp waits up to tf_timeout_s for the
+            # exact-stamp transform, and a listener fed by this node's own
+            # executor could never deliver it while _on_depth is blocking.
+            self._tf_listener = TransformListener(self._tf, self, spin_thread=True)
             qos = qos_profile_sensor_data
             # fleet_radio publishes BEST_EFFORT (a lossy mesh stand-in); a
             # RELIABLE subscriber is incompatible and silently gets nothing.
@@ -399,6 +571,11 @@ def main(argv=None):
             self.dyn_pub = self.create_publisher(
                 PointCloud2, f"/{robot_id}/dynamic_obstacles", qos
             )
+            # Motion blobs as SAM prompts for nodes/dynamic_segment.py. JSON on
+            # String like the rest of the fleet protocol, never an image.
+            self.blob_pub = self.create_publisher(
+                String, f"/{robot_id}/camera/motion_blobs", qos
+            )
             self.get_logger().info(
                 f"dynamic filter: depth -> depth_static + dynamic_obstacles "
                 f"for {robot_id}"
@@ -411,6 +588,44 @@ def main(argv=None):
             st = parse_status(msg.data)
             if st and st["robot_id"] != robot_id:
                 self._peers[st["robot_id"]] = ((st["x"], st["y"]), time.monotonic())
+
+        def _lookup(self, target, target_stamp, source, source_stamp):
+            """(R, t) taking points from `source` at source_stamp into `target`
+            at target_stamp, through the odom frame; None on a miss."""
+            try:
+                tf = self._tf.lookup_transform_full(
+                    target, Time.from_msg(target_stamp), source,
+                    Time.from_msg(source_stamp), odom_frame,
+                    timeout=Duration(seconds=float(self._cfg["tf_timeout_s"])))
+            except Exception:  # noqa: BLE001 - tf2 raises several types
+                return None
+            q, t = tf.transform.rotation, tf.transform.translation
+            return (_quat_to_matrix(q.x, q.y, q.z, q.w),
+                    np.array([t.x, t.y, t.z], dtype=np.float32))
+
+        def _motion(self, msg: Image, depth: np.ndarray):
+            """(mask, blobs) from the warped previous frame, or no motion when
+            either pose is unknown (an unwarped diff is v1's shelf-edge bug)."""
+            prev, self._prev = self._prev, (depth.copy(), msg.header.stamp, msg.header.frame_id)
+            empty = np.zeros(depth.shape, dtype=bool), []
+            if prev is None or self._info is None or prev[2] != msg.header.frame_id:
+                return empty
+            K = self._info.k
+            Kt = (float(K[0]), float(K[4]), float(K[2]), float(K[5]))
+            frame = msg.header.frame_id
+            rel = self._lookup(frame, prev[1], frame, msg.header.stamp)
+            odom = rel and self._lookup(odom_frame, msg.header.stamp, frame,
+                                        msg.header.stamp)
+            if not rel or not odom:
+                self._tf_misses += 1
+                if self._tf_misses in (1, 30) or self._tf_misses % 300 == 0:
+                    self.get_logger().warning(
+                        f"no exact-stamp TF {frame} via {odom_frame} "
+                        f"({self._tf_misses} frames without a motion mask)")
+                return empty
+            return select_dynamic_blobs(depth, prev[0], self._cfg, K=Kt,
+                                        R_prev_cur=rel[0], t_prev_cur=rel[1],
+                                        R_odom_cam=odom[0], t_odom_cam=odom[1])
 
         def _peer_mask(self, msg: Image, depth: np.ndarray):
             now = time.monotonic()
@@ -447,8 +662,12 @@ def main(argv=None):
                 raw = np.frombuffer(msg.data, dtype=np.uint16).reshape(h, w)
                 depth = raw.astype(np.float32) * 0.001  # typical mm→m; sim is 32FC1
 
-            mask = select_dynamic_mask(depth, self._prev, self._cfg)
-            self._prev = depth.copy()
+            mask, blobs = self._motion(msg, depth)
+            if blobs:
+                st = msg.header.stamp
+                self.blob_pub.publish(String(data=json.dumps({
+                    "stamp": st.sec + st.nanosec * 1e-9, "source": "motion",
+                    "frame_id": msg.header.frame_id, "blobs": blobs})))
             peers = self._peer_mask(msg, depth)
             if peers is not None:
                 mask |= peers
