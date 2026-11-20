@@ -192,12 +192,17 @@ def _make_per_robot_actions(
                 launch_arguments={"robot_id": rid}.items(),
             ))
 
+        # On the real robot the dashboard extras and the obstacle tracker run at nice 10 (as
+        # RTAB-Map does): at load 11 on the Orin with Nav2 up (2026-11-19) they starved the wheel
+        # driver and rosbridge, and the drive pad lagged.
+        low = ["nice", "-n", "10"] if platform == "real" else []
+
         # Dashboard camera tiles: a colourised depth view (any platform, it
         # only needs camera/depth) and, on real hardware, RTAB-Map's tracked
         # keypoints as JSON for the canvas overlay (sim never runs
         # rgbd_odometry, so there is no odom_info to reduce).
         actions.append(ExecuteProcess(
-            cmd=[
+            cmd=low + [
                 "python3",
                 os.path.join(REPO_ROOT, "nodes", "depth_colorizer.py"),
                 "--robot-id", rid,
@@ -207,7 +212,7 @@ def _make_per_robot_actions(
         # Both platforms: RTAB-Map's keypoints on real hardware, an ORB stand-in
         # on camera/rgb in sim (no odom_info there). On demand either way.
         actions.append(ExecuteProcess(
-            cmd=[
+            cmd=low + [
                 "python3",
                 os.path.join(REPO_ROOT, "nodes", "feature_overlay.py"),
                 "--robot-id", rid,
@@ -221,11 +226,12 @@ def _make_per_robot_actions(
         # camera/depth, so it doesn't depend on the depth filter below, and the
         # sensors view draws its boxes over the head camera.
         actions.append(ExecuteProcess(
-            cmd=[
+            cmd=low + [
                 "python3",
                 os.path.join(REPO_ROOT, "nodes", "obstacle_detector.py"),
                 "--robot-id", rid,
-            ],
+            ] + (["--overlay", os.path.join(REPO_ROOT, "configs", "obstacle_detector_real.yaml")]
+                 if platform == "real" else []),
             output="screen",
         ))
         # The magnet plates in front of the robot, in the map frame (/<id>/packages):
@@ -277,6 +283,10 @@ def _make_per_robot_actions(
                     "python3",
                     os.path.join(REPO_ROOT, "nodes", "obstacle_cloud.py"),
                     "--robot-id", rid,
+                    # 12 cm, not 5: a 1 deg camera-pitch error lifts the floor ~5 cm at 3 m,
+                    # and ~6k floor points a frame (1.5-4.4 m out) were marked as obstacles
+                    # (2026-11-19). Matches configs/nav2_real.yaml's min_obstacle_height.
+                    "--min-height-m", "0.12",
                 ],
                 output="screen",
             ))
@@ -365,9 +375,15 @@ def _make_per_robot_actions(
                 output="screen",
             ))
 
+        nav2_args = {"robot_id": rid, "use_sim_time": use_sim_time}
+        if platform == "real":
+            # Slow, CPU-light, on the real obstacle cloud: configs/nav2_real.yaml says why.
+            nav2_args["overlay_file"] = os.path.join(REPO_ROOT, "configs", "nav2_real.yaml")
+            nav2_args["node_prefix"] = "nice -n 10"
+            nav2_args["depth_to_cloud"] = "false"
         actions.append(IncludeLaunchDescription(
             _include("sortbots_nav2.launch.py"),
-            launch_arguments={"robot_id": rid, "use_sim_time": use_sim_time}.items(),
+            launch_arguments=nav2_args.items(),
             condition=IfCondition(nav2),
         ))
 
@@ -437,6 +453,8 @@ def _make_per_robot_actions(
         explorer_cmd = lambda autostart: [
             "python3", os.path.join(REPO_ROOT, "nodes", "explorer.py"), "--robot-id", rid,
             *(["--autostart"] if autostart else []),
+            # Wall-clock budgets for the real base's speed (configs/explorer_real.yaml).
+            *(["--overlay", os.path.join(REPO_ROOT, "configs", "explorer_real.yaml")] if platform == "real" else []),
             "--ros-args", "-p", ["use_sim_time:=", use_sim_time],
         ]
         if shared:

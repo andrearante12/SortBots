@@ -345,9 +345,11 @@ REAL_RUN_FLAGS = {
     # all = map on the Jetson; robot = map on the workstation from the robot's
     # keyframe stream (tasks/slam_offload.md@6501799). Real-only: sim has no Jetson.
     "slam_role": _choice("--slam-role", {"all", "robot"}),
+    # Nav2 + the explorer (run_robot.sh --nav): the Explore button on the real robot.
+    "nav": _switch("--nav", when=True),
 }
 
-REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all"}
+REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all", "nav": False}
 
 PLATFORM_FLAGS = {"sim": RUN_FLAGS, "real": REAL_RUN_FLAGS}
 

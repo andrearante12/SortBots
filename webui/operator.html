@@ -70,6 +70,10 @@
   .btn.primary:hover:not(:disabled) { background: var(--muted); }
   .btn.stop { color: var(--stop); border-color: var(--stopb); }
   .btn.stop:hover:not(:disabled) { background: var(--stoph); }
+  #estop-latch { flex: none; background: #d42020; border-color: #a01010; color: #fff; font-weight: 700; letter-spacing: .06em; padding: 5px 16px; }
+  #estop-latch:hover { background: #b81414; }
+  #estop-latch.latched { background: #fff; color: #c01010; border: 2px solid #d42020; animation: estop-blink 1s steps(2, start) infinite; }
+  @keyframes estop-blink { to { background: #ffd6d6; } }
   .btn.small { padding: 3px 10px; font-size: .8rem; }
   select, input[type="number"] { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; }
   #lf-render_every { width: 4.5em; }
@@ -794,6 +798,11 @@
        holds, quiet once it has cleared but nobody has acknowledged it. Hidden at none. -->
   <button class="btn" id="alarms" hidden aria-haspopup="true" title="Fleet alarms"><span class="dot"></span><span id="alarms-label"></span></button>
   <div id="alarm-pop" hidden role="dialog" aria-label="Fleet alarms"><h3>Fleet alarms</h3><ul id="alarm-list"></ul></div>
+  <!-- The real robot's E-STOP: /<id>/estop latched in nodes/base_driver.py (wheels braked, every
+       cmd_vel ignored), the explorer stopped, Nav2 goals cancelled, a pick aborted. The latch
+       lives on the robot, so it survives this page closing; release is a second, deliberate
+       click. Real platform only: the sim has Stop all. -->
+  <button class="btn" id="estop-latch" hidden title="Emergency stop: brake every robot's wheels NOW and refuse all driving (pad, Nav2, explore) until released">E-STOP</button>
   <button class="btn stop" id="estop" title="Halt every robot now, then shut the sim down (you choose whether to keep the map)">Stop all</button>
 </header>
 

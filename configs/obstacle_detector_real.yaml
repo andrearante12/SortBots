@@ -1,0 +1,6 @@
+# The real robot's obstacle tracker overrides, merged over configs/obstacle_detector.yaml
+# (nodes/obstacle_detector.py --overlay; sortbots_bringup.launch.py passes it on platform:=real).
+# On the real robot it only draws the operator view's obstacle boxes (Nav2 reads
+# nodes/obstacle_cloud.py's /<id>/obstacles there), and at 10 Hz it took ~40% of a core
+# while the Orin was saturated (2026-11-19). 5 Hz is plenty for boxes on a camera tile.
+rate_hz: 5.0

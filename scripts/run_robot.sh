@@ -26,9 +26,12 @@
 # (launch/sortbots_slam_workstation.launch.py, tasks/slam_offload.md@6501799). The
 # default `all` maps on the Jetson as before, at lower CPU priority.
 #
-# Not started, on purpose: Nav2, task_manager, magnet_pick and the explorer.
-# nodes/base_driver.py drives the wheels from /<id>/cmd_vel (the dashboard's
-# drive pad), capped at configs/drive_base.yaml's ros.speed_level.
+# --nav adds Nav2 and the explorer (configs/nav2_real.yaml, explorer_real.yaml): the
+# operator view's Explore button then works as in the sim. Off by default: Nav2 is real
+# CPU on the Orin next to RTAB-Map, and the Jetson has browned out under load. Never
+# started: task_manager and magnet_pick (the arm's pick is nodes/arm_driver.py's).
+# nodes/base_driver.py drives the wheels from /<id>/cmd_vel (the drive pad, or Nav2),
+# capped at configs/drive_base.yaml's ros.speed_level and latched by /<id>/estop.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -96,7 +99,7 @@ if [[ "${1:-}" == "stop" ]]; then
   exit 0
 fi
 
-ROBOT_ID=robot_0; LOCALIZE=false; RESUME=false; MAP_DB=""; SLAM_ROLE=all
+ROBOT_ID=robot_0; LOCALIZE=false; RESUME=false; MAP_DB=""; SLAM_ROLE=all; NAV=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
@@ -105,6 +108,7 @@ while [[ $# -gt 0 ]]; do
     --map)      MAP_DB="$2"; shift 2;;
     --keep-console) KEEP_CONSOLE=true; shift;;
     --slam-role) SLAM_ROLE="$2"; shift 2;;
+    --nav)      NAV=true; shift;;
     -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "[run_robot] unknown arg: $1"; exit 2;;
   esac
@@ -169,7 +173,7 @@ setsid bash -c "$ROS_ENV; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
        platform:=real robot_id:=$ROBOT_ID robot_ids:=$ROBOT_ID \
        use_sim_time:=false rviz:=false \
-       nav2:=false task_manager:=false scripted_pick:=false explore:=false \
+       nav2:=$NAV task_manager:=false scripted_pick:=false explore:=$NAV explore_autostart:=false \
        webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
        delete_db_on_start:=$DELETE_DB_ON_START slam_role:=$SLAM_ROLE" \

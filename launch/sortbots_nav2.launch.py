@@ -71,7 +71,17 @@ def _substitute_robot_0(node, robot_id: str):
     return node
 
 
-def _rewrite_robot_0(params_path: str, robot_id: str) -> str:
+def _deep_merge(base, over):
+    """`over` merged into `base`, dicts recursively, anything else replaced."""
+    if isinstance(base, dict) and isinstance(over, dict):
+        out = dict(base)
+        for k, v in over.items():
+            out[k] = _deep_merge(base.get(k), v) if k in base else v
+        return out
+    return over
+
+
+def _rewrite_robot_0(params_path: str, robot_id: str, overlay_path: str = "") -> str:
     """Return a copy of `params_path` with every "robot_0" substring in a
     string VALUE replaced by `robot_id`. A value-level substring replace,
     not a key-name substitution — see the module docstring for why: it only
@@ -88,6 +98,11 @@ def _rewrite_robot_0(params_path: str, robot_id: str) -> str:
     """
     with open(params_path) as f:
         data = yaml.safe_load(f)
+    # A platform's overrides (configs/nav2_real.yaml) over the shared file, before the
+    # robot_0 rewrite, so the overlay's own robot_0 values are rewritten too.
+    if overlay_path:
+        with open(overlay_path) as f:
+            data = _deep_merge(data, yaml.safe_load(f) or {})
     data = _substitute_robot_0(data, robot_id)
     out = tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", prefix=f"nav2_params_{robot_id}_", delete=False
@@ -97,9 +112,15 @@ def _rewrite_robot_0(params_path: str, robot_id: str) -> str:
     return out.name
 
 
-def _make_nav2_group(context, use_sim_time, params_file):
+def _make_nav2_group(context, use_sim_time, params_file, overlay_file):
     robot_id = LaunchConfiguration("robot_id").perform(context)
-    rewritten_params = _rewrite_robot_0(params_file.perform(context), robot_id)
+    # On the real robot (sortbots_bringup.launch.py): "nice -n 10", so Nav2 waits behind the
+    # wheel driver, rosbridge and odometry. At load 11 on the Orin's 6 cores (2026-11-19) the
+    # drive pad lagged until it did. And no depth_to_cloud: only the sim publishes its input.
+    prefix = LaunchConfiguration("node_prefix").perform(context) or None
+    depth_to_cloud = LaunchConfiguration("depth_to_cloud").perform(context).lower() in ("true", "1")
+    rewritten_params = _rewrite_robot_0(params_file.perform(context), robot_id,
+                                        overlay_file.perform(context))
 
     # Reactive-replanning BT (see the file's header for what it changes vs
     # the stock tree). Injected as a parameter override rather than written
@@ -114,7 +135,7 @@ def _make_nav2_group(context, use_sim_time, params_file):
 
     return [GroupAction([
             PushRosNamespace(robot_id),
-
+            *([
             # Isaac publishes raw depth Image; Nav2 needs PointCloud2.
             # depth_static (movers stripped by dynamic_obstacle_filter) feeds
             # the static obstacle source; dynamic_obstacles is a separate cloud.
@@ -138,8 +159,10 @@ def _make_nav2_group(context, use_sim_time, params_file):
                 ],
                 output="screen",
             ),
+            ] if depth_to_cloud else []),
 
             Node(
+                prefix=prefix,
                 package="nav2_controller",
                 executable="controller_server",
                 name="controller_server",
@@ -149,6 +172,7 @@ def _make_nav2_group(context, use_sim_time, params_file):
                 remappings=[("cmd_vel", "cmd_vel_nav")],
             ),
             Node(
+                prefix=prefix,
                 package="nav2_planner",
                 executable="planner_server",
                 name="planner_server",
@@ -156,6 +180,7 @@ def _make_nav2_group(context, use_sim_time, params_file):
                 parameters=[rewritten_params],
             ),
             Node(
+                prefix=prefix,
                 package="nav2_smoother",
                 executable="smoother_server",
                 name="smoother_server",
@@ -163,6 +188,7 @@ def _make_nav2_group(context, use_sim_time, params_file):
                 parameters=[rewritten_params],
             ),
             Node(
+                prefix=prefix,
                 package="nav2_behaviors",
                 executable="behavior_server",
                 name="behavior_server",
@@ -170,6 +196,7 @@ def _make_nav2_group(context, use_sim_time, params_file):
                 parameters=[rewritten_params],
             ),
             Node(
+                prefix=prefix,
                 package="nav2_bt_navigator",
                 executable="bt_navigator",
                 name="bt_navigator",
@@ -179,6 +206,7 @@ def _make_nav2_group(context, use_sim_time, params_file):
                             {"default_nav_to_pose_bt_xml": bt_xml}],
             ),
             Node(
+                prefix=prefix,
                 package="nav2_waypoint_follower",
                 executable="waypoint_follower",
                 name="waypoint_follower",
@@ -186,6 +214,7 @@ def _make_nav2_group(context, use_sim_time, params_file):
                 parameters=[rewritten_params],
             ),
             Node(
+                prefix=prefix,
                 package="nav2_velocity_smoother",
                 executable="velocity_smoother",
                 name="velocity_smoother",
@@ -198,6 +227,7 @@ def _make_nav2_group(context, use_sim_time, params_file):
                 ],
             ),
             Node(
+                prefix=prefix,
                 package="nav2_collision_monitor",
                 executable="collision_monitor",
                 name="collision_monitor",
@@ -205,6 +235,7 @@ def _make_nav2_group(context, use_sim_time, params_file):
                 parameters=[rewritten_params],
             ),
             Node(
+                prefix=prefix,
                 package="nav2_lifecycle_manager",
                 executable="lifecycle_manager",
                 name="lifecycle_manager_navigation",
@@ -245,8 +276,24 @@ def generate_launch_description():
             default_value=default_params,
             description="Full path to the Nav2 params file (rewritten per-robot before use).",
         ),
+        DeclareLaunchArgument(
+            "node_prefix",
+            default_value="",
+            description="Command prefix for every Nav2 node, e.g. 'nice -n 10' on the real robot.",
+        ),
+        DeclareLaunchArgument(
+            "depth_to_cloud",
+            default_value="true",
+            description="The sim's depth_static -> PointCloud2 container; false on the real robot.",
+        ),
+        DeclareLaunchArgument(
+            "overlay_file",
+            default_value="",
+            description="Optional YAML merged over params_file first (configs/nav2_real.yaml on the real robot).",
+        ),
         OpaqueFunction(
             function=_make_nav2_group,
-            args=[LaunchConfiguration("use_sim_time"), LaunchConfiguration("params_file")],
+            args=[LaunchConfiguration("use_sim_time"), LaunchConfiguration("params_file"),
+                  LaunchConfiguration("overlay_file")],
         ),
     ])

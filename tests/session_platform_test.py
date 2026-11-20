@@ -89,3 +89,10 @@ def test_detect_platform_env_override(monkeypatch):
     monkeypatch.setenv("SORTBOTS_PLATFORM", "bogus")
     with pytest.raises(ValueError):
         sm.detect_platform()
+
+
+def test_real_nav_flag_reaches_run_robot():
+    # real_explore: Nav2 + the explorer on the robot (run_robot.sh --nav); off by default.
+    import session as sm
+    assert "--nav" in sm.build_argv({**sm.REAL_RUN_DEFAULTS, "nav": True}, "real")
+    assert "--nav" not in sm.build_argv(dict(sm.REAL_RUN_DEFAULTS), "real")

@@ -555,8 +555,13 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot-id", default="robot_0")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--overlay", type=Path, default=None,
+                        help="YAML whose keys override --config's (configs/obstacle_detector_real.yaml)")
     args, ros_args = parser.parse_known_args(argv)
     cfg = load_config(args.config)
+    if args.overlay and args.overlay.exists():
+        with open(args.overlay) as f:
+            cfg.update(yaml.safe_load(f) or {})
 
     import rclpy
     from rclpy.duration import Duration
