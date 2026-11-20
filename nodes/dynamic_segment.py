@@ -202,7 +202,7 @@ class OrtSession:
         self.output_names = [o.name for o in self.s.get_outputs()]
 
     def run(self, feeds: dict) -> dict:
-        return dict(zip(self.output_names, self.s.run(self.output_names, feeds)))
+        return dict(zip(self.output_names, self.s.run(self.output_names, feeds), strict=True))
 
 
 class TrtSession:
@@ -391,6 +391,38 @@ def build_pipeline(cfg: dict) -> Pipeline:
     return Pipeline(det, seg, cfg)
 
 
+def bench(cfg: dict, frames: int = 20, prompts: int = 3) -> dict:
+    """Phase 0.2's numbers without ROS: ms per stage on a synthetic 848x480
+    frame, and this process's peak RSS. Run where the stack will run, with
+    RTAB-Map up, since the Orin Nano's memory is shared with the GPU."""
+    import resource
+    import time
+    pl = build_pipeline(cfg)
+    rng = np.random.default_rng(0)
+    rgb = rng.integers(0, 255, (480, 848, 3), dtype=np.uint8)
+    ps = [seg_tracks.Prompt([100 + 150 * i, 100, 200 + 150 * i, 400], "motion") for i in range(prompts)]
+    t = {"detect": [], "encode": [], "decode": []}
+    for i in range(frames + 3):   # 3 warm-up frames (TensorRT tactic caches, ORT arenas)
+        t0 = time.perf_counter()
+        pl.det.detect(rgb)
+        t1 = time.perf_counter()
+        pl.seg.set_image(rgb)
+        t2 = time.perf_counter()
+        for p in ps:
+            pl.seg.segment(p)
+        t3 = time.perf_counter()
+        if i >= 3:
+            t["detect"].append(t1 - t0)
+            t["encode"].append(t2 - t1)
+            t["decode"].append((t3 - t2) / max(1, prompts))
+    out = {k: round(float(np.median(v)) * 1e3, 1) for k, v in t.items()}
+    out["frame_ms"] = round(out["detect"] + out["encode"] + prompts * out["decode"], 1)
+    out["max_hz"] = round(1000.0 / out["frame_ms"], 1) if out["frame_ms"] else None
+    out["peak_rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 0)
+    out["backend"] = cfg.get("backend")
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--robot-id", default="robot_0")
@@ -398,8 +430,16 @@ def main(argv=None):
                     choices=("sim", "real"))
     ap.add_argument("--mode", choices=("model", "oracle"), default="model")
     ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    ap.add_argument("--backend", choices=("ort", "trt"), help="override the config's backend")
+    ap.add_argument("--bench", action="store_true",
+                    help="time the models on a synthetic frame and exit (no ROS)")
     a = ap.parse_args(argv)
     cfg = load_config(a.config, a.platform)
+    if a.backend:
+        cfg["backend"] = a.backend
+    if a.bench:
+        print(json.dumps(bench(cfg), indent=2))
+        return
 
     import time
 
