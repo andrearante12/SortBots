@@ -118,6 +118,34 @@ variants `off` / `oracle` / `model` / `model_octomap`:
 - **`recon_contamination`** scores the 3D reconstruction, recorded as the
   `recon` stream.
 
+## Live results (RTX 4070 laptop workstation, 2026-11-20)
+
+`mapping_walk_stop_walk` (robot reached its goal, ~90% of the person's floor
+observed in every run):
+
+| variant | person in `/map` (occupied_frac) | person in the 3D reconstruction (voxels) | verdict |
+|---|---|---|---|
+| `off` | 0.043 | 112 | FAIL (baseline) |
+| `oracle` | 0 | 0 | PASS |
+| `oracle_octomap` | 0 | 0 | PASS |
+
+The filter half works end to end with ground-truth masks. Still open:
+
+- **`crossing_yield` (person, `dynamic_seg` off) failed twice on this branch**:
+  1 then 2 contacts, everything else passing (detection recall 0.79, then 0.6).
+  It's not known yet whether the motion-cue change causes it. **Run it on
+  `main` on the same machine before merging.** The signed test only flags
+  things that come closer, so a lateral crosser may be picked up later.
+- Not run yet: `off` + octomap (whether the OctoMap clears a ghost on its
+  own), `mapping_cart_push`, `mapping_static_aisle`, and every `model`
+  variant (needs onnxruntime and the model files on the workstation).
+
+Running these on a second checkout: a git worktree needs
+`git submodule update --init third_party/XLeRobot` (it can point at the
+main checkout's copy) and `assets/generated/`. Maps have to be real
+directories under `maps/`, because the library rejects symlinks that point
+outside it.
+
 ## Not verified yet
 
 Written and unit-tested offline on a machine with no GPU and no ROS
