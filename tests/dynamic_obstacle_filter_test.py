@@ -195,3 +195,44 @@ def test_full_res_cost_fits_a_frame():
     per = (time.perf_counter() - t0) / 5
     print(f"select_dynamic_blobs 848x480: {per * 1e3:.1f} ms")
     assert per < 0.2  # loose: CI boxes vary; the real budget is 33 ms
+
+
+# --- segment masks ----------------------------------------------------------
+
+def test_grow_seg_mask_dilates_and_takes_the_halo_not_the_wall():
+    depth = _blank(60, 80, z=6.0)          # wall
+    depth[20:50, 30:40] = 3.0              # person
+    depth[20:50, 40:43] = 4.5              # flying pixels on their right edge
+    depth[20:50, 26:30] = 5.8              # halo that is really the wall
+    seg = np.zeros_like(depth, dtype=bool)
+    seg[20:50, 30:40] = True
+    out = dof.grow_seg_mask(seg, depth, {"seg_dilate_px": 1, "seg_halo_px": 4,
+                                         "seg_halo_dz_m": 1.6})
+    assert out[25:45, 30:40].all()         # the object
+    assert out[25:45, 29].all() and out[25:45, 40].all()   # dilation
+    assert out[25:45, 41:43].all()         # flying pixels within far + dz
+    assert not out[25:45, 26:28].any()     # wall depth stays
+    assert not out[:, 60:].any()
+
+
+def test_grow_seg_mask_resizes_a_half_res_mask():
+    depth = _blank(40, 60, z=2.0)
+    seg = np.zeros((20, 30), dtype=bool)
+    seg[5:10, 10:15] = True
+    out = dof.grow_seg_mask(seg, depth, {"seg_dilate_px": 0, "seg_halo_px": 0})
+    assert out.shape == depth.shape
+    assert out[10:20, 20:30].all() and out.sum() == 100
+
+
+def test_grow_seg_mask_empty_is_empty():
+    depth = _blank()
+    assert not dof.grow_seg_mask(np.zeros_like(depth, dtype=bool), depth).any()
+
+
+def test_seg_for_stamp_takes_newest_within_tolerance():
+    a, b, c = (np.zeros(1, bool) for _ in range(3))
+    masks = [(10.0, a), (10.1, b), (10.5, c)]
+    assert dof.seg_for_stamp(masks, 10.12, 0.3)[1] is b
+    assert dof.seg_for_stamp(masks, 10.1, 0.005)[1] is b
+    assert dof.seg_for_stamp(masks, 11.0, 0.3) is None
+    assert dof.seg_for_stamp([], 10.0, 0.3) is None

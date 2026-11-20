@@ -71,6 +71,26 @@ DEFAULTS = {
     "conflict_rate_hz": 2.0,
     "conflict_stride": 8,
     "conflict_min_px": 3,      # decimated points per conflict blob
+    # Segment masks from nodes/dynamic_segment.py (--dynamic-seg).
+    # open:   each depth frame uses the newest mask within seg_max_age_s, or
+    #         none (today's behaviour). The mask can lag the depth by the
+    #         model's latency, which seg_dilate_px absorbs.
+    # strict: a depth frame is only published once the mask for ITS stamp
+    #         arrives, so RTAB-Map never sees an unmasked or misaligned frame.
+    #         depth_static then runs at the mask rate (5-10 Hz) with the
+    #         model's latency, which is the right trade when recording a map
+    #         to keep, and the wrong one for Nav2's costmaps.
+    "seg_policy": "open",
+    "seg_max_age_s": 0.3,
+    "seg_match_s": 0.005,      # strict: same frame (rgb and depth share stamps)
+    "seg_queue_s": 1.0,        # strict: drop a depth frame whose mask never came
+    "seg_dilate_px": 4,        # rgb-vs-depth edge slack and the open-mode lag
+    # Flying pixels: a depth edge interpolates between the object and what is
+    # behind it, leaving a halo SLAM paints as a faint outline. In a band
+    # around each masked object, pixels no farther than the object's far side
+    # plus seg_halo_dz_m are masked too.
+    "seg_halo_px": 8,
+    "seg_halo_dz_m": 0.3,
     # Footprint corner reach is 0.32 m (0.5 x 0.4 m); the rest is margin for
     # the 5 Hz status lag and the two robots' localization disagreeing.
     "peer_radius_m": 0.5,
@@ -488,6 +508,91 @@ def _quat_to_matrix(x: float, y: float, z: float, w: float) -> np.ndarray:
     ], dtype=np.float32)
 
 
+def _dilate(mask: np.ndarray, px: int) -> np.ndarray:
+    """Square dilation by px, separably (a (2px+1)^2 window)."""
+    if px <= 0:
+        return mask
+    out = mask.copy()
+    for axis in (0, 1):
+        src = out.copy()
+        for k in range(1, px + 1):
+            if axis == 0:
+                out[k:, :] |= src[:-k, :]
+                out[:-k, :] |= src[k:, :]
+            else:
+                out[:, k:] |= src[:, :-k]
+                out[:, :-k] |= src[:, k:]
+    return out
+
+
+def resize_nearest(mask: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Nearest-neighbour resize, for a mask published at another resolution."""
+    if mask.shape == tuple(shape):
+        return mask
+    h, w = shape
+    ys = (np.arange(h) * mask.shape[0] // h).clip(0, mask.shape[0] - 1)
+    xs = (np.arange(w) * mask.shape[1] // w).clip(0, mask.shape[1] - 1)
+    return mask[ys[:, None], xs[None, :]]
+
+
+def grow_seg_mask(seg: np.ndarray, depth: np.ndarray, cfg: dict | None = None) -> np.ndarray:
+    """Segment mask → depth mask: resize to the depth image, dilate by
+    seg_dilate_px, then add each object's flying-pixel halo (see DEFAULTS)."""
+    c = {**DEFAULTS, **(cfg or {})}
+    m = resize_nearest(seg.astype(bool, copy=False), depth.shape)
+    if not m.any():
+        return m
+    core = _dilate(m, int(c["seg_dilate_px"]))
+    halo_px = int(c["seg_halo_px"])
+    if halo_px <= 0:
+        return core
+    labels, _ = label_blobs(core)
+    band = _dilate(core, halo_px) & ~core
+    d = depth.astype(np.float32, copy=False)
+    # Each band pixel belongs to the object whose label is nearest; a
+    # label-propagating dilation is cheaper than a distance transform and
+    # exact enough for an 8 px band.
+    lab = labels.copy()
+    for _ in range(halo_px):
+        grown = lab.copy()
+        for sl_dst, sl_src in (((slice(1, None), slice(None)), (slice(None, -1), slice(None))),
+                               ((slice(None, -1), slice(None)), (slice(1, None), slice(None))),
+                               ((slice(None), slice(1, None)), (slice(None), slice(None, -1))),
+                               ((slice(None), slice(None, -1)), (slice(None), slice(1, None)))):
+            dst = grown[sl_dst]
+            src = lab[sl_src]
+            fill = (dst == 0) & (src > 0)
+            dst[fill] = src[fill]
+        lab = grown
+    far = np.zeros(int(labels.max()) + 1, dtype=np.float32)
+    for k in range(1, far.size):
+        z = d[(labels == k) & m]
+        z = z[np.isfinite(z) & (z > 0)]
+        far[k] = np.percentile(z, 90) if z.size else -np.inf
+    bl = lab[band]
+    bz = d[band]
+    with np.errstate(invalid="ignore"):
+        take = (bl > 0) & np.isfinite(bz) & (bz <= far[bl] + float(c["seg_halo_dz_m"]))
+    out = core.copy()
+    ys, xs = np.nonzero(band)
+    out[ys[take], xs[take]] = True
+    return out
+
+
+def _stamp_s(stamp) -> float:
+    return stamp.sec + stamp.nanosec * 1e-9
+
+
+def seg_for_stamp(masks, stamp: float, tol: float):
+    """Newest (stamp, mask) within tol of `stamp`, or None. `masks` is any
+    iterable of (stamp, mask), oldest first."""
+    best = None
+    for st, m in masks:
+        if abs(st - stamp) <= tol and (best is None or st > best[0]):
+            best = (st, m)
+    return best
+
+
 def apply_static_depth(depth: np.ndarray, dynamic_mask: np.ndarray) -> np.ndarray:
     """Copy of depth with dynamic pixels set to NaN."""
     out = depth.astype(np.float32, copy=True)
@@ -525,10 +630,15 @@ def main(argv=None):
     parser.add_argument("--robot-id", default="robot_0")
     parser.add_argument("--map-conflict", action="store_true",
                         help="also publish map-conflict blobs (nodes/map_conflict.py)")
+    parser.add_argument("--dynamic-seg", action="store_true",
+                        help="also mask /<id>/camera/dynamic_seg (nodes/dynamic_segment.py)")
+    parser.add_argument("--seg-policy", choices=("open", "strict"), default=None,
+                        help="override DEFAULTS['seg_policy']")
     args = parser.parse_args(argv)
 
     import json
     import time
+    from collections import deque
 
     import rclpy
     from rclpy.duration import Duration
@@ -571,6 +681,11 @@ def main(argv=None):
             self._tf_misses = 0
             self._grid = FreeSpaceGrid() if args.map_conflict else None
             self._next_conflict = 0.0
+            if args.seg_policy:
+                self._cfg["seg_policy"] = args.seg_policy
+            self._segs: deque = deque(maxlen=16)     # (stamp s, bool mask)
+            self._pending: deque = deque()           # strict: (stamp, msg, depth, mask)
+            self._seg_stats = {"used": 0, "stale": 0, "dropped": 0}
             self._cfg = dict(DEFAULTS)
             self._peers: dict[str, tuple[tuple[float, float], float]] = {}
             self._tf = Buffer()
@@ -588,6 +703,11 @@ def main(argv=None):
             self.create_subscription(
                 CameraInfo, f"/{robot_id}/camera/camera_info", self._on_info, qos
             )
+            if args.dynamic_seg:
+                self.create_subscription(
+                    Image, f"/{robot_id}/camera/dynamic_seg", self._on_seg, qos
+                )
+                self.create_timer(10.0, self._log_seg_stats)
             self.static_pub = self.create_publisher(
                 Image, f"/{robot_id}/camera/depth_static", qos
             )
@@ -698,6 +818,39 @@ def main(argv=None):
                              np.array([t.x, t.y, t.z], dtype=np.float32),
                              peers, self._cfg["peer_radius_m"])
 
+        def _on_seg(self, msg: Image):
+            if msg.encoding not in ("mono8", "8UC1"):
+                return
+            m = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.step)
+            self._segs.append((_stamp_s(msg.header.stamp), m[:, :msg.width] > 0))
+            if self._cfg["seg_policy"] == "strict":
+                self._drain_pending()
+
+        def _log_seg_stats(self):
+            st = self._seg_stats
+            self.get_logger().info(
+                f"dynamic_seg ({self._cfg['seg_policy']}): {st['used']} frames masked, "
+                f"{st['stale']} without a fresh mask, {st['dropped']} held back")
+            for k in st:
+                st[k] = 0
+
+        def _drain_pending(self):
+            """strict: publish each held depth frame whose own mask has arrived;
+            drop the ones whose mask is now too late to come."""
+            c = self._cfg
+            newest = self._segs[-1][0] if self._segs else -np.inf
+            keep = deque()
+            for stamp, msg, depth, mask in self._pending:
+                hit = seg_for_stamp(self._segs, stamp, c["seg_match_s"])
+                if hit is not None:
+                    self._seg_stats["used"] += 1
+                    self._publish_static(msg, depth, mask | grow_seg_mask(hit[1], depth, c))
+                elif newest - stamp > c["seg_queue_s"]:
+                    self._seg_stats["dropped"] += 1
+                else:
+                    keep.append((stamp, msg, depth, mask))
+            self._pending = keep
+
         def _on_depth(self, msg: Image):
             if msg.encoding not in ("32FC1", "mono16", "16UC1"):
                 return
@@ -714,8 +867,27 @@ def main(argv=None):
             peers = self._peer_mask(msg, depth)
             if peers is not None:
                 mask |= peers
-            static = apply_static_depth(depth, mask)
 
+            if not args.dynamic_seg:
+                self._publish_static(msg, depth, mask)
+                self._publish_dynamic(msg, depth, mask)
+                return
+            stamp = _stamp_s(msg.header.stamp)
+            hit = seg_for_stamp(self._segs, stamp, self._cfg["seg_max_age_s"])
+            live = mask | grow_seg_mask(hit[1], depth, self._cfg) if hit else mask
+            if self._cfg["seg_policy"] == "strict":
+                # depth_static waits for this frame's own mask; Nav2's dynamic
+                # cloud does not, so the costmaps keep clearing at camera rate.
+                self._pending.append((stamp, msg, depth.copy(), mask))
+                self._drain_pending()
+            else:
+                self._seg_stats["used" if hit else "stale"] += 1
+                self._publish_static(msg, depth, live)
+            self._publish_dynamic(msg, depth, live)
+
+        def _publish_static(self, msg: Image, depth: np.ndarray, mask: np.ndarray):
+            h, w = depth.shape
+            static = apply_static_depth(depth, mask)
             out = Image()
             out.header = msg.header
             out.height = h
@@ -726,6 +898,7 @@ def main(argv=None):
             out.data = static.astype(np.float32).tobytes()
             self.static_pub.publish(out)
 
+        def _publish_dynamic(self, msg: Image, depth: np.ndarray, mask: np.ndarray):
             if self._info is None or not mask.any():
                 # Still publish empty cloud so costmap can clear.
                 empty = PointCloud2()
