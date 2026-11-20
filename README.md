@@ -74,6 +74,7 @@ scripts/sim_ctl.sh stop
 | [docs/architecture.md](docs/architecture.md) | repo layout, the invariants that cost the most time, perception, Nav2 and exploration, the fleet auction |
 | [docs/testing.md](docs/testing.md) | offline checks, scored live tests (worlds, test cases, metrics) |
 | [docs/real-robot.md](docs/real-robot.md) | the Jetson + D435, SLAM offload, Gaussian splats |
+| [docs/mapping-movers.md](docs/mapping-movers.md) | keeping people, carts and other movers out of the map: open-vocab detector + SAM masks, map-side clearing |
 | [docs/manipulation.md](docs/manipulation.md) | magnet pick and place in the sim, the magnet end effector CAD, the ManiSkill arm track |
 | [docs/arm.md](docs/arm.md) | the physical SO-101 arm and pan/tilt head: lerobot setup, gamepad teleop |
 | [docs/head_camera.md](docs/head_camera.md) | calibrating the head D435 to the arm, and the real one-button pick and place (`handeye pick`) |
