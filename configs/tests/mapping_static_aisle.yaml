@@ -41,5 +41,6 @@ pass_rate: 1.0
 
 variants:
   - {label: "off", set: {overrides.dynamic_seg: "off"}}
+  - {label: octomap, set: {overrides.recon_source: octomap}}
   - {label: model, set: {overrides.dynamic_seg: model}}
   - {label: model_octomap, set: {overrides.dynamic_seg: model, overrides.recon_source: octomap}}
