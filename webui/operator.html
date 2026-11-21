@@ -512,6 +512,17 @@
   .veil[hidden] { display: none; }
   #stop-dlg .card { background: var(--surface); border-radius: 12px; box-shadow: 0 12px 40px var(--shadow); width: 440px; max-width: calc(100vw - 24px); padding: 20px 22px; display: grid; gap: 12px; }
   #stop-dlg h3 { margin: 0; font-size: 1.05rem; font-weight: 600; }
+  #keys-btn { font-weight: 700; }
+  #keys-dlg .card { background: var(--surface); color: var(--ink); border-radius: 12px; box-shadow: 0 12px 40px var(--shadow); width: 420px;
+                    max-width: calc(100vw - 32px); max-height: calc(100vh - 160px); overflow: auto; padding: 18px 22px; }
+  #keys-dlg h3 { display: flex; align-items: center; margin: 0 0 4px; font-size: 1.05rem; font-weight: 600; }
+  #keys-dlg h3 .x { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 1.4rem; line-height: 1; cursor: pointer; }
+  #keys-dlg h4 { margin: 14px 0 6px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  #keys-dlg table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+  #keys-dlg td { padding: 4px 0; border-top: 1px solid var(--border); vertical-align: middle; }
+  #keys-dlg td:first-child { width: 42%; white-space: nowrap; }
+  #keys-dlg kbd { display: inline-block; min-width: 1.6em; padding: 1px 6px; margin-right: 3px; border: 1px solid var(--border); border-bottom-width: 2px;
+                  border-radius: 5px; background: var(--raise); font: 600 .78rem system-ui, sans-serif; text-align: center; }
   #stop-dlg p { margin: 0; color: var(--muted); font-size: .9rem; line-height: 1.45; }
   #sd-name-row { display: grid; gap: 4px; font-size: .84rem; color: var(--muted); }
   #sd-name-row[hidden], #sd-err[hidden] { display: none; }
@@ -781,6 +792,7 @@
 <div id="test-chip" hidden title="A scored test is driving the sim"><span class="tp-dot"></span><span class="k">Test</span>
     <button type="button" class="name" id="tc-name" title="Open the Tests tab"></button><span id="tc-time" class="muted"></span>
     <button type="button" class="btn small stop" id="tc-cancel">Stop test</button></div>
+  <button class="btn icon" id="keys-btn" type="button" aria-label="Keyboard shortcuts" aria-haspopup="dialog" title="Keyboard shortcuts (?)">?</button>
   <div id="view-box">
     <button class="btn icon" id="view-more" aria-label="View options" aria-haspopup="true" aria-expanded="false" title="View options"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><g fill="currentColor"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></g></svg></button>
     <div id="view-opts">
@@ -939,6 +951,13 @@
       <button type="submit" class="btn primary" id="sd-save">Save &amp; stop</button>
     </div>
   </form>
+</div>
+<!-- Keyboard shortcuts (2026-11-20): the ? button or the ? key; Esc or a click outside closes. -->
+<div id="keys-dlg" class="veil" hidden>
+  <div class="card" role="dialog" aria-labelledby="kd-title">
+    <h3 id="kd-title">Keyboard shortcuts <button class="x" id="kd-x" type="button" title="Close (Esc)" aria-label="Close">&times;</button></h3>
+    <h4>Robot (click its card first)</h4><table><tr><td><kbd>W</kbd> <kbd>S</kbd> <kbd>A</kbd> <kbd>D</kbd></td><td>drive forward, back, left, right</td></tr><tr><td><kbd>Q</kbd> <kbd>E</kbd></td><td>turn left, right</td></tr><tr><td><kbd>M</kbd></td><td>switch Nav / Manip</td></tr><tr><td><kbd>1</kbd>&ndash;<kbd>4</kbd></td><td>speed of the pad showing</td></tr><tr><td><kbd>Space</kbd></td><td>stop the base, arm and head</td></tr></table><h4>Manip</h4><table><tr><td><kbd>&uarr;</kbd> <kbd>&darr;</kbd></td><td>arm away, toward</td></tr><tr><td><kbd>&larr;</kbd> <kbd>&rarr;</kbd></td><td>arm left, right</td></tr><tr><td><kbd>PgUp</kbd> <kbd>PgDn</kbd></td><td>arm up, down</td></tr><tr><td><kbd>Z</kbd> <kbd>X</kbd></td><td>wrist up, down</td></tr><tr><td><kbd>I</kbd> <kbd>K</kbd> <kbd>J</kbd> <kbd>L</kbd></td><td>head up, down, left, right</td></tr><tr><td><kbd>H</kbd></td><td>centre the head</td></tr></table><h4>Map</h4><table><tr><td><kbd>V</kbd></td><td>drive tool</td></tr><tr><td><kbd>F</kbd></td><td>add waypoint</td></tr><tr><td><kbd>R</kbd></td><td>place the gateway</td></tr><tr><td><kbd>T</kbd></td><td>teleport (sim)</td></tr><tr><td><kbd>Esc</kbd></td><td>close, or deselect the robot</td></tr><tr><td><kbd>?</kbd></td><td>this list</td></tr></table>
+  </div>
 </div>
 <div id="session" hidden>
   <div class="card" role="dialog" aria-label="Session">

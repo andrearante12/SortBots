@@ -1247,7 +1247,7 @@
       <button type="button" class="featbtn" data-cam-features aria-pressed="false" title="Show the visual features RTAB-Map is tracking (green = inlier driving the pose, amber = matched to the map, grey = detected only)">Features</button>
       <span class="featstat"></span>
       <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button><button type="button" data-cam-mode="split" title="Camera and depth, stacked">Split</button></div>
-      <div class="padmode" role="tablist" aria-label="What the pad controls" hidden><button type="button" data-padmode="drive" role="tab" title="Nav mode: drive the base, mapping runs">Nav</button><button type="button" data-padmode="arm" role="tab" title="Manipulation mode: the arm, pick and rest, and the head (keys I/K/J/L, H centres); mapping pauses">Manip</button></div>
+      <div class="padmode" role="tablist" aria-label="What the pad controls" hidden><button type="button" data-padmode="drive" role="tab" title="Nav mode: drive the base, mapping runs (M switches)">Nav</button><button type="button" data-padmode="arm" role="tab" title="Manipulation mode: the arm, pick and rest, and the head (keys I/K/J/L, H centres); mapping pauses">Manip</button></div>
       <div class="drive" role="group" aria-label="Drive by hand" title="Drive by hand: hold an arrow. Keys W/A/S/D move, Q/E rotate, Space stops (they drive the robot in control)">
         <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
@@ -1671,6 +1671,12 @@
     // speed of the pad that's up; Space stops both.
     const cam = cams.get(selected);
     const armUp = !!(cam && cam.padMode === "arm" && cam.armKeys && !cam.armPad.hidden);
+    // M flips Nav / Manip: the same as clicking the other tab (it sets the robot's mode too).
+    if (e.key.toLowerCase() === "m" && cam && cam.hasArm && cam.padModeEl) {
+      e.preventDefault();
+      cam.padModeEl.querySelector(`[data-padmode="${cam.padMode === "arm" ? "drive" : "arm"}"]`).click();
+      return;
+    }
     if (e.code === "Space") { e.preventDefault(); if (armUp) cam.armKeys.stop(); if (cam && cam.headKeys) cam.headKeys.release(); return driveRelease(selected); }
     if (armUp && cam.armKeys.down(e)) { e.preventDefault(); return; }
     // The head (I/K/J/L, H centres): any pad, but the real robot ignores head_cmd in Nav.
@@ -2820,8 +2826,20 @@
   $("#outage-close").addEventListener("click", () => { outage.dismissed = true; $("#outage").hidden = true; });
   $("#empty-go").addEventListener("click", openSession);
   $("#sp-x").addEventListener("click", closeSession);
+  // Keyboard shortcuts: the ? button or key (not while typing); Esc, × or a click outside closes.
+  const keysDlg = $("#keys-dlg");
+  $("#keys-btn").addEventListener("click", () => { keysDlg.hidden = !keysDlg.hidden; });
+  $("#kd-x").addEventListener("click", () => { keysDlg.hidden = true; });
+  keysDlg.addEventListener("click", (e) => { if (e.target === keysDlg) keysDlg.hidden = true; });
+  addEventListener("keydown", (e) => {
+    if (e.key !== "?" || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.target.closest && e.target.closest("input, select, textarea")) return;
+    e.preventDefault();
+    keysDlg.hidden = !keysDlg.hidden;
+  });
   $("#session").addEventListener("click", (e) => { if (e.target.id === "session") closeSession(); });
   addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("#keys-dlg").hidden) { $("#keys-dlg").hidden = true; return; }
     if (e.key === "Escape" && !$("#stop-dlg").hidden) { closeStopDialog(); return; }
     if (e.key === "Escape") {
       if (drag) { drag = null; press = null; dirty = true; canvas.style.cursor = "grab"; return; } // abandon a send mid-drag
