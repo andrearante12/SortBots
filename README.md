@@ -2,8 +2,6 @@
 
 ![ci](https://github.com/andrearante12/SortBots/actions/workflows/ci.yml/badge.svg)
 
-![Warehouse simulation environment](docs/media/warehouse_hero.png)
-
 Fully autonomous mobile robots performing collaborative
 indoor logistics, built on
 [XLeRobot](https://github.com/Vector-Wangel/XLeRobot).
@@ -16,71 +14,44 @@ mechanism for both efficiency and resilience. Robots divide work via decentraliz
 coordinate passage through shared spaces, and dynamically
 re-allocate tasks when one is blocked or delayed. Applications to autonomous delivery logistics in dynamic enviornemnts, such as warehouses, shelf restocking, or serving foods in restaurants.
 
-### Operator dashboard
+## Warehouse Logistics
 
-Driving, teleport, waypoints and live camera/depth feeds for both robots from one browser tab:
+Using a magnetic end effector, the robot picks up a package from a pick location, loads it into its storage basket, then brings it to the dropoff location.
 
-![Operator dashboard sim view](docs/media/demos/operator_view_demo.gif)
+<img src="docs/media/demos/pick_and_place.gif" alt="Real robot pick and place" width="300">
 
-### SLAM Mapping and 3D Reconstruction (RTAB-Map) 
+## Operator dashboard
 
-![RTAB-Map feature matching during SLAM](docs/media/demos/slam_feature_mapping.gif)
+A warehouse operator can manage multiple robots and assign tasks for avaliable robots to pick up. 
 
-### Object detection validation
+<img src="docs/media/demos/operator_view_demo.gif" alt="Operator dashboard sim view">
 
-Scripted test cases from the [simtest](simtest/) layer: detecting a crossing pedestrian, and one robot detecting another.
+## SLAM mapping (RTAB-Map)
 
-| Detect pedestrian | Detect other robot |
+Robots are able to operate in an enviornment with no prior knowledge of what the enviornment looks like, by mapping it in real time. 
+
+<img src="docs/media/demos/slam_feature_mapping.gif" alt="RTAB-Map feature matching during SLAM">
+
+## Obstacle detection
+
+Robots use a combination of vision and depth based algorithms in order to identify and avoid dynamic obstacles
+
+| Pedestrian | Another robot |
 |---|---|
 | ![Detect-pedestrian test case](docs/media/demos/detect_pedestrian.gif) | ![Detect-other-robot test case](docs/media/demos/detect_robot.gif) |
 
-### Fleet mesh comms overlay
+## Fleet mesh comms
 
-The Comms overlay modeling Wi-Fi mesh range and link quality between robots and the gateway: both robots in direct range of the gateway, a robot out of range relaying through the other, and the overlay comparing a direct line-of-sight link against the routed path when obstacles are in the way.
-
-| Both robots in range | 2-hop relay | Direct vs. routed |
+| Both in range | 2-hop relay | Direct vs. routed |
 |---|---|---|
 | ![Comms overlay: both robots in range of the gateway](docs/media/demos/comms_in_range.gif) | ![Comms overlay: a 2-hop relay through the other robot](docs/media/demos/comms_relay_hop.gif) | ![Comms overlay: direct link vs. routed relay around obstacles](docs/media/demos/comms_direct_vs_relay.gif) |
 
-### Simulation infrastructure
-- **Isaac Sim** Isaac Sim 5.1 supporting SLAM pipelines and integrating with Nvidia packages such as RTAB-Map
+## Docs
 
-## Quickstart
-
-Ubuntu 22.04 or 24.04 on X11, an NVIDIA RTX GPU with at least 8 GB of VRAM. Install steps
-are in [docs/setup.md](docs/setup.md). Start from a clean shell, and never source ROS 2 in it:
-
-```bash
-scripts/run_console.sh                  # dashboard at http://localhost:8081/ (leave running)
-# Session → explore_fleet → Start: Isaac Sim + RTAB-Map + Nav2, two robots exploring
-scripts/run_console.sh stop             # console and any running sim
-```
-
-The same, scripted (exit codes are the interface):
-
-```bash
-scripts/sim_ctl.sh console start
-scripts/sim_ctl.sh start explore_fleet headless=true
-scripts/sim_ctl.sh wait running --timeout 420
-scripts/sim_ctl.sh stop
-```
-
-## Documentation
-
-| Doc | Covers |
-|---|---|
-| [docs/setup.md](docs/setup.md) | requirements, installing Isaac Sim and ROS 2, troubleshooting |
-| [docs/running.md](docs/running.md) | console, `sim_ctl.sh`, `run_demo.sh`, scenarios, performance, remote access, the operator view, saved maps |
-| [docs/architecture.md](docs/architecture.md) | repo layout, the invariants that cost the most time, perception, Nav2 and exploration, the fleet auction |
-| [docs/testing.md](docs/testing.md) | offline checks, scored live tests (worlds, test cases, metrics) |
-| [docs/real-robot.md](docs/real-robot.md) | the Jetson + D435, SLAM offload, Gaussian splats |
-| [docs/mapping-movers.md](docs/mapping-movers.md) | keeping people, carts and other movers out of the map: open-vocab detector + SAM masks, map-side clearing |
-| [docs/manipulation.md](docs/manipulation.md) | magnet pick and place in the sim, the magnet end effector CAD, the ManiSkill arm track |
-| [docs/arm.md](docs/arm.md) | the physical SO-101 arm and pan/tilt head: lerobot setup, gamepad teleop |
-| [docs/head_camera.md](docs/head_camera.md) | calibrating the head D435 to the arm, and the real one-button pick and place (`handeye pick`) |
-| [docs/magnet.md](docs/magnet.md) | the real electromagnet's ESP32 driver and circuit |
-| [docs/drive.md](docs/drive.md) | the operator view's Robot view: live D435, gamepad driving of the omni base, pick and place on one button |
-| [docs/commsim.md](docs/commsim.md) | fleet radio mesh and task-protocol simulation, real routers |
+[Setup](docs/setup.md) · [Running](docs/running.md) · [Architecture](docs/architecture.md) ·
+[Testing](docs/testing.md) · [Real robot](docs/real-robot.md) · [Mapping movers](docs/mapping-movers.md) ·
+[Manipulation](docs/manipulation.md) · [Arm](docs/arm.md) · [Head camera](docs/head_camera.md) ·
+[Magnet](docs/magnet.md) · [Drive](docs/drive.md) · [Comms](docs/commsim.md)
 
 ## License
 

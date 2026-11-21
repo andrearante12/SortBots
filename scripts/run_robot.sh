@@ -31,10 +31,13 @@
 # runs (it is otherwise off on hardware) and nodes/dynamic_segment.py masks
 # what it finds with the TensorRT engines under models/ (docs/mapping-movers.md).
 #
-# --nav adds Nav2 and the explorer (configs/nav2_real.yaml, explorer_real.yaml): the
-# operator view's Explore button then works as in the sim. Off by default: Nav2 is real
-# CPU on the Orin next to RTAB-Map, and the Jetson has browned out under load. Never
-# started: task_manager and magnet_pick (the arm's pick is nodes/arm_driver.py's).
+# --nav adds Nav2, the explorer and task_manager (configs/nav2_real.yaml,
+# explorer_real.yaml): the operator view's Explore button, click-to-go and the Tasks
+# pane's point-to-point tasks then work as in the sim. Off by default: Nav2 is real CPU
+# on the Orin next to RTAB-Map, and the Jetson has browned out under load. task_manager
+# rides on --nav because without Nav2 every task it took would just fail; on the robot
+# its tasks are nav-only (pickup/dropoff dwell, or goto). Never started: magnet_pick
+# (the arm's pick is nodes/arm_driver.py's).
 # nodes/base_driver.py drives the wheels from /<id>/cmd_vel (the drive pad, or Nav2),
 # capped at configs/drive_base.yaml's ros.speed_level and latched by /<id>/estop.
 set -u
@@ -122,7 +125,7 @@ while [[ $# -gt 0 ]]; do
     --recon-source) [[ "$2" =~ ^(cloud_map|octomap)$ ]] || { echo "[run_robot] --recon-source is cloud_map or octomap, not: $2"; exit 2; }
                 RECON_SOURCE="$2"; shift 2;;
     --nav)      NAV=true; shift;;
-    -h|--help) sed -n '2,39p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    -h|--help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "[run_robot] unknown arg: $1"; exit 2;;
   esac
 done
@@ -186,7 +189,7 @@ setsid bash -c "$ROS_ENV; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
        platform:=real robot_id:=$ROBOT_ID robot_ids:=$ROBOT_ID \
        use_sim_time:=false rviz:=false \
-       nav2:=$NAV task_manager:=false scripted_pick:=false explore:=$NAV explore_autostart:=false \
+       nav2:=$NAV task_manager:=$NAV scripted_pick:=false explore:=$NAV explore_autostart:=false \
        webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
        delete_db_on_start:=$DELETE_DB_ON_START slam_role:=$SLAM_ROLE \
@@ -217,7 +220,7 @@ cat <<EOF
   SortBots robot is UP  ($ROBOT_ID, RealSense D435)
     * Web dashboard : http://localhost:$DASHBOARD_PORT/  (or the tailnet URL above)
         - head camera, live SLAM map, 3D reconstruction
-        - drive pad / nav goals do nothing yet: no base driver
+        - drive pad (base_driver); $( [[ "$NAV" == "true" ]] && echo "Nav2 + tasks + Explore ON" || echo "no Nav2: click-to-go, tasks and Explore need --nav" )
     * RTAB-Map      : visual odometry, no IMU; mapping $( [[ "$SLAM_ROLE" == "robot" ]] && echo "on the WORKSTATION (keyframes sent from here)" || echo "here, at nice 10" )
     * Map           : $MAP_DB $( [[ "$LOCALIZE" == "true" ]] && echo "(localization — read-only)" || { [[ "$RESUME" == "true" ]] && echo "(resumed — extending existing map)" || echo "(mapping — rebuilt this run)"; } )
   Log  : $BRINGUP_LOG

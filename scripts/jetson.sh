@@ -128,6 +128,10 @@ case "${1:-}" in
     # --user: files the pipeline writes into the repo (data/sessions, maps/)
     #   stay owned by you, not root. HOME points at the bind-mounted ~/.ros's
     #   parent so run_robot.sh's ~/.ros/sortbots_<id>.db is the host's.
+    # --group-add: --user uid:gid drops supplementary groups, and the checkout is
+    #   shared through the owner's group (setgid, g+w). Without them a teammate's
+    #   console couldn't create data/sessions/<id> ("Permission denied" on every
+    #   scenario start, seen 2026-11-21 with gilbert's console on andre's checkout).
     # ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST: the dashboard runs HERE, so no
     #   DDS traffic needs to leave the Jetson — and a desktop sim on the same
     #   LAN, which also publishes /robot_0/*, can't cross-talk with the robot.
@@ -147,6 +151,7 @@ case "${1:-}" in
       -v /dev:/dev \
       -v /run/udev:/run/udev:ro \
       --user "$(id -u):$(id -g)" \
+      $(for g in $(id -G); do printf -- '--group-add %s ' "$g"; done) \
       -e HOME="$HOME" \
       -e ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
       -e ROS_STATIC_PEERS="${SORTBOTS_WORKSTATION:-}" \
