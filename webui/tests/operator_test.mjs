@@ -1231,15 +1231,15 @@ async function main() {
   await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'e' }))`);
   await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', bubbles: true }))`);
   await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'w' }))`);
-  // Arm keyboard teleop (2026-11-20): with the Arm pad up, W/S A/D E/Q move the hand, never the base.
+  // Arm keyboard teleop (2026-11-20): with the Arm pad up, arrows and Page Up/Down move the hand.
   await emit(`/${r1}/arm_state`, { data: JSON.stringify({ engaged: true, state: 'holding', level: 1 }) }); await sleep(150);
   await page.eval(`window.__operator.cams.get(${JSON.stringify(r1)}).el.querySelector('[data-padmode="arm"]').click()`); await sleep(100);
-  await page.eval(`window.__published.length = 0; window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w' })); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'q' }))`);
+  await page.eval(`window.__published.length = 0; window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp' })); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown' }))`);
   await sleep(250);
   const armJogs = JSON.parse(await page.eval(`JSON.stringify(window.__published.filter((x) => x.topic === '/${r1}/arm_cmd').map((x) => JSON.parse(x.msg.data)))`));
-  check('arm keys: W+Q jog the hand away and down, re-sent while held', armJogs.length >= 2 && armJogs.every((m) => m.jog && m.jog.out === 1 && m.jog.up === -1), JSON.stringify(armJogs.slice(0, 2)));
+  check('arm keys: Up + Page Down jog the hand away and down, re-sent while held', armJogs.length >= 2 && armJogs.every((m) => m.jog && m.jog.out === 1 && m.jog.up === -1), JSON.stringify(armJogs.slice(0, 2)));
   check('arm keys: and never drive the base', (await twists()).length === 0, JSON.stringify(await twists()));
-  await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'w' })); window.dispatchEvent(new KeyboardEvent('keyup', { key: 'q' }))`); await sleep(150);
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowUp' })); window.dispatchEvent(new KeyboardEvent('keyup', { key: 'PageDown' }))`); await sleep(150);
   const armLast = JSON.parse(await page.eval(`JSON.stringify(window.__published.filter((x) => x.topic === '/${r1}/arm_cmd').map((x) => JSON.parse(x.msg.data)).at(-1) || null)`));
   check('arm keys: letting go stops the arm', !!armLast && armLast.stop === true, JSON.stringify(armLast));
   await page.eval(`window.__operator.cams.get(${JSON.stringify(r1)}).el.querySelector('[data-padmode="drive"]').click()`);

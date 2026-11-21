@@ -1261,10 +1261,10 @@
       </div>
       <div class="pickline" hidden><b></b><span></span></div>
       <div class="armpad" role="group" aria-label="Move the arm" hidden>
-        <div class="tp hand" title="Drag to move the hand: up = away, down = toward, left / right; let go and it stops. Keys: W/S away/toward, A/D left/right"><i class="ax t">away</i><i class="ax b">toward</i><i class="ax l">left</i><i class="ax r">right</i><b class="knob"></b></div>
-        <div class="tp z" title="Drag up / down to raise / lower the hand. Keys: E up, Q down"><i class="ax t">up</i><i class="ax b">down</i><b class="knob"></b></div>
+        <div class="tp hand" title="Drag to move the hand: up = away, down = toward, left / right; let go and it stops. Keys: arrows"><i class="ax t">away</i><i class="ax b">toward</i><i class="ax l">left</i><i class="ax r">right</i><b class="knob"></b></div>
+        <div class="tp z" title="Drag up / down to raise / lower the hand. Keys: Page Up / Page Down"><i class="ax t">up</i><i class="ax b">down</i><b class="knob"></b></div>
         <div class="side">
-          <button type="button" data-wf="1" title="Wrist up (hold, or the ↑ key)">wrist &#8593;</button><button type="button" data-wf="-1" title="Wrist down (hold, or the ↓ key)">wrist &#8595;</button>
+          <button type="button" data-wf="1" title="Wrist up (hold, or the Z key)">wrist &#8593;</button><button type="button" data-wf="-1" title="Wrist down (hold, or the X key)">wrist &#8595;</button>
           <div class="lv" role="group" aria-label="Arm speed" title="Arm speed (keys 1-4); Space stops the arm"><button type="button" data-lv="0">L1</button><button type="button" data-lv="1">L2</button><button type="button" data-lv="2">L3</button><button type="button" data-lv="3">L4</button></div>
           <button type="button" data-arm-act="magnet" title="Magnet on / off">Magnet</button><button type="button" data-arm-act="pick" title="One-button pick and place">Pick</button><button type="button" data-arm-act="unload" title="Look down into the body, pick the package there and put it on the taught table pose (the base stays put: drive up to the table first)">Unload</button><div class="restrow"><button type="button" data-arm-act="rest" title="Back to the rest pose. With the magnet on it lets go first: whatever it holds drops where the hand is">Rest</button><details class="armmore"><summary title="Teach the place and table poses" aria-label="More arm actions">&#8943;</summary><div class="menu"><button type="button" data-arm-act="save_table" title="Save where the arm is now as the table pose Unload puts packages on (Unload with none saved picks and holds: drive it over the table, then this)">Save table</button><button type="button" data-arm-act="pick_hold" hidden title="Pick, then hand the arm back to the pad with the package held (no place): drive it to the new place spot">Pick &amp; hold</button><button type="button" data-arm-act="save_place" hidden title="Save where the arm is now as the place pose the next Pick uses">Save place</button></div></details></div>
         </div>
@@ -1526,10 +1526,12 @@
     });
     addEventListener("blur", () => { if (!live()) return; for (const k in J) J[k] = 0; update(); });
     // Keyboard teleop (2026-11-20): the page's keydown hands keys here while this robot is
-    // selected with the Arm pad showing. Held keys re-send like a held finger, so letting go
-    // stops the arm through the same deadman. No magnet key: a stray press would drop a package.
-    const ARM_KEYS = { w: ["out", 1], s: ["out", -1], a: ["left", 1], d: ["left", -1], e: ["up", 1], q: ["up", -1],
-                       arrowup: ["wf", 1], arrowdown: ["wf", -1] };
+    // selected with the Arm pad showing. Arrows move the hand, Page Up/Down raise and lower it,
+    // Z/X tilt the wrist; WASDQE stay the base's. Held keys re-send like a held finger, so
+    // letting go stops the arm through the same deadman. No magnet key: a stray press would
+    // drop a package.
+    const ARM_KEYS = { arrowup: ["out", 1], arrowdown: ["out", -1], arrowleft: ["left", 1], arrowright: ["left", -1],
+                       pageup: ["up", 1], pagedown: ["up", -1], z: ["wf", 1], x: ["wf", -1] };
     const heldKeys = new Set();
     const fromKeys = () => {
       for (const ax of ["out", "left", "up", "wf"]) {
@@ -1544,10 +1546,10 @@
         const k = e.key.toLowerCase();
         if (ARM_KEYS[k]) { heldKeys.add(k); fromKeys(); return true; }
         if (/^[1-4]$/.test(k)) { pad.querySelector(`[data-lv="${Number(k) - 1}"]`).click(); return true; }
-        if (e.code === "Space") { heldKeys.clear(); for (const ax in J) J[ax] = 0; update(); return true; }
         return false;
       },
       up(e) { if (heldKeys.delete(e.key.toLowerCase())) fromKeys(); },
+      stop() { heldKeys.clear(); for (const ax in J) J[ax] = 0; update(); },
       release() { if (heldKeys.size) { heldKeys.clear(); fromKeys(); } },
     };
     pad.querySelector('[data-arm-act="magnet"]').addEventListener("click", (e) => {
@@ -1670,13 +1672,18 @@
     // The Drive view owns WASD for the real base (operator_drive.js): a key must never
     // drive a ROS robot and the plugged-in one at once.
     if (stageView === "drive") return;
-    // With the Arm pad showing, the keys move the arm and never the base too.
+    // WASDQE drive the base whatever pad is up; the arm's keys (arrows, Page Up/Down, Z/X) only
+    // with the Arm pad showing, so they never move an arm nobody is looking at. Numbers set the
+    // speed of the pad that's up; Space stops both.
     const cam = cams.get(selected);
-    if (cam && cam.padMode === "arm" && cam.armKeys && !cam.armPad.hidden) {
-      if (cam.armKeys.down(e)) e.preventDefault();
+    const armUp = !!(cam && cam.padMode === "arm" && cam.armKeys && !cam.armPad.hidden);
+    if (e.code === "Space") { e.preventDefault(); if (armUp) cam.armKeys.stop(); return driveRelease(selected); }
+    if (armUp && cam.armKeys.down(e)) { e.preventDefault(); return; }
+    if (/^[1-9]$/.test(e.key) && cam && cam.drivePad) {
+      const b = cam.drivePad.querySelector(`[data-drive-level="${Number(e.key) - 1}"]`);
+      if (b && !b.hidden) { e.preventDefault(); b.click(); }
       return;
     }
-    if (e.code === "Space") { e.preventDefault(); return driveRelease(selected); }
     const cmd = DRIVE_KEYS[e.key.toLowerCase()];
     if (cmd) { e.preventDefault(); driveStart(selected, cmd); }
   });
