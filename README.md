@@ -22,13 +22,19 @@ Using a magnetic end effector, the robot picks up a package from a pick location
 
 ## Operator dashboard
 
+A warehouse operator can manage multiple robots and assign tasks for avaliable robots to pick up. 
+
 <img src="docs/media/demos/operator_view_demo.gif" alt="Operator dashboard sim view">
 
 ## SLAM mapping (RTAB-Map)
 
+Robots are able to operate in an enviornment with no prior knowledge of what the enviornment looks like, by mapping it in real time. 
+
 <img src="docs/media/demos/slam_feature_mapping.gif" alt="RTAB-Map feature matching during SLAM">
 
 ## Obstacle detection
+
+Robots use a combination of vision and depth based algorithms in order to identify and avoid dynamic obstacles
 
 | Pedestrian | Another robot |
 |---|---|
