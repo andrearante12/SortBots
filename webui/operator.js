@@ -480,6 +480,18 @@
   // Camera tile: every obstacle, boxed in the depth image's pixels (in sim one camera
   // makes both images; the D435's depth is aligned to colour). The picture is drawn
   // `background-size: cover`, so invert a cover crop, not a contain letterbox.
+  // The Obstacles toggle: hides these boxes on every tile and remembers it per browser. Drawing
+  // only; the robot's obstacle data and the map are untouched.
+  function syncObstButton(c) {
+    const b = c.el.querySelector("[data-cam-obst]");
+    b.classList.toggle("on", c.obstOn);
+    b.setAttribute("aria-pressed", String(c.obstOn));
+  }
+  function setCamObst(on) {
+    obstDefault = on;
+    try { localStorage.setItem("sortbots.camObstacles", on ? "on" : "off"); } catch (e) { /* this tab only */ }
+    for (const [id, c] of cams) { c.obstOn = on; syncObstButton(c); drawCamObstacles(id); }
+  }
   function drawCamObstacles(id) {
     const c = cams.get(id);
     if (!c || !open.has(id)) return;
@@ -495,6 +507,7 @@
     // Manipulation mode: the boxes are the table and the package the arm is working on, and
     // they covered what the operator was aiming at (2026-11-16). Back in nav mode.
     if (r && r.mode && r.mode.mode === "manip") return;
+    if (!c.obstOn) return;
     if (!p || performance.now() - r.obstaclesAt > OBSTACLE_TTL_MS || !p.w || !p.h) return;
     g.font = '600 10px "IBM Plex Sans", system-ui, sans-serif'; g.textBaseline = "bottom";
     // Each picture showing gets the boxes: the depth is aligned to colour, so the same
@@ -1237,6 +1250,9 @@
   const cams = new Map(); // id -> {el, head, pics: {rgb, depth}, mode, timers, token}
   let camDefault = "rgb";
   try { const m = localStorage.getItem("sortbots.camMode"); if (m === "depth" || m === "split") camDefault = m; } catch (e) { /* storage blocked: rgb */ }
+  // The Obstacles toggle (2026-11-20): on unless this browser turned it off.
+  let obstDefault = true;
+  try { obstDefault = localStorage.getItem("sortbots.camObstacles") !== "off"; } catch (e) { /* storage blocked: on */ }
 
   function camFor(id) {
     let c = cams.get(id);
@@ -1244,7 +1260,7 @@
     const el = document.createElement("div");
     el.className = "cam";
     el.innerHTML = `<div class="pics"><div class="pic" data-feed="rgb" data-label="Camera"><span class="msg"></span></div><div class="pic" data-feed="depth" data-label="Depth"><span class="msg"></span></div></div><canvas class="obst"></canvas><canvas class="dynseg"></canvas><canvas class="feat"></canvas>
-      <div class="camtoggles"><button type="button" class="featbtn" data-cam-features aria-pressed="false" title="Show the visual features RTAB-Map is tracking (green = inlier driving the pose, amber = matched to the map, grey = detected only)">Features</button><button type="button" class="featbtn segbtn" data-cam-seg aria-pressed="false" title="Show what dynamic_segment masks out of the map (magenta fill = masked; solid box = masked and why; dashed = what the detector saw). Runs only with dynamic_seg on">Seg</button></div>
+      <div class="camtoggles"><button type="button" class="featbtn" data-cam-features aria-pressed="false" title="Show the visual features RTAB-Map is tracking (green = inlier driving the pose, amber = matched to the map, grey = detected only)">Features</button><button type="button" class="featbtn segbtn" data-cam-seg aria-pressed="false" title="Show what dynamic_segment masks out of the map (magenta fill = masked; solid box = masked and why; dashed = what the detector saw). Runs only with dynamic_seg on">Seg</button><button type="button" class="featbtn obstbtn on" data-cam-obst aria-pressed="true" title="Show the live obstacle boxes from raw depth (obstacle_cloud.py: amber = static, red = moving, with range). They're for avoidance, so people stay in them even while Seg keeps them out of the map">Obstacles</button></div>
       <div class="camstats"><span class="featstat"></span><span class="segstat"></span></div>
       <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button><button type="button" data-cam-mode="split" title="Camera and depth, stacked">Split</button></div>
       <div class="padmode" role="tablist" aria-label="What the pad controls" hidden><button type="button" data-padmode="drive" role="tab" title="Nav mode: drive the base, mapping runs (M switches)">Nav</button><button type="button" data-padmode="arm" role="tab" title="Manipulation mode: the arm, pick and rest, and the head (keys H/J/K/L, C centres); mapping pauses">Manip</button></div>
@@ -1276,8 +1292,10 @@
           mode: camDefault, timers: {}, token: 0, headAt: -Infinity, headSent: 0, features: false, featSub: null, featData: null, featAt: -Infinity,
           // "dynseg", not "seg": .seg is the page's segmented-control class (opaque, flex), and
           // a canvas.seg covered the camera picture (2026-11-20)
-          seg: el.querySelector("canvas.dynseg"), segStat: el.querySelector(".segstat"), segOn: false, segSub: null, segData: null, segAt: -Infinity };
+          seg: el.querySelector("canvas.dynseg"), segStat: el.querySelector(".segstat"), segOn: false, segSub: null, segData: null, segAt: -Infinity,
+          obstOn: obstDefault };
     cams.set(id, c);
+    syncObstButton(c);
     wireHead(id, c);
     wireHeadKeys(id, c);
     wireArmPad(id, c, el.querySelector(".armpad"));
@@ -2784,6 +2802,7 @@
     if (cam) return setCamMode(id, cam.dataset.camMode);
     if (e.target.closest("[data-cam-features]")) return setCamFeatures(id, !camFor(id).features);
     if (e.target.closest("[data-cam-seg]")) return setCamSeg(id, !camFor(id).segOn);
+    if (e.target.closest("[data-cam-obst]")) return setCamObst(!camFor(id).obstOn);
     if (act) {
       if (act.dataset.act === "stop") { stopRobot(id); toast(`${nameOf(id)} stopped`); }
       if (act.dataset.act === "explore") toggleExplore(id);
