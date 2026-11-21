@@ -2,9 +2,17 @@
 
 ![ci](https://github.com/andrearante12/SortBots/actions/workflows/ci.yml/badge.svg)
 
-Autonomous mobile robots for collaborative indoor logistics, built on
-[XLeRobot](https://github.com/Vector-Wangel/XLeRobot): rapid deployment in
-unmapped spaces, with decentralized task allocation between robots.
+Fully autonomous mobile robots performing collaborative
+indoor logistics, built on
+[XLeRobot](https://github.com/Vector-Wangel/XLeRobot).
+
+Unlike commercial AMR
+systems that rely on extensive per-facility infrastructure,
+SortBots targets the opposite operating point: rapid deployment
+in unmapped environments, with collaboration as the primary
+mechanism for both efficiency and resilience. Robots divide work via decentralized task allocation,
+coordinate passage through shared spaces, and dynamically
+re-allocate tasks when one is blocked or delayed. Applications to autonomous delivery logistics in dynamic enviornemnts, such as warehouses, shelf restocking, or serving foods in restaurants.
 
 ## Warehouse Logistics
 
