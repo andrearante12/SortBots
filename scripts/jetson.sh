@@ -99,6 +99,11 @@ case "${1:-}" in
     done
     [[ "$(timedatectl show -p NTPSynchronized --value 2>/dev/null)" == "yes" ]] || \
       echo "[jetson] WARNING: clock still not NTP-synced after 2 min; starting anyway (a later jump can strand rosbridge)"
+    # dynamic_seg is on by default for robot runs (webui/session.py REAL_RUN_DEFAULTS) and its
+    # models run here on the host: bring the server up with the console, boot included. A
+    # failure only warns: runs still start, without the movers masked.
+    bash "$SCRIPT_DIR/jetson.sh" seg start || \
+      echo "[jetson] WARNING: no dynamic_seg server; robot runs will log that they can't reach it"
     if running; then
       echo "[jetson] container '$NAME' is already running:  scripts/jetson.sh logs"
       exit 0

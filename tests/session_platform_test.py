@@ -35,7 +35,7 @@ def test_real_scenario_uses_run_robot_and_only_its_flags(tmp_path):
     argv = sm.launcher_argv(s, s["run"])
     assert argv[0].endswith("scripts/run_robot.sh")
     assert argv[1:] == ["--robot-id", "robot_0", "--resume", "--slam-role", "all",
-                        "--keep-console"]
+                        "--dynamic-seg", "model", "--keep-console"]   # movers masked by default
     # Defaults come from the real table: no sim keys leak into `run`.
     assert set(s["run"]) == set(sm.REAL_RUN_FLAGS)
 
@@ -114,3 +114,13 @@ def test_real_nav_flag_reaches_run_robot():
     import session as sm
     assert "--nav" in sm.build_argv({**sm.REAL_RUN_DEFAULTS, "nav": True}, "real")
     assert "--nav" not in sm.build_argv(dict(sm.REAL_RUN_DEFAULTS), "real")
+
+
+def test_real_runs_mask_movers_by_default():
+    # dynamic_seg defaults on for the robot: the launch form's runs and presets alike
+    import session as sm
+    argv = sm.build_argv(dict(sm.REAL_RUN_DEFAULTS), "real")
+    assert argv[argv.index("--dynamic-seg") + 1] == "model"
+    assert "--dynamic-seg" in sm.build_argv(sm.config_to_run({"map": "new"}, "real"), "real")
+    assert "--dynamic-seg" not in sm.build_argv({**sm.REAL_RUN_DEFAULTS, "dynamic_seg": "off"}, "real")
+    assert sm.RUN_DEFAULTS["dynamic_seg"] == "off"   # the sim keeps it opt-in

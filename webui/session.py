@@ -365,7 +365,11 @@ REAL_RUN_FLAGS = {
     "nav": _switch("--nav", when=True),
 }
 
-REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all", "nav": False}
+# dynamic_seg on by default on the robot (2026-11-20): every run, the launch form's included,
+# keeps people out of the map. Needs the host's model server (scripts/jetson.sh seg start,
+# which `jetson.sh console` runs too); a run that says dynamic_seg: off skips it.
+REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all", "nav": False,
+                                                                              "dynamic_seg": "model"}
 
 PLATFORM_FLAGS = {"sim": RUN_FLAGS, "real": REAL_RUN_FLAGS}
 
