@@ -2313,7 +2313,7 @@
     if (renaming) return; // the 10 s poll would otherwise wipe the input mid-word
     $("#wps").innerHTML = waypoints.length ? waypoints.map((w) =>
       `<span class="wp" data-wp="${esc(w.name)}"><button class="go" data-go="${esc(w.name)}" title="Send the selected robot here">${esc(w.name)}</button><button class="ren" data-ren="${esc(w.name)}" title="Rename ${esc(w.name)}" aria-label="Rename ${esc(w.name)}">&#9998;</button><button class="del" data-del="${esc(w.name)}" title="Delete ${esc(w.name)}" aria-label="Delete ${esc(w.name)}">&times;</button></span>`
-    ).join("") : `<div class="none" style="padding:0">None yet. Pick the waypoint tool and click the map.</div>`;
+    ).join("") : `<div class="none" style="padding:0">None yet. Click Add, then the map.</div>`;
   }
 
   // Inline rename, from the pencil (not a double-click on the label: its two clicks would
@@ -2725,10 +2725,14 @@
   function setTool(t) {
     tool = t;
     for (const b of document.querySelectorAll("#tools button")) b.classList.toggle("active", b.dataset.t === t);
+    // the waypoint tool's button is in the task bar's Waypoints section (2026-11-20)
+    const wpAdd = $("#wp-add");
+    wpAdd.classList.toggle("active", t === "wp"); wpAdd.setAttribute("aria-pressed", String(t === "wp"));
     canvas.style.cursor = t === "wp" || t === "gw" ? "crosshair" : "grab";
     dirty = true; // the gateway pin shows with its tool
   }
   for (const b of document.querySelectorAll("#tools button")) b.addEventListener("click", () => setTool(b.dataset.t));
+  $("#wp-add").addEventListener("click", () => setTool(tool === "wp" ? "select" : "wp"));
 
   let press = null; // {px, py, wx, wy, moved, panStart}
   // Pinch to zoom (phones have no wheel): two fingers down drop whatever one finger

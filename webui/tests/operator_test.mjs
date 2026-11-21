@@ -626,7 +626,7 @@ async function main() {
     await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
 
     // -- waypoints ------------------------------------------------------------------------
-    await page.eval(`document.querySelector('#tools [data-t="wp"]').click()`);
+    await page.eval(`document.querySelector('#wp-add').click()`);   // the task bar's Add (2026-11-20)
     await mapPointer(1, 1);
     await mapPointer(-5, -5, -5, -2); // dragged: heading along +y
     const wps = await page.eval(`JSON.stringify(window.__navWps)`);

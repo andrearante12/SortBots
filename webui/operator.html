@@ -201,7 +201,8 @@
   .sidecollapse { margin-left: auto; align-self: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px;
                   background: transparent; color: var(--muted); font-size: 1.1rem; line-height: 1; cursor: pointer; }
   .sidecollapse:hover { background: var(--hover2); color: var(--ink); }
-  #right .head #tk-demo { margin-left: auto; }
+  #right .head #tk-demo, #right .head #wp-add { margin-left: auto; }
+  #wp-add.active { background: var(--ink); color: var(--on-ink); border-color: var(--ink); }
   #right .head #tk-demo + .sidecollapse { margin-left: 0; }
   /* Drag handles on the inner edge of each side bar (operator.js: drag to resize,
      double-click to reset). Outside the asides, which scroll. */
@@ -801,7 +802,6 @@
     <div class="seg" id="tools" role="toolbar" aria-label="Map tools">
       <button data-t="select" class="active" aria-label="Drive" title="Drive (V). Drag a robot to send it driving there (drop on a pin to use it); click a robot for its camera; drag the map to pan"><span class="ic">&#8598;</span><span class="lbl">Drive</span></button>
       <button data-t="tp" hidden aria-label="Teleport" title="Teleport (T), sim only. Drag a robot and drop it to move it there instantly (drop on a pin to take its heading). For setting a scene up; localization follows"><span class="ic">&#10070;</span><span class="lbl">Teleport</span></button>
-      <button data-t="wp" aria-label="Waypoint" title="Add waypoint (F). Click to place, drag to set its heading"><span class="ic">&#9670;</span><span class="lbl">Waypoint</span></button>
       <button data-t="gw" aria-label="Gateway" title="Place the fleet gateway (R): where the comms overlay puts the access point"><span class="ic">&#9650;</span><span class="lbl">Gateway</span></button>
     </div>
     <!-- Comms overlay (operator_comms.js): the commsim model of the fleet radio, fed
@@ -973,7 +973,9 @@
   <div class="head"><h2>Tasks</h2><span class="muted" id="tk-count"></span><button class="btn small" id="tk-demo" type="button" title="Queue the canned demo (configs/demo_tasks.yaml) on every robot at once">Run demo</button><button class="sidecollapse" id="collapse-right" type="button" aria-label="Collapse the task list" title="Collapse the task list (])">&#x203A;</button></div>
   <div id="demo-status" hidden></div>
   <div id="tasks"></div>
-  <div class="head"><h2>Waypoints</h2></div>
+  <!-- Adding waypoints lives with the list since 2026-11-20 (it was the top bar's ◆ tool): click
+       Add, then the map; it stays on for several, until Add again or V. F turns it on too. -->
+  <div class="head"><h2>Waypoints</h2><button class="btn small" id="wp-add" type="button" aria-pressed="false" title="Add waypoints (F): click the map to place one, drag to set its heading. Click again (or V) when done">&#9670; Add</button></div>
   <div id="wps"></div>
   <details id="newtask">
     <summary>Queue tasks</summary>
