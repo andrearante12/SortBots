@@ -380,7 +380,8 @@ class PickCore:
         self.mag = _MagnetLink(magnet, self.say, clock)
         self.st = {"arm_held": False, "locked": None, "plan": None, "state": "lock", "flag": "FREE",
                    "face": "top", "axis": np.array([0.0, 0.0, 1.0]), "high_m": HIGH_M, "hover_m": HOVER_M,
-                   "pitch_top": None, "pitch_app": None, "rest_q": poses.rest_q, "place_q": poses.place_q}
+                   "pitch_top": None, "pitch_app": None, "rest_q": poses.rest_q, "place_q": poses.place_q,
+                   "lift_tilt_rad": 0.0}
         self.head_goal = None
         self._reported = None
         self._ik_memo = {}
@@ -893,6 +894,7 @@ class PickCore:
         planned = cfg.side_pitch_deg if st["face"] == "side" else (st["pitch_top"] or cfg.pitch_deg)
         log.info("seated (%s face): magnet pitch %+.1f deg in the model (planned %+.1f), reach %.1f cm, height "
                  "%.1f cm", st["face"], settled, planned, np.linalg.norm(p_seat[:2]) * 100, p_seat[2] * 100)
+        st["lift_tilt_rad"] = 0.0
         if st["face"] == "top" and cfg.lift_tilt_deg:
             pre = self.straight(z_now, z_now + LIFT_PRE_M, 0.005, pitch=settled)
             if pre and not self.move_path(pre, "LIFTING", PRESS_MPS * 2):
@@ -905,11 +907,14 @@ class PickCore:
             probe[3] += 1e-3
             up_sign = 1.0 if kin.pose(probe)[3] > kin.pose(ref)[3] else -1.0
             q_t = self.arm_q()
+            w0 = q_t[3]
             q_t[3] = float(np.clip(q_t[3] + up_sign * math.radians(cfg.lift_tilt_deg), self.lo[3], self.hi[3]))
             if not self.move_to(q_t, "LIFTING", dps=20.0):
                 self.say("ABORTED during the lift: holding, magnet still ON", 1e9)
                 st["state"] = "holding"
                 return
+            # what the joint limit let it turn, so do_place undoes exactly this much
+            st["lift_tilt_rad"] = float(q_t[3] - w0)
             q_seat = self.arm_q()
             z_now = float((kin.tool_point(q_seat, mm) - st["locked"]) @ st["axis"])
             settled = self.model_pitch(q_seat)
@@ -973,6 +978,14 @@ class PickCore:
             if not self.drive_base(-cfg.base_back_cm / 100.0):
                 return False
             backed = True
+        # The lift's wrist tilt, turned back the same amount once clear of the table and before
+        # the swing to rest (2026-11-20: asked for on the real robot).
+        if st["lift_tilt_rad"]:
+            q_u = self.arm_q()
+            q_u[3] = float(np.clip(q_u[3] - st["lift_tilt_rad"], self.lo[3], self.hi[3]))
+            if not self.move_to(q_u, "MOVING", dps=20.0):
+                return False
+            st["lift_tilt_rad"] = 0.0
         if st["rest_q"] is not None and not self.move_to(st["rest_q"], "MOVING"):
             return False
         if not path:

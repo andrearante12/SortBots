@@ -1502,7 +1502,7 @@ def cmd_pick(a):
           "arm_held": False, "quit_armed": False, "locked": None, "plan": None, "state": "lock",
           "flag": "FREE", "level": 1, "jog_q": None, "jog_target": None, "jog_ok": True,
           "face": "top", "axis": np.array([0.0, 0.0, 1.0]), "high_m": HIGH_M, "hover_m": HOVER_M,
-          "pitch_top": None,
+          "pitch_top": None, "lift_tilt_rad": 0.0,
           "msg": f"arm free: move it clear of the package, then Lock target (marker {a.marker_id})",
           "until": time.monotonic() + 1e9}
 
@@ -1885,6 +1885,7 @@ def cmd_pick(a):
         planned = a.side_pitch_deg if st["face"] == "side" else (st["pitch_top"] or a.pitch_deg)
         print(f"\nseated ({st['face']} face): magnet pitch {settled:+.1f} deg in the model (planned "
               f"{planned:+.1f}), reach {np.linalg.norm(p_seat[:2]) * 100:.1f} cm, height {p_seat[2] * 100:.1f} cm")
+        st["lift_tilt_rad"] = 0.0
         if st["face"] == "top" and a.lift_tilt_deg:
             pre = straight(z_now, z_now + LIFT_PRE_M, 0.005, pitch=settled)
             if pre and not move_path(pre, "LIFTING", PRESS_MPS * 2):
@@ -1897,11 +1898,14 @@ def cmd_pick(a):
             probe[3] += 1e-3
             up_sign = 1.0 if kin.pose(probe)[3] > kin.pose(ref)[3] else -1.0
             q_t = arm_q()
+            w0 = q_t[3]
             q_t[3] = float(np.clip(q_t[3] + up_sign * math.radians(a.lift_tilt_deg), lo[3], hi[3]))
             if not move_to(q_t, "LIFTING", dps=20.0):
                 say("ABORTED during the lift: holding, magnet still ON", 1e9)
                 st["state"] = "holding"
                 return
+            # what the joint limit let it turn, so do_place undoes exactly this much
+            st["lift_tilt_rad"] = float(q_t[3] - w0)
             q_seat = arm_q()
             z_now = float((kin.tool_point(q_seat, hc.magnet_m) - st["locked"]) @ st["axis"])
             settled = model_pitch(q_seat)
@@ -2208,6 +2212,14 @@ def cmd_pick(a):
             if not drive_base(-a.base_back_cm / 100.0):
                 return False
             backed = True
+        # The lift's wrist tilt, turned back the same amount once clear of the table and before
+        # the swing to rest (2026-11-20: asked for on the real robot).
+        if st["lift_tilt_rad"]:
+            q_u = arm_q()
+            q_u[3] = float(np.clip(q_u[3] - st["lift_tilt_rad"], lo[3], hi[3]))
+            if not move_to(q_u, "MOVING", dps=20.0):
+                return False
+            st["lift_tilt_rad"] = 0.0
         # via rest: two known moves instead of one joint swing from the pick to wherever the place
         # is (behind the base, over the camera mast's side) with the package hanging
         if st["rest_q"] is not None and not move_to(st["rest_q"], "MOVING"):
