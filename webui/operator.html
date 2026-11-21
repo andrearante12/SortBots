@@ -278,36 +278,33 @@
                          font: 600 .66rem system-ui, sans-serif; cursor: pointer; }
   .cam .padmode button:hover { background: rgba(255,255,255,.12); }
   .cam .padmode button.on { background: rgba(255,255,255,.9); color: #15191e; }
-  /* Head pad: the drive pad's mirror on the right (operator.js wireHeadPad). Raised clear
-     of the feed's corner label (Camera / Depth). */
-  .cam .headpad { position: absolute; right: 6px; bottom: 30px; display: grid; grid-template-columns: repeat(3, 26px); gap: 3px;
-                  opacity: .75; transition: opacity .15s; touch-action: none; user-select: none; -webkit-user-select: none; }
-  .cam .headpad[hidden] { display: none; }
-  .cam:hover .headpad, .cam .headpad.on { opacity: 1; }
-  .cam .headpad button { width: 26px; height: 24px; padding: 0; border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65);
-                         color: #e6ebf0; font-size: .72rem; line-height: 1; touch-action: none; }
-  .cam .headpad button:hover { background: rgba(10,12,16,.85); }
-  .cam .headpad button.held { background: rgba(255,255,255,.9); color: #15191e; }
-  .cam .headpad [data-headpad="center"] { font-size: .6rem; }
-  @media (pointer: coarse) { .cam .headpad { grid-template-columns: repeat(3, 36px); } .cam .headpad button { width: 36px; height: 32px; font-size: .9rem; } }
-  /* Arm touchpad, bottom-centre between the drive and head pads (operator.js wireArmPad):
-     handeye.py's page, shrunk onto the tile. A 2D pad for the hand, a tall one for height,
-     then wrist up/down, the speed level, Magnet and Pick. */
+  /* Arm touchpad, bottom-centre (operator.js wireArmPad): handeye.py's page, shrunk onto the
+     tile. A 2D pad for the hand, a tall one for height, then wrist up/down, the speed level,
+     Magnet and Pick. The head has keys (I/K/J/L, operator.js wireHeadKeys), not a pad. */
   .cam .armpad { position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); display: flex; gap: 6px; align-items: flex-end;
                  opacity: .8; transition: opacity .15s; touch-action: none; user-select: none; -webkit-user-select: none; }
   .cam .armpad[hidden] { display: none; }
   .cam:hover .armpad { opacity: 1; }
   .cam .armpad .tp { position: relative; border-radius: 9px; background: rgba(29,38,51,.4); border: 1px solid rgba(120,150,190,.45); touch-action: none; cursor: grab; }
   .cam .armpad .tp.on { background: rgba(29,38,51,.6); cursor: grabbing; }
-  .cam .armpad .tp.hand { width: 104px; height: 104px; }
-  .cam .armpad .tp.z { width: 30px; height: 104px; }
+  .cam .armpad .tp.hand { width: 140px; height: 140px; }
+  .cam .armpad .tp.z { width: 40px; height: 140px; }
   .cam .armpad .knob { position: absolute; left: 50%; top: 50%; width: 20px; height: 20px; border-radius: 50%; background: rgba(74,144,226,.85);
                        transform: translate(-50%, -50%); pointer-events: none; }
   .cam .armpad .ax { position: absolute; font: normal .58rem system-ui, sans-serif; color: rgba(170,190,210,.75); pointer-events: none; }
   .cam .armpad .ax.t { top: 3px; left: 50%; transform: translateX(-50%); } .cam .armpad .ax.b { bottom: 3px; left: 50%; transform: translateX(-50%); }
   .cam .armpad .ax.l { left: 3px; top: 50%; transform: translateY(-50%); } .cam .armpad .ax.r { right: 3px; top: 50%; transform: translateY(-50%); }
   .cam .armpad .side { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
-  .cam .armpad [data-arm-act="rest"] { grid-column: 1 / -1; }
+  .cam .armpad .restrow { display: flex; gap: 3px; align-items: stretch; min-width: 0; }
+  .cam .armpad .restrow [data-arm-act="rest"] { flex: 1 1 auto; min-width: 0; }
+  .cam .armpad .armmore { position: relative; display: flex; flex: 0 0 auto; }
+  .cam .armpad .armmore > summary { list-style: none; height: 22px; width: 22px; display: flex; align-items: center; justify-content: center; cursor: pointer;
+    border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65); color: #e6ebf0; font: 600 .8rem system-ui, sans-serif; }
+  .cam .armpad .armmore > summary::-webkit-details-marker { display: none; }
+  .cam .armpad .armmore[open] > summary { background: rgba(255,255,255,.9); color: #15191e; }
+  .cam .armpad .armmore .menu { position: absolute; right: 0; bottom: calc(100% + 3px); z-index: 2; display: flex; flex-direction: column; gap: 3px;
+    padding: 3px; min-width: 92px; border: 1px solid rgba(255,255,255,.28); border-radius: 6px; background: rgba(10,12,16,.9); }
+  .cam .armpad .armmore .menu button { white-space: nowrap; text-align: left; }
   .cam .armpad .lv { grid-column: 1 / -1; display: flex; gap: 2px; }
   .cam .armpad button { height: 22px; padding: 0 7px; border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65);
                         color: #e6ebf0; font: 600 .64rem system-ui, sans-serif; line-height: 1; touch-action: none; white-space: nowrap; }
@@ -316,7 +313,7 @@
   .cam .armpad button.held, .cam .armpad button.sel { background: rgba(255,255,255,.9); color: #15191e; }
   .cam .armpad [data-arm-act="magnet"].on { background: rgba(242,183,5,.9); color: #15191e; border-color: rgba(242,183,5,1); }
   .cam .armpad [data-arm-act="pick"] { color: #8fd3a8; }
-  @media (pointer: coarse) { .cam .armpad .tp.hand { width: 120px; height: 120px; } .cam .armpad .tp.z { width: 36px; height: 120px; } .cam .armpad button { height: 28px; } }
+  @media (pointer: coarse) { .cam .armpad .tp.hand { width: 160px; height: 160px; } .cam .armpad .tp.z { width: 46px; height: 160px; } .cam .armpad button, .cam .armpad .armmore > summary { height: 28px; } .cam .armpad .armmore > summary { width: 28px; } }
   .more .cam canvas.feat { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .featbtn { position: absolute; top: 6px; left: 6px; background: rgba(10,12,16,.6); border: 1px solid transparent; color: #c3cad2; font-size: .72rem; padding: 3px 9px; border-radius: 6px; }
   .featbtn.on { background: rgba(61,220,132,.9); color: #15191e; font-weight: 600; }
@@ -515,6 +512,17 @@
   .veil[hidden] { display: none; }
   #stop-dlg .card { background: var(--surface); border-radius: 12px; box-shadow: 0 12px 40px var(--shadow); width: 440px; max-width: calc(100vw - 24px); padding: 20px 22px; display: grid; gap: 12px; }
   #stop-dlg h3 { margin: 0; font-size: 1.05rem; font-weight: 600; }
+  #keys-btn { font-weight: 700; }
+  #keys-dlg .card { background: var(--surface); color: var(--ink); border-radius: 12px; box-shadow: 0 12px 40px var(--shadow); width: 420px;
+                    max-width: calc(100vw - 32px); max-height: calc(100vh - 160px); overflow: auto; padding: 18px 22px; }
+  #keys-dlg h3 { display: flex; align-items: center; margin: 0 0 4px; font-size: 1.05rem; font-weight: 600; }
+  #keys-dlg h3 .x { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 1.4rem; line-height: 1; cursor: pointer; }
+  #keys-dlg h4 { margin: 14px 0 6px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  #keys-dlg table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+  #keys-dlg td { padding: 4px 0; border-top: 1px solid var(--border); vertical-align: middle; }
+  #keys-dlg td:first-child { width: 42%; white-space: nowrap; }
+  #keys-dlg kbd { display: inline-block; min-width: 1.6em; padding: 1px 6px; margin-right: 3px; border: 1px solid var(--border); border-bottom-width: 2px;
+                  border-radius: 5px; background: var(--raise); font: 600 .78rem system-ui, sans-serif; text-align: center; }
   #stop-dlg p { margin: 0; color: var(--muted); font-size: .9rem; line-height: 1.45; }
   #sd-name-row { display: grid; gap: 4px; font-size: .84rem; color: var(--muted); }
   #sd-name-row[hidden], #sd-err[hidden] { display: none; }
@@ -784,6 +792,7 @@
 <div id="test-chip" hidden title="A scored test is driving the sim"><span class="tp-dot"></span><span class="k">Test</span>
     <button type="button" class="name" id="tc-name" title="Open the Tests tab"></button><span id="tc-time" class="muted"></span>
     <button type="button" class="btn small stop" id="tc-cancel">Stop test</button></div>
+  <button class="btn icon" id="keys-btn" type="button" aria-label="Keyboard shortcuts" aria-haspopup="dialog" title="Keyboard shortcuts (?)">?</button>
   <div id="view-box">
     <button class="btn icon" id="view-more" aria-label="View options" aria-haspopup="true" aria-expanded="false" title="View options"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><g fill="currentColor"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></g></svg></button>
     <div id="view-opts">
@@ -942,6 +951,13 @@
       <button type="submit" class="btn primary" id="sd-save">Save &amp; stop</button>
     </div>
   </form>
+</div>
+<!-- Keyboard shortcuts (2026-11-20): the ? button or the ? key; Esc or a click outside closes. -->
+<div id="keys-dlg" class="veil" hidden>
+  <div class="card" role="dialog" aria-labelledby="kd-title">
+    <h3 id="kd-title">Keyboard shortcuts <button class="x" id="kd-x" type="button" title="Close (Esc)" aria-label="Close">&times;</button></h3>
+    <h4>Robot (click its card first)</h4><table><tr><td><kbd>W</kbd> <kbd>S</kbd> <kbd>A</kbd> <kbd>D</kbd></td><td>drive forward, back, left, right</td></tr><tr><td><kbd>Q</kbd> <kbd>E</kbd></td><td>turn left, right</td></tr><tr><td><kbd>M</kbd></td><td>switch Nav / Manip</td></tr><tr><td><kbd>1</kbd>&ndash;<kbd>4</kbd></td><td>speed of the pad showing</td></tr><tr><td><kbd>Space</kbd></td><td>stop the base, arm and head</td></tr></table><h4>Manip</h4><table><tr><td><kbd>&uarr;</kbd> <kbd>&darr;</kbd></td><td>arm away, toward</td></tr><tr><td><kbd>&larr;</kbd> <kbd>&rarr;</kbd></td><td>arm left, right</td></tr><tr><td><kbd>PgUp</kbd> <kbd>PgDn</kbd></td><td>arm up, down</td></tr><tr><td><kbd>Z</kbd> <kbd>X</kbd></td><td>wrist up, down</td></tr><tr><td><kbd>I</kbd> <kbd>K</kbd> <kbd>J</kbd> <kbd>L</kbd></td><td>head up, down, left, right</td></tr><tr><td><kbd>H</kbd></td><td>centre the head</td></tr></table><h4>Map</h4><table><tr><td><kbd>V</kbd></td><td>drive tool</td></tr><tr><td><kbd>F</kbd></td><td>add waypoint</td></tr><tr><td><kbd>R</kbd></td><td>place the gateway</td></tr><tr><td><kbd>T</kbd></td><td>teleport (sim)</td></tr><tr><td><kbd>Esc</kbd></td><td>close, or deselect the robot</td></tr><tr><td><kbd>?</kbd></td><td>this list</td></tr></table>
+  </div>
 </div>
 <div id="session" hidden>
   <div class="card" role="dialog" aria-label="Session">

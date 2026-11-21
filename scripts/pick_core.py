@@ -65,6 +65,7 @@ FACE_TOP_DEG, FACE_SIDE_DEG, SIDE_MAX_YAW_DEG = 35.0, 35.0, 12.0
 TOP_HIGH_CANDS_M, TOP_HOVER_CANDS_M = (0.12, 0.09, 0.06), (0.05, 0.03, 0.02)
 PITCH_FALLBACK_DEG = (-3, 3, -6, 6, -9, 9, -12, -15, -18, -21)
 LIFT_PRE_M, LIFT_TILT_DEG = 0.015, 15.0
+PULL_IN_CM, PULL_IN_OFF_FLAT_DEG, PULL_MPS = 7.0, 12.0, 0.02
 SIDE_HIGH_M, SIDE_HOVER_M, SIDE_LIFT_M, SIDE_PRESS_MM = 0.06, 0.03, 0.08, 8.0
 WRIST_COMPLY_TORQUE = 100
 PRESS_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_flex")
@@ -88,8 +89,10 @@ class PickConfig:
     magnet_on_mm: float = CONTACT_ABOVE_M * 1000
     press_mm: float = PRESS_BELOW_M * 1000
     press_torque: int = PRESS_TORQUE
-    base_back_cm: float = 15.0
+    base_back_cm: float = 0.0   # handeye --base-back-cm: no wheels in a pick unless asked (2026-11-20)
     lift_tilt_deg: float = LIFT_TILT_DEG
+    pull_in_cm: float = PULL_IN_CM
+    pull_in_off_flat_deg: float = PULL_IN_OFF_FLAT_DEG
     wrist_torque: int = WRIST_COMPLY_TORQUE
     pitch_deg: float = PICK_PITCH_DEG
     side_pitch_deg: float | None = None   # None: the mean of the taught side flat poses, else 0
@@ -109,6 +112,7 @@ class PickPoses:
     lo: np.ndarray
     hi: np.ndarray
     head_lim: dict
+    table_q: np.ndarray | None = None   # Unload's table pose (pick_table_pose.json); not handeye's
 
 
 def arm_limits(cal):
@@ -150,10 +154,12 @@ def load_robot(calib_dir=CALIBRATION_DIR, arm_id="sortbots_arm", head_id="sortbo
         p = head_dir / name
         return json.loads(p.read_text()) if p.is_file() else default
     rest, place = jload("pick_rest_pose.json", None), jload("pick_place_pose.json", None)
+    table = jload("pick_table_pose.json", None)
     poses = PickPoses(samples=jload("handeye_samples.json", []), flat_poses=jload("pick_flat_poses.json", []),
                       rest_q=None if rest is None else np.radians(rest["arm_deg"]),
                       place_q=None if place is None else np.radians(place["arm_deg"]),
-                      lo=lo, hi=hi, head_lim=head_lim)
+                      lo=lo, hi=hi, head_lim=head_lim,
+                      table_q=None if table is None else np.radians(table["arm_deg"]))
     return kin, hc, poses
 
 
@@ -380,8 +386,10 @@ class PickCore:
         self.mag = _MagnetLink(magnet, self.say, clock)
         self.st = {"arm_held": False, "locked": None, "plan": None, "state": "lock", "flag": "FREE",
                    "face": "top", "axis": np.array([0.0, 0.0, 1.0]), "high_m": HIGH_M, "hover_m": HOVER_M,
-                   "pitch_top": None, "pitch_app": None, "rest_q": poses.rest_q, "place_q": poses.place_q}
+                   "pitch_top": None, "pitch_app": None, "rest_q": poses.rest_q, "place_q": poses.place_q,
+                   "lift_tilt_rad": 0.0, "table_q": poses.table_q}
         self.head_goal = None
+        self.unloading = False   # unload(): no pull-in, the table pose, no base move
         self._reported = None
         self._ik_memo = {}
 
@@ -587,6 +595,26 @@ class PickCore:
             qs.append((h, r[0]))
             seed = [r[0]]
         return qs
+
+    def pull_in_path(self, p0, dist_m, pitch):
+        """cmd_pick.pull_in_path"""
+        r_hat = np.append(head_cam.arm_radial(p0), 0.0)
+        qs, seed = [], [self.arm_q()]
+        n = max(1, int(round(dist_m / 0.01)))
+        for i in range(1, n + 1):
+            d = dist_m * i / n
+            # the pitch may drift a few degrees as the arm comes in (the hand-driven pull went
+            # -24 -> -26): held exactly, only 4 of 7 cm solved
+            for p_ in (pitch, pitch - 3.0, pitch + 3.0, pitch - 6.0):
+                r = self.face_ik(p0 - r_hat * d, seed, float(seed[0][4]), pitch=p_, tol=3.0)
+                if r is not None:
+                    pitch = p_
+                    break
+            if r is None:
+                break
+            qs.append((d, r[0]))
+            seed = [r[0]]
+        return qs if qs and qs[-1][0] >= 0.02 - 1e-9 else None
 
     # ---- the steps --------------------------------------------------------------------------
     def entries(self, marker_id, n=10, timeout=4.0, give_up_s=1.5):
@@ -893,7 +921,23 @@ class PickCore:
         planned = cfg.side_pitch_deg if st["face"] == "side" else (st["pitch_top"] or cfg.pitch_deg)
         log.info("seated (%s face): magnet pitch %+.1f deg in the model (planned %+.1f), reach %.1f cm, height "
                  "%.1f cm", st["face"], settled, planned, np.linalg.norm(p_seat[:2]) * 100, p_seat[2] * 100)
-        if st["face"] == "top" and cfg.lift_tilt_deg:
+        pull = None
+        # never while unloading: pulling toward the robot from the body drags the box into the mast
+        if (st["face"] == "top" and cfg.pull_in_cm and not self.unloading and
+                abs((st["pitch_top"] or cfg.pitch_deg) - cfg.pitch_deg) >= cfg.pull_in_off_flat_deg):
+            pull = self.pull_in_path(p_seat, cfg.pull_in_cm / 100.0, settled)
+        if pull:
+            log.info("landed %+.0f deg off flat: pulling the package in %.0f cm before the lift",
+                     (st["pitch_top"] or cfg.pitch_deg) - cfg.pitch_deg, pull[-1][0] * 100)
+            if not self.move_path(pull, "LIFTING", PULL_MPS):
+                self.say("ABORTED during the pull-in: holding, magnet still ON", 1e9)
+                st["state"] = "holding"
+                return
+            q_seat = self.arm_q()
+            p_seat = kin.tool_point(q_seat, mm)
+            settled = self.model_pitch(q_seat)
+        st["lift_tilt_rad"] = 0.0
+        if st["face"] == "top" and cfg.lift_tilt_deg and not pull:
             pre = self.straight(z_now, z_now + LIFT_PRE_M, 0.005, pitch=settled)
             if pre and not self.move_path(pre, "LIFTING", PRESS_MPS * 2):
                 self.say("ABORTED during the lift: holding, magnet still ON", 1e9)
@@ -905,15 +949,27 @@ class PickCore:
             probe[3] += 1e-3
             up_sign = 1.0 if kin.pose(probe)[3] > kin.pose(ref)[3] else -1.0
             q_t = self.arm_q()
+            w0 = q_t[3]
             q_t[3] = float(np.clip(q_t[3] + up_sign * math.radians(cfg.lift_tilt_deg), self.lo[3], self.hi[3]))
             if not self.move_to(q_t, "LIFTING", dps=20.0):
                 self.say("ABORTED during the lift: holding, magnet still ON", 1e9)
                 st["state"] = "holding"
                 return
+            # what the joint limit let it turn, so do_place undoes exactly this much
+            st["lift_tilt_rad"] = float(q_t[3] - w0)
             q_seat = self.arm_q()
             z_now = float((kin.tool_point(q_seat, mm) - st["locked"]) @ st["axis"])
             settled = self.model_pitch(q_seat)
-        if st["face"] == "top":
+        if st["face"] == "top" and pull:
+            up = None
+            for top_h in (HIGH_M,) + TOP_HIGH_CANDS_M[1:] + (0.04, 0.03):
+                for p_ in (settled, settled - 6.0, settled - 12.0, settled - 18.0):
+                    up = self.lift_path(p_seat, top_h - z_now, p_)
+                    if up:
+                        break
+                if up:
+                    break
+        elif st["face"] == "top":
             up = None
             for top_h in (HIGH_M,) + TOP_HIGH_CANDS_M[1:] + (0.04, 0.03):
                 for p_ in (settled, None, (st["pitch_top"] or cfg.pitch_deg) - 6.0):
@@ -946,11 +1002,12 @@ class PickCore:
             self.say("ABORTED: base stopped", 1e9)
         return ok
 
-    def do_place(self):
+    def do_place(self, q_pl=None, base_back=True):
         """handeye cmd_pick.do_place: back the base off, via rest to a few cm above the place pose
-        (its tilt kept), straight down, magnet off, rest, base back. True if released there."""
+        (its tilt kept), straight down, magnet off, rest, base back. True if released there.
+        q_pl / base_back: unload() puts it on the table pose, the base where it is."""
         st, cfg, kin, mm = self.st, self.cfg, self.kin, self.hc.magnet_m
-        q_pl = st["place_q"]
+        q_pl = st["place_q"] if q_pl is None else q_pl
         tool = kin.tool_point(q_pl, mm)
         axis = kin.flange(q_pl)[:3, 2]
         lo_f, hi_f = self.lo - math.radians(2.5), self.hi + math.radians(2.5)
@@ -969,10 +1026,18 @@ class PickCore:
                 path = pts
                 break
         backed = False
-        if self.base is not None and cfg.base_back_cm:
+        if base_back and self.base is not None and cfg.base_back_cm:
             if not self.drive_base(-cfg.base_back_cm / 100.0):
                 return False
             backed = True
+        # The lift's wrist tilt, turned back the same amount once clear of the table and before
+        # the swing to rest (2026-11-20: asked for on the real robot).
+        if st["lift_tilt_rad"]:
+            q_u = self.arm_q()
+            q_u[3] = float(np.clip(q_u[3] - st["lift_tilt_rad"], self.lo[3], self.hi[3]))
+            if not self.move_to(q_u, "MOVING", dps=20.0):
+                return False
+            st["lift_tilt_rad"] = 0.0
         if st["rest_q"] is not None and not self.move_to(st["rest_q"], "MOVING"):
             return False
         if not path:
@@ -1178,13 +1243,50 @@ class PickCore:
             return "aborted"
         return result
 
-    def _chain(self):
+    def unload(self, marker_id=10):
+        """The operator view's Unload: the package the place pose left in the body, out onto the
+        table. The head aimed at the place pose's magnet spot, then the pick's own lock, plan and
+        press (no pull-in), then the taught table pose with the base where it is. No table pose:
+        it holds the package for the pad, and Save table keeps where it's driven to. Not in
+        handeye. -> "placed" | "picked" | "failed" | "aborted"."""
+        st = self.st
+        if st["place_q"] is None:
+            self.say("no place pose saved: Unload looks where the place pose leaves the package", 20.0)
+            return "failed"
+        if not self.mag.magnet:
+            self.say("no magnet board: plug in the ESP32 and restart", 20.0)
+            return "failed"
+        if st["state"] == "holding":
+            self.say("holding a package (magnet ON): place or release it before Unload", 20.0)
+            return "failed"
+        self.marker_id = marker_id
+        self.place_after = True
+        self.abort.clear()
+        st["state"], st["plan"] = "lock", None
+        self.head_goal = self.head_now()
+        self.unloading = True
+        try:
+            result = self._chain(unload=True)
+        finally:
+            self.unloading = False
+        if self.abort.is_set():
+            return "aborted"
+        if result == "picked" and st["table_q"] is None:
+            self.say("holding it: drive the arm over the table with the pad, then Save table", 1e9)
+        return result
+
+    def _chain(self, unload=False):
         st = self.st
         if not st["arm_held"]:
             self.hold(True)
         from_rest = st["rest_q"] is not None
         if from_rest and np.max(np.abs(self.arm_q() - st["rest_q"])) > math.radians(3):
             if not self.go_rest():
+                return "failed"
+        # Unload: the package sits where the place pose's magnet left it; look there first
+        if unload:
+            st["flag"] = "SEARCHING"
+            if not self.move_head(*self.aim_head_at(self.kin.tool_point(st["place_q"], self.hc.magnet_m))):
                 return "failed"
         if not self.find_marker() or not self.lock_with_step_aside() or not self.do_plan():
             return "failed"
@@ -1194,8 +1296,9 @@ class PickCore:
         if not self.do_go():
             return "failed"
         self.descend_and_pick()
-        if st["state"] == "holding" and st["place_q"] is not None and getattr(self, "place_after", True):
-            if self.do_place():
+        q_pl = st["table_q"] if unload else st["place_q"]
+        if st["state"] == "holding" and q_pl is not None and getattr(self, "place_after", True):
+            if self.do_place(q_pl, base_back=not unload):
                 return "placed"
         return "picked" if st["state"] == "holding" else "failed"
 

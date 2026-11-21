@@ -54,9 +54,11 @@ magnet:
 # The one-button pick (scripts/pick_core.py PickConfig); anything not set here keeps handeye's
 # default.
 pick:
-  # handeye backs the base 15 cm off the table before swinging over the place pose. 0: no
-  # wheels needed, the place goes straight to rest and over (2026-11-16, base board not fitted).
+  # Back the base this far off the table between the pick and the place (cmd_vel through
+  # base_driver), forward again after. 0: picks and places never drive the wheels (2026-11-20,
+  # asked for after trying 10 cm; also 0 from 2026-11-16 while the base board wasn't fitted).
   base_back_cm: 0
   # Aim correction along the line from the arm's base through the target, + = away from the
-  # robot. handeye's +1 mm landed ~2 mm short on the first ROS picks (2026-11-16): +3.
-  radial_mm: 3.0
+  # robot. handeye's +1 mm landed ~2 mm short on the first ROS picks (2026-11-16): +3. Still
+  # ~1 mm short on the high-box picks (2026-11-20): +4, and a +4 pick still failed short: +7.
+  radial_mm: 7.0

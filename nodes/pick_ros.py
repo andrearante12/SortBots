@@ -35,6 +35,7 @@ class BusArmIO:
         self.cal = {**{m: head_cal[m] for m in HEAD}, **{j: arm_cal[j] for j in ARM}}
         self.ids = {j: int(c["id"]) for j, c in self.cal.items()}
         self.last = {}
+        self.goal = {}   # the last goal written per joint: arm_driver's pick_trace (no second bus reader)
 
     def _deg(self, j, raw):
         c = self.cal[j]
@@ -51,6 +52,7 @@ class BusArmIO:
 
     def write(self, deg: dict):
         self.bus.sync_write(ft.GOAL_POSITION, {self.ids[j]: self._raw(j, d) for j, d in deg.items()})
+        self.goal = {**self.goal, **deg}
 
     def set_torque_limit(self, joint, raw):
         self.bus.write(self.ids[joint], TORQUE_LIMIT, int(max(0, min(1000, raw))))
