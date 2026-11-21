@@ -1186,6 +1186,13 @@ PITCH_FALLBACK_DEG = (-3, 3, -6, 6, -9, 9, -12, -15, -18, -21)
 # hand it held when lifted LIFT_PRE_M first, then the wrist tilted (the page's "wrist up" way),
 # which pivots the package on the magnet instead of peeling it off flat. --lift-tilt-deg sets it.
 LIFT_PRE_M, LIFT_TILT_DEG = 0.015, 15.0
+# A top grab the plan had to land PULL_IN_OFF_FLAT_DEG or more off the taught flat pitch (a high box
+# near the base, the wrist at its limit, 2026-11-20): the magnet lands tilted and can't flatten, the
+# straight-up lift peeled the box off at once, and a straight-up lift there barely solves anyway. A
+# hand-driven pick that held slid the box PULL_IN_CM toward the robot at the grab's height first,
+# then lifted. The trigger is the plan's pitch, not the wrist's angle: the press moves the wrist a
+# few degrees off its limit. --pull-in-cm sets it.
+PULL_IN_CM, PULL_IN_OFF_FLAT_DEG, PULL_MPS = 7.0, 12.0, 0.02
 SIDE_HIGH_M, SIDE_HOVER_M, SIDE_LIFT_M, SIDE_PRESS_MM = 0.06, 0.03, 0.08, 8.0
 WRIST_COMPLY_TORQUE = 100  # wrist_flex during the press: the magnet tilts flat on contact
 PRESS_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_flex")
@@ -1782,6 +1789,27 @@ def cmd_pick(a):
             seed = [r[0]]
         return qs
 
+    def pull_in_path(p0, dist_m, pitch):
+        """(d, q) poses sliding the magnet d toward the arm's base at p0's height, its pitch kept,
+        as far as solves up to dist_m in 1 cm steps; None if that is under 2 cm."""
+        r_hat = np.append(head_cam.arm_radial(p0), 0.0)
+        qs, seed = [], [arm_q()]
+        n = max(1, int(round(dist_m / 0.01)))
+        for i in range(1, n + 1):
+            d = dist_m * i / n
+            # the pitch may drift a few degrees as the arm comes in (the hand-driven pull went
+            # -24 -> -26): held exactly, only 4 of 7 cm solved
+            for p_ in (pitch, pitch - 3.0, pitch + 3.0, pitch - 6.0):
+                r = face_ik(p0 - r_hat * d, seed, float(seed[0][4]), pitch=p_, tol=3.0)
+                if r is not None:
+                    pitch = p_
+                    break
+            if r is None:
+                break
+            qs.append((d, r[0]))
+            seed = [r[0]]
+        return qs if qs and qs[-1][0] >= 0.02 - 1e-9 else None
+
     def lift_path(p0, height, pitch):
         """(h, q) poses lifting the magnet straight up from p0 by `height`, its axis held at the
         face's normal turned by `pitch`: a side pick lifts up, not back along the normal."""
@@ -1885,8 +1913,23 @@ def cmd_pick(a):
         planned = a.side_pitch_deg if st["face"] == "side" else (st["pitch_top"] or a.pitch_deg)
         print(f"\nseated ({st['face']} face): magnet pitch {settled:+.1f} deg in the model (planned "
               f"{planned:+.1f}), reach {np.linalg.norm(p_seat[:2]) * 100:.1f} cm, height {p_seat[2] * 100:.1f} cm")
+        pull = None
+        if (st["face"] == "top" and a.pull_in_cm and
+                abs((st["pitch_top"] or a.pitch_deg) - a.pitch_deg) >= a.pull_in_off_flat_deg):
+            pull = pull_in_path(p_seat, a.pull_in_cm / 100.0, settled)
+        if pull:
+            print(f"landed {(st['pitch_top'] or a.pitch_deg) - a.pitch_deg:+.0f} deg off flat: pulling the "
+                  f"package in {pull[-1][0] * 100:.0f} cm before the lift")
+            if not move_path(pull, "LIFTING", PULL_MPS):
+                say("ABORTED during the pull-in: holding, magnet still ON", 1e9)
+                st["state"] = "holding"
+                return
+            q_seat = arm_q()
+            p_seat = kin.tool_point(q_seat, hc.magnet_m)
+            settled = model_pitch(q_seat)
         st["lift_tilt_rad"] = 0.0
-        if st["face"] == "top" and a.lift_tilt_deg:
+        # no break-away tilt after a pull-in: the box is already off its spot
+        if st["face"] == "top" and a.lift_tilt_deg and not pull:
             pre = straight(z_now, z_now + LIFT_PRE_M, 0.005, pitch=settled)
             if pre and not move_path(pre, "LIFTING", PRESS_MPS * 2):
                 say("ABORTED during the lift: holding, magnet still ON", 1e9)
@@ -1910,7 +1953,18 @@ def cmd_pick(a):
             z_now = float((kin.tool_point(q_seat, hc.magnet_m) - st["locked"]) @ st["axis"])
             settled = model_pitch(q_seat)
         # lift at the pitch the wrist settled to: the taught one would twist the package on the way up
-        if st["face"] == "top":
+        if st["face"] == "top" and pull:
+            # straight up from where the pull-in left it, the hand's lift tilting further down
+            # if level won't solve (the hand-driven pick went -26 -> -38 deg on the way up)
+            up = None
+            for top_h in (HIGH_M,) + TOP_HIGH_CANDS_M[1:] + (0.04, 0.03):
+                for p_ in (settled, settled - 6.0, settled - 12.0, settled - 18.0):
+                    up = lift_path(p_seat, top_h - z_now, p_)
+                    if up:
+                        break
+                if up:
+                    break
+        elif st["face"] == "top":
             # as high as solves, at the settled tilt, else the planned one, else tilted further:
             # at the top of the reach (-23 deg, a tall box) none of 12/9/6 cm solved straight up and
             # the arm was left holding the package down on it (2026-11-15)
@@ -2781,6 +2835,12 @@ def main(argv=None):
     pk.add_argument("--lift-tilt-deg", type=float, default=LIFT_TILT_DEG,
                     help=f"after a top pick: lift {LIFT_PRE_M * 100:.1f} cm, then tilt the wrist this far the "
                          f"'wrist up' way before the rest of the lift (default {LIFT_TILT_DEG:g}; 0 = straight up)")
+    pk.add_argument("--pull-in-cm", type=float, default=PULL_IN_CM,
+                    help=f"after a top grab landed --pull-in-off-flat-deg or more off flat: slide the package "
+                         f"this far toward the robot before lifting (default {PULL_IN_CM:g}; 0 = off)")
+    pk.add_argument("--pull-in-off-flat-deg", type=float, default=PULL_IN_OFF_FLAT_DEG,
+                    help=f"how far off the taught flat pitch the plan's landing must be to pull in (default "
+                         f"{PULL_IN_OFF_FLAT_DEG:g})")
     pk.add_argument("--wrist-torque", type=int, default=WRIST_COMPLY_TORQUE,
                     help=f"wrist_flex Torque_Limit during the press, 0..1000 (default {WRIST_COMPLY_TORQUE}): low "
                          "lets the magnet tilt flat on contact; --wrist-torque 1000 turns that off")

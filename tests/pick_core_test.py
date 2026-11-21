@@ -290,6 +290,7 @@ class HandeyeRun:
         a = types.SimpleNamespace(marker_id=10, marker_m=0.02, head=list(pc.PICK_HEAD), port="", arm_id="",
                                   head_id="sortbots_head", no_view=True, magnet_on_mm=10.0, press_mm=15.0,
                                   press_torque=pc.PRESS_TORQUE, base_back_cm=15.0, lift_tilt_deg=pc.LIFT_TILT_DEG,
+                                  pull_in_cm=pc.PULL_IN_CM, pull_in_off_flat_deg=pc.PULL_IN_OFF_FLAT_DEG,
                                   wrist_torque=pc.WRIST_COMPLY_TORQUE, pitch_deg=pc.PICK_PITCH_DEG,
                                   side_pitch_deg=None, side_press_mm=pc.SIDE_PRESS_MM, radial_mm=1.0)
         a.__dict__.update(args)
@@ -446,14 +447,15 @@ def test_the_ik_memo_answers_only_exact_repeats():
 
 
 # ---- the whole PICK, command for command -----------------------------------------------------
-def _pick_pair(**core_kw):
+def _pick_pair(target=TARGET, **core_kw):
     """handeye: boot (head ramp, torque reset, go to rest), then PICK. PickCore: the same."""
     q0 = POSES.samples[0]["arm_deg"]
     run = HandeyeRun(keys=[[], ["o"]], q_deg=q0)
-    run.entries = fake_entries(run.bus, TARGET)
+    run.entries = fake_entries(run.bus, target)
     run.run()
     he_log = run.log[:run.snap]
     core, bus, mag, _ = make_core(q_deg=q0, head=(0.0, 0.0), **core_kw)
+    core.entries = fake_entries(bus, target)
     bus.log.append(("magnet", "off"))  # cmd_pick switches the magnet off as it opens it
     core.start()
     core.go_rest()
@@ -468,6 +470,21 @@ def test_auto_pick_writes_what_handeye_writes():
     kinds = [x[0] if x[0] != "magnet" else x[1] for x in core_log]
     assert "on" in kinds and "off" in kinds and ("base", -0.15) in core_log and ("base", 0.15) in core_log
     assert run.locals["st"]["state"] == core.st["state"] == "lock"
+
+
+def test_a_high_grab_pulls_in_before_the_lift():
+    # The box top the real arm grabbed at its wrist limit (2026-11-20, 23.6 cm out, 19.4 cm up): the
+    # straight-up lift peeled it off; now it slides in at the grab's height first, as by hand.
+    high = np.array([0.236, 0.023, 0.194])
+    he_log, core_log, result, run, core = _pick_pair(target=high)
+    assert result == "placed", result
+    same_log(he_log, core_log)
+    assert core.st["lift_tilt_rad"] == 0.0   # no break-away tilt after a pull-in, nothing to undo
+    on = next(i for i, x in enumerate(core_log) if x == ("magnet", "on"))
+    back = next(i for i, x in enumerate(core_log) if x[0] == "base" and i > on)
+    reach = [float(np.hypot(*KIN.tool_point(np.radians([g[j] for j in pc.ARM]), HC.magnet_m)[:2]))
+             for k, g, *_ in core_log[on:back] if k == "goal" and all(j in g for j in pc.ARM)]
+    assert reach and min(reach) < reach[0] - 0.04   # came in >= 4 cm holding it, before the back-off
 
 
 # ---- safety ----------------------------------------------------------------------------------

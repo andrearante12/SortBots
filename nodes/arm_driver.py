@@ -29,6 +29,12 @@ and a servo board takes one owner: anything that moves either goes through here.
                                               {"cmd": "cancel"} holds the arm where it is
     /<id>/pick_status  std_msgs/String (JSON, latched) phase/busy/note/result, the keys the
                                               sim's magnet_pick.py publishes
+    /<id>/pick_trace   std_msgs/String (JSON)  during a pick only, at the state rate: "phase",
+                                              "goal_deg" / "read_deg" (the arm's last goal and
+                                              last read, no extra bus traffic) and "pose" (the
+                                              goal's tip, as arm_state's). arm_state goes quiet
+                                              while the pick owns the board, so without this a
+                                              bag of a failed pick had no arm at all (2026-11-20)
     /<id>/estop        std_msgs/Bool           true latches the e-stop (nodes/base_driver.py
                                               brakes the wheels): a running pick is aborted
                                               (the arm holds, the magnet is NOT dropped),
@@ -72,6 +78,7 @@ import dataclasses
 import fcntl
 import glob
 import json
+import logging
 import math
 import os
 import queue
@@ -764,6 +771,20 @@ def run_node(robot_id: str, cfg: dict):
     rclpy.init()
     node = rclpy.create_node(f"arm_driver_{robot_id}")
     log = node.get_logger()
+
+    class _ToRosLog(logging.Handler):
+        """pick_core's logging (the "seated ... magnet pitch" line and the like) into this node's
+        log: unconfigured, Python dropped every INFO line, so a failed pick left only "pick:
+        starting auto" behind (2026-11-20). Two call sites: rclpy won't change a site's severity."""
+        def emit(self, record):
+            if record.levelno >= logging.WARNING:
+                log.warning(f"pick_core: {record.getMessage()}")
+            else:
+                log.info(f"pick_core: {record.getMessage()}")
+    pick_log = logging.getLogger("pick_core")
+    pick_log.addHandler(_ToRosLog())
+    pick_log.setLevel(logging.INFO)
+    pick_log.propagate = False
     head = Head(cfg)
     arm = Arm(cfg) if cfg.get("arm") else None
     magnet = Magnet(cfg) if cfg.get("magnet") else None
@@ -871,6 +892,7 @@ def run_node(robot_id: str, cfg: dict):
                 return pick_status("FAILED", f"calibration: {e}")
         kin, hc, poses = pick["robot"]
         io = pick_ros.BusArmIO(head.bus, head.cal, arm.cal)
+        pick["io"] = io
         cam = pick_ros.RosCamera(io)
         pick["subs"] = [
             node.create_subscription(Image, f"/{robot_id}/camera/rgb", cam.on_rgb, qos_profile_sensor_data),
@@ -885,6 +907,7 @@ def run_node(robot_id: str, cfg: dict):
         def report(phase, text, **extra):
             if text:
                 said["text"] = text
+                log.info(f"pick {phase}: {text}")
             busy = phase in pick_core.PickCore.MOVING_FLAGS or phase in ("HELD", "LOCKED", "PLANNED", "HOVERING", "HOLDING")
             pick_status(phase, text, busy=True if pick["thread"] else busy, **{k: v for k, v in extra.items() if k in ("state", "magnet")})
 
@@ -1046,6 +1069,7 @@ def run_node(robot_id: str, cfg: dict):
     node.create_subscription(String, f"/{robot_id}/arm_cmd", on_arm, 10)
     head_pub = node.create_publisher(String, f"/{robot_id}/head_state", 10)
     arm_pub = node.create_publisher(String, f"/{robot_id}/arm_state", 10)
+    trace_pub = node.create_publisher(String, f"/{robot_id}/pick_trace", 10)
     last = {"t": time.monotonic(), "head": None, "arm": None}
 
     def logged(key, what, state, message):
@@ -1087,6 +1111,19 @@ def run_node(robot_id: str, cfg: dict):
             logged("arm", "arm", arm.state, arm.message)
         logged("head", "head", head.state, head.message)
 
+    def publish_trace():
+        io = pick.get("io")
+        if io is None or arm is None:
+            return
+        g = {j: round(float(io.goal[j]), 2) for j in ARM_JOINTS if j in io.goal}
+        msg = {"phase": (_json(pick["last"].data) or {}).get("phase") if pick["last"] is not None else None,
+               "goal_deg": g, "read_deg": {j: round(float(io.last[j]), 2) for j in ARM_JOINTS if j in io.last}}
+        if len(g) == len(ARM_JOINTS):
+            import numpy as np
+            x, y, z, p = (float(v) for v in arm.kin.pose(np.radians([g[j] for j in ARM_JOINTS])))
+            msg["pose"] = {"x": round(x, 4), "y": round(y, 4), "z": round(z, 4), "pitch": round(p, 4)}
+        trace_pub.publish(String(data=json.dumps(msg)))
+
     def on_state():
         now = time.monotonic()
         # Latched, and re-sent at 1 Hz too: rosbridge doesn't hand a latched message to a page
@@ -1098,6 +1135,7 @@ def run_node(robot_id: str, cfg: dict):
             publish_mode()       # latched too, but rosbridge doesn't replay it to a late page
             last["pick_pub"] = now
         if pick["thread"] is not None:
+            publish_trace()
             return                     # the pick reads the board itself
         if mode["mode"] == "nav":
             head.hold_nav(now)

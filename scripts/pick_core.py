@@ -65,6 +65,7 @@ FACE_TOP_DEG, FACE_SIDE_DEG, SIDE_MAX_YAW_DEG = 35.0, 35.0, 12.0
 TOP_HIGH_CANDS_M, TOP_HOVER_CANDS_M = (0.12, 0.09, 0.06), (0.05, 0.03, 0.02)
 PITCH_FALLBACK_DEG = (-3, 3, -6, 6, -9, 9, -12, -15, -18, -21)
 LIFT_PRE_M, LIFT_TILT_DEG = 0.015, 15.0
+PULL_IN_CM, PULL_IN_OFF_FLAT_DEG, PULL_MPS = 7.0, 12.0, 0.02
 SIDE_HIGH_M, SIDE_HOVER_M, SIDE_LIFT_M, SIDE_PRESS_MM = 0.06, 0.03, 0.08, 8.0
 WRIST_COMPLY_TORQUE = 100
 PRESS_JOINTS = ("shoulder_lift", "elbow_flex", "wrist_flex")
@@ -90,6 +91,8 @@ class PickConfig:
     press_torque: int = PRESS_TORQUE
     base_back_cm: float = 15.0
     lift_tilt_deg: float = LIFT_TILT_DEG
+    pull_in_cm: float = PULL_IN_CM
+    pull_in_off_flat_deg: float = PULL_IN_OFF_FLAT_DEG
     wrist_torque: int = WRIST_COMPLY_TORQUE
     pitch_deg: float = PICK_PITCH_DEG
     side_pitch_deg: float | None = None   # None: the mean of the taught side flat poses, else 0
@@ -589,6 +592,26 @@ class PickCore:
             seed = [r[0]]
         return qs
 
+    def pull_in_path(self, p0, dist_m, pitch):
+        """cmd_pick.pull_in_path"""
+        r_hat = np.append(head_cam.arm_radial(p0), 0.0)
+        qs, seed = [], [self.arm_q()]
+        n = max(1, int(round(dist_m / 0.01)))
+        for i in range(1, n + 1):
+            d = dist_m * i / n
+            # the pitch may drift a few degrees as the arm comes in (the hand-driven pull went
+            # -24 -> -26): held exactly, only 4 of 7 cm solved
+            for p_ in (pitch, pitch - 3.0, pitch + 3.0, pitch - 6.0):
+                r = self.face_ik(p0 - r_hat * d, seed, float(seed[0][4]), pitch=p_, tol=3.0)
+                if r is not None:
+                    pitch = p_
+                    break
+            if r is None:
+                break
+            qs.append((d, r[0]))
+            seed = [r[0]]
+        return qs if qs and qs[-1][0] >= 0.02 - 1e-9 else None
+
     # ---- the steps --------------------------------------------------------------------------
     def entries(self, marker_id, n=10, timeout=4.0, give_up_s=1.5):
         """handeye CamWorker.entries over Camera.latest(): `marker_id`'s entries with a target
@@ -894,8 +917,22 @@ class PickCore:
         planned = cfg.side_pitch_deg if st["face"] == "side" else (st["pitch_top"] or cfg.pitch_deg)
         log.info("seated (%s face): magnet pitch %+.1f deg in the model (planned %+.1f), reach %.1f cm, height "
                  "%.1f cm", st["face"], settled, planned, np.linalg.norm(p_seat[:2]) * 100, p_seat[2] * 100)
+        pull = None
+        if (st["face"] == "top" and cfg.pull_in_cm and
+                abs((st["pitch_top"] or cfg.pitch_deg) - cfg.pitch_deg) >= cfg.pull_in_off_flat_deg):
+            pull = self.pull_in_path(p_seat, cfg.pull_in_cm / 100.0, settled)
+        if pull:
+            log.info("landed %+.0f deg off flat: pulling the package in %.0f cm before the lift",
+                     (st["pitch_top"] or cfg.pitch_deg) - cfg.pitch_deg, pull[-1][0] * 100)
+            if not self.move_path(pull, "LIFTING", PULL_MPS):
+                self.say("ABORTED during the pull-in: holding, magnet still ON", 1e9)
+                st["state"] = "holding"
+                return
+            q_seat = self.arm_q()
+            p_seat = kin.tool_point(q_seat, mm)
+            settled = self.model_pitch(q_seat)
         st["lift_tilt_rad"] = 0.0
-        if st["face"] == "top" and cfg.lift_tilt_deg:
+        if st["face"] == "top" and cfg.lift_tilt_deg and not pull:
             pre = self.straight(z_now, z_now + LIFT_PRE_M, 0.005, pitch=settled)
             if pre and not self.move_path(pre, "LIFTING", PRESS_MPS * 2):
                 self.say("ABORTED during the lift: holding, magnet still ON", 1e9)
@@ -918,7 +955,16 @@ class PickCore:
             q_seat = self.arm_q()
             z_now = float((kin.tool_point(q_seat, mm) - st["locked"]) @ st["axis"])
             settled = self.model_pitch(q_seat)
-        if st["face"] == "top":
+        if st["face"] == "top" and pull:
+            up = None
+            for top_h in (HIGH_M,) + TOP_HIGH_CANDS_M[1:] + (0.04, 0.03):
+                for p_ in (settled, settled - 6.0, settled - 12.0, settled - 18.0):
+                    up = self.lift_path(p_seat, top_h - z_now, p_)
+                    if up:
+                        break
+                if up:
+                    break
+        elif st["face"] == "top":
             up = None
             for top_h in (HIGH_M,) + TOP_HIGH_CANDS_M[1:] + (0.04, 0.03):
                 for p_ in (settled, None, (st["pitch_top"] or cfg.pitch_deg) - 6.0):
