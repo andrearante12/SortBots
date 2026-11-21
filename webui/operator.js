@@ -270,9 +270,12 @@
     render();
   }
 
-  // -- view (pan / zoom) ----------------------------------------------------------
+  // -- view (pan / zoom / rotate) -------------------------------------------------
+  // rot (2026-11-20): how far the map is turned on screen, radians, counter-clockwise; the
+  // view's only, never the map's. Text stays upright. Remembered per browser.
 
-  const view = { cx: 0, cy: 0, scale: 20, moved: false }; // centre in world m, px per m
+  const view = { cx: 0, cy: 0, scale: 20, rot: 0, moved: false }; // centre in world m, px per m
+  try { view.rot = Number(localStorage.getItem("sortbots.mapRot")) || 0; } catch (e) { /* storage blocked: north up */ }
   const canvas = $("#map");
   const ctx = canvas.getContext("2d");
   let cssW = 0, cssH = 0;
@@ -286,8 +289,28 @@
     if (!view.moved) fitView();
     dirty = true;
   }
-  const toPx = (x, y) => [cssW / 2 + (x - view.cx) * view.scale, cssH / 2 - (y - view.cy) * view.scale];
-  const toWorld = (px, py) => [view.cx + (px - cssW / 2) / view.scale, view.cy - (py - cssH / 2) / view.scale];
+  // Everything the map draws or hit-tests goes through these two (and screenToWorldDelta for
+  // pan and zoom), so the rotation lives here; a world angle drawn straight onto the canvas
+  // adds view.rot itself (the robot and waypoint arrows, the movers' arrows and ellipses).
+  const toPx = (x, y) => {
+    const ex = (x - view.cx) * view.scale, ey = (y - view.cy) * view.scale, c = Math.cos(view.rot), s = Math.sin(view.rot);
+    return [cssW / 2 + ex * c - ey * s, cssH / 2 - (ex * s + ey * c)];
+  };
+  // A screen offset (px, y down) as a world offset (m).
+  const screenToWorldDelta = (dpx, dpy) => {
+    const c = Math.cos(view.rot), s = Math.sin(view.rot), ex = dpx, ey = -dpy;
+    return [(ex * c + ey * s) / view.scale, (-ex * s + ey * c) / view.scale];
+  };
+  const toWorld = (px, py) => {
+    const [dx, dy] = screenToWorldDelta(px - cssW / 2, py - cssH / 2);
+    return [view.cx + dx, view.cy + dy];
+  };
+  function setMapRot(rad) {
+    view.rot = Math.atan2(Math.sin(rad), Math.cos(rad));   // keep it in (-pi, pi]
+    if (Math.abs(view.rot) < 1e-9) view.rot = 0;
+    try { localStorage.setItem("sortbots.mapRot", String(view.rot)); } catch (e) { /* this tab only */ }
+    dirty = true;
+  }
 
   function fitView() {
     let box = knownBox ? [...knownBox] : null;
@@ -298,7 +321,9 @@
     }
     if (!box || !cssW) return;
     const pad = 2; // m of breathing room
-    const w = Math.max(box[2] - box[0] + 2 * pad, 8), h = Math.max(box[3] - box[1] + 2 * pad, 8);
+    const bw = Math.max(box[2] - box[0] + 2 * pad, 8), bh = Math.max(box[3] - box[1] + 2 * pad, 8);
+    // the turned box's extent on screen
+    const c = Math.abs(Math.cos(view.rot)), s = Math.abs(Math.sin(view.rot)), w = bw * c + bh * s, h = bw * s + bh * c;
     view.scale = Math.min((cssW - 120) / w, (cssH - 80) / h);
     view.cx = (box[0] + box[2]) / 2; view.cy = (box[1] + box[3]) / 2;
     dirty = true;
@@ -371,7 +396,7 @@
         // Where it will be in one second at this velocity, floored so a slow walker's
         // arrow is still visible at fleet zoom.
         const len = Math.max(Math.hypot(o.vel[0], o.vel[1]) * view.scale, 14);
-        const ang = Math.atan2(-o.vel[1], o.vel[0]); // canvas y points down
+        const ang = Math.atan2(-o.vel[1], o.vel[0]) - view.rot; // canvas y points down; the view's turn
         const ex = a + Math.cos(ang) * len, ey = b + Math.sin(ang) * len;
         ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(ex, ey); ctx.stroke();
         ctx.beginPath(); ctx.moveTo(ex, ey);
@@ -392,7 +417,7 @@
           if (o.cov) {
             const [r1, r2, ang] = covEllipse(o.cov);
             ctx.globalAlpha = 0.15; ctx.beginPath();
-            ctx.ellipse(la, lb, Math.max(3, r1 * view.scale), Math.max(3, r2 * view.scale), -ang, 0, 7);
+            ctx.ellipse(la, lb, Math.max(3, r1 * view.scale), Math.max(3, r2 * view.scale), -(ang + view.rot), 0, 7);
             ctx.fill();
           }
           ctx.globalAlpha = 1; ctx.lineWidth = 2;
@@ -646,7 +671,7 @@
       const [px, py] = toPx(pose.x, pose.y), r = Math.max(5, (a.radius || 0.3) * view.scale);
       // Heading tick, dashed while it stands still at a waypoint.
       ctx.strokeStyle = rgba(a.color, 1); ctx.lineWidth = 2; ctx.setLineDash(pose.moving ? [] : [3, 3]);
-      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px + r * 2 * Math.cos(pose.yaw), py - r * 2 * Math.sin(pose.yaw)); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(px + r * 2 * Math.cos(pose.yaw + view.rot), py - r * 2 * Math.sin(pose.yaw + view.rot)); ctx.stroke();
       ctx.setLineDash([]);
       ctx.fillStyle = palette.ink; ctx.fillText(a.label || a.id, px, py + r + 13);
     }
@@ -665,9 +690,12 @@
 
     if (mapCanvas && mapInfo) {
       const { width: w, height: h, resolution: res, origin } = mapInfo;
+      // the image's top-left (world x min, y max), then turned with the view about that corner
       const [dx, dy] = toPx(origin.position.x, origin.position.y + h * res);
       ctx.imageSmoothingEnabled = false; // crisp cells
-      ctx.drawImage(mapCanvas, dx, dy, w * res * view.scale, h * res * view.scale);
+      ctx.save(); ctx.translate(dx, dy); ctx.rotate(-view.rot);
+      ctx.drawImage(mapCanvas, 0, 0, w * res * view.scale, h * res * view.scale);
+      ctx.restore();
     }
 
     drawWorld();
@@ -706,7 +734,7 @@
       ctx.globalAlpha = live ? 1 : 0.4;
       if (open.has(r.id)) { ctx.strokeStyle = r.color; ctx.lineWidth = selected === r.id ? 2.5 : 1.25; ctx.beginPath(); ctx.arc(a, b, 17, 0, 7); ctx.stroke(); }
       ctx.fillStyle = r.color; ctx.beginPath(); ctx.arc(a, b, 10, 0, 7); ctx.fill();
-      const yaw = -r.pose.yaw; // canvas y points down
+      const yaw = -(r.pose.yaw + view.rot); // canvas y points down; the view's turn
       ctx.fillStyle = palette.robotInk; ctx.beginPath();
       ctx.moveTo(a + Math.cos(yaw) * 13, b + Math.sin(yaw) * 13);
       ctx.lineTo(a + Math.cos(yaw + 2.5) * 6, b + Math.sin(yaw + 2.5) * 6);
@@ -726,7 +754,8 @@
     if (!r || !r.pose) return;
     const [a, b] = toPx(r.pose.x, r.pose.y), [ex, ey] = toPx(drag.wx, drag.wy);
     // A teleport keeps the robot's heading (or a pin's); a send faces the way it travels.
-    const tp = drag.tp, yaw = drag.wp ? -(drag.wp.yaw || 0) : tp ? -r.pose.yaw : Math.atan2(ey - b, ex - a); // canvas y points down
+    // canvas y points down; a world yaw also turns with the view (the free drag is screen-space already)
+    const tp = drag.tp, yaw = drag.wp ? -((drag.wp.yaw || 0) + view.rot) : tp ? -(r.pose.yaw + view.rot) : Math.atan2(ey - b, ex - a);
     ctx.strokeStyle = r.color; ctx.fillStyle = r.color; ctx.lineWidth = 2.5;
     // No path line for a teleport: it doesn't travel, it appears.
     if (!tp) { ctx.setLineDash([7, 5]); ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(ex, ey); ctx.stroke(); ctx.setLineDash([]); }
@@ -2720,7 +2749,8 @@
     if (pinch && touches.size === 2) {
       const g = pinchGeom();
       view.scale = Math.min(200, Math.max(2, pinch.scale0 * g.d / pinch.d0));
-      view.cx = pinch.wx - (g.mx - cssW / 2) / view.scale; view.cy = pinch.wy + (g.my - cssH / 2) / view.scale;
+      const [ox, oy] = screenToWorldDelta(g.mx - cssW / 2, g.my - cssH / 2);
+      view.cx = pinch.wx - ox; view.cy = pinch.wy - oy;
       view.moved = true; dirty = true;
       return;
     }
@@ -2740,8 +2770,9 @@
     }
     if (press.moved && (tool === "select" || tool === "tp")) { // drag pans
       view.moved = true;
-      view.cx = press.cx - (px - press.px) / view.scale;
-      view.cy = press.cy + (py - press.py) / view.scale;
+      const [ox, oy] = screenToWorldDelta(px - press.px, py - press.py);   // turned with the view
+      view.cx = press.cx - ox;
+      view.cy = press.cy - oy;
       dirty = true;
     }
   });
@@ -2788,7 +2819,8 @@
     const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
     const [wx, wy] = toWorld(px, py), k = Math.exp(-e.deltaY * 0.0015);
     view.scale = Math.min(200, Math.max(2, view.scale * k));
-    view.cx = wx - (px - cssW / 2) / view.scale; view.cy = wy + (py - cssH / 2) / view.scale; // keep the point under the cursor
+    const [ox, oy] = screenToWorldDelta(px - cssW / 2, py - cssH / 2);
+    view.cx = wx - ox; view.cy = wy - oy; // keep the point under the cursor
     view.moved = true; dirty = true;
   }, { passive: false });
 
@@ -2961,9 +2993,14 @@
     }
     if (e.target.closest && e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
     if (stageView === "drive") return; // map tools have no map to act on
+    // [ / ] turn the 2D map 15 deg left / right (the view only)
+    if (e.key === "[" || e.key === "]") { e.preventDefault(); return setMapRot(view.rot + (e.key === "[" ? 1 : -1) * Math.PI / 12); }
     const t = { v: "select", f: "wp", r: "gw", t: "tp" }[e.key.toLowerCase()];
     if (t && !(t === "tp" && platform !== "sim")) setTool(t);
   });
+  $("#map-rot-ccw").addEventListener("click", () => setMapRot(view.rot + Math.PI / 2));
+  $("#map-rot-cw").addEventListener("click", () => setMapRot(view.rot - Math.PI / 2));
+  $("#map-rot-reset").addEventListener("click", () => setMapRot(0));
   addEventListener("resize", resize);
   // The window resize event isn't enough: on iPhone it fires on rotation BEFORE the new
   // layout settles, so the map kept its portrait pixel size and CSS stretched it across
