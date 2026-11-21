@@ -805,7 +805,7 @@
       r.mode = m;
       if (m.note && m.note !== wasNote) toast(`${nameOf(id)}: ${m.note}`);
       const c = cams.get(id);
-      if (c && m.mode !== was && !(m.mode === "manip" && c.padMode === "head")) { c.padMode = m.mode === "manip" ? "arm" : "drive"; applyPadMode(c); }
+      if (c && m.mode !== was) { c.padMode = m.mode === "manip" ? "arm" : "drive"; applyPadMode(c); }
       if (c) syncHeadLock(c, r);
       if (m.mode !== was) drawCamObstacles(id);   // clear or restore the boxes now, not on the next obstacle message
       if (c) syncPickLine(c);
@@ -1247,26 +1247,21 @@
       <button type="button" class="featbtn" data-cam-features aria-pressed="false" title="Show the visual features RTAB-Map is tracking (green = inlier driving the pose, amber = matched to the map, grey = detected only)">Features</button>
       <span class="featstat"></span>
       <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button><button type="button" data-cam-mode="split" title="Camera and depth, stacked">Split</button></div>
-      <div class="padmode" role="tablist" aria-label="What the pad controls" hidden><button type="button" data-padmode="drive" role="tab" title="Nav mode: drive the base, mapping runs">Nav</button><button type="button" data-padmode="head" role="tab" title="Aim the head">Head</button><button type="button" data-padmode="arm" role="tab" title="Manipulation mode: the arm, pick and rest; mapping pauses">Manip</button></div>
+      <div class="padmode" role="tablist" aria-label="What the pad controls" hidden><button type="button" data-padmode="drive" role="tab" title="Nav mode: drive the base, mapping runs (M switches)">Nav</button><button type="button" data-padmode="arm" role="tab" title="Manipulation mode: the arm, pick and rest, and the head (keys I/K/J/L, H centres); mapping pauses">Manip</button></div>
       <div class="drive" role="group" aria-label="Drive by hand" title="Drive by hand: hold an arrow. Keys W/A/S/D move, Q/E rotate, Space stops (they drive the robot in control)">
         <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
         <button type="button" data-drive="rot-left" aria-label="Rotate left">&#8634;</button><button type="button" data-drive="back" aria-label="Back">&#9660;</button><button type="button" data-drive="rot-right" aria-label="Rotate right">&#8635;</button>
         <button type="button" class="lvl" data-drive-level="0" title="Speed L1: 0.1 m/s, 30 deg/s" hidden>L1</button><button type="button" class="lvl" data-drive-level="1" title="Speed L2: 0.2 m/s, 60 deg/s" hidden>L2</button><button type="button" class="lvl" data-drive-level="2" title="Speed L3: 0.3 m/s, 90 deg/s" hidden>L3</button>
       </div>
-      <div class="headpad" role="group" aria-label="Aim the head" title="Aim the head: hold an arrow; the dot centres it" hidden>
-        <span></span><button type="button" data-headpad="up" aria-label="Look up">&#9650;</button><span></span>
-        <button type="button" data-headpad="left" aria-label="Look left">&#9664;</button><button type="button" data-headpad="center" aria-label="Centre the head">&#9679;</button><button type="button" data-headpad="right" aria-label="Look right">&#9654;</button>
-        <span></span><button type="button" data-headpad="down" aria-label="Look down">&#9660;</button><span></span>
-      </div>
       <div class="pickline" hidden><b></b><span></span></div>
       <div class="armpad" role="group" aria-label="Move the arm" hidden>
-        <div class="tp hand" title="Drag to move the hand: up = away, down = toward, left / right; let go and it stops"><i class="ax t">away</i><i class="ax b">toward</i><i class="ax l">left</i><i class="ax r">right</i><b class="knob"></b></div>
-        <div class="tp z" title="Drag up / down to raise / lower the hand"><i class="ax t">up</i><i class="ax b">down</i><b class="knob"></b></div>
+        <div class="tp hand" title="Drag to move the hand: up = away, down = toward, left / right; let go and it stops. Keys: arrows"><i class="ax t">away</i><i class="ax b">toward</i><i class="ax l">left</i><i class="ax r">right</i><b class="knob"></b></div>
+        <div class="tp z" title="Drag up / down to raise / lower the hand. Keys: Page Up / Page Down"><i class="ax t">up</i><i class="ax b">down</i><b class="knob"></b></div>
         <div class="side">
-          <button type="button" data-wf="1" title="Wrist up (hold)">wrist &#8593;</button><button type="button" data-wf="-1" title="Wrist down (hold)">wrist &#8595;</button>
-          <div class="lv" role="group" aria-label="Arm speed"><button type="button" data-lv="0">L1</button><button type="button" data-lv="1">L2</button><button type="button" data-lv="2">L3</button><button type="button" data-lv="3">L4</button></div>
-          <button type="button" data-arm-act="magnet" title="Magnet on / off">Magnet</button><button type="button" data-arm-act="pick" title="One-button pick and place">Pick</button><button type="button" data-arm-act="rest" title="Back to the rest pose. With the magnet on it lets go first: whatever it holds drops where the hand is">Rest</button><button type="button" data-arm-act="pick_hold" hidden title="Pick, then hand the arm back to the pad with the package held (no place): drive it to the new place spot">Pick &amp; hold</button><button type="button" data-arm-act="save_place" hidden title="Save where the arm is now as the place pose the next Pick uses">Save place</button>
+          <button type="button" data-wf="1" title="Wrist up (hold, or the Z key)">wrist &#8593;</button><button type="button" data-wf="-1" title="Wrist down (hold, or the X key)">wrist &#8595;</button>
+          <div class="lv" role="group" aria-label="Arm speed" title="Arm speed (keys 1-4); Space stops the arm"><button type="button" data-lv="0">L1</button><button type="button" data-lv="1">L2</button><button type="button" data-lv="2">L3</button><button type="button" data-lv="3">L4</button></div>
+          <button type="button" data-arm-act="magnet" title="Magnet on / off">Magnet</button><button type="button" data-arm-act="pick" title="One-button pick and place">Pick</button><button type="button" data-arm-act="unload" title="Look down into the body, pick the package there and put it on the taught table pose (the base stays put: drive up to the table first)">Unload</button><div class="restrow"><button type="button" data-arm-act="rest" title="Back to the rest pose. With the magnet on it lets go first: whatever it holds drops where the hand is">Rest</button><details class="armmore"><summary title="Teach the place and table poses" aria-label="More arm actions">&#8943;</summary><div class="menu"><button type="button" data-arm-act="save_table" title="Save where the arm is now as the table pose Unload puts packages on (Unload with none saved picks and holds: drive it over the table, then this)">Save table</button><button type="button" data-arm-act="pick_hold" hidden title="Pick, then hand the arm back to the pad with the package held (no place): drive it to the new place spot">Pick &amp; hold</button><button type="button" data-arm-act="save_place" hidden title="Save where the arm is now as the place pose the next Pick uses">Save place</button></div></details></div>
         </div>
       </div>`;
     const perc = document.createElement("div");
@@ -1281,7 +1276,7 @@
           mode: camDefault, timers: {}, token: 0, headAt: -Infinity, headSent: 0, features: false, featSub: null, featData: null, featAt: -Infinity };
     cams.set(id, c);
     wireHead(id, c);
-    wireHeadPad(id, c, el.querySelector(".headpad"));
+    wireHeadKeys(id, c);
     wireArmPad(id, c, el.querySelector(".armpad"));
     wirePadMode(id, c, el);
     syncCamButtons(c);
@@ -1310,48 +1305,48 @@
     c.head.addEventListener("change", send); // the last position, whatever the rate limit dropped
     c.headSend = send;
   }
-  // The head pad over the camera's bottom-right (the drive pad's mirror): hold an arrow to
-  // look that way, the dot centres. It moves the sliders, which stay the one source of what
-  // is sent, so a pad press and a drag can't disagree. Tilt > 0 looks down, pan > 0 left.
-  const HEAD_PAD_RAD_S = 1.2, HEAD_PAD_DIR = { up: ["tilt", -1], down: ["tilt", 1], left: ["pan", 1], right: ["pan", -1] };
-  function wireHeadPad(id, c, pad) {
-    c.headPad = pad;
+  // Head keys (2026-11-20, replacing the Head tab's pad): hold I/K to look up/down, J/L
+  // left/right; H centres. They move the sliders, which stay the one source of what is sent,
+  // so a key and a drag can't disagree. Tilt > 0 looks down, pan > 0 left.
+  const HEAD_KEY_RAD_S = 1.2, HEAD_KEYS = { i: ["tilt", -1], k: ["tilt", 1], j: ["pan", 1], l: ["pan", -1] };
+  function wireHeadKeys(id, c) {
     const setAxis = (key, rad) => {
       const inp = c.head.querySelector(`[data-head="${key}"]`);
       inp.value = Math.max(Number(inp.min), Math.min(Number(inp.max), rad));
       c.head.querySelector(`[data-head-out="${key}"]`).textContent = headText(Number(inp.value));
     };
+    const held = new Set();
     let timer = null, last = 0;
-    const stop = (b) => { clearInterval(timer); timer = null; if (b) b.classList.remove("held"); c.headSend(); };
-    for (const b of pad.querySelectorAll("[data-headpad]")) {
-      const cmd = b.dataset.headpad;
-      b.addEventListener("pointerdown", (e) => {
-        e.preventDefault(); e.stopPropagation(); b.setPointerCapture(e.pointerId);
-        c.headAt = performance.now();
-        if (cmd === "center") { setAxis("pan", 0); setAxis("tilt", 0); c.headSend(); return; }
-        const [key, sign] = HEAD_PAD_DIR[cmd];
-        b.classList.add("held"); last = performance.now(); clearInterval(timer);
-        timer = setInterval(() => {
-          const now = performance.now(), dt = (now - last) / 1000; last = now;
-          c.headAt = now;
-          setAxis(key, Number(c.head.querySelector(`[data-head="${key}"]`).value) + sign * HEAD_PAD_RAD_S * dt);
-          c.headSend();
-        }, 1000 / HEAD_HZ);
-      });
-      const up = () => { if (timer) stop(b); };
-      b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up); b.addEventListener("lostpointercapture", up);
-      b.addEventListener("click", (e) => e.stopPropagation()); // not a card click
-    }
-    let fade = null;
-    pad.addEventListener("pointerdown", () => { pad.classList.add("on"); clearTimeout(fade); });
-    pad.addEventListener("pointerup", () => { clearTimeout(fade); fade = setTimeout(() => pad.classList.remove("on"), 3000); });
+    const step = () => {
+      const now = performance.now(), dt = (now - last) / 1000; last = now;
+      c.headAt = now;
+      for (const k of held) {
+        const [key, sign] = HEAD_KEYS[k];
+        setAxis(key, Number(c.head.querySelector(`[data-head="${key}"]`).value) + sign * HEAD_KEY_RAD_S * dt);
+      }
+      c.headSend();
+    };
+    const stop = () => { clearInterval(timer); timer = null; c.headSend(); };
+    c.headKeys = {
+      down(e) {
+        const k = e.key.toLowerCase();
+        if (k === "h") { c.headAt = performance.now(); setAxis("pan", 0); setAxis("tilt", 0); c.headSend(); return true; }
+        if (!HEAD_KEYS[k]) return false;
+        held.add(k);
+        if (!timer) { last = performance.now(); timer = setInterval(step, 1000 / HEAD_HZ); }
+        return true;
+      },
+      up(e) { if (held.delete(e.key.toLowerCase()) && !held.size && timer) stop(); },
+      release() { if (held.size) { held.clear(); stop(); } },
+      handles: (e) => e.key.toLowerCase() === "h" || !!HEAD_KEYS[e.key.toLowerCase()],
+    };
   }
   // Nav holds the real head forward (arm_driver ignores head_cmd there): the sliders say so
   // instead of springing back. The sim has no robot_mode, so its head stays free.
   function syncHeadLock(c, r) {
     const locked = !!(r && r.mode && r.mode.mode === "nav");
     for (const s of c.head.querySelectorAll("[data-head]")) s.disabled = locked;
-    c.head.title = locked ? "Nav mode holds the camera forward (mapping assumes it). Head or Manip to aim it." : "";
+    c.head.title = locked ? "Nav mode holds the camera forward (mapping assumes it). Manip to aim it." : "";
   }
   function syncHeads() {
     for (const [id, c] of cams) {
@@ -1525,6 +1520,33 @@
       pad.querySelectorAll("[data-lv]").forEach((x) => x.classList.toggle("sel", x === b));
     });
     addEventListener("blur", () => { if (!live()) return; for (const k in J) J[k] = 0; update(); });
+    // Keyboard teleop (2026-11-20): the page's keydown hands keys here while this robot is
+    // selected with the Arm pad showing. Arrows move the hand, Page Up/Down raise and lower it,
+    // Z/X tilt the wrist; WASDQE stay the base's. Held keys re-send like a held finger, so
+    // letting go stops the arm through the same deadman. No magnet key: a stray press would
+    // drop a package.
+    const ARM_KEYS = { arrowup: ["out", 1], arrowdown: ["out", -1], arrowleft: ["left", 1], arrowright: ["left", -1],
+                       pageup: ["up", 1], pagedown: ["up", -1], z: ["wf", 1], x: ["wf", -1] };
+    const heldKeys = new Set();
+    const fromKeys = () => {
+      for (const ax of ["out", "left", "up", "wf"]) {
+        let v = 0;
+        for (const k of heldKeys) if (ARM_KEYS[k][0] === ax) v += ARM_KEYS[k][1];
+        J[ax] = Math.max(-1, Math.min(1, v));
+      }
+      update();
+    };
+    c.armKeys = {
+      down(e) {
+        const k = e.key.toLowerCase();
+        if (ARM_KEYS[k]) { heldKeys.add(k); fromKeys(); return true; }
+        if (/^[1-4]$/.test(k)) { pad.querySelector(`[data-lv="${Number(k) - 1}"]`).click(); return true; }
+        return false;
+      },
+      up(e) { if (heldKeys.delete(e.key.toLowerCase())) fromKeys(); },
+      stop() { heldKeys.clear(); for (const ax in J) J[ax] = 0; update(); },
+      release() { if (heldKeys.size) { heldKeys.clear(); fromKeys(); } },
+    };
     pad.querySelector('[data-arm-act="magnet"]').addEventListener("click", (e) => {
       e.stopPropagation();
       const r = robots.get(id), m = r && r.arm && r.arm.magnet;
@@ -1546,10 +1568,16 @@
       publishString(`/${id}/pick_request`, JSON.stringify({ cmd: "auto" }));
       toast(`${nameOf(id)}: pick and place started`);
     });
+    // The ⋯ menu holds the teaching buttons: shut once one is used or the pointer goes elsewhere.
+    const more = pad.querySelector(".armmore");
+    more.querySelector(".menu").addEventListener("click", () => { more.open = false; });
+    document.addEventListener("pointerdown", (e) => { if (more.open && !more.contains(e.target)) more.open = false; });
     // Teaching a new place spot: pick and keep holding, drive there with the pad, save it.
     // Hidden once the place pose was taught (2026-11-19); drop `hidden` on the two buttons to
-    // teach a new one.
-    for (const [act, msg] of [["pick_hold", "pick, then hold for you to place"], ["save_place", "saving the place pose"]]) {
+    // teach a new one. Unload and Save table (2026-11-20) are the reverse: the body out onto a
+    // table pose taught the same way (Unload with none saved picks and holds).
+    for (const [act, msg] of [["pick_hold", "pick, then hold for you to place"], ["save_place", "saving the place pose"],
+                              ["unload", "unloading onto the table"], ["save_table", "saving the table pose"]]) {
       pad.querySelector(`[data-arm-act="${act}"]`).addEventListener("click", (e) => {
         e.stopPropagation();
         const r = robots.get(id);
@@ -1577,9 +1605,9 @@
     }
   }
 
-  // -- one pad at a time over the camera: Drive / Head / Arm (2026-11-16: all three at once
-  // covered the picture). Head and Arm are offered only when that hardware reports in
-  // (head_state / arm_state, or the sim's head); the choice is remembered per browser.
+  // -- one pad at a time over the camera: Nav (drive) / Manip (arm) (2026-11-16: all at once
+  // covered the picture; the Head tab became keys, 2026-11-20). Manip is offered only when an
+  // arm reports in (arm_state); the choice is remembered per browser.
   const PAD_MODE_KEY = "sortbots.padMode";
   function wirePadMode(id, c, el) {
     c.robotId = id;
@@ -1590,10 +1618,10 @@
       e.stopPropagation();
       c.padMode = b.dataset.padmode;
       try { localStorage.setItem(PAD_MODE_KEY, c.padMode); } catch (err) { /* per-page only */ }
-      // Nav and Manip are the ROBOT's mode (arm_driver pauses mapping in manipulation). Head
-      // is manipulation too: nav holds the camera at its mount pose and ignores head_cmd.
-      // Without an arm there is no mode to set (the sim, a bare base).
-      const robotMode = { drive: "nav", head: "manip", arm: "manip" }[c.padMode];
+      // Nav and Manip are the ROBOT's mode (arm_driver pauses mapping in manipulation; nav
+      // holds the camera at its mount pose and ignores head_cmd). Without an arm there is no
+      // mode to set (the sim, a bare base).
+      const robotMode = { drive: "nav", arm: "manip" }[c.padMode];
       if (robotMode && c.hasArm) publishString(`/${id}/robot_mode_cmd`, JSON.stringify({ mode: robotMode }));
       applyPadMode(c);
     });
@@ -1601,16 +1629,15 @@
   }
   function applyPadMode(c) {
     if (!c.padModeEl) return;
-    const can = { drive: true, head: !!c.hasHead, arm: !!c.hasArm };
+    const can = { drive: true, arm: !!c.hasArm };
     const mode = can[c.padMode] ? c.padMode : "drive";
     for (const b of c.padModeEl.querySelectorAll("[data-padmode]")) {
       b.hidden = !can[b.dataset.padmode];
       b.classList.toggle("on", b.dataset.padmode === mode);
       b.setAttribute("aria-selected", String(b.dataset.padmode === mode));
     }
-    c.padModeEl.hidden = !(can.head || can.arm);   // drive alone: nothing to switch
+    c.padModeEl.hidden = !can.arm;   // drive alone: nothing to switch
     c.drivePad.hidden = mode !== "drive";
-    if (c.headPad) c.headPad.hidden = mode !== "head";
     if (c.armPad) c.armPad.hidden = mode !== "arm";
     syncPickLine(c);
   }
@@ -1639,15 +1666,44 @@
     // The Drive view owns WASD for the real base (operator_drive.js): a key must never
     // drive a ROS robot and the plugged-in one at once.
     if (stageView === "drive") return;
-    if (e.code === "Space") { e.preventDefault(); return driveRelease(selected); }
+    // WASDQE drive the base whatever pad is up; the arm's keys (arrows, Page Up/Down, Z/X) only
+    // with the Arm pad showing, so they never move an arm nobody is looking at. Numbers set the
+    // speed of the pad that's up; Space stops both.
+    const cam = cams.get(selected);
+    const armUp = !!(cam && cam.padMode === "arm" && cam.armKeys && !cam.armPad.hidden);
+    // M flips Nav / Manip: the same as clicking the other tab (it sets the robot's mode too).
+    if (e.key.toLowerCase() === "m" && cam && cam.hasArm && cam.padModeEl) {
+      e.preventDefault();
+      cam.padModeEl.querySelector(`[data-padmode="${cam.padMode === "arm" ? "drive" : "arm"}"]`).click();
+      return;
+    }
+    if (e.code === "Space") { e.preventDefault(); if (armUp) cam.armKeys.stop(); if (cam && cam.headKeys) cam.headKeys.release(); return driveRelease(selected); }
+    if (armUp && cam.armKeys.down(e)) { e.preventDefault(); return; }
+    // The head (I/K/J/L, H centres): any pad, but the real robot ignores head_cmd in Nav.
+    if (cam && cam.headKeys && cam.hasHead && cam.headKeys.handles(e)) {
+      e.preventDefault();
+      const r = robots.get(selected);
+      if (r && r.mode && r.mode.mode === "nav") return toast(`${nameOf(selected)}: Nav holds the head forward; switch to Manip to aim it`);
+      cam.headKeys.down(e);
+      return;
+    }
+    if (/^[1-9]$/.test(e.key) && cam && cam.drivePad) {
+      const b = cam.drivePad.querySelector(`[data-drive-level="${Number(e.key) - 1}"]`);
+      if (b && !b.hidden) { e.preventDefault(); b.click(); }
+      return;
+    }
     const cmd = DRIVE_KEYS[e.key.toLowerCase()];
     if (cmd) { e.preventDefault(); driveStart(selected, cmd); }
   });
   addEventListener("keyup", (e) => {
+    for (const c of cams.values()) { if (c.armKeys) c.armKeys.up(e); if (c.headKeys) c.headKeys.up(e); }
     const cmd = DRIVE_KEYS[e.key.toLowerCase()];
     if (cmd) for (const id of drives.keys()) driveStop(id, cmd);
   });
-  const releaseAllDrives = () => { for (const [id, d] of drives) if (d.held.size) driveRelease(id); };
+  const releaseAllDrives = () => {
+    for (const [id, d] of drives) if (d.held.size) driveRelease(id);
+    for (const c of cams.values()) { if (c.armKeys) c.armKeys.release(); if (c.headKeys) c.headKeys.release(); }
+  };
   addEventListener("blur", releaseAllDrives);
   document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAllDrives(); });
   // -- SLAM feature overlay (nodes/feature_overlay.py, real platform) -------------------------
@@ -2770,8 +2826,20 @@
   $("#outage-close").addEventListener("click", () => { outage.dismissed = true; $("#outage").hidden = true; });
   $("#empty-go").addEventListener("click", openSession);
   $("#sp-x").addEventListener("click", closeSession);
+  // Keyboard shortcuts: the ? button or key (not while typing); Esc, × or a click outside closes.
+  const keysDlg = $("#keys-dlg");
+  $("#keys-btn").addEventListener("click", () => { keysDlg.hidden = !keysDlg.hidden; });
+  $("#kd-x").addEventListener("click", () => { keysDlg.hidden = true; });
+  keysDlg.addEventListener("click", (e) => { if (e.target === keysDlg) keysDlg.hidden = true; });
+  addEventListener("keydown", (e) => {
+    if (e.key !== "?" || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.target.closest && e.target.closest("input, select, textarea")) return;
+    e.preventDefault();
+    keysDlg.hidden = !keysDlg.hidden;
+  });
   $("#session").addEventListener("click", (e) => { if (e.target.id === "session") closeSession(); });
   addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("#keys-dlg").hidden) { $("#keys-dlg").hidden = true; return; }
     if (e.key === "Escape" && !$("#stop-dlg").hidden) { closeStopDialog(); return; }
     if (e.key === "Escape") {
       if (drag) { drag = null; press = null; dirty = true; canvas.style.cursor = "grab"; return; } // abandon a send mid-drag

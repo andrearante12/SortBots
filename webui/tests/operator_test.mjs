@@ -378,6 +378,10 @@ async function main() {
     await page.eval(`(() => { const s = document.querySelector('${headSel} [data-head="tilt"]'); s.value = '0.8'; s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     const headCmd = JSON.parse(await page.eval(`JSON.stringify(window.__published.filter((x) => x.topic === '/${r0}/head_cmd').at(-1) || null)`));
     check(`${vp.label}: moving a slider commands the head`, !!headCmd && headCmd.msg.name[1] === 'head_tilt_joint' && headCmd.msg.position[1] === 0.8 && headCmd.msg.position[0] === 0.1, JSON.stringify(headCmd));
+    // Unload / Save table (2026-11-20): the arm pad's reverse of Pick, one pick_request each.
+    await page.eval(`window.__published.length = 0; (() => { const el = window.__operator.cams.get(${JSON.stringify(r0)}).el; el.querySelector('[data-arm-act="unload"]').click(); el.querySelector('[data-arm-act="save_table"]').click(); })()`);
+    const pickReqs = JSON.parse(await page.eval(`JSON.stringify(window.__published.filter((x) => x.topic === '/${r0}/pick_request').map((x) => JSON.parse(x.msg.data).cmd))`));
+    check(`${vp.label}: Unload and Save table send their pick requests`, JSON.stringify(pickReqs) === '["unload","save_table"]', JSON.stringify(pickReqs));
     await click(`#fleet .robot[data-id="${r0}"] [data-cam-mode="depth"]`);
     await sleep(100);
     check(`${vp.label}: leaving split shows one picture again`, (await page.eval(`[...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')].filter((p) => p.offsetWidth).length`)) === 1);
@@ -1227,6 +1231,18 @@ async function main() {
   await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'e' }))`);
   await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', bubbles: true }))`);
   await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'w' }))`);
+  // Arm keyboard teleop (2026-11-20): with the Arm pad up, arrows and Page Up/Down move the hand.
+  await emit(`/${r1}/arm_state`, { data: JSON.stringify({ engaged: true, state: 'holding', level: 1 }) }); await sleep(150);
+  await page.eval(`window.__operator.cams.get(${JSON.stringify(r1)}).el.querySelector('[data-padmode="arm"]').click()`); await sleep(100);
+  await page.eval(`window.__published.length = 0; window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp' })); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown' }))`);
+  await sleep(250);
+  const armJogs = JSON.parse(await page.eval(`JSON.stringify(window.__published.filter((x) => x.topic === '/${r1}/arm_cmd').map((x) => JSON.parse(x.msg.data)))`));
+  check('arm keys: Up + Page Down jog the hand away and down, re-sent while held', armJogs.length >= 2 && armJogs.every((m) => m.jog && m.jog.out === 1 && m.jog.up === -1), JSON.stringify(armJogs.slice(0, 2)));
+  check('arm keys: and never drive the base', (await twists()).length === 0, JSON.stringify(await twists()));
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowUp' })); window.dispatchEvent(new KeyboardEvent('keyup', { key: 'PageDown' }))`); await sleep(150);
+  const armLast = JSON.parse(await page.eval(`JSON.stringify(window.__published.filter((x) => x.topic === '/${r1}/arm_cmd').map((x) => JSON.parse(x.msg.data)).at(-1) || null)`));
+  check('arm keys: letting go stops the arm', !!armLast && armLast.stop === true, JSON.stringify(armLast));
+  await page.eval(`window.__operator.cams.get(${JSON.stringify(r1)}).el.querySelector('[data-padmode="drive"]').click()`);
   await shot('drive-pad');
   await page.eval(`window.__operator.select(null)`);
 

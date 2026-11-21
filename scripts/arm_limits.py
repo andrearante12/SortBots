@@ -40,7 +40,8 @@ STOPS = CAL_DIR / "so_follower" / "sortbots_arm_stops.json"
 OFFSETS = CAL_DIR / "so_follower" / "sortbots_arm_kin_offsets.json"
 # files holding arm angles in lerobot degrees: {"arm_deg": [...]} (one) or a list of them
 POSE_FILES = [CAL_DIR / "sortbots_head" / n for n in
-              ("handeye_samples.json", "pick_flat_poses.json", "pick_rest_pose.json", "pick_place_pose.json")]
+              ("handeye_samples.json", "pick_flat_poses.json", "pick_rest_pose.json", "pick_place_pose.json",
+               "pick_table_pose.json")]
 
 
 def to_deg(raw, mid):
