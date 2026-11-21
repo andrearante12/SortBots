@@ -149,6 +149,7 @@ def _make_per_robot_actions(
     head_tf = context.launch_configurations.get("head_tf", "live")
     if head_tf not in ("static", "live"):
         raise ValueError(f"head_tf:={head_tf!r} — expected static or live")
+    fleet_radio = context.launch_configurations.get("fleet_radio", "false")
     raw = robot_ids_cfg.perform(context).strip()
     robot_ids = [r.strip() for r in raw.split(",") if r.strip()] if raw else [primary_robot_id]
     platform = platform_cfg.perform(context)
@@ -423,15 +424,19 @@ def _make_per_robot_actions(
             condition=IfCondition(nav2),
         ))
 
-        # Mesh status broadcaster (self-reported pose — peers must not TF-eavesdrop).
-        actions.append(ExecuteProcess(
-            cmd=[
-                "python3",
-                os.path.join(REPO_ROOT, "nodes", "fleet_radio.py"),
-                "--robot-id", rid,
-            ],
-            output="screen",
-        ))
+        # Mesh status broadcaster (self-reported pose — peers must not TF-eavesdrop). Its readers
+        # (fleet_tasks' liveness, explorer keepouts, the depth filter's peer mask) are all about
+        # OTHER robots, so a lone real robot skips it: ~15% of an Orin core, mostly its Python TF
+        # listener (2026-11-20). fleet_radio:=true (run_robot.sh --fleet) when it has peers.
+        if platform != "real" or fleet_radio == "true":
+            actions.append(ExecuteProcess(
+                cmd=[
+                    "python3",
+                    os.path.join(REPO_ROOT, "nodes", "fleet_radio.py"),
+                    "--robot-id", rid,
+                ],
+                output="screen",
+            ))
 
         actions.append(ExecuteProcess(
             cmd=[
@@ -599,6 +604,14 @@ def generate_launch_description():
     recon_source = LaunchConfiguration("recon_source")
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "fleet_radio",
+            default_value="false",
+            description=(
+                "Real robot: start nodes/fleet_radio.py (the mesh status heartbeat other robots "
+                "read). Off for a lone robot; true when it has peers. The sim always runs it."
+            ),
+        ),
         DeclareLaunchArgument(
             "head_tf",
             default_value="live",

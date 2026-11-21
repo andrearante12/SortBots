@@ -120,8 +120,11 @@ POSE_STALE_S = 5.0  # a pose older than this isn't reported (a failed peek keeps
 NAV_TOL_DEG = 3.0   # "back at the nav pose": servo settle plus the tilt's sag under the camera
 # Live head TF (2026-11-20, --head-tf live, the robot's default): base_link -> camera_link
 # follows the head, so the camera can turn while mapping. Published this often (above the
-# camera's 15 fps, so tf2 interpolates every frame's stamp), from head reads this often.
-HEAD_TF_HZ, HEAD_READ_HZ = 30.0, 20.0
+# camera's 15 fps, so tf2 interpolates every frame's stamp), from head reads this often while
+# the head moves (the state rate's 5 Hz poll otherwise). 30 / 20 Hz always cost ~20% of a core
+# on the Orin with Nav2 up (load 23, 2026-11-20).
+HEAD_TF_HZ, HEAD_READ_HZ = 20.0, 20.0
+HEAD_MOVING_S = 1.0   # this long after a head command or a changed read still counts as moving
 # camera_link (RealSense body: x forward, y left, z up) <- its optical frame (z forward, x right,
 # y down). The colour sensor's ~1.5 cm offset along y is left out: it only shifts the camera by
 # (I - R) * offset as the head turns, under 1 cm at 30 deg.
@@ -876,6 +879,7 @@ def run_node(robot_id: str, cfg: dict, head_tf: str = "static"):
     steady = Clock(clock_type=ClockType.STEADY_TIME)
 
     def on_head(msg):
+        live["moved_at"] = time.monotonic()   # the live head TF reads it fast while it moves
         if mode["mode"] == "nav":
             # turned in nav: mapping pauses now, not at the next 1 s check (apply_mode)
             head.look(dict(zip(msg.name, msg.position)), time.monotonic())
@@ -1179,7 +1183,8 @@ def run_node(robot_id: str, cfg: dict, head_tf: str = "static"):
     # base_link -> camera_link from the head's angles, so mapping keeps the walls where they are
     # while the head turns. The launch starts no static mount when this is live, so it is ALWAYS
     # published: the nav pose's mount when the head's angle is unknown or the model won't load.
-    live = {"on": head_tf == "live", "mount": None, "hc": None, "read_at": -1e9}
+    live = {"on": head_tf == "live", "mount": None, "hc": None, "read_at": -1e9,
+            "moved_at": -1e9, "last_deg": None, "T": None, "T_for": None}
     if live["on"]:
         from geometry_msgs.msg import TransformStamped
         from tf2_ros import TransformBroadcaster
@@ -1193,6 +1198,10 @@ def run_node(robot_id: str, cfg: dict, head_tf: str = "static"):
         except (OSError, ValueError, KeyError) as e:
             log.warning(f"head_tf live without the head model ({e}): publishing the fixed nav-pose mount")
         tf_bc = TransformBroadcaster(node)
+        # The same transform as a plain topic, re-sent when it changes and at 2 Hz: obstacle_cloud
+        # follows the head from this instead of a Python TF listener decoding all of /tf.
+        mount_pub = node.create_publisher(TransformStamped, f"/{robot_id}/camera_mount", 10)
+        live["mount_sent"] = -1e9
 
         def head_deg_now():
             """Where the head is, in bus degrees: the pick's own reads and goals while it owns the
@@ -1208,8 +1217,13 @@ def run_node(robot_id: str, cfg: dict, head_tf: str = "static"):
 
         def publish_head_tf():
             cur = head_deg_now()
-            T = live["mount"] if live["hc"] is None or cur is None else \
-                live_mount(live["mount"], live["hc"], head.nav_deg(), cur)
+            key = None if cur is None else (round(float(cur["head_pan"]), 2), round(float(cur["head_tilt"]), 2))
+            changed = key != live["T_for"] or live["T"] is None
+            if changed:                # the matrix work only when the head's angle moved
+                live["T"] = live["mount"] if live["hc"] is None or cur is None else \
+                    live_mount(live["mount"], live["hc"], head.nav_deg(), cur)
+                live["T_for"] = key
+            T = live["T"]
             t = TransformStamped()
             t.header.stamp = node.get_clock().now().to_msg()
             t.header.frame_id, t.child_frame_id = f"{robot_id}/base_link", f"{robot_id}/camera_link"
@@ -1218,6 +1232,10 @@ def run_node(robot_id: str, cfg: dict, head_tf: str = "static"):
             q = matrix_quat(T[:3, :3])
             t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w = q
             tf_bc.sendTransform(t)
+            now = time.monotonic()
+            if changed or now - live["mount_sent"] >= 0.5:
+                mount_pub.publish(t)
+                live["mount_sent"] = now
         node.create_timer(1.0 / HEAD_TF_HZ, publish_head_tf, clock=steady)
         log.info(f"head_tf live: base_link -> camera_link from the head at {HEAD_TF_HZ:.0f} Hz"
                  f"{'' if live['hc'] else ' (no head model: fixed mount)'}")
@@ -1243,10 +1261,18 @@ def run_node(robot_id: str, cfg: dict, head_tf: str = "static"):
                 pick_finished()
             return                     # the pick owns the arm and head while it runs
         head.tick(now, dt)
-        # live head TF wants the head's angle fresher than the state rate's 5 Hz
+        # live head TF wants the head's angle fresher than the state rate's 5 Hz, but only while it
+        # moves: a head being slewed to a goal, a head command just in, or the last read changed
         if live["on"] and head.bus is not None and now - live["read_at"] >= 1.0 / HEAD_READ_HZ:
-            live["read_at"] = now
-            head.poll(now)
+            slewing = head.goal is not None and head.target is not None and head.goal != head.target
+            if slewing or now - live["moved_at"] <= HEAD_MOVING_S:
+                live["read_at"] = now
+                head.poll(now)
+                if head.pos != live["last_deg"]:
+                    live["moved_at"] = now   # still turning (by hand, or settling): keep reading fast
+            live["last_deg"] = dict(head.pos) if head.pos else None
+            if slewing:
+                live["moved_at"] = now
         if arm is not None:
             if head.bus is None:
                 arm.engaged = False

@@ -38,6 +38,7 @@
 # rides on --nav because without Nav2 every task it took would just fail; on the robot
 # its tasks are nav-only (pickup/dropoff dwell, or goto). Never started: magnet_pick
 # (the arm's pick is nodes/arm_driver.py's).
+# --fleet starts nodes/fleet_radio.py, this robot's mesh heartbeat, for when it has peers.
 # nodes/base_driver.py drives the wheels from /<id>/cmd_vel (the drive pad, or Nav2),
 # capped at configs/drive_base.yaml's ros.speed_level and latched by /<id>/estop.
 set -u
@@ -108,7 +109,7 @@ if [[ "${1:-}" == "stop" ]]; then
 fi
 
 ROBOT_ID=robot_0; LOCALIZE=false; RESUME=false; MAP_DB=""; SLAM_ROLE=all; NAV=false
-DYNAMIC_SEG=off; SEG_POLICY=open; RECON_SOURCE=cloud_map
+DYNAMIC_SEG=off; SEG_POLICY=open; RECON_SOURCE=cloud_map; FLEET=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
@@ -125,7 +126,8 @@ while [[ $# -gt 0 ]]; do
     --recon-source) [[ "$2" =~ ^(cloud_map|octomap)$ ]] || { echo "[run_robot] --recon-source is cloud_map or octomap, not: $2"; exit 2; }
                 RECON_SOURCE="$2"; shift 2;;
     --nav)      NAV=true; shift;;
-    -h|--help) sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    --fleet)    FLEET=true; shift;;
+    -h|--help) sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "[run_robot] unknown arg: $1"; exit 2;;
   esac
 done
@@ -193,7 +195,8 @@ setsid bash -c "$ROS_ENV; \
        webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
        delete_db_on_start:=$DELETE_DB_ON_START slam_role:=$SLAM_ROLE \
-       dynamic_seg:=$DYNAMIC_SEG seg_policy:=$SEG_POLICY recon_source:=$RECON_SOURCE" \
+       dynamic_seg:=$DYNAMIC_SEG seg_policy:=$SEG_POLICY recon_source:=$RECON_SOURCE \
+       fleet_radio:=$FLEET" \
   >"$BRINGUP_LOG" 2>&1 &
 
 # Wait for the camera for real rather than sleeping a fixed time: the D435

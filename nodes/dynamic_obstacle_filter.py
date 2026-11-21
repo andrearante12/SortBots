@@ -81,7 +81,9 @@ DEFAULTS = {
     #         model's latency, which is the right trade when recording a map
     #         to keep, and the wrong one for Nav2's costmaps.
     "seg_policy": "open",
-    "seg_max_age_s": 0.3,
+    # open: the newest mask may be this old. 0.5, not 0.3, since dynamic_segment runs at 3 Hz
+    # (0.33 s apart plus ~0.1 s of model latency; 2026-11-20): at 0.3 a third of frames went unmasked.
+    "seg_max_age_s": 0.5,
     "seg_match_s": 0.005,      # strict: same frame (rgb and depth share stamps)
     "seg_queue_s": 1.0,        # strict: drop a depth frame whose mask never came
     "seg_dilate_px": 4,        # rgb-vs-depth edge slack and the open-mode lag

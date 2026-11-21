@@ -18,13 +18,8 @@ from __future__ import annotations
 
 import argparse
 import math
-import time
 
 import numpy as np
-
-# --live-mount: how stale the head-moved mount may get (10 Hz; the head slews at most ~90 deg/s,
-# but obstacles are for avoidance at base speed, not for mapping)
-LIVE_MOUNT_S = 0.1
 
 DEFAULTS = {
     "stride": 4,            # 848x480 -> 212x120
@@ -81,8 +76,8 @@ def main(argv=None):
     for k, v in DEFAULTS.items():
         ap.add_argument("--" + k.replace("_", "-"), type=type(v), default=v)
     ap.add_argument("--live-mount", action="store_true",
-                    help="the camera mount moves with the head (arm_driver --head-tf live): look it "
-                         "up again every LIVE_MOUNT_S instead of once")
+                    help="the camera mount moves with the head (arm_driver --head-tf live): follow "
+                         "/<id>/camera_mount instead of looking the mount up once")
     a = ap.parse_args(argv)
     band = {k: getattr(a, k) for k in DEFAULTS}
 
@@ -99,10 +94,16 @@ def main(argv=None):
             super().__init__(f"{rid}_obstacle_cloud")
             self.K = None
             self.T = None
-            self._t_at = -1e9
+            self.mount = None   # live: base_link <- camera_link, from arm_driver's /<id>/camera_mount
+            self.link = None    # live: camera_link <- depth frame, the driver's own fixed chain
             self.tf = Buffer()
             self._tfl = TransformListener(self.tf, self)
             self.pub = self.create_publisher(PointCloud2, f"/{rid}/obstacles", qos_profile_sensor_data)
+            if a.live_mount:
+                # The head's mount as a plain topic, not a TF listener left decoding all of /tf
+                # (~20% of a core on the Orin with Nav2 up, 2026-11-20).
+                from geometry_msgs.msg import TransformStamped
+                self.create_subscription(TransformStamped, f"/{rid}/camera_mount", self.on_mount, 10)
             self.create_subscription(CameraInfo, f"/{rid}/camera/camera_info",
                                      self.on_info, qos_profile_sensor_data)
             self.create_subscription(Image, f"/{rid}/camera/depth", self.on_depth,
@@ -111,26 +112,41 @@ def main(argv=None):
         def on_info(self, m):
             self.K = (m.k[0], m.k[4], m.k[2], m.k[5])
 
+        def on_mount(self, msg):
+            r, t = msg.transform.rotation, msg.transform.translation
+            self.mount = quat_matrix(r.x, r.y, r.z, r.w, (t.x, t.y, t.z))
+            if self.link is not None:
+                self.T = self.mount @ self.link
+
         def on_depth(self, m):
             if self.K is None:
                 return
-            now = time.monotonic()
-            if self.T is None or (a.live_mount and now - self._t_at >= LIVE_MOUNT_S):
+            if a.live_mount:
+                # The driver's camera_link -> depth chain is fixed: look it up once and drop TF;
+                # the head's part comes in on /camera_mount.
+                if self.link is None:
+                    try:
+                        tr = self.tf.lookup_transform(f"{rid}/camera_link", m.header.frame_id,
+                                                      rclpy.time.Time())
+                    except Exception:
+                        return
+                    r, t = tr.transform.rotation, tr.transform.translation
+                    self.link = quat_matrix(r.x, r.y, r.z, r.w, (t.x, t.y, t.z))
+                    self._drop_tf()
+                if self.mount is None:
+                    return
+                self.T = self.mount @ self.link
+            elif self.T is None:
                 # Static mount: look it up once, then never touch TF again (a
-                # per-frame lookup is the expensive part in rclpy). Live (the head
-                # moves the camera): again every LIVE_MOUNT_S, the newest one.
+                # per-frame lookup is the expensive part in rclpy).
                 try:
                     tr = self.tf.lookup_transform(f"{rid}/base_link", m.header.frame_id,
                                                   rclpy.time.Time())
                 except Exception:
-                    if self.T is None:
-                        return
-                else:
-                    r, t = tr.transform.rotation, tr.transform.translation
-                    self.T = quat_matrix(r.x, r.y, r.z, r.w, (t.x, t.y, t.z))
-                    self._t_at = now
-                    if not a.live_mount:
-                        self._drop_tf()
+                    return
+                r, t = tr.transform.rotation, tr.transform.translation
+                self.T = quat_matrix(r.x, r.y, r.z, r.w, (t.x, t.y, t.z))
+                self._drop_tf()
             d = depth_to_metres(m.data, m.encoding, m.height, m.width)
             if d is None:
                 return

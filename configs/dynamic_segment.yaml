@@ -5,7 +5,9 @@
 # Frames per second the models run on (wall clock, steady). RTAB-Map takes a
 # keyframe at ~2 Hz, so anything above that is margin for seg_policy: open,
 # whose depth frames use the newest mask. Bounded by the Orin Nano budget.
-rate_hz: 5.0
+# 3, not 5 (2026-11-20): with Nav2 up the Orin sat at load 23; 3 still covers RTAB-Map's 2 Hz,
+# and the depth filter's seg_max_age_s (0.5) is set for this rate.
+rate_hz: 3.0
 
 # Class lists live in seg_tracks.DEFAULTS too; these override them. The
 # detector's vocabulary is BAKED INTO the exported engine (YOLO-World
