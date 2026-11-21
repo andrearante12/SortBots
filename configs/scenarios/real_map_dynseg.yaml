@@ -19,7 +19,7 @@ run:
   localize: false
   map: null
   dynamic_seg: model     # off | model (oracle is the simulator's)
-  seg_policy: strict     # each depth frame waits for its own mask (open: the newest, up to 0.3 s old)
+  seg_policy: open       # the newest mask; strict stalled RTAB-Map's sync on the Orin (2026-11-20)
 
 overrides: [resume, seg_policy]
 

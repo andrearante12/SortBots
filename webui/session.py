@@ -368,12 +368,13 @@ REAL_RUN_FLAGS = {
 # dynamic_seg on by default on the robot (2026-11-20): every run, the launch form's included,
 # keeps people out of the map. Needs the host's model server (scripts/jetson.sh seg start,
 # which `jetson.sh console` runs too); a run that says dynamic_seg: off skips it.
-# seg_policy strict: each depth frame waits for its OWN mask. open used the newest one, up to
-# 0.3 s old, and a walking person's leading edge got past it (~85% of a person blanked, measured
-# live 2026-11-20). strict caps depth_static at the mask rate (~5 Hz), above RTAB-Map's 2 Hz.
+# seg_policy stays open (the newest mask, up to 0.3 s old: ~85% of a walking person blanked,
+# measured live 2026-11-20). strict was tried the same day and stalled mapping: each depth frame
+# waits for its own mask, so depth_static came ~1 s late, at 1.5 Hz under the Orin's load, and
+# RTAB-Map's approx sync (queue 10, ~0.7 s of rgb) never paired it: "Did not receive data since
+# 5 seconds". strict needs a longer sync queue and CPU headroom first.
 REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all", "nav": False,
-                                                                              "dynamic_seg": "model",
-                                                                              "seg_policy": "strict"}
+                                                                              "dynamic_seg": "model"}
 
 PLATFORM_FLAGS = {"sim": RUN_FLAGS, "real": REAL_RUN_FLAGS}
 

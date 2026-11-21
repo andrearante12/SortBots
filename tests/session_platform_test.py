@@ -35,8 +35,7 @@ def test_real_scenario_uses_run_robot_and_only_its_flags(tmp_path):
     argv = sm.launcher_argv(s, s["run"])
     assert argv[0].endswith("scripts/run_robot.sh")
     assert argv[1:] == ["--robot-id", "robot_0", "--resume", "--slam-role", "all",
-                        "--dynamic-seg", "model", "--seg-policy", "strict",
-                        "--keep-console"]   # movers masked by default, each frame by its own mask
+                        "--dynamic-seg", "model", "--keep-console"]   # movers masked by default
     # Defaults come from the real table: no sim keys leak into `run`.
     assert set(s["run"]) == set(sm.REAL_RUN_FLAGS)
 
