@@ -1266,7 +1266,7 @@
         <div class="side">
           <button type="button" data-wf="1" title="Wrist up (hold)">wrist &#8593;</button><button type="button" data-wf="-1" title="Wrist down (hold)">wrist &#8595;</button>
           <div class="lv" role="group" aria-label="Arm speed"><button type="button" data-lv="0">L1</button><button type="button" data-lv="1">L2</button><button type="button" data-lv="2">L3</button><button type="button" data-lv="3">L4</button></div>
-          <button type="button" data-arm-act="magnet" title="Magnet on / off">Magnet</button><button type="button" data-arm-act="pick" title="One-button pick and place">Pick</button><button type="button" data-arm-act="unload" title="Look down into the body, pick the package there and put it on the taught table pose (the base stays put: drive up to the table first)">Unload</button><button type="button" data-arm-act="rest" title="Back to the rest pose. With the magnet on it lets go first: whatever it holds drops where the hand is">Rest</button><button type="button" data-arm-act="pick_hold" hidden title="Pick, then hand the arm back to the pad with the package held (no place): drive it to the new place spot">Pick &amp; hold</button><button type="button" data-arm-act="save_place" hidden title="Save where the arm is now as the place pose the next Pick uses">Save place</button><button type="button" data-arm-act="save_table" title="Save where the arm is now as the table pose Unload puts packages on (Unload with none saved picks and holds: drive it over the table, then this)">Save table</button>
+          <button type="button" data-arm-act="magnet" title="Magnet on / off">Magnet</button><button type="button" data-arm-act="pick" title="One-button pick and place">Pick</button><button type="button" data-arm-act="unload" title="Look down into the body, pick the package there and put it on the taught table pose (the base stays put: drive up to the table first)">Unload</button><div class="restrow"><button type="button" data-arm-act="rest" title="Back to the rest pose. With the magnet on it lets go first: whatever it holds drops where the hand is">Rest</button><details class="armmore"><summary title="Teach the place and table poses" aria-label="More arm actions">&#8943;</summary><div class="menu"><button type="button" data-arm-act="save_table" title="Save where the arm is now as the table pose Unload puts packages on (Unload with none saved picks and holds: drive it over the table, then this)">Save table</button><button type="button" data-arm-act="pick_hold" hidden title="Pick, then hand the arm back to the pad with the package held (no place): drive it to the new place spot">Pick &amp; hold</button><button type="button" data-arm-act="save_place" hidden title="Save where the arm is now as the place pose the next Pick uses">Save place</button></div></details></div>
         </div>
       </div>`;
     const perc = document.createElement("div");
@@ -1546,6 +1546,10 @@
       publishString(`/${id}/pick_request`, JSON.stringify({ cmd: "auto" }));
       toast(`${nameOf(id)}: pick and place started`);
     });
+    // The ⋯ menu holds the teaching buttons: shut once one is used or the pointer goes elsewhere.
+    const more = pad.querySelector(".armmore");
+    more.querySelector(".menu").addEventListener("click", () => { more.open = false; });
+    document.addEventListener("pointerdown", (e) => { if (more.open && !more.contains(e.target)) more.open = false; });
     // Teaching a new place spot: pick and keep holding, drive there with the pad, save it.
     // Hidden once the place pose was taught (2026-11-19); drop `hidden` on the two buttons to
     // teach a new one. Unload and Save table (2026-11-20) are the reverse: the body out onto a

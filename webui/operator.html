@@ -307,7 +307,16 @@
   .cam .armpad .ax.t { top: 3px; left: 50%; transform: translateX(-50%); } .cam .armpad .ax.b { bottom: 3px; left: 50%; transform: translateX(-50%); }
   .cam .armpad .ax.l { left: 3px; top: 50%; transform: translateY(-50%); } .cam .armpad .ax.r { right: 3px; top: 50%; transform: translateY(-50%); }
   .cam .armpad .side { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
-  .cam .armpad [data-arm-act="rest"] { grid-column: 1 / -1; }
+  .cam .armpad .restrow { display: flex; gap: 3px; align-items: stretch; min-width: 0; }
+  .cam .armpad .restrow [data-arm-act="rest"] { flex: 1 1 auto; min-width: 0; }
+  .cam .armpad .armmore { position: relative; display: flex; flex: 0 0 auto; }
+  .cam .armpad .armmore > summary { list-style: none; height: 22px; width: 22px; display: flex; align-items: center; justify-content: center; cursor: pointer;
+    border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65); color: #e6ebf0; font: 600 .8rem system-ui, sans-serif; }
+  .cam .armpad .armmore > summary::-webkit-details-marker { display: none; }
+  .cam .armpad .armmore[open] > summary { background: rgba(255,255,255,.9); color: #15191e; }
+  .cam .armpad .armmore .menu { position: absolute; right: 0; bottom: calc(100% + 3px); z-index: 2; display: flex; flex-direction: column; gap: 3px;
+    padding: 3px; min-width: 92px; border: 1px solid rgba(255,255,255,.28); border-radius: 6px; background: rgba(10,12,16,.9); }
+  .cam .armpad .armmore .menu button { white-space: nowrap; text-align: left; }
   .cam .armpad .lv { grid-column: 1 / -1; display: flex; gap: 2px; }
   .cam .armpad button { height: 22px; padding: 0 7px; border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65);
                         color: #e6ebf0; font: 600 .64rem system-ui, sans-serif; line-height: 1; touch-action: none; white-space: nowrap; }
@@ -316,7 +325,7 @@
   .cam .armpad button.held, .cam .armpad button.sel { background: rgba(255,255,255,.9); color: #15191e; }
   .cam .armpad [data-arm-act="magnet"].on { background: rgba(242,183,5,.9); color: #15191e; border-color: rgba(242,183,5,1); }
   .cam .armpad [data-arm-act="pick"] { color: #8fd3a8; }
-  @media (pointer: coarse) { .cam .armpad .tp.hand { width: 120px; height: 120px; } .cam .armpad .tp.z { width: 36px; height: 120px; } .cam .armpad button { height: 28px; } }
+  @media (pointer: coarse) { .cam .armpad .tp.hand { width: 120px; height: 120px; } .cam .armpad .tp.z { width: 36px; height: 120px; } .cam .armpad button, .cam .armpad .armmore > summary { height: 28px; } .cam .armpad .armmore > summary { width: 28px; } }
   .more .cam canvas.feat { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .featbtn { position: absolute; top: 6px; left: 6px; background: rgba(10,12,16,.6); border: 1px solid transparent; color: #c3cad2; font-size: .72rem; padding: 3px 9px; border-radius: 6px; }
   .featbtn.on { background: rgba(61,220,132,.9); color: #15191e; font-weight: 600; }
