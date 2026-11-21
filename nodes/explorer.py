@@ -364,8 +364,11 @@ class ExplorerNode(Node):
         self._spin_reason = "startup"          # or "hard escape", for logging
         self._last_hard_escape_at: float | None = None
 
+        # The TF listener and the /map subscription are made by _set_awake, only while exploring
+        # (or paused): see there.
         self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.tf_listener = None
+        self._map_sub = None
 
         self.nav_client = ActionClient(self, NavigateToPose, f"/{robot_id}/navigate_to_pose")
         self.spin_client = ActionClient(self, Spin, f"/{robot_id}/spin")
@@ -385,8 +388,8 @@ class ExplorerNode(Node):
         # already stamps on every goal/marker — so this robot plans against
         # BOTH robots' discovered free space, not just its own. Overridable
         # (e.g. back to /{robot_id}/map) for single-robot debugging without
-        # map_merge running.
-        self.create_subscription(OccupancyGrid, map_topic, self._on_map, MAP_QOS)
+        # map_merge running. Subscribed in _set_awake, latched, so a wake gets it at once.
+        self._map_topic = map_topic
         self.create_subscription(String, f"/{robot_id}/explore_cmd", self._on_cmd, 10)
         # The operator view's E-STOP (nodes/base_driver.py latches the wheels): stop exploring
         # here too, so a released e-stop doesn't find the robot still chasing its last goal.
@@ -428,7 +431,29 @@ class ExplorerNode(Node):
             f"explorer up for {robot_id} (autostart={autostart}); "
             f"min_frontier_cells={cfg['min_frontier_cells']} alpha={cfg['alpha']}"
         )
+        self._set_awake(self.state == "exploring")
         self._publish_status()
+
+    def _set_awake(self, awake: bool):
+        """Lazy while idle (2026-11-20): a stopped explorer still decoded every /tf message (a
+        Python TF listener) and every /map update, ~18% of an Orin core doing nothing, now that
+        the robot's runs start it by default. Asleep it keeps only explore_cmd, the e-stop,
+        hints and the mesh topics (all rare), and its heartbeat, so the Explore button still
+        sees it and a start wakes it without a restart; the map comes back at once (latched)
+        and TF within a tick (_tick already rides out a missing pose)."""
+        if awake == (self._map_sub is not None):
+            return
+        if awake:
+            self.tf_buffer = tf2_ros.Buffer()
+            self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+            self._map_sub = self.create_subscription(OccupancyGrid, self._map_topic, self._on_map, MAP_QOS)
+        else:
+            if self.tf_listener is not None:
+                self.tf_listener.unregister()
+                self.tf_listener = None
+            self.destroy_subscription(self._map_sub)
+            self._map_sub = None
+        self.get_logger().info(f"explorer {'awake' if awake else 'asleep'} (map and TF {'on' if awake else 'off'})")
 
     # -- map -------------------------------------------------------------
 
@@ -453,6 +478,7 @@ class ExplorerNode(Node):
         if cmd == "start":
             if self.state != "exploring":
                 self.get_logger().info("explore_cmd: start")
+                self._set_awake(True)
                 self.state = "exploring"
                 self._empty_cycles = 0
                 self._consec_failures = 0
@@ -471,6 +497,7 @@ class ExplorerNode(Node):
             self.get_logger().info("explore_cmd: stop")
             self._cancel_active_goal()
             self.state = "stopped"
+            self._set_awake(False)
             self._publish_status()
         elif cmd == "pause":
             self.get_logger().info("explore_cmd: pause")
@@ -1747,6 +1774,7 @@ class ExplorerNode(Node):
 
     def _finish(self):
         self.state = "done"
+        self._set_awake(False)   # the grid it finished on stays for the summary below
         elapsed = 0.0 if self._started_at is None else self._now() - self._started_at
         free_m2, occ_m2, known_m2 = self._area_stats()
         ref = self.cfg["reference_free_area_m2"]
