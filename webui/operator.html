@@ -345,17 +345,20 @@
 
   #stage { position: relative; min-width: 0; min-height: 0; }
   /* The map orientation dial, bottom-right of the 2D map (operator.js setMapRot). */
-  #map-dial { position: absolute; right: 16px; bottom: 16px; z-index: 2; width: 76px; height: 76px; border-radius: 50%;
+  #map-dial { position: absolute; right: 16px; bottom: 30px; z-index: 2; width: 76px; height: 76px; border-radius: 50%;
               background: var(--float); border: 1px solid var(--line); box-shadow: 0 2px 8px var(--shadow); color: var(--ink);
               cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
   #map-dial.on { cursor: grabbing; }
   #map-dial:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
   #map-dial svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
   #map-dial .ring { fill: none; stroke: var(--border); stroke-width: 1.5; }
-  #map-dial .ticks path { stroke: var(--faint); stroke-width: 1.5; }
-  #map-dial .tip { fill: var(--stop); }
-  #map-dial text { fill: currentColor; font: 700 8px system-ui, sans-serif; }
-  #map-dial .deg { position: absolute; left: 0; right: 0; bottom: 14px; text-align: center; font: 600 .66rem system-ui, sans-serif;
+  /* RViz's axis colours: x red, y green, z blue */
+  #map-dial .ax { stroke-width: 2.4; stroke-linecap: round; }
+  #map-dial .x { stroke: #e5484d; fill: #e5484d; } #map-dial .y { stroke: #30a46c; fill: #30a46c; }
+  #map-dial .hd { stroke: none; }
+  #map-dial text { stroke: none; font: 700 8px system-ui, sans-serif; }
+  #map-dial .z { fill: #3e8cf0; stroke: var(--float); stroke-width: 1; }
+  #map-dial .deg { position: absolute; left: 0; right: 0; top: calc(100% + 3px); text-align: center; font: 600 .66rem system-ui, sans-serif;
                    color: var(--muted); pointer-events: none; }
   #map { width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
   .float { position: absolute; background: var(--float); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 2px 8px var(--shadow); }
@@ -851,15 +854,19 @@
 <main id="stage">
   <canvas id="map"></canvas>
   <canvas id="comms" hidden></canvas>
-  <!-- Map orientation dial (2026-11-20): drag around it to turn the 2D map on screen, so the
+  <!-- Map orientation gizmo (2026-11-20): the map frame's x (red) and y (green) axes as they
+       lie on screen, z (blue) out of it. Drag around the ring to turn the 2D map about z, so the
        map and costmap line up with the room as you see it. The view only: the map, its frame
-       and everything sent to the robots stay in map coordinates. The needle is the map's +y. -->
+       and everything sent to the robots stay in map coordinates. -->
   <div id="map-dial" role="slider" tabindex="0" aria-label="Map orientation" aria-valuemin="-180" aria-valuemax="180" aria-valuenow="0"
-       title="Drag around to turn the map (the view only). Shift snaps to 15°. Double-click: back to the map's own orientation. Keys [ and ] turn it 15°.">
+       title="Drag around to turn the map about z (the view only). Shift snaps to 15°. Double-click: back to the map's own orientation. Keys [ and ] turn it 15°.">
     <svg viewBox="-32 -32 64 64" aria-hidden="true">
       <circle class="ring" r="29"></circle>
-      <g class="ticks"><path d="M0,-29V-25M29,0H25M0,29V25M-29,0H-25"></path></g>
-      <g class="needle"><path class="tip" d="M0,-14 L4.5,0 L0,-3 L-4.5,0 Z"></path><text y="-17" text-anchor="middle">N</text></g>
+      <g class="frame">
+        <path class="ax x" d="M0,0H19"></path><path class="hd x" d="M24,0L17,-3.5V3.5Z"></path><text class="x" x="11" y="-4">x</text>
+        <path class="ax y" d="M0,0V-19"></path><path class="hd y" d="M0,-24L-3.5,-17H3.5Z"></path><text class="y" x="4" y="-10">y</text>
+      </g>
+      <circle class="z" r="3.2"></circle>
     </svg>
     <span class="deg">0°</span>
   </div>

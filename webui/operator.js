@@ -251,7 +251,9 @@
       const dst = (h - 1 - row) * w; // grid row 0 is the bottom; image row 0 is the top
       for (let col = 0; col < w; col++) {
         const v = msg.data[row * w + col];
-        if (v < 0) { px[dst + col] = palette.unknown; continue; }
+        // unknown: transparent, so the grid's rectangle doesn't show as a box (a diamond once the
+        // view is turned, 2026-11-20); the canvas background is under it
+        if (v < 0) { px[dst + col] = 0; continue; }
         px[dst + col] = v >= 50 ? palette.occ : palette.free;
         known++;
         if (col < minC) minC = col; if (col > maxC) maxC = col;
@@ -312,12 +314,12 @@
     syncMapDial();
     dirty = true;
   }
-  // The dial's needle points where the map's +y is on screen; the readout is the turn in degrees.
+  // The gizmo's x and y arrows lie where the map's axes do on screen; the readout is the turn.
   function syncMapDial() {
     const dial = $("#map-dial");
     if (!dial) return;
     const deg = Math.round(view.rot * 180 / Math.PI);
-    dial.querySelector(".needle").setAttribute("transform", `rotate(${-view.rot * 180 / Math.PI})`);
+    dial.querySelector(".frame").setAttribute("transform", `rotate(${-view.rot * 180 / Math.PI})`);
     dial.querySelector(".deg").textContent = `${deg}°`;
     dial.setAttribute("aria-valuenow", String(deg));
   }
