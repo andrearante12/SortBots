@@ -2726,13 +2726,17 @@
     tool = t;
     for (const b of document.querySelectorAll("#tools button")) b.classList.toggle("active", b.dataset.t === t);
     // the waypoint tool's button is in the task bar's Waypoints section (2026-11-20)
-    const wpAdd = $("#wp-add");
-    wpAdd.classList.toggle("active", t === "wp"); wpAdd.setAttribute("aria-pressed", String(t === "wp"));
+    // ... and the gateway's in its Comms section
+    for (const [id, tt] of [["#wp-add", "wp"], ["#gw-add", "gw"]]) {
+      const b = $(id);
+      b.classList.toggle("active", t === tt); b.setAttribute("aria-pressed", String(t === tt));
+    }
     canvas.style.cursor = t === "wp" || t === "gw" ? "crosshair" : "grab";
     dirty = true; // the gateway pin shows with its tool
   }
   for (const b of document.querySelectorAll("#tools button")) b.addEventListener("click", () => setTool(b.dataset.t));
   $("#wp-add").addEventListener("click", () => setTool(tool === "wp" ? "select" : "wp"));
+  $("#gw-add").addEventListener("click", () => setTool(tool === "gw" ? "select" : "gw"));
 
   let press = null; // {px, py, wx, wy, moved, panStart}
   // Pinch to zoom (phones have no wheel): two fingers down drop whatever one finger
@@ -3061,7 +3065,7 @@
     // style.display, not [hidden]: #map / #tools set their own display, which beats the attribute.
     canvas.style.display = $("#tools").style.display = $("#map-dial").style.display = onMap ? "" : "none";
     $("#cloud").hidden = !view3d;
-    $("#comms-toggle").hidden = !onMap; // the overlay draws on the 2D map only
+    $("#comms-sec").hidden = !onMap; // the overlay draws on the 2D map only
     setComms(onMap && commsWanted);
     if (view3d) {
       if (!cloudMounted) { window.sortbotsCloud.mount($("#cloud"), ros); cloudMounted = true; }

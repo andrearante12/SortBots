@@ -283,8 +283,9 @@ async function main() {
     check(`${vp.label}: header says the sim is off`, (await $text('#s-label')) === 'Sim not running', await $text('#s-label'));
     check(`${vp.label}: no mode on the session chip without a session`, (await page.eval(`document.getElementById('session-chip').dataset.mode || ''`)) === '');
     check(`${vp.label}: page does not scroll`, await page.eval(`document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight`));
-    check(`${vp.label}: every map control fits the top bar, Comms included`,
-      await page.eval(`document.getElementById('comms-toggle').getBoundingClientRect().right <= document.getElementById('mode-strip').getBoundingClientRect().right + 1`));
+    // Comms moved to the task bar (2026-11-20): the top bar's map controls still all fit
+    check(`${vp.label}: every map control fits the top bar`,
+      await page.eval(`document.getElementById('tools').getBoundingClientRect().right <= document.getElementById('mode-strip').getBoundingClientRect().right + 1`));
     if (await visible('#view-more')) {
       await click('#view-more');
       check(`${vp.label}: the view options open from the top bar`, await page.eval(`getComputedStyle(document.getElementById('view-opts')).display === 'flex'`));
@@ -1017,7 +1018,7 @@ async function main() {
   await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
   await sleep(500);
   check('comms: off by default, no overlay, no model stream', !(await visible('#comms')) && !(await visible('#comms-bar')) && !(await vz()).on);
-  await page.eval(`document.querySelector('#tools [data-t="gw"]').click()`);
+  await page.eval(`document.querySelector('#gw-add').click()`);   // the task bar's Comms section (2026-11-20)
   await mapPointer(0.5, 8);
   await waitFor(async () => (await page.eval(`JSON.stringify(window.__operator.gateway)`)) !== 'null', { what: 'gateway pin save', tries: 20 });
   const gwPin = JSON.parse(await page.eval(`JSON.stringify(window.__operator.gateway)`));
