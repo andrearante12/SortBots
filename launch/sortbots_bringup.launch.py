@@ -63,8 +63,9 @@ docker/jetson's container) adds the RealSense driver per robot
 (sortbots_realsense.launch.py, which publishes the sim's camera topic names),
 switches RTAB-Map to visual odometry with no IMU wait, and anchors each robot
 with its `real` spawn entry in configs/robots.yaml. Everything else is the
-same graph. run_robot.sh also turns Nav2/task_manager/magnet_pick off,
-because without a base driver there is nothing for them to move.
+same graph. run_robot.sh starts Nav2, the explorer and task_manager only
+with --nav (CPU on the Orin), and never magnet_pick: the real arm's pick is
+nodes/arm_driver.py's.
 """
 import os
 

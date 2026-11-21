@@ -27,8 +27,9 @@ real` scenarios run `scripts/run_robot.sh` → `sortbots_bringup.launch.py
 platform:=real`. Runbook: `docs/real-robot.md`.
 
 - The real stack uses `use_sim_time:=false`, RTAB-Map visual odometry, and no IMU
-  (a plain D435 has none, so `wait_imu_to_init` must be false). Nav2 is off until
-  a base driver exists.
+  (a plain D435 has none, so `wait_imu_to_init` must be false). Nav2, the
+  explorer and task_manager run only with `run_robot.sh --nav` (`real_explore`,
+  `real_nav`); `nodes/base_driver.py` drives the wheels from `cmd_vel`.
 - `/etc/nv_tegra_release` isn't visible inside the container, so
   `SORTBOTS_PLATFORM=real` has to be set there. `scripts/jetson.sh` sets it.
 - The container's DDS is localhost-only on purpose, so a desktop sim on the LAN
