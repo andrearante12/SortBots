@@ -3004,9 +3004,11 @@
       return;
     }
     if (e.target.closest && e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
+    // [ / ] collapse or reopen the robot list / task list, in any view
+    if (e.key === "[" || e.key === "]") { e.preventDefault(); return sideToggles[e.key === "[" ? "left" : "right"](); }
     if (stageView === "drive") return; // map tools have no map to act on
-    // [ / ] turn the 2D map 15 deg left / right (the view only)
-    if (e.key === "[" || e.key === "]") { e.preventDefault(); return setMapRot(view.rot + (e.key === "[" ? 1 : -1) * Math.PI / 12); }
+    // { / } (Shift+[ / ]) turn the 2D map 15 deg left / right (the view only; the dial does it by hand)
+    if (e.key === "{" || e.key === "}") { e.preventDefault(); return setMapRot(view.rot + (e.key === "{" ? 1 : -1) * Math.PI / 12); }
     const t = { v: "select", f: "wp", r: "gw", t: "tp" }[e.key.toLowerCase()];
     if (t && !(t === "tp" && platform !== "sim")) setTool(t);
   });
@@ -3262,8 +3264,9 @@
   // the map, then pushes the task list off the edge, and snaps to full width near the end.
   const SIDES = { left: { min: 200, max: Infinity, dflt: 260 }, right: { min: 240, max: 560, dflt: 296 } };
   const LEFT_SNAP_PX = 24;
+  const RAIL_PX = 24;   // a collapsed side bar's rail (operator.html --rail-w)
   function syncMapGone() {
-    const px = (side) => (document.body.classList.contains(`hide-${side}`) ? 0
+    const px = (side) => (document.body.classList.contains(`hide-${side}`) ? RAIL_PX
       : parseFloat(document.body.style.getPropertyValue(`--${side}-w`)) || SIDES[side].dflt);
     // The phone layouts stack the panes and have no handles: there the widths mean nothing.
     const sideBySide = getComputedStyle($("#rz-left")).display !== "none";
@@ -3295,24 +3298,27 @@
     h.addEventListener("dblclick", () => setSide(side, null));
   }
   addEventListener("resize", syncMapGone);
-  // Either side bar can be put away altogether; the choice is kept per browser.
-  for (const [side, name] of [["left", "robot list"], ["right", "task list"]]) {
-    const btn = $(`#hide-${side}`), key = `sortbots.hide.${side}`;
+  // Either side bar collapses to a slim rail: the button in its header, a click on the rail, or
+  // [ / ] (2026-11-20; the hide buttons used to be in the view menu). Kept per browser.
+  const sideToggles = {};
+  for (const side of ["left", "right"]) {
+    const key = `sortbots.hide.${side}`;
     const apply = (hide) => {
       document.body.classList.toggle(`hide-${side}`, hide);
-      btn.classList.toggle("on", !hide);
-      btn.title = btn.ariaLabel = `${hide ? "Show" : "Hide"} the ${name}`;
       syncMapGone();
       dispatchEvent(new Event("resize"));
+    };
+    const toggle = () => {
+      const hide = !document.body.classList.contains(`hide-${side}`);
+      try { localStorage.setItem(key, hide ? "1" : "0"); } catch (e) { /* this tab only */ }
+      apply(hide);
     };
     let hidden = false;
     try { hidden = localStorage.getItem(key) === "1"; } catch (e) { /* no storage: shown */ }
     apply(hidden);
-    btn.addEventListener("click", () => {
-      const hide = !document.body.classList.contains(`hide-${side}`);
-      try { localStorage.setItem(key, hide ? "1" : "0"); } catch (e) { /* this tab only */ }
-      apply(hide);
-    });
+    $(`#collapse-${side}`).addEventListener("click", toggle);
+    $(`#rail-${side}`).addEventListener("click", toggle);
+    sideToggles[side] = toggle;
   }
 
   let toastTimer = null;
@@ -3324,8 +3330,13 @@
   }
 
   function render() {
-    $("#coverage").hidden = !mapInfo;
-    if (mapInfo) $("#cov-n").textContent = `${Math.round(mappedM2).toLocaleString()} m²`;
+    // The mapped area rides in the Maps button when it shows (2026-11-20: the top bar was full);
+    // the separate figure only stands in where there is no Maps button.
+    const m2 = mapInfo ? `${Math.round(mappedM2).toLocaleString()} m²` : "";
+    const mapsBtn = $("#maps-btn");
+    mapsBtn.textContent = m2 ? `Maps · ${m2}` : "Maps";
+    $("#coverage").hidden = !mapInfo || !mapsBtn.hidden;
+    if (mapInfo) $("#cov-n").textContent = m2;
     dirty = true;
     renderEmpty();
   }

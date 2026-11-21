@@ -1428,15 +1428,16 @@ async function main() {
   check('panels: closing them keeps them closed', !(await page.eval(`!!document.querySelector('#fleet .robot.sel[data-id="${anyId}"]')`)));
   const stageW = () => page.eval(`document.getElementById('stage').getBoundingClientRect().width`);
   const w0 = await stageW();
-  await click('#hide-right'); await sleep(200);
-  check('panels: the task list hides and the map takes its room', !(await visible('#right')) && (await stageW()) > w0 + 200, String(await stageW()));
+  // Collapse (2026-11-20): the header's button, leaving a slim rail that reopens it; [ / ] too.
+  await click('#collapse-right'); await sleep(200);
+  check('panels: the task list collapses to a rail and the map takes its room', !(await visible('#right')) && await visible('#rail-right') && (await stageW()) > w0 + 200, String(await stageW()));
   check('panels: Stop all stays on screen', await page.eval(`document.getElementById('estop').getBoundingClientRect().right <= innerWidth`));
-  await click('#hide-left'); await sleep(200);
-  check('panels: the robot list hides too, leaving the map the window', !(await visible('#left')) && Math.abs((await stageW()) - (await page.eval(`innerWidth`))) < 2, String(await stageW()));
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: '[' }))`); await sleep(200);
+  check('panels: [ collapses the robot list, leaving the map the window less the two rails', !(await visible('#left')) && await visible('#rail-left') && Math.abs((await stageW()) - ((await page.eval(`innerWidth`)) - 48)) < 3, String(await stageW()));
   await load();
-  check('panels: hidden side bars stay hidden after a reload', !(await visible('#left')) && !(await visible('#right')));
-  await click('#hide-left'); await click('#hide-right'); await sleep(200);
-  check('panels: and come back', await visible('#left') && await visible('#right') && Math.abs((await stageW()) - w0) < 4, String(await stageW()));
+  check('panels: collapsed side bars stay collapsed after a reload', !(await visible('#left')) && !(await visible('#right')) && await visible('#rail-left'));
+  await click('#rail-left'); await click('#rail-right'); await sleep(200);
+  check('panels: and the rails bring them back', await visible('#left') && await visible('#right') && !(await visible('#rail-left')) && Math.abs((await stageW()) - w0) < 4, String(await stageW()));
   await page.eval(`localStorage.clear()`); await load();
 
   // -- 2D map / 3D cloud -----------------------------------------------------------------------
