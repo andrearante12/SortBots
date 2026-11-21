@@ -25,15 +25,23 @@ detector:
   classes: [person, forklift, pallet jack, robot, box, cart, pallet, trolley, bin]
   size: 640
 segmenter:
+  # NanoSAM with the PPHGV2-B1 encoder (huggingface.co/dragonSwing/nanosam,
+  # sam_hgv2_b1_ln_nonorm_image_encoder.onnx, Apache-2.0): faster and more
+  # accurate than the ResNet18 one, whose Drive link now wants a sign-in
+  # (2026-11-20). The decoder is MobileSAM's, from the same repo.
   encoder: models/nanosam_encoder.onnx
   decoder: models/nanosam_decoder.onnx
-  size: 1024
+  size: 1024          # the decoder's frame (SAM's): prompts and masks are in it
+  encoder_size: 512   # B1 takes 512 (same 64x64 embedding); ResNet18 took 1024
+  normalize: false    # a "nonorm" export wants raw 0-255; ResNet18 wanted SAM's mean/std
 
 sim:
   # The desktop has a GPU but no TensorRT engines unless built there; ort
   # with the CUDA provider if onnxruntime-gpu is installed, else CPU (slow).
   backend: ort
 real:
-  # Engines are built on the Jetson from the ONNX files above
-  # (scripts/dynamic_seg_models.sh engines); .onnx -> .engine next to them.
-  backend: trt
+  # The engines run on the Jetson HOST (scripts/dynamic_seg_server.py, started by
+  # scripts/jetson.sh seg start): the Jazzy container has no TensorRT. Built there
+  # from the ONNX files above (scripts/dynamic_seg_models.sh engines).
+  backend: remote
+  remote: {host: 127.0.0.1, port: 7311}

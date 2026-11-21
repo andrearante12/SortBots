@@ -6,6 +6,7 @@
 #   scripts/jetson.sh console   # start the dashboard console in the container
 #   scripts/jetson.sh shell     # a shell in the running container, ROS sourced
 #   scripts/jetson.sh bridge start BUNDLE   # fleet mesh bridge (docs/commsim.md step 7)
+#   scripts/jetson.sh seg start # dynamic_segment's TensorRT server, on the host (stop | status)
 #   scripts/jetson.sh logs      # follow the console's output
 #   scripts/jetson.sh stop      # stop the robot pipeline, the console, the container
 #   scripts/jetson.sh status    # container + camera + console at a glance
@@ -194,6 +195,39 @@ case "${1:-}" in
       stop|status)
         exec docker exec "$NAME" "$REPO_ROOT/scripts/fleet_bridge.sh" "$2" ;;
       *) echo "usage: scripts/jetson.sh bridge start BUNDLE_DIR | stop | status"; exit 2 ;;
+    esac
+    ;;
+
+  seg)
+    # dynamic_segment's TensorRT engines, on the HOST (scripts/dynamic_seg_server.py):
+    # the container has no TensorRT, the host's python3 does (JetPack). cuda-python
+    # goes into models/.pylib (gitignored, beside the engines) on first start.
+    SEG_PID=/tmp/sortbots_seg_server.pid SEG_LOG=/tmp/sortbots_seg_server.log
+    seg_up() { [[ -f "$SEG_PID" ]] && kill -0 "$(cat "$SEG_PID")" 2>/dev/null; }
+    case "${2:-status}" in
+      start)
+        seg_up && { echo "[jetson] seg server already running (pid $(cat "$SEG_PID"))"; exit 0; }
+        ls "$REPO_ROOT"/models/*.engine >/dev/null 2>&1 || {
+          echo "[jetson] no engines in $REPO_ROOT/models: scripts/dynamic_seg_models.sh engines"; exit 1; }
+        /usr/bin/python3 -c 'import tensorrt' 2>/dev/null || {
+          echo "[jetson] the host's python3 has no tensorrt (python3-libnvinfer)"; exit 1; }
+        if ! PYTHONPATH="$REPO_ROOT/models/.pylib" /usr/bin/python3 -c 'import cuda' 2>/dev/null; then
+          echo "[jetson] installing cuda-python into models/.pylib"
+          /usr/bin/python3 -m pip install -q --target "$REPO_ROOT/models/.pylib" "cuda-python>=12.6,<12.7" || exit 1
+        fi
+        PYTHONPATH="$REPO_ROOT/models/.pylib" setsid /usr/bin/python3 "$REPO_ROOT/scripts/dynamic_seg_server.py" \
+          >"$SEG_LOG" 2>&1 < /dev/null &
+        echo $! > "$SEG_PID"
+        sleep 2
+        seg_up && echo "[jetson] seg server up (pid $(cat "$SEG_PID")), log $SEG_LOG" \
+               || { echo "[jetson] seg server died:"; tail -20 "$SEG_LOG"; exit 1; } ;;
+      stop)
+        seg_up && kill "$(cat "$SEG_PID")" && echo "[jetson] seg server stopped" || echo "[jetson] seg server not running"
+        rm -f "$SEG_PID" ;;
+      status)
+        seg_up && echo "[jetson] seg server running (pid $(cat "$SEG_PID"))" || echo "[jetson] seg server not running"
+        [[ -f "$SEG_LOG" ]] && tail -5 "$SEG_LOG" ;;
+      *) echo "usage: scripts/jetson.sh seg start | stop | status"; exit 2 ;;
     esac
     ;;
 

@@ -1243,9 +1243,9 @@
     if (c) return c;
     const el = document.createElement("div");
     el.className = "cam";
-    el.innerHTML = `<div class="pics"><div class="pic" data-feed="rgb" data-label="Camera"><span class="msg"></span></div><div class="pic" data-feed="depth" data-label="Depth"><span class="msg"></span></div></div><canvas class="obst"></canvas><canvas class="feat"></canvas>
-      <button type="button" class="featbtn" data-cam-features aria-pressed="false" title="Show the visual features RTAB-Map is tracking (green = inlier driving the pose, amber = matched to the map, grey = detected only)">Features</button>
-      <span class="featstat"></span>
+    el.innerHTML = `<div class="pics"><div class="pic" data-feed="rgb" data-label="Camera"><span class="msg"></span></div><div class="pic" data-feed="depth" data-label="Depth"><span class="msg"></span></div></div><canvas class="obst"></canvas><canvas class="seg"></canvas><canvas class="feat"></canvas>
+      <div class="camtoggles"><button type="button" class="featbtn" data-cam-features aria-pressed="false" title="Show the visual features RTAB-Map is tracking (green = inlier driving the pose, amber = matched to the map, grey = detected only)">Features</button><button type="button" class="featbtn segbtn" data-cam-seg aria-pressed="false" title="Show what dynamic_segment masks out of the map (magenta fill = masked; solid box = masked and why; dashed = what the detector saw). Runs only with dynamic_seg on">Seg</button></div>
+      <div class="camstats"><span class="featstat"></span><span class="segstat"></span></div>
       <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button><button type="button" data-cam-mode="split" title="Camera and depth, stacked">Split</button></div>
       <div class="padmode" role="tablist" aria-label="What the pad controls" hidden><button type="button" data-padmode="drive" role="tab" title="Nav mode: drive the base, mapping runs (M switches)">Nav</button><button type="button" data-padmode="arm" role="tab" title="Manipulation mode: the arm, pick and rest, and the head (keys I/K/J/L, H centres); mapping pauses">Manip</button></div>
       <div class="drive" role="group" aria-label="Drive by hand" title="Drive by hand: hold an arrow. Keys W/A/S/D move, Q/E rotate, Space stops (they drive the robot in control)">
@@ -1273,7 +1273,8 @@
     head.innerHTML = HEAD_AXES.map(([key, label, lo, hi]) => `<label>${label}<input type="range" data-head="${key}" min="${lo}" max="${hi}" step="0.01" value="0" aria-label="Head ${key}"><output data-head-out="${key}"></output></label>`).join("");
     c = { el, head, perc, pics: { rgb: el.querySelector('[data-feed="rgb"]'), depth: el.querySelector('[data-feed="depth"]') },
           overlay: el.querySelector("canvas.obst"), feat: el.querySelector("canvas.feat"), featStat: el.querySelector(".featstat"),
-          mode: camDefault, timers: {}, token: 0, headAt: -Infinity, headSent: 0, features: false, featSub: null, featData: null, featAt: -Infinity };
+          mode: camDefault, timers: {}, token: 0, headAt: -Infinity, headSent: 0, features: false, featSub: null, featData: null, featAt: -Infinity,
+          seg: el.querySelector("canvas.seg"), segStat: el.querySelector(".segstat"), segOn: false, segSub: null, segData: null, segAt: -Infinity };
     cams.set(id, c);
     wireHead(id, c);
     wireHeadKeys(id, c);
@@ -1766,6 +1767,89 @@
     g.restore();
   }
   setInterval(() => { for (const [id, c] of cams) if (c.features && c.featData && performance.now() - c.featAt > FEATURE_TTL_MS) drawCamFeatures(id); }, 1000);
+
+  // -- dynamic segmentation overlay (nodes/dynamic_segment.py, 2026-11-20) ---------------------
+  // The Seg toggle, built like Features: /<id>/dynamic_seg/overlay is subscribed only while it
+  // is on, and the node builds the payload only while someone subscribes. The mask comes as
+  // run lengths over a 4x-pooled grid (a few KB, not a second image stream).
+  const SEG_TTL_MS = 1500, SEG_FILL = [255, 79, 216, 110], SEG_LINE = "#ff4fd8";
+  function setCamSeg(id, on) {
+    const c = camFor(id);
+    if (c.segOn === on) return;
+    c.segOn = on;
+    const b = c.el.querySelector("[data-cam-seg]");
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-pressed", String(on));
+    if (c.segSub) { c.segSub.unsubscribe(); c.segSub = null; }
+    c.segData = null;
+    if (on) {
+      c.segSub = topic(`/${id}/dynamic_seg/overlay`, "std_msgs/String", { throttle_rate: 100, queue_length: 1 });
+      c.segSub.subscribe((msg) => {
+        try { c.segData = JSON.parse(msg.data); } catch (e) { return; }
+        c.segAt = performance.now();
+        drawCamSeg(id);
+      });
+    }
+    drawCamSeg(id);
+  }
+  function segMaskCanvas(p) {
+    const cv = document.createElement("canvas");
+    cv.width = p.mw; cv.height = p.mh;
+    const g = cv.getContext("2d"), img = g.createImageData(p.mw, p.mh), d = img.data;
+    let i = 0, on = false;
+    for (const run of p.runs) {
+      if (on) for (let k = i; k < i + run; k++) { const o = k * 4; d[o] = SEG_FILL[0]; d[o + 1] = SEG_FILL[1]; d[o + 2] = SEG_FILL[2]; d[o + 3] = SEG_FILL[3]; }
+      i += run; on = !on;
+    }
+    g.putImageData(img, 0, 0);
+    return cv;
+  }
+  // Same cover-crop inversion as drawCamFeatures: the picture is `background-size: cover`.
+  function drawCamSeg(id) {
+    const c = cams.get(id);
+    if (!c) return;
+    const cv = c.seg, w = cv.clientWidth, h = cv.clientHeight;
+    if (!w || !h) return;
+    if (cv.width !== w) cv.width = w;
+    if (cv.height !== h) cv.height = h;
+    const g = cv.getContext("2d");
+    g.clearRect(0, 0, w, h);
+    if (!c.segOn) { c.segStat.textContent = ""; return; }
+    const p = c.segData, fresh = p && performance.now() - c.segAt < SEG_TTL_MS;
+    if (!fresh || !p.w || !p.h) { c.segStat.textContent = "Waiting for segmentation (dynamic_seg on?)"; return; }
+    const ms = typeof p.latency_ms === "number" ? ` · ${Math.round(p.latency_ms)} ms` : "";
+    c.segStat.textContent = `${p.masked.length} masked · ${p.dets.length} detected · ${p.tracks} tracked${ms}`;
+    const pic = c.pics.rgb.offsetWidth ? c.pics.rgb : c.pics.depth;
+    const pw = pic.offsetWidth, ph = pic.offsetHeight;
+    const k = Math.max(pw / p.w, ph / p.h), ox = pic.offsetLeft + (pw - p.w * k) / 2, oy = pic.offsetTop + (ph - p.h * k) / 2;
+    g.save(); g.beginPath(); g.rect(pic.offsetLeft, pic.offsetTop, pw, ph); g.clip();
+    // one grid cell is `stride` image pixels (the last row/column may hang past the frame: clipped)
+    const cell = p.stride || 4;
+    if (p.runs.length > 1) g.drawImage(segMaskCanvas(p), ox, oy, p.mw * cell * k, p.mh * cell * k);
+    const label = (txt, x, y, col) => {
+      g.font = "600 11px system-ui, sans-serif";
+      const tw = g.measureText(txt).width;
+      g.fillStyle = "rgba(10,12,16,.75)"; g.fillRect(x, y - 14, tw + 8, 15);
+      g.fillStyle = col; g.fillText(txt, x + 4, y - 3);
+    };
+    // what the detector saw (dashed), then what was masked and why (solid, on top)
+    g.setLineDash([5, 4]); g.lineWidth = 1.5; g.strokeStyle = "rgba(255,255,255,.8)";
+    for (const d of p.dets) {
+      const [x0, y0, x1, y1] = d.bbox;
+      g.strokeRect(ox + x0 * k, oy + y0 * k, (x1 - x0) * k, (y1 - y0) * k);
+    }
+    g.setLineDash([]); g.lineWidth = 2; g.strokeStyle = SEG_LINE;
+    for (const m of p.masked) {
+      const [x0, y0, x1, y1] = m.bbox;
+      g.strokeRect(ox + x0 * k, oy + y0 * k, (x1 - x0) * k, (y1 - y0) * k);
+      label(`${m.cls || m.reason}${m.cls && m.reason !== "always" ? ` · ${m.reason}` : ""}`, ox + x0 * k, oy + y0 * k, "#fff");
+    }
+    for (const d of p.dets) if (!p.masked.some((m) => m.cls === d.cls && Math.abs(m.bbox[0] - d.bbox[0]) < 20)) {
+      label(`${d.cls} ${d.score.toFixed(2)}`, ox + d.bbox[0] * k, oy + d.bbox[3] * k + 14, "#d7dde3");
+    }
+    g.restore();
+  }
+  setInterval(() => { for (const [id, c] of cams) if (c.segOn && c.segData && performance.now() - c.segAt > SEG_TTL_MS) drawCamSeg(id); }, 1000);
 
   function syncCamButtons(c) {
     for (const b of c.el.querySelectorAll("[data-cam-mode]")) b.classList.toggle("on", b.dataset.camMode === c.mode);
@@ -2690,6 +2774,7 @@
     const act = e.target.closest("[data-act]"), cam = e.target.closest("[data-cam-mode]");
     if (cam) return setCamMode(id, cam.dataset.camMode);
     if (e.target.closest("[data-cam-features]")) return setCamFeatures(id, !camFor(id).features);
+    if (e.target.closest("[data-cam-seg]")) return setCamSeg(id, !camFor(id).segOn);
     if (act) {
       if (act.dataset.act === "stop") { stopRobot(id); toast(`${nameOf(id)} stopped`); }
       if (act.dataset.act === "explore") toggleExplore(id);

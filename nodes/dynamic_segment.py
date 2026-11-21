@@ -19,6 +19,10 @@ stock would vanish from the map).
 Backends, one interface (session.run(feeds) -> outputs):
   ort     onnxruntime, CPU or CUDA. Offline tests and the sim desktop.
   trt     TensorRT engines built on the Jetson (scripts/dynamic_seg_models.sh).
+  remote  the same engines, run by scripts/dynamic_seg_server.py on the Jetson
+          HOST over localhost: the Jazzy container has no TensorRT (JetPack's
+          is for the host's py3.10), so the node keeps its pre/post-processing
+          here and only the tensors cross (2026-11-20). Still all on the robot.
   oracle  --mode oracle: Isaac's instance segmentation of the world's actors
           instead of any model (spawn_warehouse.py --instance-seg). Separates
           the depth-filter half from model quality in the scored tests.
@@ -137,13 +141,15 @@ def yolo_postprocess(out: np.ndarray, meta, classes: list[str], score_min: float
 
 # --- SAM I/O ------------------------------------------------------------------
 
-def sam_preprocess(rgb: np.ndarray, size: int = 1024):
-    """Longest side to `size`, normalised, zero-padded bottom/right (SAM's
-    ResizeLongestSide). Returns (NCHW float32, scale)."""
+def sam_preprocess(rgb: np.ndarray, size: int = 1024, normalize: bool = True):
+    """Longest side to `size`, normalised (unless the encoder does it itself),
+    zero-padded bottom/right (SAM's ResizeLongestSide). Returns (NCHW float32, scale)."""
     h, w = rgb.shape[:2]
     s = size / max(h, w)
     nw, nh = int(round(w * s)), int(round(h * s))
-    img = (_resize(rgb, nw, nh).astype(np.float32) - SAM_MEAN) / SAM_STD
+    img = _resize(rgb, nw, nh).astype(np.float32)
+    if normalize:
+        img = (img - SAM_MEAN) / SAM_STD
     out = np.zeros((size, size, 3), dtype=np.float32)
     out[:nh, :nw] = img
     return np.ascontiguousarray(out.transpose(2, 0, 1)[None]), s
@@ -266,11 +272,75 @@ class TrtSession:
         return outs
 
 
-def open_session(path: str, backend: str):
-    """`path` names the ONNX file; trt opens the .engine built next to it."""
+# --- remote: the host's TensorRT over localhost -------------------------------
+# One frame: 4-byte big-endian header length, a JSON header naming each array's
+# dtype and shape, then the arrays' bytes back to back. Plain sockets and numpy,
+# no extra package on either side of the container wall.
+
+def send_msg(sock, header: dict, arrays: dict | None = None) -> None:
+    arrays = {k: np.ascontiguousarray(v) for k, v in (arrays or {}).items()}
+    header = dict(header, arrays=[[k, a.dtype.str, list(a.shape)] for k, a in arrays.items()])
+    h = json.dumps(header).encode()
+    sock.sendall(len(h).to_bytes(4, "big") + h + b"".join(a.tobytes() for a in arrays.values()))
+
+
+def _recv_exact(sock, n: int) -> bytes:
+    buf = bytearray(n)
+    view, got = memoryview(buf), 0
+    while got < n:
+        k = sock.recv_into(view[got:], n - got)
+        if not k:
+            raise ConnectionError("connection closed")
+        got += k
+    return bytes(buf)
+
+
+def recv_msg(sock) -> tuple[dict, dict]:
+    header = json.loads(_recv_exact(sock, int.from_bytes(_recv_exact(sock, 4), "big")))
+    arrays = {}
+    for name, dt, shape in header.pop("arrays", []):
+        dtype = np.dtype(dt)
+        n = int(np.prod(shape, dtype=np.int64)) * dtype.itemsize
+        arrays[name] = np.frombuffer(_recv_exact(sock, n), dtype=dtype).reshape(shape)
+    return header, arrays
+
+
+class RemoteSession:
+    """OrtSession's interface over scripts/dynamic_seg_server.py: `model` is the
+    engine's stem (yolo_world, nanosam_encoder, ...), looked up in the server's
+    own models dir."""
+
+    def __init__(self, model: str, host: str = "127.0.0.1", port: int = 7311, timeout_s: float = 10.0):
+        import socket
+        self.model = model
+        try:
+            self.sock = socket.create_connection((host, int(port)), timeout=timeout_s)
+        except OSError as e:
+            raise RuntimeError(f"no dynamic_seg_server at {host}:{port} ({e}): start it on the Jetson host "
+                               "with scripts/jetson.sh seg start") from e
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        info = self._ask({"op": "open", "model": model})[0]
+        self.input_names, self.output_names = info["input_names"], info["output_names"]
+
+    def _ask(self, header: dict, arrays: dict | None = None):
+        send_msg(self.sock, header, arrays)
+        h, a = recv_msg(self.sock)
+        if h.get("error"):
+            raise RuntimeError(f"dynamic_seg_server ({self.model}): {h['error']}")
+        return h, a
+
+    def run(self, feeds: dict) -> dict:
+        return self._ask({"op": "run", "model": self.model}, feeds)[1]
+
+
+def open_session(path: str, backend: str, remote: dict | None = None):
+    """`path` names the ONNX file; trt opens the .engine built next to it, and
+    remote asks the host's server for that engine by its stem."""
     p = Path(path) if Path(path).is_absolute() else REPO_ROOT / path
     if backend == "trt":
         return TrtSession(str(p.with_suffix(".engine")))
+    if backend == "remote":
+        return RemoteSession(p.stem, **(remote or {}))
     return OrtSession(str(p))
 
 
@@ -287,12 +357,20 @@ class Detector:
 
 
 class Segmenter:
-    def __init__(self, encoder, decoder, size: int = 1024):
+    """`size` is the decoder's frame (SAM's 1024: prompts and low-res masks are in
+    it); `encoder_size` what the image encoder takes, when it differs (NanoSAM's
+    PPHGV2-B1 takes 512, its embedding the same 64x64); `normalize` False for an
+    encoder exported "nonorm", which wants raw 0-255."""
+
+    def __init__(self, encoder, decoder, size: int = 1024, encoder_size: int | None = None,
+                 normalize: bool = True):
         self.enc, self.dec, self.size = encoder, decoder, int(size)
+        self.enc_size, self.normalize = int(encoder_size or size), bool(normalize)
         self._emb = self._scale = self._hw = None
 
     def set_image(self, rgb: np.ndarray) -> None:
-        x, self._scale = sam_preprocess(rgb, self.size)
+        x, s_enc = sam_preprocess(rgb, self.enc_size, self.normalize)
+        self._scale = s_enc * self.size / self.enc_size   # image pixels -> the decoder's frame
         self._emb = next(iter(self.enc.run({self.enc.input_names[0]: x}).values()))
         self._hw = rgb.shape[:2]
 
@@ -327,7 +405,7 @@ class Pipeline:
                 predicted[t.id] = seg_tracks.predict_box(t, K, *cam_from_odom)
         prompts = seg_tracks.select_prompts(dets, blobs, self.tracks.tracks, predicted, self.cfg)
         mask = np.zeros((h, w), dtype=bool)
-        results, rejected = [], 0
+        results, rejected, masked = [], 0, []
         if prompts:
             self.seg.set_image(rgb)
         for p in prompts:
@@ -338,9 +416,15 @@ class Pipeline:
             mask |= m
             box = seg_tracks.mask_bbox(m)
             results.append((p, box, _anchor(m, box, depth, K, odom_from_cam)))
+            masked.append({"bbox": [round(float(v), 1) for v in (box if box is not None else p.bbox)],
+                           "cls": p.cls, "reason": p.reason})
         live = self.tracks.update(results, now)
         info = {
             "detections": len(dets), "prompts": len(prompts), "rejected": rejected,
+            # for the operator view's overlay (overlay_payload): what was masked, and why
+            "masked": masked,
+            "dets": [{"bbox": [round(float(v), 1) for v in d["bbox"]], "cls": d["cls"],
+                      "score": round(float(d["score"]), 2)} for d in dets[:16]],
             "tracks": [{"id": t.id, "cls": t.cls, "reason": t.reason,
                         "age_s": round(now - t.first_s, 1),
                         "unsupported_s": round(now - t.support_s, 1)} for t in live],
@@ -367,6 +451,32 @@ def _anchor(mask, box, depth, K, odom_from_cam) -> dict:
     return out
 
 
+def mask_rle(mask: np.ndarray, stride: int = 4) -> tuple[int, int, list[int]]:
+    """The mask max-pooled by `stride` (a thin arm still shows), then run lengths
+    over the row-major cells, starting with a run of zeros: (w, h, runs)."""
+    h, w = mask.shape
+    hh, ww = -(-h // stride), -(-w // stride)
+    pad = np.zeros((hh * stride, ww * stride), dtype=bool)
+    pad[:h, :w] = mask
+    small = pad.reshape(hh, stride, ww, stride).any(axis=(1, 3)).ravel()
+    edges = np.flatnonzero(np.diff(small.astype(np.int8))) + 1
+    runs = np.diff(np.concatenate([[0], edges, [small.size]])).tolist()
+    if small.size and small[0]:
+        runs = [0] + runs
+    return ww, hh, [int(r) for r in runs]
+
+
+def overlay_payload(mask: np.ndarray, info: dict, stamp: float, stride: int = 4) -> dict:
+    """/<id>/dynamic_seg/overlay: a few KB of JSON the camera tile draws (the mask
+    image itself would be a second image stream through rosbridge)."""
+    mw, mh, runs = mask_rle(mask, stride)
+    return {"stamp": float(stamp), "w": int(mask.shape[1]), "h": int(mask.shape[0]),
+            "mw": mw, "mh": mh, "stride": int(stride), "runs": runs,
+            "masked": info.get("masked", []), "dets": info.get("dets", []),
+            "tracks": len(info.get("tracks", [])), "latency_ms": info.get("latency_ms"),
+            "mode": info.get("mode")}
+
+
 def oracle_mask(ids: np.ndarray, labels: dict, prefix: str = "/World/SimTest/actors/") -> np.ndarray:
     """Isaac instance-segmentation ids → mask of the world's actors. The labels
     table maps id (as a string) to a prim path or semantic label, depending on
@@ -380,10 +490,11 @@ def oracle_mask(ids: np.ndarray, labels: dict, prefix: str = "/World/SimTest/act
 def build_pipeline(cfg: dict) -> Pipeline:
     backend = cfg.get("backend", "ort")
     d, s = cfg["detector"], cfg["segmenter"]
-    det = Detector(open_session(d["model"], backend), d["classes"], d["size"],
+    remote = cfg.get("remote")
+    det = Detector(open_session(d["model"], backend, remote), d["classes"], d["size"],
                    cfg.get("score_min", 0.25), cfg.get("nms_iou", 0.5))
-    seg = Segmenter(open_session(s["encoder"], backend), open_session(s["decoder"], backend),
-                    s.get("size", 1024))
+    seg = Segmenter(open_session(s["encoder"], backend, remote), open_session(s["decoder"], backend, remote),
+                    s.get("size", 1024), s.get("encoder_size"), s.get("normalize", True))
     missing = (set(cfg.get("always", [])) | set(cfg.get("if_moving", []))) - set(d["classes"])
     if missing:
         raise ValueError(f"classes {sorted(missing)} are not in the exported vocabulary "
@@ -430,7 +541,7 @@ def main(argv=None):
                     choices=("sim", "real"))
     ap.add_argument("--mode", choices=("model", "oracle"), default="model")
     ap.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    ap.add_argument("--backend", choices=("ort", "trt"), help="override the config's backend")
+    ap.add_argument("--backend", choices=("ort", "trt", "remote"), help="override the config's backend")
     ap.add_argument("--bench", action="store_true",
                     help="time the models on a synthetic frame and exit (no ROS)")
     a = ap.parse_args(argv)
@@ -486,6 +597,8 @@ def main(argv=None):
                 self.create_subscription(String, f"{p}/instance_seg_labels", self._on_labels, 10)
             self.pub = self.create_publisher(Image, f"{p}/dynamic_seg", qos)
             self.info_pub = self.create_publisher(String, f"/{rid}/dynamic_seg/info", 10)
+            # The operator view's Seg toggle: built only while someone subscribes.
+            self.overlay_pub = self.create_publisher(String, f"/{rid}/dynamic_seg/overlay", 10)
             # Steady clock: under use_sim_time a node timer stretches by the
             # real-time factor (CLAUDE.md), and the model's budget is wall time.
             self.create_timer(1.0 / float(cfg.get("rate_hz", 5.0)), self._tick,
@@ -530,6 +643,8 @@ def main(argv=None):
                          "latency_ms": round((time.monotonic() - t0) * 1e3, 1),
                          "mask_frac": round(float(mask.mean()), 4)})
             self.info_pub.publish(String(data=json.dumps(info)))
+            if self.overlay_pub.get_subscription_count():
+                self.overlay_pub.publish(String(data=json.dumps(overlay_payload(mask, info, info["stamp"]))))
 
         def _tick(self):
             t0 = time.monotonic()

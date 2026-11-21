@@ -177,4 +177,95 @@ def test_config_classes_are_in_the_export_vocabulary():
         cfg = ds.load_config(ds.DEFAULT_CONFIG, platform)
         vocab = set(cfg["detector"]["classes"])
         assert set(cfg["always"]) <= vocab and set(cfg["if_moving"]) <= vocab
-    assert ds.load_config(ds.DEFAULT_CONFIG, "real")["backend"] == "trt"
+    real = ds.load_config(ds.DEFAULT_CONFIG, "real")
+    assert real["backend"] == "remote" and real["remote"]["port"]   # the host's TensorRT server
+
+
+class _Echo:
+    """A session that remembers what it was fed."""
+    input_names = ["image"]
+
+    def __init__(self, out):
+        self.out, self.fed = out, None
+
+    def run(self, feeds):
+        self.fed = feeds
+        return self.out
+
+
+def test_segmenter_b1_encoder_takes_512_raw_but_prompts_stay_in_1024():
+    # PPHGV2-B1: a 512 input, no mean/std, and the decoder still in SAM's 1024 frame
+    enc = _Echo({"image_embeddings": np.zeros((1, 256, 64, 64), np.float32)})
+    seg = ds.Segmenter(enc, None, size=1024, encoder_size=512, normalize=False)
+    rgb = np.full((H, W, 3), 200, np.uint8)
+    seg.set_image(rgb)
+    x = enc.fed["image"]
+    assert x.shape == (1, 3, 512, 512)
+    assert x[0, :, 0, 0].tolist() == [200.0, 200.0, 200.0]   # raw 0-255, not normalised
+    assert seg._scale == pytest.approx(1024 / W)             # image px -> the decoder's 1024 frame
+    old = ds.Segmenter(enc, None, size=1024)                 # the ResNet18 default is unchanged
+    old.set_image(rgb)
+    assert enc.fed["image"].shape == (1, 3, 1024, 1024) and enc.fed["image"][0, 0, 0, 0] != 200.0
+
+
+def test_mask_rle_round_trips_through_the_pooled_grid():
+    m = np.zeros((H, W), bool)
+    m[100:200, 300:310] = True          # a thin arm survives the max-pool
+    m[0, 0] = True                      # runs that start with ones begin with a 0 run
+    mw, mh, runs = ds.mask_rle(m, 4)
+    assert (mw, mh) == (W // 4, H // 4) and sum(runs) == mw * mh and runs[0] == 0
+    flat, on = [], False
+    for r in runs:
+        flat += [on] * r
+        on = not on
+    small = np.array(flat).reshape(mh, mw)
+    assert small[25:50, 75:78].all() and small[0, 0] and small.sum() == 25 * 3 + 1
+    p = ds.overlay_payload(m, {"masked": [{"bbox": [300, 100, 310, 200], "cls": "person", "reason": "always"}],
+                               "dets": [], "tracks": [{}], "latency_ms": 41.0}, 12.5)
+    assert p["stride"] == 4 and p["tracks"] == 1 and p["masked"][0]["cls"] == "person"
+
+
+def test_remote_protocol_carries_arrays_both_ways():
+    import socket
+    a, b = socket.socketpair()
+    feeds = {"images": np.arange(24, dtype=np.float32).reshape(1, 2, 3, 4),
+             "point_labels": np.array([[2.0, 3.0]], np.float32)}
+    ds.send_msg(a, {"op": "run", "model": "yolo_world"}, feeds)
+    h, got = ds.recv_msg(b)
+    assert h == {"op": "run", "model": "yolo_world"}
+    assert set(got) == set(feeds) and all(np.array_equal(got[k], feeds[k]) and got[k].dtype == feeds[k].dtype
+                                          for k in feeds)
+    ds.send_msg(b, {"error": "nope"})
+    assert ds.recv_msg(a) == ({"error": "nope"}, {})
+    a.close(); b.close()
+
+
+def test_remote_session_against_a_fake_server():
+    # the node's side of scripts/dynamic_seg_server.py: open, then run
+    import socket
+    import threading
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+
+    def serve():
+        conn, _ = srv.accept()
+        h, _a = ds.recv_msg(conn)
+        assert h == {"op": "open", "model": "nanosam_encoder"}
+        ds.send_msg(conn, {"input_names": ["image"], "output_names": ["image_embeddings"]})
+        h, arrs = ds.recv_msg(conn)
+        ds.send_msg(conn, {}, {"image_embeddings": arrs["image"][:, :1] * 2})
+        conn.close()
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    s = ds.open_session("models/nanosam_encoder.onnx", "remote", {"host": "127.0.0.1", "port": srv.getsockname()[1]})
+    assert s.input_names == ["image"]
+    out = s.run({"image": np.ones((1, 3, 2, 2), np.float32)})
+    assert out["image_embeddings"].shape == (1, 1, 2, 2) and float(out["image_embeddings"].max()) == 2.0
+    t.join(2)
+    srv.close()
+
+
+def test_remote_session_says_how_to_start_the_server():
+    with pytest.raises(RuntimeError, match="jetson.sh seg start"):
+        ds.RemoteSession("yolo_world", port=1, timeout_s=0.5)

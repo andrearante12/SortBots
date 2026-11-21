@@ -314,11 +314,15 @@
   .cam .armpad [data-arm-act="magnet"].on { background: rgba(242,183,5,.9); color: #15191e; border-color: rgba(242,183,5,1); }
   .cam .armpad [data-arm-act="pick"] { color: #8fd3a8; }
   @media (pointer: coarse) { .cam .armpad .tp.hand { width: 160px; height: 160px; } .cam .armpad .tp.z { width: 46px; height: 160px; } .cam .armpad button, .cam .armpad .armmore > summary { height: 28px; } .cam .armpad .armmore > summary { width: 28px; } }
-  .more .cam canvas.feat { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-  .featbtn { position: absolute; top: 6px; left: 6px; background: rgba(10,12,16,.6); border: 1px solid transparent; color: #c3cad2; font-size: .72rem; padding: 3px 9px; border-radius: 6px; }
+  .more .cam canvas.feat, .more .cam canvas.seg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  /* Features and Seg, side by side top-left; their status lines stacked under them. */
+  .camtoggles { position: absolute; top: 6px; left: 6px; display: flex; gap: 4px; }
+  .featbtn { background: rgba(10,12,16,.6); border: 1px solid transparent; color: #c3cad2; font-size: .72rem; padding: 3px 9px; border-radius: 6px; }
   .featbtn.on { background: rgba(61,220,132,.9); color: #15191e; font-weight: 600; }
-  .featstat { position: absolute; top: 32px; left: 6px; font-size: .68rem; color: #e6eaee; background: rgba(10,12,16,.6); padding: 1px 6px; border-radius: 4px; pointer-events: none; }
-  .featstat:empty { display: none; }
+  .segbtn.on { background: rgba(255,79,216,.9); }
+  .camstats { position: absolute; top: 32px; left: 6px; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; pointer-events: none; }
+  .featstat, .segstat { font-size: .68rem; color: #e6eaee; background: rgba(10,12,16,.6); padding: 1px 6px; border-radius: 4px; }
+  .featstat:empty, .segstat:empty { display: none; }
   .camsel { position: absolute; top: 6px; right: 6px; display: flex; background: rgba(10,12,16,.6); border-radius: 6px; padding: 2px; }
   .camsel button { background: none; border: none; color: #c3cad2; font-size: .72rem; padding: 2px 8px; border-radius: 4px; }
   .camsel button.on { background: rgba(255,255,255,.9); color: #15191e; font-weight: 600; }
