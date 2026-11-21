@@ -255,6 +255,18 @@ def test_mover_cells_one_person_and_edge_bleed():
     assert m["n"] == int(((person[:, 2] >= 0.1)).sum())
 
 
+def test_mover_cells_drops_background_seen_through_the_mask():
+    from dynamic_obstacle_filter import mover_cells
+    rng = np.random.default_rng(1)
+    person = np.column_stack([rng.uniform(1.9, 2.2, 600), rng.uniform(-0.15, 0.15, 600),
+                              rng.uniform(0.2, 1.7, 600)])
+    # wall between the legs, plus the flying pixels joining it to the person along the ray
+    streak = np.column_stack([np.linspace(2.2, 3.8, 150), np.zeros(150), np.full(150, 0.5)])
+    m = mover_cells(np.vstack([person, streak]))[0]
+    assert max(x for x, _ in m["cells"]) < 2.5
+    assert abs(m["at"][0] - 2.05) < 0.1
+
+
 def test_mover_cells_two_apart_nearest_first_and_empty():
     from dynamic_obstacle_filter import mover_cells
     a = np.array([[3.0 + dx, dy, 1.0] for dx in (0, .1, .2) for dy in (0, .1)])

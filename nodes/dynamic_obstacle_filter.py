@@ -642,6 +642,7 @@ MOVERS = {
     # A cluster smaller than this is the mask's edge bleeding onto the wall behind
     # (grow_seg_mask's halo), not a mover: a person is 4-20 cells at 0.1 m.
     "movers_min_cells": 3,
+    "movers_depth_band_m": 0.4,  # around the cluster's median range: a person's own depth
 }
 
 
@@ -685,12 +686,20 @@ def mover_cells(pts: np.ndarray, cfg: dict | None = None) -> list[dict]:
         if len(group) < c["movers_min_cells"]:
             continue
         mine = np.isin(inv, group)
+        # Keep the cluster's own depth: SAM's mask also takes the background showing between
+        # arms and legs, which lands at the wall's range and drew a person as a 1.9 m streak
+        # along the ray (live, 2026-11-20). Most of a mask is the mover, so the median is it.
+        r = np.hypot(xy[mine, 0], xy[mine, 1])
+        mine[mine] = np.abs(r - np.median(r)) <= c["movers_depth_band_m"]
+        kept = np.unique(inv[mine])
+        if len(kept) < c["movers_min_cells"]:
+            continue
         at = xy[mine].mean(axis=0)
         out.append({
             "at": [round(float(at[0]), 2), round(float(at[1]), 2)],
             "n": int(mine.sum()),
             "cells": [[round((float(i) + 0.5) * s, 2), round((float(j) + 0.5) * s, 2)]
-                      for i, j in cells[group]],
+                      for i, j in cells[kept]],
         })
     out.sort(key=lambda m: m["at"][0] ** 2 + m["at"][1] ** 2)
     return out
