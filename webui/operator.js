@@ -1917,7 +1917,7 @@
     }
   }
   function closeRobot(id) {
-    open.delete(id); stopCam(id); setCamFeatures(id, false);
+    open.delete(id); stopCam(id); setCamFeatures(id, false); setCamSeg(id, false);
     if (selected === id) selected = [...open].pop() ?? null; // control falls to the newest still open
     refreshSelection();
   }
@@ -2577,7 +2577,7 @@
                          obstaclesMap: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity });
     }
     for (const [id, c] of cams) {
-      c.head.hidden = true; c.perc.hidden = true; c.featData = null; drawCamFeatures(id);
+      c.head.hidden = true; c.perc.hidden = true; c.featData = null; drawCamFeatures(id); c.segData = null; drawCamSeg(id);
       c.overlay.getContext("2d").clearRect(0, 0, c.overlay.width, c.overlay.height);
       if (open.has(id)) startCam(id); else for (const pic of Object.values(c.pics)) pic.style.backgroundImage = "";
     }
