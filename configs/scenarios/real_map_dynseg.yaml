@@ -19,7 +19,7 @@ run:
   localize: false
   map: null
   dynamic_seg: model     # off | model (oracle is the simulator's)
-  seg_policy: open       # open: depth frames use the newest mask; strict waits for one
+  seg_policy: strict     # each depth frame waits for its own mask (open: the newest, up to 0.3 s old)
 
 overrides: [resume, seg_policy]
 
