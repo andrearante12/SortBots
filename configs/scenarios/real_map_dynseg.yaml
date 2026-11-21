@@ -1,0 +1,27 @@
+# Real-robot scenario — see configs/scenarios/explore_fresh.yaml for the file
+# format, and real_map_fresh.yaml, which this is plus dynamic segmentation.
+name: real_map_dynseg
+
+title: Real robot — camera mapping, movers masked out
+description: >
+  real_map_fresh with dynamic segmentation on: the depth filter runs and
+  nodes/dynamic_segment.py masks people, carts and the like out of what
+  RTAB-Map maps (docs/mapping-movers.md). The models run on the Jetson host:
+  start the server first with `scripts/jetson.sh seg start`. Turn on Seg on the
+  camera tile to see what it masks.
+
+platform: real
+status: ready
+
+run:
+  robot_id: robot_0
+  resume: false
+  localize: false
+  map: null
+  dynamic_seg: model     # off | model (oracle is the simulator's)
+  seg_policy: open       # open: depth frames use the newest mask; strict waits for one
+
+overrides: [resume, seg_policy]
+
+capture:
+  bag: false
