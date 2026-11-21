@@ -6,9 +6,9 @@ Autonomous mobile robots for collaborative indoor logistics, built on
 [XLeRobot](https://github.com/Vector-Wangel/XLeRobot): rapid deployment in
 unmapped spaces, with decentralized task allocation between robots.
 
-## Pick and place
+## Warehouse Logistics
 
-The real robot picks a package out of its own basket and places it on the chair beside it (sped up).
+Using a magnetic end effector, the robot picks up a package from a pick location, loads it into its storage basket, then brings it to the dropoff location.
 
 <img src="docs/media/demos/pick_and_place.gif" alt="Real robot pick and place" width="300">
 
