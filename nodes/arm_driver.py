@@ -24,6 +24,9 @@ and a servo board takes one owner: anything that moves either goes through here.
                                               it holds the package and hands the arm back to
                                               the pad; {"cmd": "save_place"} saves where the
                                               arm is now as the place pose;
+                                              {"cmd": "unload"} the package in the body out
+                                              onto the table pose (pick_core.unload), and
+                                              {"cmd": "save_table"} saves that pose;
                                               {"cmd": "rest"} back to the taught rest pose,
                                               releasing the magnet first if it's on;
                                               {"cmd": "cancel"} holds the arm where it is
@@ -936,6 +939,9 @@ def run_node(robot_id: str, cfg: dict):
                     else:
                         raise_result = None
                     result = raise_result or ("rest" if core.go_rest() else ("aborted" if abort.is_set() else "failed"))
+                elif action == "unload":
+                    core.start()
+                    result = core.unload()
                 else:
                     core.start()
                     result = core.auto_pick(place=action != "pick_hold")
@@ -953,7 +959,8 @@ def run_node(robot_id: str, cfg: dict):
         abort.clear()
         pick["thread"] = threading.Thread(target=run, daemon=True)
         log.info(f"pick: starting {action}")
-        pick_status("STARTING", "going to rest" if action == "rest" else "pick and place", busy=True)
+        pick_status("STARTING", {"rest": "going to rest", "unload": "unloading onto the table"}.get(action, "pick and place"),
+                    busy=True)
         pick["thread"].start()
 
     # -- nav / manipulation mode --------------------------------------------------------------
@@ -1008,24 +1015,26 @@ def run_node(robot_id: str, cfg: dict):
 
     def on_pick_request(msg):
         cmd = _json(msg.data) or {}
-        if cmd.get("cmd") in ("auto", "rest", "pick_hold") and estop["on"]:
+        if cmd.get("cmd") in ("auto", "rest", "pick_hold", "unload") and estop["on"]:
             return pick_status("FAILED", "e-stop is latched: release it first")
-        if cmd.get("cmd") in ("auto", "rest", "pick_hold"):
+        if cmd.get("cmd") in ("auto", "rest", "pick_hold", "unload"):
             set_mode("manip")
             start_pick(cmd["cmd"])
         elif cmd.get("cmd") == "save_place":
-            save_place()
+            save_pose("pick_place_pose.json", "place")
+        elif cmd.get("cmd") == "save_table":
+            save_pose("pick_table_pose.json", "table")
         elif cmd.get("cmd") in ("cancel", "stop", "abort"):
             pick["abort"].set()
 
-    def save_place():
-        """Where the arm is now becomes the place pose: handeye's pick_place_pose.json, in the
-        repo's calibration copy that load_robot reads (commit it to keep it). The next pick
-        loads it fresh."""
+    def save_pose(name, what):
+        """Where the arm is now becomes the place pose (handeye's pick_place_pose.json) or
+        Unload's table pose (pick_table_pose.json), in the repo's calibration copy that
+        load_robot reads (commit it to keep it). The next pick loads it fresh."""
         import pick_core
         import pick_ros
         if pick["thread"] is not None:
-            return pick_status("BUSY", "a pick is running: save the place pose once it's done", busy=True)
+            return pick_status("BUSY", f"a pick is running: save the {what} pose once it's done", busy=True)
         if arm is None:
             return pick_status("FAILED", "no arm configured")
         now = time.monotonic()
@@ -1037,15 +1046,15 @@ def run_node(robot_id: str, cfg: dict):
             deg = pick_ros.BusArmIO(head.bus, head.cal, arm.cal).read()
         except (OSError, ft.BusError) as e:
             return pick_status("FAILED", f"could not read the arm: {e}")
-        path = pick_core.CALIBRATION_DIR / "robots" / "sortbots_head" / "pick_place_pose.json"
+        path = pick_core.CALIBRATION_DIR / "robots" / "sortbots_head" / name
         rec = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "arm_deg": [round(deg[j], 4) for j in pick_ros.ARM]}
         try:
             path.write_text(json.dumps(rec, indent=1))
         except OSError as e:
-            return pick_status("FAILED", f"could not save the place pose: {e}")
+            return pick_status("FAILED", f"could not save the {what} pose: {e}")
         pick["robot"] = None          # the next pick reloads the poses
-        log.info(f"place pose saved: {rec['arm_deg']}")
-        pick_status("SAVED", "place pose saved: release the magnet, then Rest", busy=False)
+        log.info(f"{what} pose saved: {rec['arm_deg']}")
+        pick_status("SAVED", f"{what} pose saved: release the magnet, then Rest", busy=False)
 
     node.create_subscription(String, f"/{robot_id}/pick_request", on_pick_request, 10)
 

@@ -378,6 +378,10 @@ async function main() {
     await page.eval(`(() => { const s = document.querySelector('${headSel} [data-head="tilt"]'); s.value = '0.8'; s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     const headCmd = JSON.parse(await page.eval(`JSON.stringify(window.__published.filter((x) => x.topic === '/${r0}/head_cmd').at(-1) || null)`));
     check(`${vp.label}: moving a slider commands the head`, !!headCmd && headCmd.msg.name[1] === 'head_tilt_joint' && headCmd.msg.position[1] === 0.8 && headCmd.msg.position[0] === 0.1, JSON.stringify(headCmd));
+    // Unload / Save table (2026-11-20): the arm pad's reverse of Pick, one pick_request each.
+    await page.eval(`window.__published.length = 0; (() => { const el = window.__operator.cams.get(${JSON.stringify(r0)}).el; el.querySelector('[data-arm-act="unload"]').click(); el.querySelector('[data-arm-act="save_table"]').click(); })()`);
+    const pickReqs = JSON.parse(await page.eval(`JSON.stringify(window.__published.filter((x) => x.topic === '/${r0}/pick_request').map((x) => JSON.parse(x.msg.data).cmd))`));
+    check(`${vp.label}: Unload and Save table send their pick requests`, JSON.stringify(pickReqs) === '["unload","save_table"]', JSON.stringify(pickReqs));
     await click(`#fleet .robot[data-id="${r0}"] [data-cam-mode="depth"]`);
     await sleep(100);
     check(`${vp.label}: leaving split shows one picture again`, (await page.eval(`[...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')].filter((p) => p.offsetWidth).length`)) === 1);

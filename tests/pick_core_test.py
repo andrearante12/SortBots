@@ -487,6 +487,39 @@ def test_a_high_grab_pulls_in_before_the_lift():
     assert reach and min(reach) < reach[0] - 0.04   # came in >= 4 cm holding it, before the back-off
 
 
+def test_unload_looks_into_the_body_and_places_on_the_table():
+    # The operator view's Unload: head aimed at where the place pose leaves the package, the pick's
+    # own lock/plan/press, then the table pose, the base never moving.
+    core, bus, mag, reports = make_core(q_deg=POSES.samples[0]["arm_deg"], head=(0.0, 0.0))
+    core.st["table_q"] = POSES.place_q.copy()   # any reachable drop spot: this tests the flow
+    aimed = []
+    aim = core.aim_head_at
+    core.aim_head_at = lambda p: aimed.append(np.asarray(p, float)) or aim(p)
+    core.start()
+    core.go_rest()
+    assert core.unload(10) == "placed", reports[-3:]
+    spot = KIN.tool_point(POSES.place_q, HC.magnet_m)
+    assert np.allclose(aimed[0], spot)              # its first look is into the body
+    assert not [x for x in bus.log if x[0] == "base"]  # the base stayed put
+    kinds = [x[1] for x in bus.log if x[0] == "magnet"]
+    assert "on" in kinds and kinds[-1] == "off"
+    assert core.unloading is False
+
+
+def test_unload_without_a_table_pose_holds_it_for_the_pad():
+    core, bus, mag, reports = make_core(q_deg=POSES.samples[0]["arm_deg"], head=(0.0, 0.0))
+    core.start()
+    core.go_rest()
+    assert core.st["table_q"] is None
+    assert core.unload(10) == "picked"
+    assert core.st["state"] == "holding" and "Save table" in reports[-1][1]
+
+
+def test_unload_needs_a_place_pose():
+    core, *_ , reports = make_core(place=False)
+    assert core.unload(10) == "failed" and "no place pose" in reports[-1][1]
+
+
 # ---- safety ----------------------------------------------------------------------------------
 def _tool_z(bus):
     return KIN.tool_point(np.radians([bus.pos[j] for j in pc.ARM]), HC.magnet_m)[2]
