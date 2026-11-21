@@ -1243,7 +1243,7 @@
     if (c) return c;
     const el = document.createElement("div");
     el.className = "cam";
-    el.innerHTML = `<div class="pics"><div class="pic" data-feed="rgb" data-label="Camera"><span class="msg"></span></div><div class="pic" data-feed="depth" data-label="Depth"><span class="msg"></span></div></div><canvas class="obst"></canvas><canvas class="seg"></canvas><canvas class="feat"></canvas>
+    el.innerHTML = `<div class="pics"><div class="pic" data-feed="rgb" data-label="Camera"><span class="msg"></span></div><div class="pic" data-feed="depth" data-label="Depth"><span class="msg"></span></div></div><canvas class="obst"></canvas><canvas class="dynseg"></canvas><canvas class="feat"></canvas>
       <div class="camtoggles"><button type="button" class="featbtn" data-cam-features aria-pressed="false" title="Show the visual features RTAB-Map is tracking (green = inlier driving the pose, amber = matched to the map, grey = detected only)">Features</button><button type="button" class="featbtn segbtn" data-cam-seg aria-pressed="false" title="Show what dynamic_segment masks out of the map (magenta fill = masked; solid box = masked and why; dashed = what the detector saw). Runs only with dynamic_seg on">Seg</button></div>
       <div class="camstats"><span class="featstat"></span><span class="segstat"></span></div>
       <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button><button type="button" data-cam-mode="split" title="Camera and depth, stacked">Split</button></div>
@@ -1274,7 +1274,9 @@
     c = { el, head, perc, pics: { rgb: el.querySelector('[data-feed="rgb"]'), depth: el.querySelector('[data-feed="depth"]') },
           overlay: el.querySelector("canvas.obst"), feat: el.querySelector("canvas.feat"), featStat: el.querySelector(".featstat"),
           mode: camDefault, timers: {}, token: 0, headAt: -Infinity, headSent: 0, features: false, featSub: null, featData: null, featAt: -Infinity,
-          seg: el.querySelector("canvas.seg"), segStat: el.querySelector(".segstat"), segOn: false, segSub: null, segData: null, segAt: -Infinity };
+          // "dynseg", not "seg": .seg is the page's segmented-control class (opaque, flex), and
+          // a canvas.seg covered the camera picture (2026-11-20)
+          seg: el.querySelector("canvas.dynseg"), segStat: el.querySelector(".segstat"), segOn: false, segSub: null, segData: null, segAt: -Infinity };
     cams.set(id, c);
     wireHead(id, c);
     wireHeadKeys(id, c);
