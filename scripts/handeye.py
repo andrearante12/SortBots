@@ -2829,9 +2829,10 @@ def main(argv=None):
     pk.add_argument("--press-torque", type=int, default=PRESS_TORQUE,
                     help=f"Torque_Limit of lift/elbow/wrist during the press, 0..1000 (default {PRESS_TORQUE}): "
                          "how hard it pushes; --press-mm is how far")
-    pk.add_argument("--base-back-cm", type=float, default=15.0,
+    # 0 since 2026-11-20 (was 15): asked for picks and places that never drive the wheels
+    pk.add_argument("--base-back-cm", type=float, default=0.0,
                     help="placing: back the base this far away from the table first, forward again after "
-                         "(default 15; 0 = don't use the base)")
+                         "(default 0 = don't use the base)")
     pk.add_argument("--lift-tilt-deg", type=float, default=LIFT_TILT_DEG,
                     help=f"after a top pick: lift {LIFT_PRE_M * 100:.1f} cm, then tilt the wrist this far the "
                          f"'wrist up' way before the rest of the lift (default {LIFT_TILT_DEG:g}; 0 = straight up)")

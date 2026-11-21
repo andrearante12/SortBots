@@ -289,7 +289,7 @@ class HandeyeRun:
         saved_mods = {k: sys.modules.get(k) for k in self.mods}
         a = types.SimpleNamespace(marker_id=10, marker_m=0.02, head=list(pc.PICK_HEAD), port="", arm_id="",
                                   head_id="sortbots_head", no_view=True, magnet_on_mm=10.0, press_mm=15.0,
-                                  press_torque=pc.PRESS_TORQUE, base_back_cm=15.0, lift_tilt_deg=pc.LIFT_TILT_DEG,
+                                  press_torque=pc.PRESS_TORQUE, base_back_cm=0.0, lift_tilt_deg=pc.LIFT_TILT_DEG,
                                   pull_in_cm=pc.PULL_IN_CM, pull_in_off_flat_deg=pc.PULL_IN_OFF_FLAT_DEG,
                                   wrist_torque=pc.WRIST_COMPLY_TORQUE, pitch_deg=pc.PICK_PITCH_DEG,
                                   side_pitch_deg=None, side_press_mm=pc.SIDE_PRESS_MM, radial_mm=1.0)
@@ -452,7 +452,7 @@ def _pick_pair(target=TARGET, **core_kw):
     q0 = POSES.samples[0]["arm_deg"]
     run = HandeyeRun(keys=[[], ["o"]], q_deg=q0)
     run.entries = fake_entries(run.bus, target)
-    run.run()
+    run.run(base_back_cm=core_kw.get("base_back_cm", 0.0))
     he_log = run.log[:run.snap]
     core, bus, mag, _ = make_core(q_deg=q0, head=(0.0, 0.0), **core_kw)
     core.entries = fake_entries(bus, target)
@@ -464,7 +464,7 @@ def _pick_pair(target=TARGET, **core_kw):
 
 
 def test_auto_pick_writes_what_handeye_writes():
-    he_log, core_log, result, run, core = _pick_pair()
+    he_log, core_log, result, run, core = _pick_pair(base_back_cm=15.0)   # the back-off, when asked for
     assert result == "placed", result
     same_log(he_log, core_log)
     kinds = [x[0] if x[0] != "magnet" else x[1] for x in core_log]
@@ -481,10 +481,10 @@ def test_a_high_grab_pulls_in_before_the_lift():
     same_log(he_log, core_log)
     assert core.st["lift_tilt_rad"] == 0.0   # no break-away tilt after a pull-in, nothing to undo
     on = next(i for i, x in enumerate(core_log) if x == ("magnet", "on"))
-    back = next(i for i, x in enumerate(core_log) if x[0] == "base" and i > on)
+    off = next(i for i, x in enumerate(core_log) if x == ("magnet", "off") and i > on)
     reach = [float(np.hypot(*KIN.tool_point(np.radians([g[j] for j in pc.ARM]), HC.magnet_m)[:2]))
-             for k, g, *_ in core_log[on:back] if k == "goal" and all(j in g for j in pc.ARM)]
-    assert reach and min(reach) < reach[0] - 0.04   # came in >= 4 cm holding it, before the back-off
+             for k, g, *_ in core_log[on:off] if k == "goal" and all(j in g for j in pc.ARM)]
+    assert reach and min(reach) < reach[0] - 0.04   # came in >= 4 cm while holding it
 
 
 def test_unload_looks_into_the_body_and_places_on_the_table():

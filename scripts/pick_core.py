@@ -89,7 +89,7 @@ class PickConfig:
     magnet_on_mm: float = CONTACT_ABOVE_M * 1000
     press_mm: float = PRESS_BELOW_M * 1000
     press_torque: int = PRESS_TORQUE
-    base_back_cm: float = 15.0
+    base_back_cm: float = 0.0   # handeye --base-back-cm: no wheels in a pick unless asked (2026-11-20)
     lift_tilt_deg: float = LIFT_TILT_DEG
     pull_in_cm: float = PULL_IN_CM
     pull_in_off_flat_deg: float = PULL_IN_OFF_FLAT_DEG
