@@ -60,5 +60,6 @@ pick:
   # 2026-11-16 while the base board wasn't fitted).
   base_back_cm: 10
   # Aim correction along the line from the arm's base through the target, + = away from the
-  # robot. handeye's +1 mm landed ~2 mm short on the first ROS picks (2026-11-16): +3.
-  radial_mm: 3.0
+  # robot. handeye's +1 mm landed ~2 mm short on the first ROS picks (2026-11-16): +3. Still
+  # ~1 mm short on the high-box picks (2026-11-20): +4.
+  radial_mm: 4.0
