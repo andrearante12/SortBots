@@ -1,0 +1,34 @@
+# Real-robot scenario — see real_map_fresh.yaml for the format. Point-to-point tasks
+# on a map the robot already built: localize (read-only) + Nav2 + task_manager
+# (scripts/run_robot.sh --localize --nav). The real counterpart of library_localize.
+#
+# Why a saved map and not real_explore's fresh one: waypoints are poses in the map
+# frame, and a fresh map's frame is wherever the robot happened to start, so pins
+# placed in one run mean nothing in the next. A saved map keeps them (waypoints: map
+# loads the map's own set).
+name: real_nav
+
+title: Real robot — saved map, navigate tasks
+description: >
+  Loads a map the robot built, localizes on it read-only, and runs Nav2 and
+  task_manager: place waypoints on the map, then queue a move or a pick-up ->
+  drop-off in the Tasks pane and the robot drives it (slow, 0.15 m/s,
+  configs/nav2_real.yaml). Start the robot somewhere it has mapped, camera
+  facing something textured, and wait for it to localize before queueing:
+  Nav2 can't plan until RTAB-Map places it. Keep the E-STOP in reach.
+
+platform: real
+status: ready
+
+run:
+  robot_id: robot_0
+  localize: true
+  resume: false
+  map: null              # null = the working DB; the Map dropdown sets this
+  nav: true
+  waypoints: map
+
+overrides: [map]
+
+capture:
+  bag: false

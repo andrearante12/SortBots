@@ -82,7 +82,9 @@ Develop elsewhere and push. Don't commit on the Jetson.
 - No IMU (`wait_imu_to_init:=false`).
 - Depth is 16UC1 mm.
 - The map anchor is `spawn.real`.
-- Nav2, the explorer and task_manager are **off** until a base driver exists.
+- Nav2, the explorer and task_manager run only with `--nav` (`real_explore`, `real_nav`):
+  Nav2 is real CPU on the Orin next to RTAB-Map. `nodes/base_driver.py` turns `cmd_vel`
+  into wheel speeds. magnet_pick never runs: the real pick is `nodes/arm_driver.py`'s.
 - DDS is localhost-only, so a desktop sim on the LAN can't cross-talk with
   `/robot_0/*`.
 - `SORTBOTS_PLATFORM=real` must be set inside the container. `jetson.sh` sets it.
@@ -95,6 +97,33 @@ and silently dropped UDP fragments starved odometry. `configs/dds/fastdds_large_
 **Viewing on the Jetson's own screen:** snap browsers need `SNAP_REEXEC=0`. For WebGL
 without a GPU, add `--disable-gpu --enable-unsafe-swiftshader --ignore-gpu-blocklist`.
 Viewing from another device is better.
+
+### Point-to-point tasks
+
+Operator task → `/robot_0/dispatch_task` → `nodes/task_manager.py` → Nav2
+`navigate_to_pose` → `cmd_vel` → `nodes/base_driver.py` → wheels. The same path as the sim.
+The only real-robot difference is that the whole chain is behind `run_robot.sh --nav`.
+
+1. **Map the space** with `real_map_fresh` (or `real_explore`), then save it from the Map
+   button. Waypoints are poses in the map frame, and a fresh map's frame starts wherever
+   the robot stood, so pins only carry over between runs on a saved map.
+2. **Start `real_nav`** and pick that map. Start the robot somewhere it has mapped, with the
+   camera on something textured, and wait until it shows on the map, localized. Nav2 can't
+   plan before that, and task_manager retries a rejected first leg for 90 s only.
+3. **Place waypoints** on the map (they save with the map), then in **Tasks** queue a move
+   (`goto`) or a pick-up → drop-off. Pick-up and drop-off are 2 s dwells on the robot: no
+   arm. Task state streams on `/robot_0/task_status`.
+
+From a shell in the container (`scripts/jetson.sh shell`), the same without the GUI:
+
+```bash
+ros2 topic pub --once /robot_0/dispatch_task std_msgs/String '{data: "{\"goto\": \"A\"}"}'
+ros2 topic echo /robot_0/task_status
+ros2 topic pub --once /robot_0/cancel_task std_msgs/String '{data: all}'
+```
+
+Speed is capped at 0.15 m/s (`configs/nav2_real.yaml`) under base_driver's own cap. The
+E-STOP latches in base_driver and stops Nav2's output from reaching the wheels.
 
 ### SLAM offload
 
@@ -117,8 +146,8 @@ Without a workstation, the default `--slam-role all` maps on the Jetson at `nice
 
 **Next hardware steps:**
 
-- A base driver (`cmd_vel` → motors, `odom`), after which Nav2, the explorer and
-  task_manager can be enabled on the robot.
+- Wheel odometry from the base driver (`odom`): the base drives open-loop today, and
+  Nav2's odometry is RTAB-Map's visual odometry alone.
 - An MPU6050 driver feeding `imu_filter_madgwick`.
 - cuVSLAM, which needs JetPack 7.2.
 - Mesh radios (see [Fleet comms](commsim.md)).

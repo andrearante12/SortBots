@@ -121,6 +121,16 @@ def _make_nav2_group(context, use_sim_time, params_file, overlay_file):
     depth_to_cloud = LaunchConfiguration("depth_to_cloud").perform(context).lower() in ("true", "1")
     rewritten_params = _rewrite_robot_0(params_file.perform(context), robot_id,
                                         overlay_file.perform(context))
+    # The launch's use_sim_time, over nav2_params.yaml's `use_sim_time: true` (written for
+    # Isaac's /clock). Every server gets it, not just lifecycle_manager: on the real robot
+    # there is no /clock publisher, and with the file's true each server's clock sat at 0
+    # forever. The controller loop runs on a wall rate so it still drove, but the progress
+    # checker's 20 s allowance never elapsed, so a robot pinned by collision_monitor never
+    # failed into the recoveries (clear, spin, wait, back up): stalled indefinitely
+    # beside a chair, 2026-11-21. A dict param applies to every node in the process (/**),
+    # so the costmaps inside controller_server and planner_server get it too.
+    sim_time = {"use_sim_time": use_sim_time.perform(context).lower() in ("true", "1")}
+    params = [rewritten_params, sim_time]
 
     # Reactive-replanning BT (see the file's header for what it changes vs
     # the stock tree). Injected as a parameter override rather than written
@@ -167,7 +177,7 @@ def _make_nav2_group(context, use_sim_time, params_file, overlay_file):
                 executable="controller_server",
                 name="controller_server",
                 output="screen",
-                parameters=[rewritten_params],
+                parameters=params,
                 # Raw output goes to velocity_smoother first, not the robot.
                 remappings=[("cmd_vel", "cmd_vel_nav")],
             ),
@@ -177,7 +187,7 @@ def _make_nav2_group(context, use_sim_time, params_file, overlay_file):
                 executable="planner_server",
                 name="planner_server",
                 output="screen",
-                parameters=[rewritten_params],
+                parameters=params,
             ),
             Node(
                 prefix=prefix,
@@ -185,7 +195,7 @@ def _make_nav2_group(context, use_sim_time, params_file, overlay_file):
                 executable="smoother_server",
                 name="smoother_server",
                 output="screen",
-                parameters=[rewritten_params],
+                parameters=params,
             ),
             Node(
                 prefix=prefix,
@@ -193,7 +203,7 @@ def _make_nav2_group(context, use_sim_time, params_file, overlay_file):
                 executable="behavior_server",
                 name="behavior_server",
                 output="screen",
-                parameters=[rewritten_params],
+                parameters=params,
             ),
             Node(
                 prefix=prefix,
@@ -202,8 +212,7 @@ def _make_nav2_group(context, use_sim_time, params_file, overlay_file):
                 name="bt_navigator",
                 output="screen",
                 # Later dicts override the params file.
-                parameters=[rewritten_params,
-                            {"default_nav_to_pose_bt_xml": bt_xml}],
+                parameters=[*params, {"default_nav_to_pose_bt_xml": bt_xml}],
             ),
             Node(
                 prefix=prefix,
@@ -211,7 +220,7 @@ def _make_nav2_group(context, use_sim_time, params_file, overlay_file):
                 executable="waypoint_follower",
                 name="waypoint_follower",
                 output="screen",
-                parameters=[rewritten_params],
+                parameters=params,
             ),
             Node(
                 prefix=prefix,
@@ -219,7 +228,7 @@ def _make_nav2_group(context, use_sim_time, params_file, overlay_file):
                 executable="velocity_smoother",
                 name="velocity_smoother",
                 output="screen",
-                parameters=[rewritten_params],
+                parameters=params,
                 # Smoother -> collision_monitor -> robot cmd_vel.
                 remappings=[
                     ("cmd_vel", "cmd_vel_nav"),
@@ -232,7 +241,7 @@ def _make_nav2_group(context, use_sim_time, params_file, overlay_file):
                 executable="collision_monitor",
                 name="collision_monitor",
                 output="screen",
-                parameters=[rewritten_params],
+                parameters=params,
             ),
             Node(
                 prefix=prefix,
