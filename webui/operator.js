@@ -1247,7 +1247,7 @@
       <div class="camtoggles"><button type="button" class="featbtn" data-cam-features aria-pressed="false" title="Show the visual features RTAB-Map is tracking (green = inlier driving the pose, amber = matched to the map, grey = detected only)">Features</button><button type="button" class="featbtn segbtn" data-cam-seg aria-pressed="false" title="Show what dynamic_segment masks out of the map (magenta fill = masked; solid box = masked and why; dashed = what the detector saw). Runs only with dynamic_seg on">Seg</button></div>
       <div class="camstats"><span class="featstat"></span><span class="segstat"></span></div>
       <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button><button type="button" data-cam-mode="split" title="Camera and depth, stacked">Split</button></div>
-      <div class="padmode" role="tablist" aria-label="What the pad controls" hidden><button type="button" data-padmode="drive" role="tab" title="Nav mode: drive the base, mapping runs (M switches)">Nav</button><button type="button" data-padmode="arm" role="tab" title="Manipulation mode: the arm, pick and rest, and the head (keys I/K/J/L, H centres); mapping pauses">Manip</button></div>
+      <div class="padmode" role="tablist" aria-label="What the pad controls" hidden><button type="button" data-padmode="drive" role="tab" title="Nav mode: drive the base, mapping runs (M switches)">Nav</button><button type="button" data-padmode="arm" role="tab" title="Manipulation mode: the arm, pick and rest, and the head (keys H/J/K/L, C centres); mapping pauses">Manip</button></div>
       <div class="drive" role="group" aria-label="Drive by hand" title="Drive by hand: hold an arrow. Keys W/A/S/D move, Q/E rotate, Space stops (they drive the robot in control)">
         <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
@@ -1308,10 +1308,10 @@
     c.head.addEventListener("change", send); // the last position, whatever the rate limit dropped
     c.headSend = send;
   }
-  // Head keys (2026-11-20, replacing the Head tab's pad): hold I/K to look up/down, J/L
-  // left/right; H centres. They move the sliders, which stay the one source of what is sent,
-  // so a key and a drag can't disagree. Tilt > 0 looks down, pan > 0 left.
-  const HEAD_KEY_RAD_S = 1.2, HEAD_KEYS = { i: ["tilt", -1], k: ["tilt", 1], j: ["pan", 1], l: ["pan", -1] };
+  // Head keys (2026-11-20, replacing the Head tab's pad), vim's: hold H/J/K/L to look left,
+  // down, up, right; C centres. They move the sliders, which stay the one source of what is
+  // sent, so a key and a drag can't disagree. Tilt > 0 looks down, pan > 0 left.
+  const HEAD_KEY_RAD_S = 1.2, HEAD_KEYS = { h: ["pan", 1], j: ["tilt", 1], k: ["tilt", -1], l: ["pan", -1] };
   function wireHeadKeys(id, c) {
     const setAxis = (key, rad) => {
       const inp = c.head.querySelector(`[data-head="${key}"]`);
@@ -1333,7 +1333,7 @@
     c.headKeys = {
       down(e) {
         const k = e.key.toLowerCase();
-        if (k === "h") { c.headAt = performance.now(); setAxis("pan", 0); setAxis("tilt", 0); c.headSend(); return true; }
+        if (k === "c") { c.headAt = performance.now(); setAxis("pan", 0); setAxis("tilt", 0); c.headSend(); return true; }
         if (!HEAD_KEYS[k]) return false;
         held.add(k);
         if (!timer) { last = performance.now(); timer = setInterval(step, 1000 / HEAD_HZ); }
@@ -1341,7 +1341,7 @@
       },
       up(e) { if (held.delete(e.key.toLowerCase()) && !held.size && timer) stop(); },
       release() { if (held.size) { held.clear(); stop(); } },
-      handles: (e) => e.key.toLowerCase() === "h" || !!HEAD_KEYS[e.key.toLowerCase()],
+      handles: (e) => e.key.toLowerCase() === "c" || !!HEAD_KEYS[e.key.toLowerCase()],
     };
   }
   // Nav holds the real head forward (arm_driver ignores head_cmd there): the sliders say so
@@ -1682,7 +1682,7 @@
     }
     if (e.code === "Space") { e.preventDefault(); if (armUp) cam.armKeys.stop(); if (cam && cam.headKeys) cam.headKeys.release(); return driveRelease(selected); }
     if (armUp && cam.armKeys.down(e)) { e.preventDefault(); return; }
-    // The head (I/K/J/L, H centres): any pad, but the real robot ignores head_cmd in Nav.
+    // The head (vim's H/J/K/L, C centres): any pad, but the real robot ignores head_cmd in Nav.
     if (cam && cam.headKeys && cam.hasHead && cam.headKeys.handles(e)) {
       e.preventDefault();
       const r = robots.get(selected);
