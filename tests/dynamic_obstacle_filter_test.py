@@ -236,3 +236,29 @@ def test_seg_for_stamp_takes_newest_within_tolerance():
     assert dof.seg_for_stamp(masks, 10.1, 0.005)[1] is b
     assert dof.seg_for_stamp(masks, 11.0, 0.3) is None
     assert dof.seg_for_stamp([], 10.0, 0.3) is None
+
+
+def test_mover_cells_one_person_and_edge_bleed():
+    from dynamic_obstacle_filter import mover_cells
+    rng = np.random.default_rng(0)
+    # a person: a 0.4 x 0.3 m column 2 m out, floor to 1.7 m
+    person = np.column_stack([rng.uniform(1.9, 2.3, 400), rng.uniform(-0.15, 0.15, 400),
+                              rng.uniform(0.0, 1.7, 400)])
+    bleed = np.array([[5.0, 1.0, 1.0], [5.02, 1.01, 1.1]])     # halo on the wall behind: one cell
+    floor = np.array([[2.0, 0.0, 0.02]] * 50)                   # under the band
+    far = np.array([[7.0, 0.0, 1.0]] * 50)                      # past movers_max_range_m
+    out = mover_cells(np.vstack([person, bleed, floor, far]))
+    assert len(out) == 1
+    m = out[0]
+    assert abs(m["at"][0] - 2.1) < 0.05 and abs(m["at"][1]) < 0.05
+    assert 4 <= len(m["cells"]) <= 20     # 0.4 x 0.3 m straddling cell edges: up to 5 x 4
+    assert m["n"] == int(((person[:, 2] >= 0.1)).sum())
+
+
+def test_mover_cells_two_apart_nearest_first_and_empty():
+    from dynamic_obstacle_filter import mover_cells
+    a = np.array([[3.0 + dx, dy, 1.0] for dx in (0, .1, .2) for dy in (0, .1)])
+    b = np.array([[1.0 + dx, 2.0 + dy, 1.0] for dx in (0, .1, .2) for dy in (0, .1)])
+    out = mover_cells(np.vstack([a, b]))
+    assert [round(m["at"][0]) for m in out] == [1, 3]
+    assert mover_cells(np.zeros((0, 3))) == []

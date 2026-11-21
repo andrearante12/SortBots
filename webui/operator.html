@@ -381,6 +381,16 @@
   #map-dial .z { fill: #3e8cf0; stroke: var(--float); stroke-width: 1; }
   #map-dial .deg { position: absolute; left: 0; right: 0; top: calc(100% + 3px); text-align: center; font: 600 .66rem system-ui, sans-serif;
                    color: var(--muted); pointer-events: none; }
+  /* Live map layers (operator.js setLayer), stacked over the dial. */
+  #map-layers { right: 16px; bottom: 132px; z-index: 2; display: flex; flex-direction: column; gap: 3px; padding: 4px; }
+  #map-layers .layerbtn { background: none; border: 1px solid transparent; border-radius: 6px; color: var(--muted);
+                          font: 500 .74rem system-ui, sans-serif; padding: 3px 8px; cursor: pointer; text-align: left; }
+  #map-layers .layerbtn:hover { color: var(--ink); }
+  #map-layers .layerbtn::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px;
+                                  border: 1px solid currentColor; vertical-align: 0; }
+  #map-layers .layerbtn.on { color: var(--ink); font-weight: 600; }
+  #map-layers .layerbtn[data-layer="people"].on::before { background: #e5484d; border-color: #e5484d; }
+  #map-layers .layerbtn[data-layer="costmap"].on::before { background: #8a5cf0; border-color: #8a5cf0; }
   #map { width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
   .float { position: absolute; background: var(--float); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 2px 8px var(--shadow); }
   #tools button { padding: 5px 11px; font-size: .95rem; line-height: 1.2; }
@@ -888,6 +898,11 @@
       <circle class="z" r="3.2"></circle>
     </svg>
     <span class="deg">0°</span>
+  </div>
+  <!-- Live layers over the SLAM map (operator.js setLayer). The map itself never holds movers. -->
+  <div id="map-layers" class="float" role="group" aria-label="Map layers">
+    <button type="button" class="layerbtn" data-layer="people" aria-pressed="false" title="People: where the segmenter sees movers now, red, fading over 3 s so old positions clear. Kept out of the SLAM map on purpose. Needs dynamic_seg">People</button>
+    <button type="button" class="layerbtn" data-layer="costmap" aria-pressed="false" title="Costmap: Nav2's local costmap (raw depth, people included), what the planner avoids right now. Violet: solid = obstacle, faint = keep-out margin">Costmap</button>
   </div>
   <!-- The 3D view (operator_cloud.js): the live fused point cloud, or a Gaussian splat of
        a SAVED map, trained after the run by the splat worker on the workstation's GPU

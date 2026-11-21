@@ -627,6 +627,75 @@ def depth_to_points(
     return np.stack([x, y, z], axis=1)
 
 
+# /<id>/movers: where the segmented movers are on the floor right now, for the operator
+# map's People layer. The SLAM map never holds them (depth_static strips them, and a
+# keyframe can't be un-painted); this is the live layer beside it, fresh points kept and
+# old ones dropped by the page. A few hundred bytes at movers_rate_hz instead of the
+# masked cloud (tens of thousands of points a frame).
+MOVERS = {
+    "movers_rate_hz": 5.0,
+    "movers_cell_m": 0.1,
+    "movers_stride": 4,          # full-res pixels between samples of the mask
+    "movers_min_z_m": 0.1,       # above base_link (the floor): not the floor under them
+    "movers_max_z_m": 2.2,
+    "movers_max_range_m": 6.0,
+    # A cluster smaller than this is the mask's edge bleeding onto the wall behind
+    # (grow_seg_mask's halo), not a mover: a person is 4-20 cells at 0.1 m.
+    "movers_min_cells": 3,
+}
+
+
+def mover_cells(pts: np.ndarray, cfg: dict | None = None) -> list[dict]:
+    """Movers as floor cells, from masked points (Nx3, base_link, z up from the floor).
+
+    Points in the height band and range are binned into cells; 8-connected cells are one
+    mover. Each: {"at": [x, y] (mean of its points), "n": points, "cells": [[x, y], ...]
+    (cell centres)}, nearest first, metres rounded to the cm.
+    """
+    c = {**MOVERS, **(cfg or {})}
+    if pts.size == 0:
+        return []
+    z = pts[:, 2]
+    keep = ((z >= c["movers_min_z_m"]) & (z <= c["movers_max_z_m"])
+            & (np.hypot(pts[:, 0], pts[:, 1]) <= c["movers_max_range_m"]))
+    xy = pts[keep, :2]
+    if not len(xy):
+        return []
+    s = float(c["movers_cell_m"])
+    ij = np.floor(xy / s).astype(np.int64)
+    cells, inv = np.unique(ij, axis=0, return_inverse=True)
+    inv = inv.reshape(-1)
+    index = {(int(i), int(j)): k for k, (i, j) in enumerate(cells)}
+    label = np.full(len(cells), -1)
+    out = []
+    for k0 in range(len(cells)):
+        if label[k0] >= 0:
+            continue
+        label[k0] = k0
+        group, todo = [k0], [k0]
+        while todo:
+            i, j = cells[todo.pop()]
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    k = index.get((int(i) + di, int(j) + dj))
+                    if k is not None and label[k] < 0:
+                        label[k] = k0
+                        group.append(k)
+                        todo.append(k)
+        if len(group) < c["movers_min_cells"]:
+            continue
+        mine = np.isin(inv, group)
+        at = xy[mine].mean(axis=0)
+        out.append({
+            "at": [round(float(at[0]), 2), round(float(at[1]), 2)],
+            "n": int(mine.sum()),
+            "cells": [[round((float(i) + 0.5) * s, 2), round((float(j) + 0.5) * s, 2)]
+                      for i, j in cells[group]],
+        })
+    out.sort(key=lambda m: m["at"][0] ** 2 + m["at"][1] ** 2)
+    return out
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot-id", default="robot_0")
@@ -657,6 +726,7 @@ def main(argv=None):
 
     robot_id = args.robot_id
     odom_frame = f"{robot_id}/odom"
+    base_frame = f"{robot_id}/base_link"
 
     def pack_cloud(header: Header, pts: np.ndarray) -> PointCloud2:
         msg = PointCloud2()
@@ -710,6 +780,9 @@ def main(argv=None):
                     Image, f"/{robot_id}/camera/dynamic_seg", self._on_seg, qos
                 )
                 self.create_timer(10.0, self._log_seg_stats)
+                self.movers_pub = self.create_publisher(String, f"/{robot_id}/movers", 10)
+                self._movers_next = 0.0
+                self._movers_any = False
             self.static_pub = self.create_publisher(
                 Image, f"/{robot_id}/camera/depth_static", qos
             )
@@ -880,7 +953,9 @@ def main(argv=None):
                 return
             stamp = _stamp_s(msg.header.stamp)
             hit = seg_for_stamp(self._segs, stamp, self._cfg["seg_max_age_s"])
-            live = mask | grow_seg_mask(hit[1], depth, self._cfg) if hit else mask
+            seg = grow_seg_mask(hit[1], depth, self._cfg) if hit else None
+            live = mask | seg if hit else mask
+            self._publish_movers(msg, depth, seg)
             if self._cfg["seg_policy"] == "strict":
                 # depth_static waits for this frame's own mask; Nav2's dynamic
                 # cloud does not, so the costmaps keep clearing at camera rate.
@@ -890,6 +965,37 @@ def main(argv=None):
                 self._seg_stats["used" if hit else "stale"] += 1
                 self._publish_static(msg, depth, live)
             self._publish_dynamic(msg, depth, live)
+
+        def _publish_movers(self, msg: Image, depth: np.ndarray, seg):
+            """The segmented movers on the floor (mover_cells), at most movers_rate_hz. In
+            base_link at the newest TF, not the frame's stamp: the exact-stamp lookup is
+            what keeps missing on the Orin, and the page places them with the base pose
+            it holds on arrival, as it does /<id>/obstacle_tracks."""
+            now = time.monotonic()
+            if now < self._movers_next or self._info is None:
+                return
+            self._movers_next = now + 1.0 / MOVERS["movers_rate_hz"]
+            movers = []
+            if seg is not None and seg.any():
+                try:
+                    tf = self._tf.lookup_transform(base_frame, msg.header.frame_id, Time(),
+                                                   timeout=Duration(seconds=0.0))
+                except Exception:  # noqa: BLE001 - tf2 raises several types
+                    return
+                K = self._info.k
+                pts = depth_to_points(depth, seg, float(K[0]), float(K[4]), float(K[2]),
+                                      float(K[5]), stride=MOVERS["movers_stride"])
+                q, t = tf.transform.rotation, tf.transform.translation
+                R = _quat_to_matrix(q.x, q.y, q.z, q.w)
+                movers = mover_cells(pts @ R.T + np.array([t.x, t.y, t.z], dtype=np.float32))
+            # One empty message after the last mover, then quiet until the next one.
+            if not movers and not self._movers_any:
+                return
+            self._movers_any = bool(movers)
+            st = msg.header.stamp
+            self.movers_pub.publish(String(data=json.dumps({
+                "stamp": round(st.sec + st.nanosec * 1e-9, 3), "frame": base_frame,
+                "cell_m": MOVERS["movers_cell_m"], "movers": movers})))
 
         def _publish_static(self, msg: Image, depth: np.ndarray, mask: np.ndarray):
             h, w = depth.shape

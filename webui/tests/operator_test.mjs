@@ -20,6 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+const MOVER_WAIT_MS = 3300; // > operator.js MOVER_KEEP_MS
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEBUI_DIR = path.dirname(HERE);
@@ -475,6 +476,27 @@ async function main() {
     check(`${vp.label}: velocity without a world frame is rotated like a position`, close(wBase.vel, [0, 1]), tfm);
     check(`${vp.label}: predicted points go through the world frame's pose, covariance rotates with it`,
       close(wOdom.pred[0], [1, 5, 0]) && close(wBase.pred[0], [1, 1, 3]) && close(wBase.cov, [0.01, 0, 0.04]), tfm);
+    // People layer: the segmented movers (/<id>/movers), fresh then fading out by themselves.
+    const mover = { data: JSON.stringify({ stamp: 1, frame: `${r0}/base_link`, cell_m: 0.1,
+      movers: [{ at: [2, 0], n: 50, cells: [[1.95, -0.05], [1.95, 0.05], [2.05, -0.05], [2.05, 0.05]] }] }) };
+    const mAt = [-3 + 2 * Math.cos(0.5), 2 + 2 * Math.sin(0.5)];
+    await emit(`/${r0}/movers`, mover);
+    await sleep(300);
+    const [mx, my] = await page.eval(`window.__operator.toPx(${mAt[0]}, ${mAt[1]})`);
+    check(`${vp.label}: a segmented person is marked on the map where they stand`, (await redPx('#map', mx, my, 30)) > 20);
+    await click('#map-layers [data-layer="people"]');
+    await sleep(200);
+    check(`${vp.label}: ... and hidden with the People layer off`, (await redPx('#map')) === 0);
+    await click('#map-layers [data-layer="people"]');
+    await sleep(MOVER_WAIT_MS);
+    check(`${vp.label}: ... and gone a few seconds after the last sighting`, (await redPx('#map')) === 0);
+    const cmTopic = `/${r0}/local_costmap/costmap`, subs = () => page.eval(`(window.__topics[${JSON.stringify(cmTopic)}] || []).length`);
+    check(`${vp.label}: the costmap isn't fetched while its layer is off`, (await subs()) === 0);
+    await click('#map-layers [data-layer="costmap"]');
+    check(`${vp.label}: the Costmap layer subscribes to the local costmap`, (await subs()) > 0);
+    await click('#map-layers [data-layer="costmap"]');
+    check(`${vp.label}: ... and lets go of it when switched off`, (await subs()) === 0);
+
     // That wait also outlasted ONLINE_TTL_MS for both robots; a live one keeps sending /tf.
     await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
     await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));

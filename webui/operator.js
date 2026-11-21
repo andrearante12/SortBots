@@ -442,6 +442,119 @@
     }
   }
 
+  // -- map layers: People and Costmap (2026-11-20) ---------------------------------------------
+  // The SLAM map is the permanent record, so movers are kept out of it (depth_static) and a
+  // keyframe can't be un-painted. These two are the live picture beside it:
+  //   People: /<id>/movers (nodes/dynamic_obstacle_filter.py mover_cells), the segmented
+  //     movers' floor cells. Each report is placed in `map` on arrival and kept MOVER_KEEP_MS,
+  //     fading, so a walker leaves a short trail and where they were clears by itself.
+  //   Costmap: Nav2's local costmap (/<id>/local_costmap/costmap, from raw depth, people
+  //     included): what the planner avoids right now. Subscribed only while shown (~50 KB a
+  //     message through rosbridge).
+  // Both remembered per browser; toggled by the buttons over the map (operator.html #map-layers).
+  const MOVER_KEEP_MS = 3000, MOVER_FRESH_MS = 800, COST_INK = [138, 92, 240]; // --tc of .pill.exploring
+  const layers = { people: true, costmap: false };
+  try { Object.assign(layers, JSON.parse(localStorage.getItem("sortbots.mapLayers") || "{}")); } catch (e) { /* defaults */ }
+
+  function onMovers(r, p) {
+    const base = lookupPose(p.frame || `${r.id}/base_link`);
+    if (!base) return;
+    const c = Math.cos(base.yaw), s = Math.sin(base.yaw);
+    const toMap = ([x, y]) => [base.x + c * x - s * y, base.y + s * x + c * y];
+    const now = performance.now();
+    r.movers = r.movers.filter((m) => now - m.t < MOVER_KEEP_MS);
+    if (p.movers && p.movers.length) {
+      r.movers.push({ t: now, cell: p.cell_m || 0.1,
+                      blobs: p.movers.map((m) => ({ at: toMap(m.at), cells: m.cells.map(toMap) })) });
+    }
+    dirty = true;
+  }
+  // Older reports first, so the newest cells paint on top.
+  function drawMovers() {
+    if (!layers.people) return;
+    const now = performance.now();
+    ctx.fillStyle = OBSTACLE_RED; ctx.strokeStyle = OBSTACLE_RED;
+    for (const r of robots.values()) {
+      for (const m of r.movers) {
+        const age = now - m.t;
+        if (age >= MOVER_KEEP_MS) continue;
+        const half = Math.max(1.5, (m.cell * view.scale) / 2);
+        ctx.globalAlpha = 0.55 * (1 - age / MOVER_KEEP_MS);
+        for (const b of m.blobs) for (const [x, y] of b.cells) {
+          const [a, bb] = toPx(x, y);
+          ctx.save(); ctx.translate(a, bb); ctx.rotate(-view.rot); ctx.fillRect(-half, -half, 2 * half, 2 * half); ctx.restore();
+        }
+      }
+      // A marker on each mover of the newest report while it's fresh: cells are a few
+      // pixels at fleet zoom, the halo is what's found (as drawObstacles' movers).
+      const last = r.movers[r.movers.length - 1];
+      if (!last || now - last.t > MOVER_FRESH_MS) continue;
+      ctx.globalAlpha = 1; ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
+      for (const b of last.blobs) {
+        const [a, bb] = toPx(b.at[0], b.at[1]);
+        ctx.beginPath(); ctx.arc(a, bb, 5, 0, 7); ctx.fill();
+        ctx.globalAlpha = 0.35; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(a, bb, 12, 0, 7); ctx.stroke();
+        ctx.globalAlpha = 1; ctx.fillText("person", a, bb - 16);
+      }
+    }
+    ctx.globalAlpha = 1; ctx.lineWidth = 2;
+  }
+  const moversShown = () => layers.people && [...robots.values()].some((r) => r.movers.length);
+
+  // Rasterised once per message; placed at draw time with the grid frame's live pose.
+  function onCostmap(r, msg) {
+    const { width: w, height: h } = msg.info;
+    if (!w || !h) return;
+    const off = (r.costmap && r.costmap.canvas) || document.createElement("canvas");
+    off.width = w; off.height = h;
+    const octx = off.getContext("2d"), img = octx.createImageData(w, h), d = img.data;
+    for (let row = 0; row < h; row++) {
+      const dst = (h - 1 - row) * w; // grid row 0 is the bottom
+      for (let col = 0; col < w; col++) {
+        const v = msg.data[row * w + col];
+        if (v <= 0) continue;
+        // lethal and inscribed strong; the inflation ramp faint, so it reads as a margin
+        const a = v >= 99 ? 170 : 20 + Math.round(v * 0.9), k = 4 * (dst + col);
+        d[k] = COST_INK[0]; d[k + 1] = COST_INK[1]; d[k + 2] = COST_INK[2]; d[k + 3] = a;
+      }
+    }
+    octx.putImageData(img, 0, 0);
+    r.costmap = { canvas: off, info: msg.info, frame: msg.header.frame_id };
+    dirty = true;
+  }
+  function drawCostmaps() {
+    if (!layers.costmap) return;
+    for (const r of robots.values()) {
+      const cm = r.costmap;
+      const pose = cm && lookupPose(cm.frame);
+      if (!pose) continue;
+      const { width: w, height: h, resolution: res, origin } = cm.info;
+      // the image's top-left (grid x min, y max) in map, then turned by the frame's yaw and the view's
+      const ox = origin.position.x, oy = origin.position.y + h * res, c = Math.cos(pose.yaw), s = Math.sin(pose.yaw);
+      const [dx, dy] = toPx(pose.x + c * ox - s * oy, pose.y + s * ox + c * oy);
+      ctx.imageSmoothingEnabled = false;
+      ctx.save(); ctx.translate(dx, dy); ctx.rotate(-(view.rot + pose.yaw));
+      ctx.drawImage(cm.canvas, 0, 0, w * res * view.scale, h * res * view.scale);
+      ctx.restore();
+    }
+  }
+  function syncCostmapSub(r) {
+    if (layers.costmap && !r.costmapSub) {
+      r.costmapSub = topic(`/${r.id}/local_costmap/costmap`, "nav_msgs/OccupancyGrid", { throttle_rate: 500, queue_length: 1 });
+      r.costmapSub.subscribe((msg) => onCostmap(r, msg));
+    } else if (!layers.costmap && r.costmapSub) {
+      r.costmapSub.unsubscribe(); r.costmapSub = null; r.costmap = null;
+    }
+  }
+  function setLayer(name, on) {
+    layers[name] = on;
+    try { localStorage.setItem("sortbots.mapLayers", JSON.stringify(layers)); } catch (e) { /* this tab only */ }
+    const b = document.querySelector(`#map-layers [data-layer="${name}"]`);
+    if (b) { b.classList.toggle("on", on); b.setAttribute("aria-pressed", String(on)); }
+    if (name === "costmap") for (const r of robots.values()) syncCostmapSub(r);
+    dirty = true;
+  }
+
   // Camera tile, in a world with packages: what the plate detector found, which is what the
   // pick aims at. The obstacle boxes would only frame the table. Green is the plate the pick
   // controller has locked (/pick_status); amber is everything else the detector reports. Both
@@ -709,6 +822,7 @@
       ctx.drawImage(mapCanvas, 0, 0, w * res * view.scale, h * res * view.scale);
       ctx.restore();
     }
+    drawCostmaps();
 
     drawWorld();
 
@@ -739,6 +853,7 @@
     }
 
     drawObstacles();
+    drawMovers();
 
     for (const r of robots.values()) {
       if (!r.pose) continue;
@@ -798,7 +913,7 @@
       id, color: COLORS[robots.size % COLORS.length], pose: null, linkAt: -Infinity, plan: [],
       explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity, queueDepth: 0,
       nav: null, seenStamp: {}, odom: null, odomAt: -Infinity,
-      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity, head: null, headAt: -Infinity, arm: null, armAt: -Infinity, mode: null,
+      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], movers: [], costmap: null, costmapSub: null, subs: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity, head: null, headAt: -Infinity, arm: null, armAt: -Infinity, mode: null,
     };
     robots.set(id, r);
     // Kept so removeRobot can drop them when a run leaves this robot out.
@@ -811,6 +926,14 @@
       try { p = JSON.parse(msg.data); } catch (e) { return; }
       onObstacles(r, p);
     });
+    // The segmented movers for the map's People layer; quiet unless dynamic_seg is on and
+    // something is in view.
+    sub(`/${id}/movers`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
+      let p;
+      try { p = JSON.parse(msg.data); } catch (e) { return; }
+      onMovers(r, p);
+    });
+    syncCostmapSub(r);
 
     // What the plate detector sees and what the pick is aiming at, for the camera tile.
     sub(`/${id}/packages`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
@@ -928,6 +1051,7 @@
     if (!r) return;
     if (open.has(id)) closeRobot(id);
     for (const t of r.subs) t.unsubscribe();
+    if (r.costmapSub) r.costmapSub.unsubscribe();
     robots.delete(id);
     dirty = true;
     renderFleet();
@@ -2642,7 +2766,7 @@
     for (const r of robots.values()) {
       Object.assign(r, { pose: null, linkAt: -Infinity, plan: [], explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity,
                          queueDepth: 0, nav: null, seenStamp: {}, odom: null, odomAt: -Infinity, obstacles: null, obstaclesAt: -Infinity,
-                         obstaclesMap: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity });
+                         obstaclesMap: [], movers: [], costmap: null, plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity });
     }
     for (const [id, c] of cams) {
       c.head.hidden = true; c.perc.hidden = true; c.featData = null; drawCamFeatures(id); c.segData = null; drawCamSeg(id);
@@ -3063,7 +3187,7 @@
     const onMap = v === "2d";
     for (const b of document.querySelectorAll("#view button")) b.classList.toggle("active", b.dataset.v === v);
     // style.display, not [hidden]: #map / #tools set their own display, which beats the attribute.
-    canvas.style.display = $("#tools").style.display = $("#map-dial").style.display = onMap ? "" : "none";
+    canvas.style.display = $("#tools").style.display = $("#map-dial").style.display = $("#map-layers").style.display = onMap ? "" : "none";
     $("#cloud").hidden = !view3d;
     $("#comms-sec").hidden = !onMap; // the overlay draws on the 2D map only
     setComms(onMap && commsWanted);
@@ -3374,6 +3498,17 @@
   // "sim" waits for loadWaypoints to learn the platform (it's sim-only), see there.
   try { const v = localStorage.getItem("sortbots.mapView"); if (v === "3d") setView("3d"); } catch (e) { /* default: 2D */ }
   setInterval(loadWaypoints, 10000); // another operator may have added pins
+  // The People layer fades between reports (and after the last one), so it redraws on its own.
+  setInterval(() => {
+    if (!moversShown()) return;
+    const now = performance.now();
+    for (const r of robots.values()) r.movers = r.movers.filter((m) => now - m.t < MOVER_KEEP_MS);
+    dirty = true; // once more after the last one goes, to erase it
+  }, 100);
+  for (const b of document.querySelectorAll("#map-layers [data-layer]")) {
+    setLayer(b.dataset.layer, !!layers[b.dataset.layer]);
+    b.addEventListener("click", () => setLayer(b.dataset.layer, !layers[b.dataset.layer]));
+  }
   setInterval(loadGateway, 10000);
   setInterval(loadVersion, 30000); // someone may switch branches on the host
   try { if (localStorage.getItem("sortbots.comms") === "on") $("#comms-toggle").click(); } catch (e) { /* default: off */ }
