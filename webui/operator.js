@@ -805,7 +805,7 @@
       r.mode = m;
       if (m.note && m.note !== wasNote) toast(`${nameOf(id)}: ${m.note}`);
       const c = cams.get(id);
-      if (c && m.mode !== was && !(m.mode === "manip" && c.padMode === "head")) { c.padMode = m.mode === "manip" ? "arm" : "drive"; applyPadMode(c); }
+      if (c && m.mode !== was) { c.padMode = m.mode === "manip" ? "arm" : "drive"; applyPadMode(c); }
       if (c) syncHeadLock(c, r);
       if (m.mode !== was) drawCamObstacles(id);   // clear or restore the boxes now, not on the next obstacle message
       if (c) syncPickLine(c);
@@ -1247,17 +1247,12 @@
       <button type="button" class="featbtn" data-cam-features aria-pressed="false" title="Show the visual features RTAB-Map is tracking (green = inlier driving the pose, amber = matched to the map, grey = detected only)">Features</button>
       <span class="featstat"></span>
       <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button><button type="button" data-cam-mode="split" title="Camera and depth, stacked">Split</button></div>
-      <div class="padmode" role="tablist" aria-label="What the pad controls" hidden><button type="button" data-padmode="drive" role="tab" title="Nav mode: drive the base, mapping runs">Nav</button><button type="button" data-padmode="head" role="tab" title="Aim the head">Head</button><button type="button" data-padmode="arm" role="tab" title="Manipulation mode: the arm, pick and rest; mapping pauses">Manip</button></div>
+      <div class="padmode" role="tablist" aria-label="What the pad controls" hidden><button type="button" data-padmode="drive" role="tab" title="Nav mode: drive the base, mapping runs">Nav</button><button type="button" data-padmode="arm" role="tab" title="Manipulation mode: the arm, pick and rest, and the head (keys I/K/J/L, H centres); mapping pauses">Manip</button></div>
       <div class="drive" role="group" aria-label="Drive by hand" title="Drive by hand: hold an arrow. Keys W/A/S/D move, Q/E rotate, Space stops (they drive the robot in control)">
         <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
         <button type="button" data-drive="rot-left" aria-label="Rotate left">&#8634;</button><button type="button" data-drive="back" aria-label="Back">&#9660;</button><button type="button" data-drive="rot-right" aria-label="Rotate right">&#8635;</button>
         <button type="button" class="lvl" data-drive-level="0" title="Speed L1: 0.1 m/s, 30 deg/s" hidden>L1</button><button type="button" class="lvl" data-drive-level="1" title="Speed L2: 0.2 m/s, 60 deg/s" hidden>L2</button><button type="button" class="lvl" data-drive-level="2" title="Speed L3: 0.3 m/s, 90 deg/s" hidden>L3</button>
-      </div>
-      <div class="headpad" role="group" aria-label="Aim the head" title="Aim the head: hold an arrow; the dot centres it" hidden>
-        <span></span><button type="button" data-headpad="up" aria-label="Look up">&#9650;</button><span></span>
-        <button type="button" data-headpad="left" aria-label="Look left">&#9664;</button><button type="button" data-headpad="center" aria-label="Centre the head">&#9679;</button><button type="button" data-headpad="right" aria-label="Look right">&#9654;</button>
-        <span></span><button type="button" data-headpad="down" aria-label="Look down">&#9660;</button><span></span>
       </div>
       <div class="pickline" hidden><b></b><span></span></div>
       <div class="armpad" role="group" aria-label="Move the arm" hidden>
@@ -1281,7 +1276,7 @@
           mode: camDefault, timers: {}, token: 0, headAt: -Infinity, headSent: 0, features: false, featSub: null, featData: null, featAt: -Infinity };
     cams.set(id, c);
     wireHead(id, c);
-    wireHeadPad(id, c, el.querySelector(".headpad"));
+    wireHeadKeys(id, c);
     wireArmPad(id, c, el.querySelector(".armpad"));
     wirePadMode(id, c, el);
     syncCamButtons(c);
@@ -1310,48 +1305,48 @@
     c.head.addEventListener("change", send); // the last position, whatever the rate limit dropped
     c.headSend = send;
   }
-  // The head pad over the camera's bottom-right (the drive pad's mirror): hold an arrow to
-  // look that way, the dot centres. It moves the sliders, which stay the one source of what
-  // is sent, so a pad press and a drag can't disagree. Tilt > 0 looks down, pan > 0 left.
-  const HEAD_PAD_RAD_S = 1.2, HEAD_PAD_DIR = { up: ["tilt", -1], down: ["tilt", 1], left: ["pan", 1], right: ["pan", -1] };
-  function wireHeadPad(id, c, pad) {
-    c.headPad = pad;
+  // Head keys (2026-11-20, replacing the Head tab's pad): hold I/K to look up/down, J/L
+  // left/right; H centres. They move the sliders, which stay the one source of what is sent,
+  // so a key and a drag can't disagree. Tilt > 0 looks down, pan > 0 left.
+  const HEAD_KEY_RAD_S = 1.2, HEAD_KEYS = { i: ["tilt", -1], k: ["tilt", 1], j: ["pan", 1], l: ["pan", -1] };
+  function wireHeadKeys(id, c) {
     const setAxis = (key, rad) => {
       const inp = c.head.querySelector(`[data-head="${key}"]`);
       inp.value = Math.max(Number(inp.min), Math.min(Number(inp.max), rad));
       c.head.querySelector(`[data-head-out="${key}"]`).textContent = headText(Number(inp.value));
     };
+    const held = new Set();
     let timer = null, last = 0;
-    const stop = (b) => { clearInterval(timer); timer = null; if (b) b.classList.remove("held"); c.headSend(); };
-    for (const b of pad.querySelectorAll("[data-headpad]")) {
-      const cmd = b.dataset.headpad;
-      b.addEventListener("pointerdown", (e) => {
-        e.preventDefault(); e.stopPropagation(); b.setPointerCapture(e.pointerId);
-        c.headAt = performance.now();
-        if (cmd === "center") { setAxis("pan", 0); setAxis("tilt", 0); c.headSend(); return; }
-        const [key, sign] = HEAD_PAD_DIR[cmd];
-        b.classList.add("held"); last = performance.now(); clearInterval(timer);
-        timer = setInterval(() => {
-          const now = performance.now(), dt = (now - last) / 1000; last = now;
-          c.headAt = now;
-          setAxis(key, Number(c.head.querySelector(`[data-head="${key}"]`).value) + sign * HEAD_PAD_RAD_S * dt);
-          c.headSend();
-        }, 1000 / HEAD_HZ);
-      });
-      const up = () => { if (timer) stop(b); };
-      b.addEventListener("pointerup", up); b.addEventListener("pointercancel", up); b.addEventListener("lostpointercapture", up);
-      b.addEventListener("click", (e) => e.stopPropagation()); // not a card click
-    }
-    let fade = null;
-    pad.addEventListener("pointerdown", () => { pad.classList.add("on"); clearTimeout(fade); });
-    pad.addEventListener("pointerup", () => { clearTimeout(fade); fade = setTimeout(() => pad.classList.remove("on"), 3000); });
+    const step = () => {
+      const now = performance.now(), dt = (now - last) / 1000; last = now;
+      c.headAt = now;
+      for (const k of held) {
+        const [key, sign] = HEAD_KEYS[k];
+        setAxis(key, Number(c.head.querySelector(`[data-head="${key}"]`).value) + sign * HEAD_KEY_RAD_S * dt);
+      }
+      c.headSend();
+    };
+    const stop = () => { clearInterval(timer); timer = null; c.headSend(); };
+    c.headKeys = {
+      down(e) {
+        const k = e.key.toLowerCase();
+        if (k === "h") { c.headAt = performance.now(); setAxis("pan", 0); setAxis("tilt", 0); c.headSend(); return true; }
+        if (!HEAD_KEYS[k]) return false;
+        held.add(k);
+        if (!timer) { last = performance.now(); timer = setInterval(step, 1000 / HEAD_HZ); }
+        return true;
+      },
+      up(e) { if (held.delete(e.key.toLowerCase()) && !held.size && timer) stop(); },
+      release() { if (held.size) { held.clear(); stop(); } },
+      handles: (e) => e.key.toLowerCase() === "h" || !!HEAD_KEYS[e.key.toLowerCase()],
+    };
   }
   // Nav holds the real head forward (arm_driver ignores head_cmd there): the sliders say so
   // instead of springing back. The sim has no robot_mode, so its head stays free.
   function syncHeadLock(c, r) {
     const locked = !!(r && r.mode && r.mode.mode === "nav");
     for (const s of c.head.querySelectorAll("[data-head]")) s.disabled = locked;
-    c.head.title = locked ? "Nav mode holds the camera forward (mapping assumes it). Head or Manip to aim it." : "";
+    c.head.title = locked ? "Nav mode holds the camera forward (mapping assumes it). Manip to aim it." : "";
   }
   function syncHeads() {
     for (const [id, c] of cams) {
@@ -1610,9 +1605,9 @@
     }
   }
 
-  // -- one pad at a time over the camera: Drive / Head / Arm (2026-11-16: all three at once
-  // covered the picture). Head and Arm are offered only when that hardware reports in
-  // (head_state / arm_state, or the sim's head); the choice is remembered per browser.
+  // -- one pad at a time over the camera: Nav (drive) / Manip (arm) (2026-11-16: all at once
+  // covered the picture; the Head tab became keys, 2026-11-20). Manip is offered only when an
+  // arm reports in (arm_state); the choice is remembered per browser.
   const PAD_MODE_KEY = "sortbots.padMode";
   function wirePadMode(id, c, el) {
     c.robotId = id;
@@ -1623,10 +1618,10 @@
       e.stopPropagation();
       c.padMode = b.dataset.padmode;
       try { localStorage.setItem(PAD_MODE_KEY, c.padMode); } catch (err) { /* per-page only */ }
-      // Nav and Manip are the ROBOT's mode (arm_driver pauses mapping in manipulation). Head
-      // is manipulation too: nav holds the camera at its mount pose and ignores head_cmd.
-      // Without an arm there is no mode to set (the sim, a bare base).
-      const robotMode = { drive: "nav", head: "manip", arm: "manip" }[c.padMode];
+      // Nav and Manip are the ROBOT's mode (arm_driver pauses mapping in manipulation; nav
+      // holds the camera at its mount pose and ignores head_cmd). Without an arm there is no
+      // mode to set (the sim, a bare base).
+      const robotMode = { drive: "nav", arm: "manip" }[c.padMode];
       if (robotMode && c.hasArm) publishString(`/${id}/robot_mode_cmd`, JSON.stringify({ mode: robotMode }));
       applyPadMode(c);
     });
@@ -1634,16 +1629,15 @@
   }
   function applyPadMode(c) {
     if (!c.padModeEl) return;
-    const can = { drive: true, head: !!c.hasHead, arm: !!c.hasArm };
+    const can = { drive: true, arm: !!c.hasArm };
     const mode = can[c.padMode] ? c.padMode : "drive";
     for (const b of c.padModeEl.querySelectorAll("[data-padmode]")) {
       b.hidden = !can[b.dataset.padmode];
       b.classList.toggle("on", b.dataset.padmode === mode);
       b.setAttribute("aria-selected", String(b.dataset.padmode === mode));
     }
-    c.padModeEl.hidden = !(can.head || can.arm);   // drive alone: nothing to switch
+    c.padModeEl.hidden = !can.arm;   // drive alone: nothing to switch
     c.drivePad.hidden = mode !== "drive";
-    if (c.headPad) c.headPad.hidden = mode !== "head";
     if (c.armPad) c.armPad.hidden = mode !== "arm";
     syncPickLine(c);
   }
@@ -1677,8 +1671,16 @@
     // speed of the pad that's up; Space stops both.
     const cam = cams.get(selected);
     const armUp = !!(cam && cam.padMode === "arm" && cam.armKeys && !cam.armPad.hidden);
-    if (e.code === "Space") { e.preventDefault(); if (armUp) cam.armKeys.stop(); return driveRelease(selected); }
+    if (e.code === "Space") { e.preventDefault(); if (armUp) cam.armKeys.stop(); if (cam && cam.headKeys) cam.headKeys.release(); return driveRelease(selected); }
     if (armUp && cam.armKeys.down(e)) { e.preventDefault(); return; }
+    // The head (I/K/J/L, H centres): any pad, but the real robot ignores head_cmd in Nav.
+    if (cam && cam.headKeys && cam.hasHead && cam.headKeys.handles(e)) {
+      e.preventDefault();
+      const r = robots.get(selected);
+      if (r && r.mode && r.mode.mode === "nav") return toast(`${nameOf(selected)}: Nav holds the head forward; switch to Manip to aim it`);
+      cam.headKeys.down(e);
+      return;
+    }
     if (/^[1-9]$/.test(e.key) && cam && cam.drivePad) {
       const b = cam.drivePad.querySelector(`[data-drive-level="${Number(e.key) - 1}"]`);
       if (b && !b.hidden) { e.preventDefault(); b.click(); }
@@ -1688,13 +1690,13 @@
     if (cmd) { e.preventDefault(); driveStart(selected, cmd); }
   });
   addEventListener("keyup", (e) => {
-    for (const c of cams.values()) if (c.armKeys) c.armKeys.up(e);
+    for (const c of cams.values()) { if (c.armKeys) c.armKeys.up(e); if (c.headKeys) c.headKeys.up(e); }
     const cmd = DRIVE_KEYS[e.key.toLowerCase()];
     if (cmd) for (const id of drives.keys()) driveStop(id, cmd);
   });
   const releaseAllDrives = () => {
     for (const [id, d] of drives) if (d.held.size) driveRelease(id);
-    for (const c of cams.values()) if (c.armKeys) c.armKeys.release();
+    for (const c of cams.values()) { if (c.armKeys) c.armKeys.release(); if (c.headKeys) c.headKeys.release(); }
   };
   addEventListener("blur", releaseAllDrives);
   document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAllDrives(); });

@@ -278,21 +278,9 @@
                          font: 600 .66rem system-ui, sans-serif; cursor: pointer; }
   .cam .padmode button:hover { background: rgba(255,255,255,.12); }
   .cam .padmode button.on { background: rgba(255,255,255,.9); color: #15191e; }
-  /* Head pad: the drive pad's mirror on the right (operator.js wireHeadPad). Raised clear
-     of the feed's corner label (Camera / Depth). */
-  .cam .headpad { position: absolute; right: 6px; bottom: 30px; display: grid; grid-template-columns: repeat(3, 26px); gap: 3px;
-                  opacity: .75; transition: opacity .15s; touch-action: none; user-select: none; -webkit-user-select: none; }
-  .cam .headpad[hidden] { display: none; }
-  .cam:hover .headpad, .cam .headpad.on { opacity: 1; }
-  .cam .headpad button { width: 26px; height: 24px; padding: 0; border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65);
-                         color: #e6ebf0; font-size: .72rem; line-height: 1; touch-action: none; }
-  .cam .headpad button:hover { background: rgba(10,12,16,.85); }
-  .cam .headpad button.held { background: rgba(255,255,255,.9); color: #15191e; }
-  .cam .headpad [data-headpad="center"] { font-size: .6rem; }
-  @media (pointer: coarse) { .cam .headpad { grid-template-columns: repeat(3, 36px); } .cam .headpad button { width: 36px; height: 32px; font-size: .9rem; } }
-  /* Arm touchpad, bottom-centre between the drive and head pads (operator.js wireArmPad):
-     handeye.py's page, shrunk onto the tile. A 2D pad for the hand, a tall one for height,
-     then wrist up/down, the speed level, Magnet and Pick. */
+  /* Arm touchpad, bottom-centre (operator.js wireArmPad): handeye.py's page, shrunk onto the
+     tile. A 2D pad for the hand, a tall one for height, then wrist up/down, the speed level,
+     Magnet and Pick. The head has keys (I/K/J/L, operator.js wireHeadKeys), not a pad. */
   .cam .armpad { position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); display: flex; gap: 6px; align-items: flex-end;
                  opacity: .8; transition: opacity .15s; touch-action: none; user-select: none; -webkit-user-select: none; }
   .cam .armpad[hidden] { display: none; }
