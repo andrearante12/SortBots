@@ -382,6 +382,30 @@ def test_nav_pose_aims_and_holds_the_head():
     assert head.target["head_pan"] == 0.0
 
 
+def test_nav_head_can_look_around_and_comes_back():
+    # 2026-11-20: a /head_cmd in nav turns the head (mapping pauses on off_nav), and stays
+    # turned; one at the nav pose hands it back to hold_nav
+    head, bus = make(present={"head_pan": 2600})
+    head.nav = {"head_pan_joint": 0.0, "head_tilt_joint": math.radians(5)}
+    head.hold_nav(0.0)
+    assert head.off_nav()                               # aimed, but the servo isn't there yet
+    head.pos = dict(head.nav_deg())                     # arrived
+    assert not head.looking and not head.off_nav()
+    head.look({"head_pan_joint": 0.6}, 1.0)
+    assert head.looking and head.off_nav()
+    turned = dict(head.target)
+    head.hold_nav(1.5)                                  # nav no longer drags it back
+    assert head.target == turned and abs(turned["head_pan"]) > 10
+    head.look({"head_pan_joint": 0.0, "head_tilt_joint": math.radians(5)}, 2.0)
+    assert not head.looking
+    head.pos = {"head_pan": 25.0, "head_tilt": 5.0}     # sent back, but not there yet
+    assert head.off_nav()
+    head.pos = {"head_pan": 1.0, "head_tilt": 5.5}      # within NAV_TOL_DEG: mapping may resume
+    assert not head.off_nav()
+    st = head.status(0.0)
+    assert st["nav"] == {"pan": 0.0, "tilt": pytest.approx(math.radians(5), abs=1e-4)} and st["looking"] is False
+
+
 def test_nav_pose_opens_a_board_that_shows_up_later():
     plugged = {"in": False}
 

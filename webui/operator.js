@@ -1333,7 +1333,13 @@
     c.headKeys = {
       down(e) {
         const k = e.key.toLowerCase();
-        if (k === "c") { c.headAt = performance.now(); setAxis("pan", 0); setAxis("tilt", 0); c.headSend(); return true; }
+        if (k === "c") {
+          // in Nav, back to the pose mapping assumes (arm_driver's head_state "nav"), which also
+          // resumes mapping; otherwise straight ahead
+          const r = robots.get(id), n = r && r.mode && r.mode.mode === "nav" && r.head && r.head.nav;
+          c.headAt = performance.now(); setAxis("pan", n ? n.pan : 0); setAxis("tilt", n ? n.tilt : 0); c.headSend();
+          return true;
+        }
         if (!HEAD_KEYS[k]) return false;
         held.add(k);
         if (!timer) { last = performance.now(); timer = setInterval(step, 1000 / HEAD_HZ); }
@@ -1346,10 +1352,12 @@
   }
   // Nav holds the real head forward (arm_driver ignores head_cmd there): the sliders say so
   // instead of springing back. The sim has no robot_mode, so its head stays free.
+  // Nav used to lock the head; since 2026-11-20 it can turn there and arm_driver pauses mapping
+  // until it's back at the nav pose (C), so the sliders only say so.
   function syncHeadLock(c, r) {
-    const locked = !!(r && r.mode && r.mode.mode === "nav");
-    for (const s of c.head.querySelectorAll("[data-head]")) s.disabled = locked;
-    c.head.title = locked ? "Nav mode holds the camera forward (mapping assumes it). Manip to aim it." : "";
+    const nav = !!(r && r.mode && r.mode.mode === "nav");
+    for (const s of c.head.querySelectorAll("[data-head]")) s.disabled = false;
+    c.head.title = nav ? "Turning the head in Nav pauses mapping until it's back at the nav pose (C)." : "";
   }
   function syncHeads() {
     for (const [id, c] of cams) {
@@ -1682,11 +1690,10 @@
     }
     if (e.code === "Space") { e.preventDefault(); if (armUp) cam.armKeys.stop(); if (cam && cam.headKeys) cam.headKeys.release(); return driveRelease(selected); }
     if (armUp && cam.armKeys.down(e)) { e.preventDefault(); return; }
-    // The head (vim's H/J/K/L, C centres): any pad, but the real robot ignores head_cmd in Nav.
+    // The head (vim's H/J/K/L, C centres or, in Nav, back to the nav pose): any pad. In Nav
+    // arm_driver pauses mapping while it's turned (robot_mode's note says so).
     if (cam && cam.headKeys && cam.hasHead && cam.headKeys.handles(e)) {
       e.preventDefault();
-      const r = robots.get(selected);
-      if (r && r.mode && r.mode.mode === "nav") return toast(`${nameOf(selected)}: Nav holds the head forward; switch to Manip to aim it`);
       cam.headKeys.down(e);
       return;
     }

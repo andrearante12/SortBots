@@ -48,9 +48,12 @@ and a servo board takes one owner: anything that moves either goes through here.
 Nav and manipulation are robot states. Manipulation pauses RTAB-Map's mapping (a full core on
 the Orin, 2026-11-16, and the robot isn't exploring while it picks); nav resumes it on the same
 map. Odometry runs in both: the place backs the base off, and the robot must stay localized.
-A pick or rest switches to manipulation by itself; nav is refused while one runs. Nav also
-holds the head at head.nav_pose and ignores /head_cmd: the camera's TF is a static mount, so
-a head turned while mapping would put the map's walls in the wrong place.
+A pick or rest switches to manipulation by itself; nav is refused while one runs. Nav holds
+the head at head.nav_pose: the camera's TF is a static mount, so a head turned while mapping
+would put the map's walls in the wrong place. A /head_cmd in nav still turns it (2026-11-20:
+looking around without leaving nav), and mapping pauses until the head is back at the nav
+pose, by where it IS, not just where it was sent; entering nav, or a /head_cmd at the nav
+pose, hands it back.
 
 During a pick the pads are paused (their goal re-sends would fight it) and any arm pad touch
 aborts it, as any key did on handeye's page. An abort holds the arm and never drops the magnet.
@@ -111,6 +114,7 @@ RETRY_OPEN_S = 2.0
 MAGNET_PROBE_S = 5.0
 PEEK_S = 1.0  # while not holding the board: read where the head is this often, torque untouched
 POSE_STALE_S = 5.0  # a pose older than this isn't reported (a failed peek keeps the last one)
+NAV_TOL_DEG = 3.0   # "back at the nav pose": servo settle plus the tilt's sag under the camera
 # The arm board's link dropped out for ~1-2 s at a time (2026-11-16: ~25% of reads lost in
 # bursts, through lerobot too). The cause was the arm's half-seated servo cable loading the
 # shared line; reseated, 0 of 1488 were lost. Still ridden through, in case it comes back:
@@ -189,6 +193,7 @@ class Head:
         self.opener = opener or (lambda port, timeout_s=0.02: ft.Bus(port, timeout_s=timeout_s))
         self.holders_of = holders_of
         self.bus = None
+        self.looking = False    # nav: turned by the operator, so hold_nav leaves it (mapping pauses)
         self.target = None      # degrees, where the operator wants it
         self.goal = None        # degrees, slewed toward target, what was last sent
         self.pos = None         # degrees, last read
@@ -230,10 +235,32 @@ class Head:
         if self.bus is None and now >= self.next_open:
             self._open(now)
 
+    def nav_deg(self) -> dict:
+        return {HEAD_JOINTS[n]: self.to_deg(HEAD_JOINTS[n], rad) for n, rad in self.nav.items()}
+
+    def look(self, joints: dict, now: float):
+        """Nav mode's /head_cmd: turn the head and keep it there, or, sent to the nav pose,
+        hand it back to hold_nav."""
+        self.command(joints, now)
+        tgt = self.target or {}
+        self.looking = any(abs(tgt.get(m, d) - d) > NAV_TOL_DEG for m, d in self.nav_deg().items())
+
+    def off_nav(self) -> bool:
+        """The head is away from the nav pose, or still on its way back: what it last read AND
+        where it was sent both have to be there before mapping may resume."""
+        want = self.nav_deg()
+        return any(src and any(abs(src.get(m, d) - d) > NAV_TOL_DEG for m, d in want.items())
+                   for src in (self.pos, self.target))
+
     def hold_nav(self, now):
-        """Nav mode: aim at the nav pose and keep it there. Called at STATE_HZ, so a board
-        plugged in (or freed by another process) later is opened and aimed by itself."""
-        want = {HEAD_JOINTS[n]: self.to_deg(HEAD_JOINTS[n], rad) for n, rad in self.nav.items()}
+        """Nav mode: aim at the nav pose and keep it there, unless the operator turned it
+        (look). Called at STATE_HZ, so a board plugged in (or freed by another process)
+        later is opened and aimed by itself."""
+        if self.looking:
+            if self.bus is None and now >= self.next_open:
+                self._open(now)
+            return
+        want = self.nav_deg()
         if self.bus is None or self.target != want:
             self.command(self.nav, now)
 
@@ -431,6 +458,9 @@ class Head:
         if self.pos and now - self.pos_at <= POSE_STALE_S:
             s["pan"] = round(self.to_rad("head_pan", self.pos["head_pan"]), 4)
             s["tilt"] = round(self.to_rad("head_tilt", self.pos["head_tilt"]), 4)
+        # where nav holds it, for the page's "back to the nav pose" key, and whether it's turned
+        s["nav"] = {"pan": round(self.nav["head_pan_joint"], 4), "tilt": round(self.nav["head_tilt_joint"], 4)}
+        s["looking"] = self.looking
         return s
 
 
@@ -795,7 +825,10 @@ def run_node(robot_id: str, cfg: dict):
 
     def on_head(msg):
         if mode["mode"] == "nav":
-            return                     # nav holds the camera at the mount mapping assumes
+            # turned in nav: mapping pauses now, not at the next 1 s check (apply_mode)
+            head.look(dict(zip(msg.name, msg.position)), time.monotonic())
+            apply_mode()
+            return
         head.command(dict(zip(msg.name, msg.position)), time.monotonic())
 
     def on_arm(msg):
@@ -973,10 +1006,17 @@ def run_node(robot_id: str, cfg: dict):
     def publish_mode():
         mode_pub.publish(String(data=json.dumps({k: mode[k] for k in ("mode", "mapping", "note")})))
 
+    HEAD_NOTE = "head turned: mapping paused until it's back at the nav pose (C)"
+
     def apply_mode():
-        """Make RTAB-Map match the mode. Re-run every second, so a mapping node that restarted,
-        or wasn't up yet when the mode was set, ends up paused or running as it should."""
-        want = "paused" if mode["mode"] == "manip" else "running"
+        """Make RTAB-Map match the mode, and the head in nav. Re-run at the state rate, so a
+        mapping node that restarted, or wasn't up yet when the mode was set, ends up paused or
+        running as it should, and mapping resumes as soon as a turned head is back."""
+        head_off = mode["mode"] == "nav" and head.off_nav()
+        if mode["note"] in ("", HEAD_NOTE) and mode["note"] != (HEAD_NOTE if head_off else ""):
+            mode["note"] = HEAD_NOTE if head_off else ""
+            publish_mode()
+        want = "paused" if mode["mode"] == "manip" or head_off else "running"
         if mode["applied"] == want:
             return
         cli = pause_cli if want == "paused" else resume_cli
@@ -1003,6 +1043,8 @@ def run_node(robot_id: str, cfg: dict):
             mode["note"] = "a pick is running: nav mode once it's done (or touch the arm pad to stop it)"
             return publish_mode()
         mode["note"] = ""
+        if m == "nav":
+            head.looking = False       # nav takes the head back to its pose; mapping waits for it
         if m != mode["mode"]:
             mode["mode"], mode["applied"] = m, None
             log.info(f"{m} mode")
@@ -1149,6 +1191,7 @@ def run_node(robot_id: str, cfg: dict):
         if mode["mode"] == "nav":
             head.hold_nav(now)
         head.poll(now)
+        apply_mode()                   # cheap when nothing changed; resumes mapping once the head is back
         head_pub.publish(String(data=json.dumps(head.status())))
         if arm is not None:
             if head.bus is not None:
