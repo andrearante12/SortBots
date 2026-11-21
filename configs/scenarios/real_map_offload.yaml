@@ -21,6 +21,7 @@ run:
   localize: false
   map: null
   slam_role: robot
+  nav: false             # nav is the robot's default now (2026-11-20); this preset is about saving its CPU
 
 overrides: [resume]
 

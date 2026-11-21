@@ -35,7 +35,8 @@ def test_real_scenario_uses_run_robot_and_only_its_flags(tmp_path):
     argv = sm.launcher_argv(s, s["run"])
     assert argv[0].endswith("scripts/run_robot.sh")
     assert argv[1:] == ["--robot-id", "robot_0", "--resume", "--slam-role", "all",
-                        "--dynamic-seg", "model", "--keep-console"]   # movers masked by default
+                        "--dynamic-seg", "model", "--nav",
+                        "--keep-console"]   # movers masked and nav + tasks on by default
     # Defaults come from the real table: no sim keys leak into `run`.
     assert set(s["run"]) == set(sm.REAL_RUN_FLAGS)
 
@@ -110,10 +111,12 @@ def test_recon_source_flag():
 
 
 def test_real_nav_flag_reaches_run_robot():
-    # real_explore: Nav2 + the explorer on the robot (run_robot.sh --nav); off by default.
+    # Nav2 + the explorer + task_manager on the robot (run_robot.sh --nav): on by default since
+    # 2026-11-20 (a queued task waited forever without it); nav: false turns it off.
     import session as sm
-    assert "--nav" in sm.build_argv({**sm.REAL_RUN_DEFAULTS, "nav": True}, "real")
-    assert "--nav" not in sm.build_argv(dict(sm.REAL_RUN_DEFAULTS), "real")
+    assert "--nav" in sm.build_argv(dict(sm.REAL_RUN_DEFAULTS), "real")
+    assert "--nav" in sm.build_argv(sm.config_to_run({"map": "new"}, "real"), "real")   # the launch form's runs too
+    assert "--nav" not in sm.build_argv({**sm.REAL_RUN_DEFAULTS, "nav": False}, "real")
 
 
 def test_real_runs_mask_movers_by_default():

@@ -373,7 +373,10 @@ REAL_RUN_FLAGS = {
 # waits for its own mask, so depth_static came ~1 s late, at 1.5 Hz under the Orin's load, and
 # RTAB-Map's approx sync (queue 10, ~0.7 s of rgb) never paired it: "Did not receive data since
 # 5 seconds". strict needs a longer sync queue and CPU headroom first.
-REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all", "nav": False,
+# nav on by default too (2026-11-20): Nav2, the explorer (not autostarted) and task_manager, so
+# click-to-go and queued tasks just work; a task queued on a run without it waited forever. It's
+# real CPU on the Orin next to RTAB-Map: a run that says nav: false leaves it off.
+REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all", "nav": True,
                                                                               "dynamic_seg": "model"}
 
 PLATFORM_FLAGS = {"sim": RUN_FLAGS, "real": REAL_RUN_FLAGS}
