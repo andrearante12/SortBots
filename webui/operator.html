@@ -344,6 +344,19 @@
   .more .acts { display: flex; gap: 6px; flex-wrap: wrap; }
 
   #stage { position: relative; min-width: 0; min-height: 0; }
+  /* The map orientation dial, bottom-right of the 2D map (operator.js setMapRot). */
+  #map-dial { position: absolute; right: 16px; bottom: 16px; z-index: 2; width: 76px; height: 76px; border-radius: 50%;
+              background: var(--float); border: 1px solid var(--line); box-shadow: 0 2px 8px var(--shadow); color: var(--ink);
+              cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+  #map-dial.on { cursor: grabbing; }
+  #map-dial:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+  #map-dial svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+  #map-dial .ring { fill: none; stroke: var(--border); stroke-width: 1.5; }
+  #map-dial .ticks path { stroke: var(--faint); stroke-width: 1.5; }
+  #map-dial .tip { fill: var(--stop); }
+  #map-dial text { fill: currentColor; font: 700 8px system-ui, sans-serif; }
+  #map-dial .deg { position: absolute; left: 0; right: 0; bottom: 14px; text-align: center; font: 600 .66rem system-ui, sans-serif;
+                   color: var(--muted); pointer-events: none; }
   #map { width: 100%; height: 100%; display: block; cursor: crosshair; touch-action: none; }
   .float { position: absolute; background: var(--float); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 2px 8px var(--shadow); }
   #tools button { padding: 5px 11px; font-size: .95rem; line-height: 1.2; }
@@ -805,10 +818,6 @@
       <button class="btn icon" id="hide-right" aria-label="Hide the task list" title="Hide the task list">&#x25E8;</button>
       <button class="btn icon" id="fullscreen" hidden aria-label="Full screen" title="Full screen">&#x26F6;</button>
       <button class="btn icon" id="theme" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
-      <!-- Turn the 2D map on screen (the view only: the map and its frame are unchanged). -->
-      <button class="btn icon" id="map-rot-ccw" aria-label="Turn the map 90 degrees left" title="Turn the map 90° left ([ turns it 15°)">&#x21BA;</button>
-      <button class="btn icon" id="map-rot-cw" aria-label="Turn the map 90 degrees right" title="Turn the map 90° right (] turns it 15°)">&#x21BB;</button>
-      <button class="btn icon" id="map-rot-reset" aria-label="Map north up" title="Back to the map's own orientation (x right, y up)">N</button>
     </div>
   </div>
   <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">Sim not running</span></button>
@@ -842,6 +851,18 @@
 <main id="stage">
   <canvas id="map"></canvas>
   <canvas id="comms" hidden></canvas>
+  <!-- Map orientation dial (2026-11-20): drag around it to turn the 2D map on screen, so the
+       map and costmap line up with the room as you see it. The view only: the map, its frame
+       and everything sent to the robots stay in map coordinates. The needle is the map's +y. -->
+  <div id="map-dial" role="slider" tabindex="0" aria-label="Map orientation" aria-valuemin="-180" aria-valuemax="180" aria-valuenow="0"
+       title="Drag around to turn the map (the view only). Shift snaps to 15°. Double-click: back to the map's own orientation. Keys [ and ] turn it 15°.">
+    <svg viewBox="-32 -32 64 64" aria-hidden="true">
+      <circle class="ring" r="29"></circle>
+      <g class="ticks"><path d="M0,-29V-25M29,0H25M0,29V25M-29,0H-25"></path></g>
+      <g class="needle"><path class="tip" d="M0,-14 L4.5,0 L0,-3 L-4.5,0 Z"></path><text y="-17" text-anchor="middle">N</text></g>
+    </svg>
+    <span class="deg">0°</span>
+  </div>
   <!-- The 3D view (operator_cloud.js): the live fused point cloud, or a Gaussian splat of
        a SAVED map, trained after the run by the splat worker on the workstation's GPU
        (operator_splat.js, splat/worker.py, scripts/splat.sh). -->
@@ -965,7 +986,7 @@
 <div id="keys-dlg" class="veil" hidden>
   <div class="card" role="dialog" aria-labelledby="kd-title">
     <h3 id="kd-title">Keyboard shortcuts <button class="x" id="kd-x" type="button" title="Close (Esc)" aria-label="Close">&times;</button></h3>
-    <h4>Robot (click its card first)</h4><table><tr><td><kbd>W</kbd> <kbd>S</kbd> <kbd>A</kbd> <kbd>D</kbd></td><td>drive forward, back, left, right</td></tr><tr><td><kbd>Q</kbd> <kbd>E</kbd></td><td>turn left, right</td></tr><tr><td><kbd>M</kbd></td><td>switch Nav / Manip</td></tr><tr><td><kbd>H</kbd> <kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd></td><td>head left, down, up, right (in Nav, mapping pauses while it's turned)</td></tr><tr><td><kbd>C</kbd></td><td>head back: the nav pose in Nav (mapping resumes), else centred</td></tr><tr><td><kbd>1</kbd>&ndash;<kbd>4</kbd></td><td>speed of the pad showing</td></tr><tr><td><kbd>Space</kbd></td><td>stop the base, arm and head</td></tr></table><h4>Manip</h4><table><tr><td><kbd>&uarr;</kbd> <kbd>&darr;</kbd></td><td>arm away, toward</td></tr><tr><td><kbd>&larr;</kbd> <kbd>&rarr;</kbd></td><td>arm left, right</td></tr><tr><td><kbd>PgUp</kbd> <kbd>PgDn</kbd></td><td>arm up, down</td></tr><tr><td><kbd>Z</kbd> <kbd>X</kbd></td><td>wrist up, down</td></tr></table><h4>Map</h4><table><tr><td><kbd>V</kbd></td><td>drive tool</td></tr><tr><td><kbd>F</kbd></td><td>add waypoint</td></tr><tr><td><kbd>R</kbd></td><td>place the gateway</td></tr><tr><td><kbd>T</kbd></td><td>teleport (sim)</td></tr><tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>turn the 2D map 15° left, right (⋯ has 90° and north up)</td></tr><tr><td><kbd>Esc</kbd></td><td>close, or deselect the robot</td></tr><tr><td><kbd>?</kbd></td><td>this list</td></tr></table>
+    <h4>Robot (click its card first)</h4><table><tr><td><kbd>W</kbd> <kbd>S</kbd> <kbd>A</kbd> <kbd>D</kbd></td><td>drive forward, back, left, right</td></tr><tr><td><kbd>Q</kbd> <kbd>E</kbd></td><td>turn left, right</td></tr><tr><td><kbd>M</kbd></td><td>switch Nav / Manip</td></tr><tr><td><kbd>H</kbd> <kbd>J</kbd> <kbd>K</kbd> <kbd>L</kbd></td><td>head left, down, up, right (in Nav, mapping pauses while it's turned)</td></tr><tr><td><kbd>C</kbd></td><td>head back: the nav pose in Nav (mapping resumes), else centred</td></tr><tr><td><kbd>1</kbd>&ndash;<kbd>4</kbd></td><td>speed of the pad showing</td></tr><tr><td><kbd>Space</kbd></td><td>stop the base, arm and head</td></tr></table><h4>Manip</h4><table><tr><td><kbd>&uarr;</kbd> <kbd>&darr;</kbd></td><td>arm away, toward</td></tr><tr><td><kbd>&larr;</kbd> <kbd>&rarr;</kbd></td><td>arm left, right</td></tr><tr><td><kbd>PgUp</kbd> <kbd>PgDn</kbd></td><td>arm up, down</td></tr><tr><td><kbd>Z</kbd> <kbd>X</kbd></td><td>wrist up, down</td></tr></table><h4>Map</h4><table><tr><td><kbd>V</kbd></td><td>drive tool</td></tr><tr><td><kbd>F</kbd></td><td>add waypoint</td></tr><tr><td><kbd>R</kbd></td><td>place the gateway</td></tr><tr><td><kbd>T</kbd></td><td>teleport (sim)</td></tr><tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>turn the 2D map 15° left, right (or drag the dial, bottom-right; double-click it for north up)</td></tr><tr><td><kbd>Esc</kbd></td><td>close, or deselect the robot</td></tr><tr><td><kbd>?</kbd></td><td>this list</td></tr></table>
   </div>
 </div>
 <div id="session" hidden>

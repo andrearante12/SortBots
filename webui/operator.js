@@ -309,7 +309,17 @@
     view.rot = Math.atan2(Math.sin(rad), Math.cos(rad));   // keep it in (-pi, pi]
     if (Math.abs(view.rot) < 1e-9) view.rot = 0;
     try { localStorage.setItem("sortbots.mapRot", String(view.rot)); } catch (e) { /* this tab only */ }
+    syncMapDial();
     dirty = true;
+  }
+  // The dial's needle points where the map's +y is on screen; the readout is the turn in degrees.
+  function syncMapDial() {
+    const dial = $("#map-dial");
+    if (!dial) return;
+    const deg = Math.round(view.rot * 180 / Math.PI);
+    dial.querySelector(".needle").setAttribute("transform", `rotate(${-view.rot * 180 / Math.PI})`);
+    dial.querySelector(".deg").textContent = `${deg}°`;
+    dial.setAttribute("aria-valuenow", String(deg));
   }
 
   function fitView() {
@@ -2998,9 +3008,30 @@
     const t = { v: "select", f: "wp", r: "gw", t: "tp" }[e.key.toLowerCase()];
     if (t && !(t === "tp" && platform !== "sim")) setTool(t);
   });
-  $("#map-rot-ccw").addEventListener("click", () => setMapRot(view.rot + Math.PI / 2));
-  $("#map-rot-cw").addEventListener("click", () => setMapRot(view.rot - Math.PI / 2));
-  $("#map-rot-reset").addEventListener("click", () => setMapRot(0));
+  // The orientation dial: drag around its centre and the map turns by as much as the pointer
+  // has (relative, so grabbing it never jumps); Shift snaps to 15 deg; double-click resets.
+  {
+    const dial = $("#map-dial");
+    let grab = null;
+    const angleAt = (e) => {
+      const r = dial.getBoundingClientRect();
+      return Math.atan2(-(e.clientY - (r.top + r.height / 2)), e.clientX - (r.left + r.width / 2));   // CCW, y up
+    };
+    dial.addEventListener("pointerdown", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      dial.setPointerCapture(e.pointerId); dial.classList.add("on");
+      grab = { a0: angleAt(e), rot0: view.rot };
+    });
+    dial.addEventListener("pointermove", (e) => {
+      if (!grab || !dial.hasPointerCapture(e.pointerId)) return;
+      let rot = grab.rot0 + (angleAt(e) - grab.a0);
+      if (e.shiftKey) rot = Math.round(rot / (Math.PI / 12)) * (Math.PI / 12);
+      setMapRot(rot);
+    });
+    for (const n of ["pointerup", "pointercancel", "lostpointercapture"]) dial.addEventListener(n, () => { grab = null; dial.classList.remove("on"); });
+    dial.addEventListener("dblclick", (e) => { e.stopPropagation(); setMapRot(0); });
+    syncMapDial();
+  }
   addEventListener("resize", resize);
   // The window resize event isn't enough: on iPhone it fires on rotation BEFORE the new
   // layout settles, so the map kept its portrait pixel size and CSS stretched it across
@@ -3020,7 +3051,7 @@
     const onMap = v === "2d";
     for (const b of document.querySelectorAll("#view button")) b.classList.toggle("active", b.dataset.v === v);
     // style.display, not [hidden]: #map / #tools set their own display, which beats the attribute.
-    canvas.style.display = $("#tools").style.display = onMap ? "" : "none";
+    canvas.style.display = $("#tools").style.display = $("#map-dial").style.display = onMap ? "" : "none";
     $("#cloud").hidden = !view3d;
     $("#comms-toggle").hidden = !onMap; // the overlay draws on the 2D map only
     setComms(onMap && commsWanted);
