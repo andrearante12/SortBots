@@ -466,3 +466,44 @@ def test_peek_names_silent_arm_servos_and_a_busy_board():
     busy = ad.Head(CFG, opener=lambda port, **kw: bus, holders_of=lambda port: [(9, "handeye")])
     busy.poll(0.0)
     assert busy.board == "busy"
+
+
+# ---- live head TF (2026-11-20) ----------------------------------------------------------------
+def _hc():
+    np = pytest.importorskip("numpy")
+    import head_cam
+    return np, head_cam.HeadCam.load(REPO / "configs/calibration/robots/sortbots_head/sortbots_head_camera.json")
+
+
+def test_rpy_matrix_and_quat_round_trip():
+    np, _ = _hc()
+    T = ad.rpy_matrix([0.1, -0.2, 1.17], [0.05, 0.2618, -0.3])
+    x, y, z, w = ad.matrix_quat(T[:3, :3])
+    n = math.sqrt(x * x + y * y + z * z + w * w)
+    assert n == pytest.approx(1.0)
+    # back through the same quaternion -> matrix as obstacle_cloud's quat_matrix
+    R = np.array([[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                  [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                  [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+    assert np.allclose(R, T[:3, :3], atol=1e-9)
+    assert math.asin(-T[2, 0]) == pytest.approx(0.2618, abs=1e-9)   # pitch > 0 looks down
+
+
+def test_live_mount_is_the_measured_mount_at_the_nav_pose_and_follows_the_head():
+    np, hc = _hc()
+    mount = ad.rpy_matrix([0.0, 0.0, 1.17], [0.0, 0.2618, 0.0])   # configs/sensors/d435_real.yaml
+    nav = {"head_pan": 0.0, "head_tilt": 32.0}                      # configs/arm_board.yaml nav_pose
+    assert np.allclose(ad.live_mount(mount, hc, nav, dict(nav)), mount, atol=1e-9)   # nothing moves
+    pitch = lambda T: math.degrees(math.asin(-T[2, 0]))                              # noqa: E731
+    yaw = lambda T: math.degrees(math.atan2(T[1, 0], T[0, 0]))                       # noqa: E731
+    up, down = (ad.live_mount(mount, hc, nav, {"head_pan": 0.0, "head_tilt": t}) for t in (22.0, 42.0))
+    # 10 deg of the head's tilt turns the camera's pitch the opposite ways, by a real amount
+    # (the head's scale isn't 1:1 with the camera's pitch: 32 there was 15 deg down measured)
+    d_up, d_down = pitch(up) - pitch(mount), pitch(down) - pitch(mount)
+    assert d_up * d_down < 0 and 2.0 < abs(d_up) < 20.0 and 2.0 < abs(d_down) < 20.0
+    assert abs(yaw(up)) < 1.0                                       # tilt alone doesn't turn it
+    side = ad.live_mount(mount, hc, nav, {"head_pan": 20.0, "head_tilt": 32.0})
+    assert 5.0 < abs(yaw(side)) < 40.0                              # pan turns it
+    for T in (up, down, side):                                      # rigid, and stays on the head
+        assert np.allclose(T[:3, :3] @ T[:3, :3].T, np.eye(3), atol=1e-9)
+        assert np.linalg.norm(T[:3, 3] - mount[:3, 3]) < 0.15

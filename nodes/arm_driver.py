@@ -49,11 +49,14 @@ Nav and manipulation are robot states. Manipulation pauses RTAB-Map's mapping (a
 the Orin, 2026-11-16, and the robot isn't exploring while it picks); nav resumes it on the same
 map. Odometry runs in both: the place backs the base off, and the robot must stay localized.
 A pick or rest switches to manipulation by itself; nav is refused while one runs. Nav holds
-the head at head.nav_pose: the camera's TF is a static mount, so a head turned while mapping
-would put the map's walls in the wrong place. A /head_cmd in nav still turns it (2026-11-20:
-looking around without leaving nav), and mapping pauses until the head is back at the nav
-pose, by where it IS, not just where it was sent; entering nav, or a /head_cmd at the nav
-pose, hands it back.
+the head at head.nav_pose, and a /head_cmd in nav still turns it (2026-11-20: looking around
+without leaving nav); entering nav, or a /head_cmd at the nav pose, hands it back.
+
+--head-tf live (the robot's default): this node publishes <id>/base_link -> <id>/camera_link
+from the head's angles (live_mount: the measured nav-pose mount times the hand-eye model's
+camera motion since the nav pose), so the head can turn while mapping and the walls stay put.
+--head-tf static: the launch publishes a fixed mount instead, and a head turned in nav pauses
+mapping until it is back at the nav pose, by where it IS, not just where it was sent.
 
 During a pick the pads are paused (their goal re-sends would fight it) and any arm pad touch
 aborts it, as any key did on handeye's page. An abort holds the arm and never drops the magnet.
@@ -115,6 +118,55 @@ MAGNET_PROBE_S = 5.0
 PEEK_S = 1.0  # while not holding the board: read where the head is this often, torque untouched
 POSE_STALE_S = 5.0  # a pose older than this isn't reported (a failed peek keeps the last one)
 NAV_TOL_DEG = 3.0   # "back at the nav pose": servo settle plus the tilt's sag under the camera
+# Live head TF (2026-11-20, --head-tf live, the robot's default): base_link -> camera_link
+# follows the head, so the camera can turn while mapping. Published this often (above the
+# camera's 15 fps, so tf2 interpolates every frame's stamp), from head reads this often.
+HEAD_TF_HZ, HEAD_READ_HZ = 30.0, 20.0
+# camera_link (RealSense body: x forward, y left, z up) <- its optical frame (z forward, x right,
+# y down). The colour sensor's ~1.5 cm offset along y is left out: it only shifts the camera by
+# (I - R) * offset as the head turns, under 1 cm at 30 deg.
+LINK_FROM_OPTICAL = ((0.0, 0.0, 1.0), (-1.0, 0.0, 0.0), (0.0, -1.0, 0.0))
+
+
+def rpy_matrix(xyz, rpy):
+    """4x4 from static_transform_publisher's xyz / roll-pitch-yaw (R = Rz Ry Rx)."""
+    import numpy as np
+    r, p, y = (float(v) for v in rpy)
+    cr, sr, cp, sp, cy, sy = math.cos(r), math.sin(r), math.cos(p), math.sin(p), math.cos(y), math.sin(y)
+    T = np.eye(4)
+    T[:3, :3] = [[cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+                 [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+                 [-sp, cp * sr, cp * cr]]
+    T[:3, 3] = [float(v) for v in xyz]
+    return T
+
+
+def live_mount(mount, hc, nav_deg: dict, cur_deg: dict):
+    """base_link <- camera_link with the head at cur_deg: the measured mount (true at the nav
+    pose, configs/sensors/d435_real.yaml) times how the camera moved since the nav pose, from
+    the hand-eye head model (head_cam.HeadCam: arm base <- optical frame at bus degrees). At
+    the nav pose it IS the mount, so turning live on moves nothing that was mapped."""
+    import numpy as np
+    L = np.eye(4)
+    L[:3, :3] = LINK_FROM_OPTICAL
+    rel = np.linalg.inv(hc.matrix(nav_deg["head_pan"], nav_deg["head_tilt"])) @ \
+        hc.matrix(cur_deg["head_pan"], cur_deg["head_tilt"])
+    return np.asarray(mount) @ L @ rel @ np.linalg.inv(L)
+
+
+def matrix_quat(R) -> tuple[float, float, float, float]:
+    """3x3 rotation -> (x, y, z, w)."""
+    m = [[float(R[i][j]) for j in range(3)] for i in range(3)]
+    t = m[0][0] + m[1][1] + m[2][2]
+    if t > 0:
+        s = math.sqrt(t + 1.0) * 2
+        return ((m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s, 0.25 * s)
+    i = max(range(3), key=lambda k: m[k][k])
+    j, k = (i + 1) % 3, (i + 2) % 3
+    s = math.sqrt(1.0 + m[i][i] - m[j][j] - m[k][k]) * 2
+    q = [0.0, 0.0, 0.0, (m[k][j] - m[j][k]) / s]
+    q[i], q[j], q[k] = 0.25 * s, (m[j][i] + m[i][j]) / s, (m[k][i] + m[i][k]) / s
+    return q[0], q[1], q[2], q[3]
 # The arm board's link dropped out for ~1-2 s at a time (2026-11-16: ~25% of reads lost in
 # bursts, through lerobot too). The cause was the arm's half-seated servo cable loading the
 # shared line; reseated, 0 of 1488 were lost. Still ridden through, in case it comes back:
@@ -795,7 +847,7 @@ def _json(text):
     return v if isinstance(v, dict) else None
 
 
-def run_node(robot_id: str, cfg: dict):
+def run_node(robot_id: str, cfg: dict, head_tf: str = "static"):
     import rclpy
     from rclpy.clock import Clock, ClockType
     from sensor_msgs.msg import JointState
@@ -1012,7 +1064,8 @@ def run_node(robot_id: str, cfg: dict):
         """Make RTAB-Map match the mode, and the head in nav. Re-run at the state rate, so a
         mapping node that restarted, or wasn't up yet when the mode was set, ends up paused or
         running as it should, and mapping resumes as soon as a turned head is back."""
-        head_off = mode["mode"] == "nav" and head.off_nav()
+        # with the live head TF a turned head maps correctly: no pause for it
+        head_off = mode["mode"] == "nav" and not live["on"] and head.off_nav()
         if mode["note"] in ("", HEAD_NOTE) and mode["note"] != (HEAD_NOTE if head_off else ""):
             mode["note"] = HEAD_NOTE if head_off else ""
             publish_mode()
@@ -1121,6 +1174,53 @@ def run_node(robot_id: str, cfg: dict):
     head_pub = node.create_publisher(String, f"/{robot_id}/head_state", 10)
     arm_pub = node.create_publisher(String, f"/{robot_id}/arm_state", 10)
     trace_pub = node.create_publisher(String, f"/{robot_id}/pick_trace", 10)
+
+    # -- live head TF ---------------------------------------------------------------------------
+    # base_link -> camera_link from the head's angles, so mapping keeps the walls where they are
+    # while the head turns. The launch starts no static mount when this is live, so it is ALWAYS
+    # published: the nav pose's mount when the head's angle is unknown or the model won't load.
+    live = {"on": head_tf == "live", "mount": None, "hc": None, "read_at": -1e9}
+    if live["on"]:
+        from geometry_msgs.msg import TransformStamped
+        from tf2_ros import TransformBroadcaster
+        import head_cam
+        with open(REPO / "configs" / "sensors" / "d435_real.yaml") as f:
+            m = yaml.safe_load(f)["mount"]
+        live["mount"] = rpy_matrix(m["xyz"], m["rpy"])
+        cam_json = REPO / "configs" / "calibration" / "robots" / "sortbots_head" / "sortbots_head_camera.json"
+        try:
+            live["hc"] = head_cam.HeadCam.load(cam_json)
+        except (OSError, ValueError, KeyError) as e:
+            log.warning(f"head_tf live without the head model ({e}): publishing the fixed nav-pose mount")
+        tf_bc = TransformBroadcaster(node)
+
+        def head_deg_now():
+            """Where the head is, in bus degrees: the pick's own reads and goals while it owns the
+            board, else the driver's (20 Hz while holding it), else unknown."""
+            io = pick.get("io")
+            if pick["thread"] is not None and io is not None:
+                src = {**io.last, **io.goal}
+                if "head_pan" in src and "head_tilt" in src:
+                    return {"head_pan": src["head_pan"], "head_tilt": src["head_tilt"]}
+            if head.pos and time.monotonic() - head.pos_at <= POSE_STALE_S:
+                return head.pos
+            return None
+
+        def publish_head_tf():
+            cur = head_deg_now()
+            T = live["mount"] if live["hc"] is None or cur is None else \
+                live_mount(live["mount"], live["hc"], head.nav_deg(), cur)
+            t = TransformStamped()
+            t.header.stamp = node.get_clock().now().to_msg()
+            t.header.frame_id, t.child_frame_id = f"{robot_id}/base_link", f"{robot_id}/camera_link"
+            t.transform.translation.x, t.transform.translation.y, t.transform.translation.z = \
+                (float(v) for v in T[:3, 3])
+            q = matrix_quat(T[:3, :3])
+            t.transform.rotation.x, t.transform.rotation.y, t.transform.rotation.z, t.transform.rotation.w = q
+            tf_bc.sendTransform(t)
+        node.create_timer(1.0 / HEAD_TF_HZ, publish_head_tf, clock=steady)
+        log.info(f"head_tf live: base_link -> camera_link from the head at {HEAD_TF_HZ:.0f} Hz"
+                 f"{'' if live['hc'] else ' (no head model: fixed mount)'}")
     last = {"t": time.monotonic(), "head": None, "arm": None}
 
     def logged(key, what, state, message):
@@ -1143,6 +1243,10 @@ def run_node(robot_id: str, cfg: dict):
                 pick_finished()
             return                     # the pick owns the arm and head while it runs
         head.tick(now, dt)
+        # live head TF wants the head's angle fresher than the state rate's 5 Hz
+        if live["on"] and head.bus is not None and now - live["read_at"] >= 1.0 / HEAD_READ_HZ:
+            live["read_at"] = now
+            head.poll(now)
         if arm is not None:
             if head.bus is None:
                 arm.engaged = False
@@ -1236,8 +1340,12 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--robot-id", default="robot_0")
     p.add_argument("--config", type=Path, default=REPO / "configs" / "arm_board.yaml")
+    p.add_argument("--head-tf", choices=("static", "live"), default="static",
+                   help="live: publish base_link -> camera_link from the head's angles (the launch "
+                        "then starts no static mount); static: the mount is fixed, and a head turned "
+                        "in nav pauses mapping")
     args = p.parse_args(argv)
-    run_node(args.robot_id, load_config(args.config))
+    run_node(args.robot_id, load_config(args.config), head_tf=args.head_tf)
     return 0
 
 

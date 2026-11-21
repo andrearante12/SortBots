@@ -125,6 +125,26 @@ ros2 topic pub --once /robot_0/cancel_task std_msgs/String '{data: all}'
 Speed is capped at 0.15 m/s (`configs/nav2_real.yaml`) under base_driver's own cap. The
 E-STOP latches in base_driver and stops Nav2's output from reaching the wheels.
 
+### Turning the head while mapping
+
+The camera sits on the pan/tilt head, so its pose relative to the body changes when the
+head turns. By default (`head_tf:=live`), `nodes/arm_driver.py` publishes
+`<id>/base_link -> <id>/camera_link` at 30 Hz from the head's angles, read at 20 Hz. It
+takes the measured mount in `configs/sensors/d435_real.yaml`, which is right at the head's
+nav pose, and applies how the camera has moved since that pose, using the hand-eye head
+model (`configs/calibration/robots/sortbots_head/sortbots_head_camera.json`). At the nav
+pose the result is exactly the mount, so maps made before keep lining up. Visual odometry,
+RTAB-Map, the depth filter and the obstacle cloud all look the transform up per frame (the
+obstacle cloud at 10 Hz), so the head can turn (H/J/K/L in the operator view) while the
+robot maps.
+
+`head_tf:=static` publishes the fixed mount from the RealSense launch instead. Then a head
+turned in Nav pauses mapping until it's back at the nav pose (C), because a fixed mount
+would put the walls it sees in the wrong place.
+
+Untested so far: how much a fast head sweep smears the map. The head's angle lags the
+camera frames by up to one read, so a slow turn is safer than a fast one.
+
 ### SLAM offload
 
 On the Orin Nano, mapping competes with odometry and obstacle detection. With

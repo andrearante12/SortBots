@@ -93,6 +93,10 @@ def _actions(context):
             "--child-frame-id", f"{rid}/camera_link",
         ],
     )
+    # head_tf live: nodes/arm_driver.py publishes base_link -> camera_link from the head's angles
+    # (2026-11-20); a static mount beside it would be two sources for one transform.
+    if context.launch_configurations.get("head_tf", "static") == "live":
+        return [driver]
     return [driver, mount]
 
 
@@ -102,6 +106,12 @@ def generate_launch_description():
             "robot_id",
             default_value="robot_0",
             description="Namespace / TF prefix for this robot's camera.",
+        ),
+        DeclareLaunchArgument(
+            "head_tf",
+            default_value="static",
+            description="static: publish the fixed mount from d435_real.yaml. live: don't; "
+                        "arm_driver publishes it from the head's angles.",
         ),
         OpaqueFunction(function=_actions),
     ])

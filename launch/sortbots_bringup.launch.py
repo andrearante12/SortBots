@@ -144,6 +144,11 @@ def _make_per_robot_actions(
     recon_source = recon_source_cfg.perform(context)
     if recon_source not in ("cloud_map", "octomap"):
         raise ValueError(f"recon_source:={recon_source!r} — expected cloud_map or octomap")
+    # Real only (the sim's head TF comes from Isaac): live = arm_driver publishes the camera mount
+    # from the head's angles, so the head can turn while mapping (2026-11-20).
+    head_tf = context.launch_configurations.get("head_tf", "live")
+    if head_tf not in ("static", "live"):
+        raise ValueError(f"head_tf:={head_tf!r} — expected static or live")
     raw = robot_ids_cfg.perform(context).strip()
     robot_ids = [r.strip() for r in raw.split(",") if r.strip()] if raw else [primary_robot_id]
     platform = platform_cfg.perform(context)
@@ -205,7 +210,7 @@ def _make_per_robot_actions(
         if platform == "real":
             actions.append(IncludeLaunchDescription(
                 _include("sortbots_realsense.launch.py"),
-                launch_arguments={"robot_id": rid}.items(),
+                launch_arguments={"robot_id": rid, "head_tf": head_tf}.items(),
             ))
 
         # On the real robot the dashboard extras and the obstacle tracker run at nice 10 (as
@@ -285,7 +290,7 @@ def _make_per_robot_actions(
                 cmd=[
                     "python3",
                     os.path.join(REPO_ROOT, "nodes", "arm_driver.py"),
-                    "--robot-id", rid,
+                    "--robot-id", rid, "--head-tf", head_tf,
                 ],
                 output="screen",
             ))
@@ -303,7 +308,7 @@ def _make_per_robot_actions(
                     # and ~6k floor points a frame (1.5-4.4 m out) were marked as obstacles
                     # (2026-11-19). Matches configs/nav2_real.yaml's min_obstacle_height.
                     "--min-height-m", "0.12",
-                ],
+                ] + (["--live-mount"] if head_tf == "live" else []),   # the mount moves with the head
                 output="screen",
             ))
 
@@ -594,6 +599,16 @@ def generate_launch_description():
     recon_source = LaunchConfiguration("recon_source")
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "head_tf",
+            default_value="live",
+            description=(
+                "Real robot: live (nodes/arm_driver.py publishes base_link -> camera_link "
+                "from the head's angles, so the head can turn while mapping) or static (the "
+                "fixed mount in configs/sensors/d435_real.yaml; a head turned in nav pauses "
+                "mapping)."
+            ),
+        ),
         DeclareLaunchArgument(
             "recon_source",
             default_value="cloud_map",
