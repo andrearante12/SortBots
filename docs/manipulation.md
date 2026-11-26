@@ -99,7 +99,7 @@ the camera. In `pick_place_smoke`:
 - The real robot needs a magnet link in the URDF, the microswitch as the "held" signal,
   and measured detector thresholds.
 
-`tests/magnet_test.py` keeps the sim's TCP offset (47.1 mm) matched to
+`tests/magnet_test.py` keeps the sim's TCP offset (38.1 mm) matched to
 `hardware/magnet_effector/params.py`.
 
 ## Hardware: magnet end effector

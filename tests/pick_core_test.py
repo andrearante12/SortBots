@@ -508,9 +508,9 @@ def test_unload_looks_into_the_body_and_places_on_the_table():
 
 def test_unload_without_a_table_pose_holds_it_for_the_pad():
     core, bus, mag, reports = make_core(q_deg=POSES.samples[0]["arm_deg"], head=(0.0, 0.0))
+    core.st["table_q"] = None   # the repo's calibration has one taught (cd03b8f); this tests the untaught path
     core.start()
     core.go_rest()
-    assert core.st["table_q"] is None
     assert core.unload(10) == "picked"
     assert core.st["state"] == "holding" and "Save table" in reports[-1][1]
 

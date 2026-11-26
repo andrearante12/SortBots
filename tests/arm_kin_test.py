@@ -34,7 +34,7 @@ def test_fk_at_zero(kin):
     t = kin.fk([0, 0, 0, 0, 0])
     assert t[:3, 3] == pytest.approx((0.248, -0.133, 0.856), abs=1e-3)
     pos, a = kin.tcp([0, 0, 0, 0, 0])
-    assert pos == pytest.approx((0.2955, -0.133, 0.856), abs=1e-3)   # 47.1 mm beyond Fixed_Jaw
+    assert pos == pytest.approx((0.2865, -0.133, 0.856), abs=1e-3)   # 38.1 mm beyond Fixed_Jaw
     # the URDF's rpy values are 1.5708, not pi/2, so a few micro-radians of slop
     assert a == pytest.approx((1, 0, 0), abs=1e-4)
 
