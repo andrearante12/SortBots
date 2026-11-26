@@ -25,7 +25,7 @@ def pose(x=1.0, y=2.0, z=0.8, yaw=0.0):
 
 
 def test_tcp_offset_matches_the_cad_parameters():
-    """The TCP constant is the printed effector's 47.1 mm; recompute it from
+    """The TCP constant is the printed effector's 38.1 mm (the uxcell 5 V magnet); recompute it from
     hardware/magnet_effector/params.py (pure dataclasses, no cadquery)."""
     sys.path.insert(0, str(REPO_ROOT / "hardware" / "magnet_effector"))
     from params import DEFAULT

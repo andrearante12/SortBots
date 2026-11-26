@@ -36,11 +36,11 @@ from . import geometry, world
 # TCP = the magnet face, TCP_OFFSET_M from the `Fixed_Jaw` link origin. Fixed_Jaw
 # is the link motor 5 (wrist roll) turns, so it is where the real effector's horn
 # mounts. The roll axis is Fixed_Jaw -Y (URDF `Wrist_Roll` axis 0 -1 0; the stock
-# jaw tip sits at y=-0.097), and the magnet face is z_magnet_face = 47.1 mm from
+# jaw tip sits at y=-0.097), and the magnet face is z_magnet_face = 38.1 mm from
 # the horn face along it (hardware/magnet_effector/params.py, `Params.z_magnet_face`,
 # at rest, before the plunger's 3 mm of travel). tests/magnet_test.py recomputes
-# 47.1 mm from params.py (a pure dataclass, no cadquery) so the two cannot drift.
-TCP_OFFSET_M = (0.0, -0.0471, 0.0)
+# 38.1 mm from params.py (a pure dataclass, no cadquery) so the two cannot drift.
+TCP_OFFSET_M = (0.0, -0.0381, 0.0)
 # The unit vector the magnet points along, in the Fixed_Jaw frame.
 APPROACH_LOCAL = (0.0, -1.0, 0.0)
 
