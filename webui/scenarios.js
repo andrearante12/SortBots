@@ -528,6 +528,7 @@
     logSessionId = null;
     try {
       session = await postJson("/api/session/start", { config: formConfig() });
+      if (window.sortbotsRunStarting) window.sortbotsRunStarting();
     } catch (e) {
       renderWarning(`Could not start: ${e.message}`);
     } finally {

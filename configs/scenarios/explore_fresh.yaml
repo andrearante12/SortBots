@@ -10,7 +10,7 @@
 # reachable-adjacent to a control API that serve.py exposes on 0.0.0.0, so
 # "config key" must never mean "arbitrary shell argument".
 #
-# See docs/running.md ("Scenarios tab") for the full schema and for how to
+# See docs/running.md ("Scenarios") for the full schema and for how to
 # add a new scenario.
 
 # Must equal the filename stem — the UI addresses scenarios by this name.
@@ -44,7 +44,7 @@ run:
   localize: false
   teleop: false
   map: null              # null = run_demo.sh's default ~/.ros/sortbots_<robot_id>.db
-  # world: aisle_crossing  # optional: a configs/worlds/ layout (props + scripted
+  # world: person_crossing  # optional: a configs/worlds/ layout (props + scripted
                            # movers) added to the scene — see moving_obstacles.yaml
 
 # Which `run:` keys the scenario card exposes as controls. Everything else is

@@ -60,7 +60,7 @@ class Costmap:
         # standalone stress test (2026-11-02). Integer arithmetic allocates
         # no floats in the loop and the TypeError stopped, but segfaults
         # elsewhere since suggest the fault (interpreter or CPU, unresolved)
-        # only moved; see fleetsim/README.md "Known issues".
+        # only moved; see docs/fleetsim.md "Known issues".
         self.wint = array("l", bytes(array("l").itemsize * grid.size))
         self.version = 0
         self.rebuild()

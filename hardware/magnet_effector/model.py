@@ -160,8 +160,8 @@ def plunger(p: Params = DEFAULT, compressed: float = 0.0) -> cq.Workplane:
 # ---- placeholders (assembly / tests only) ----------------------------------
 
 def magnet_parts(p: Params = DEFAULT, compressed: float = 0.0) -> dict:
-    """Adafruit 3873, split into coloured pieces so it reads like the product
-    photos: chrome body with the tapped hole on the back, dark potting ring
+    """The uxcell 5 V holding magnet, split into coloured pieces so it reads like
+    the product: iron body with the tapped hole on the back, dark potting ring
     around the Ø12 pole on the face, black heat-shrink lead stub out of the
     SIDE, and the start of the blue leads. {name: (Workplane, Color)}."""
     m = p.magnet
@@ -289,7 +289,7 @@ def effector_assembly(p: Params = DEFAULT, horn: cq.Shape = None) -> cq.Assembly
          |- printed_parts          what you 3D print
          |    |- adapter_body
          |    |- plunger
-         |- magnet_Adafruit_3873   what you buy
+         |- magnet_uxcell_5kg   what you buy
          |    |- body, potting, lead_stub, leads
          |- hardware               screws, springs, switch
               |- m3x18_guide_screws_x3, springs_x3, m4_magnet_screw,
@@ -303,7 +303,7 @@ def effector_assembly(p: Params = DEFAULT, horn: cq.Shape = None) -> cq.Assembly
     printed.add(adapter_body(p), name="adapter_body", color=PRINTED)
     printed.add(plunger(p), name="plunger", color=PLUNGER)
 
-    mag = cq.Assembly(name="magnet_Adafruit_3873")
+    mag = cq.Assembly(name="magnet_uxcell_5kg")
     for name, (wp, col) in magnet_parts(p).items():
         mag.add(wp, name=name.replace("magnet_", ""), color=col)
 

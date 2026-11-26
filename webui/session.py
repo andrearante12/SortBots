@@ -305,6 +305,11 @@ RUN_FLAGS = {
     "explore": _switch("--explore", when=True),
     "map": _map_path("--map"),
     "world": _world_name("--world"),
+    # What the magnet pick controller aims at (nodes/magnet_pick.py): `camera` is the
+    # head camera's plate detections, `oracle` the simulator's ground truth (a sim-only
+    # diagnostic that separates perception failures from dock/arm ones). Stock value
+    # emits no flag, so every existing scenario's argv is unchanged.
+    "perception": _omit_at("camera", _choice("--perception", {"camera", "oracle"})),
 }
 
 RUN_DEFAULTS = {
@@ -324,6 +329,7 @@ RUN_DEFAULTS = {
     "explore": False,
     "map": None,
     "world": None,
+    "perception": "camera",
 }
 
 
@@ -337,11 +343,13 @@ REAL_RUN_FLAGS = {
     "resume": RUN_FLAGS["resume"],
     "map": RUN_FLAGS["map"],
     # all = map on the Jetson; robot = map on the workstation from the robot's
-    # keyframe stream (tasks/slam_offload.md). Real-only: sim has no Jetson.
+    # keyframe stream (tasks/slam_offload.md@6501799). Real-only: sim has no Jetson.
     "slam_role": _choice("--slam-role", {"all", "robot"}),
+    # Nav2 + the explorer (run_robot.sh --nav): the Explore button on the real robot.
+    "nav": _switch("--nav", when=True),
 }
 
-REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all"}
+REAL_RUN_DEFAULTS = {key: RUN_DEFAULTS.get(key) for key in REAL_RUN_FLAGS} | {"slam_role": "all", "nav": False}
 
 PLATFORM_FLAGS = {"sim": RUN_FLAGS, "real": REAL_RUN_FLAGS}
 
@@ -471,30 +479,37 @@ def load_scenarios() -> list[dict]:
     `error` string rather than being dropped — a silently missing scenario is
     much harder to debug than a card that says why it won't load.
     """
-    out = []
-    for path in sorted(SCENARIO_DIR.glob("*.yaml")):
-        try:
-            with open(path) as f:
-                out.append(_validate(path, yaml.safe_load(f)))
-        except (ScenarioError, yaml.YAMLError, OSError) as exc:
-            out.append({
-                "name": path.stem,
-                "title": path.stem,
-                "description": "",
-                "status": "invalid",
-                "platform": None,
-                "run": {},
-                "overrides": [],
-                "capture": {"bag": False},
-                "error": f"{path.name}: {exc}",
-            })
-    return out
+    return [_load_one(path) for path in sorted(SCENARIO_DIR.glob("*.yaml"))]
+
+
+def _load_one(path: Path) -> dict:
+    """One scenario file, validated: or the `invalid` card that says why not."""
+    try:
+        with open(path) as f:
+            return _validate(path, yaml.safe_load(f))
+    except (ScenarioError, yaml.YAMLError, OSError) as exc:
+        return {
+            "name": path.stem,
+            "title": path.stem,
+            "description": "",
+            "status": "invalid",
+            "platform": None,
+            "run": {},
+            "overrides": [],
+            "capture": {"bag": False},
+            "error": f"{path.name}: {exc}",
+        }
 
 
 def get_scenario(name: str) -> dict:
-    for scenario in load_scenarios():
-        if scenario["name"] == name:
-            return scenario
+    # A scenario's name must equal its file's stem (_validate enforces it), so the one
+    # wanted can be read directly. Scanning every file here made resolving a single
+    # test case cost a parse of ALL the scenarios, and listing the Tests tab quadratic
+    # in the number of tests (0.9 s for a dozen, pure-python YAML).
+    if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        path = SCENARIO_DIR / f"{name}.yaml"
+        if path.is_file():
+            return _load_one(path)
     raise ScenarioError(f"no such scenario: {name!r}")
 
 
@@ -930,6 +945,29 @@ def clear_map_blocking(robot_id: str = "robot_0") -> dict:
     _ros_service_call(f"/{rid}/rgbd_odometry/reset_odom", "std_srvs/srv/Empty", "{}")
     _publish_recon_reset(rid)
     return {"cleared": True, "robot_id": rid}
+
+
+# What set_map_mode_blocking last put each robot's RTAB-Map in, keyed (session_id, robot_id):
+# RTAB-Map has no service that reports it, and a new session starts in its scenario's mode.
+_MAP_MODE: dict[tuple, str] = {}
+MAP_MODES = {"localize": "set_mode_localization", "mapping": "set_mode_mapping"}
+
+
+def set_map_mode_blocking(mode: str, robot_id: str = "robot_0", session_id=None) -> dict:
+    """Switch the running RTAB-Map between mapping (the graph grows; a loaded map is extended)
+    and localization only (the map is used as it is, never changed), live, through RTAB-Map's
+    own set_mode_* services: no restart, unlike a localize scenario."""
+    if mode not in MAP_MODES:
+        raise maps_lib.MapError(f"mode must be one of {sorted(MAP_MODES)}")
+    rid = _check_robot_id(robot_id)
+    _ros_service_call(f"/{rid}/rtabmap/{MAP_MODES[mode]}", "std_srvs/srv/Empty", "{}")
+    _MAP_MODE[(session_id, rid)] = mode
+    return {"mode": mode, "robot_id": rid}
+
+
+def map_mode(robot_id: str = "robot_0", session_id=None):
+    """The mode set_map_mode_blocking set in this session, or None (the scenario's own)."""
+    return _MAP_MODE.get((session_id, str(robot_id)))
 
 
 def load_map_blocking(name: str, robot_id: str = "robot_0") -> dict:

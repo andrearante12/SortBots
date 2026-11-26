@@ -2,7 +2,7 @@
 + the dashboard's own static file server (`webui/serve.py`).
 
 Doesn't start Nav2, RTAB-Map, `nodes/task_manager.py`, or Isaac — those run
-separately (see docs/quickstart.md and the other launch files in this dir). This
+separately (see docs/setup.md and the other launch files in this dir). This
 file only owns the three processes the browser talks to directly.
 
 Run from a shell with system ROS 2 Jazzy sourced (NOT the Isaac venv or
@@ -21,7 +21,7 @@ prepends its bin dirs to PATH in `.bashrc` — check `which python3` first:
     export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
     ros2 launch ./launch/sortbots_webui.launch.py
 
-Then open http://localhost:8081/. Requires (see docs/quickstart.md):
+Then open http://localhost:8081/. Requires (see docs/setup.md):
     sudo apt install ros-jazzy-rosbridge-suite ros-jazzy-web-video-server
 """
 import os
@@ -62,6 +62,9 @@ def generate_launch_description():
             executable="rosbridge_websocket",
             name="rosbridge_websocket",
             output="screen",
+            # Respawned: nodes/rosbridge_watchdog.py kills it when it stops forwarding.
+            respawn=True,
+            respawn_delay=1.0,
             parameters=[{
                 "port": 9090,
                 # RTAB-Map's cloud_map (3D reconstruction panel) easily exceeds
@@ -97,6 +100,12 @@ def generate_launch_description():
         # for anything else (rviz plugins, curl, old tabs) opening streams.
         ExecuteProcess(
             cmd=["bash", os.path.join(REPO_ROOT, "nodes", "web_video_watchdog.sh")],
+            output="screen",
+        ),
+        # Restarts rosbridge when it is up but forwards nothing while the robot pipeline runs
+        # (seen twice on the Jetson, 2026-11-16: the page waited on robots that were publishing).
+        ExecuteProcess(
+            cmd=["python3", os.path.join(REPO_ROOT, "nodes", "rosbridge_watchdog.py")],
             output="screen",
         ),
         ExecuteProcess(

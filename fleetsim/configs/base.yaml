@@ -14,7 +14,7 @@ world:
   source: synthetic           # synthetic | map
   map: null                   # with source: map — a maps/<name> library entry, or a dir path
   # Cell size for EVERY grid in the run: the true world, each robot's belief,
-  # each costmap. 0.2 m is the compromise (fleetsim/README.md, "Resolution"):
+  # each costmap. 0.2 m is the compromise (docs/fleetsim.md, "Resolution"):
   #   * the 0.5 x 0.4 m footprint is ~3 x 2 cells, so inflation and clearance
   #     still mean something. A robot is planned as a disc of
   #     footprint_radius_m + half a cell (0.35 m here), so a passage must be
@@ -64,7 +64,7 @@ nav:
   clearance_margin_m: 0.1     # obstacle counts as in the way within body + its radius + this
   detection_ttl_s: 0.5        # a camera detection is trusted this long
   predict_s: 0.5              # also avoid where a moving detection will be this far ahead
-                              # (obstacle_detector tracks carry velocity; docs/obstacle_detection.md v2)
+                              # (obstacle_detector tracks carry velocity; docs/obstacle_detection.md@6501799 v2)
   bump_ttl_s: 5.0             # a physical bump stays an obstacle this long
   block_replan_s: 2.0         # blocked this long -> replan around it (lower priority first)
   block_fail_s: 45.0          # blocked this long -> the leg fails (Nav2 abort after recoveries)
@@ -73,7 +73,7 @@ nav:
   replan_period_s: 10.0       # backstop replan while driving (Nav2's BT replans at 1 Hz)
   min_replan_s: 0.5           # never replan more often than this
   hiccup_rate_hz: 0.0         # PLACEHOLDER: random recovery pauses per driving second; calibrate
-  hiccup_s: 4.0               #   against Isaac's task timings (README, "Calibration")
+  hiccup_s: 4.0               #   against Isaac's task timings (docs/fleetsim.md, "Calibration")
   return_home_s: 10.0         # idle this long -> drive back to the home spot (null = stay put)
 
 tasks:
@@ -99,7 +99,7 @@ status:                       # nodes/fleet_radio.py /fleet/status
   # it on tests a design, not the robots as they are.
   session_liveness: false
 
-map_share:                    # commsim/docs/brief.md "Obstacles and maps"
+map_share:                    # commsim/docs/brief.md@6501799 "Obstacles and maps"
   enabled: true
   prior: none                 # none = every robot starts blind; truth = every robot starts with the
                               # true map (a localize-on-saved-map run), so only CHANGES need sharing
@@ -119,7 +119,7 @@ obstacle_share:               # #18: tell peers about movers they may not see
   expiry_s: 3.0
   min_interval_s: 0.5
 
-intent:                       # path intents (fleetsim/intent.py; README "Path intents")
+intent:                       # path intents (fleetsim/intent.py; docs/fleetsim.md "Path intents")
   enabled: false              # off: the local layer alone, as on the robots today
   # status: the points ride on /fleet/status (no frames of their own, to the
   # Status recipients). message: their own best-effort message to robots

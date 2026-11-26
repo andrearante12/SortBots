@@ -4,7 +4,7 @@
 These give RTAB-Map (and any visual-odometry pipeline) enough texture
 gradient to track ORB features. The Phase 3 warehouse used untextured
 UsdGeom.Cubes which produced 0 inliers per frame — see Phase 4's demo
-notes in docs/isaac_sim_phase4.md.
+notes in docs/isaac_sim_phase4.md@6501799.
 
 Run after `source scripts/activate_isaac.sh` (or any env with `requests`
 or stdlib `urllib`):

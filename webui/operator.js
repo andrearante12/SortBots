@@ -51,12 +51,14 @@
   let selected = null;
   let tool = "select";
   let view3d = false; // main stage is the 3D point cloud
-  let stageView = "2d"; // "2d" map | "3d" cloud | "sim" (Isaac's own render, sim only)
+  let stageView = "2d"; // "2d" map | "3d" cloud | "sim" (Isaac's own render, sim only) | "drive" (real base, operator_drive.js)
   let waypoints = []; // [{name, x, y, yaw}], the server's copy — also the task endpoints
   let gateway = null; // {x, y}: the fleet gateway pin (comms overlay), server's copy
   let platform = null; // "sim" | "real", from serve.py; the Teleport tool is sim-only
   let tasks = []; // [{id, kind: "goto"|"pickup", goto, pickup, dropoff, robot, state, at, reason}]
   let session = null; // last /api/session body, null until the first answer
+  const START_WAIT_MS = 30000;
+  let startAskedAt = null; // when a start was asked for, until the session says it is starting
   let controlAvailable = true; // false once /api/session answers 503
   let mapInfo = null;
   let mapCanvas = null;
@@ -64,12 +66,75 @@
   let knownBox = null; // [minX, minY, maxX, maxY] of non-unknown cells, world metres
   let dirty = true;
 
+  // -- the robot's computer rebooting or dropping off Wi-Fi ----------------------------------
+  // The page is served by the robot's own console, so while it is down nothing at this address
+  // answers: a fresh load can only show the browser's error. A page that is ALREADY open can do
+  // better, and say what has come back as the robot boots (2026-11-16: it sat on a stale view).
+  // Stages: the GUI server answers (/api/session), the live link (rosbridge), the robot stack
+  // (session + robots online). Shown once the server has been gone OUTAGE_SHOW_MS, so a Wi-Fi
+  // blip doesn't flash it; it closes by itself OUTAGE_DONE_MS after the robots are back.
+  const OUTAGE_SHOW_MS = 4000, OUTAGE_DONE_MS = 2500;
+  const outage = {
+    downAt: null, serverAt: null, rosAt: null, rosUp: false, doneAt: null, timer: null, dismissed: false,
+    server(ok) {
+      const now = performance.now();
+      if (!ok && this.downAt === null) { this.downAt = now; this.serverAt = this.rosAt = this.doneAt = null; this.dismissed = false; }
+      if (ok && this.downAt !== null && this.serverAt === null) {
+        this.serverAt = now;
+        // the console restarted: what it serves may have changed (branch, consoles, robots)
+        refreshRoster(); loadVersion(); loadConsoles();
+      }
+      this.tick();
+    },
+    ros(up) {
+      this.rosUp = up;
+      if (up && this.downAt !== null && this.rosAt === null) this.rosAt = performance.now();
+      this.tick();
+    },
+    tick() {
+      if (this.downAt === null) return;
+      const now = performance.now(), el = $("#outage");
+      if (!el) return;
+      const mmss = (ms) => { const t = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`; };
+      const since = (t) => (t === null ? "" : mmss(t - this.downAt));
+      const list = [...robots.values()], up = list.filter(online).length;
+      const running = session && session.state === "running", starting = session && session.state === "starting";
+      let stack, stackOk = false;
+      if (this.serverAt === null) stack = "";
+      else if (!controlAvailable) { stack = "no session control on this console"; stackOk = true; }
+      else if (running && list.length && up === list.length) { stack = `${up} of ${list.length} online`; stackOk = true; }
+      else if (running) stack = `starting: ${up} of ${list.length || "?"} robots online`;
+      else if (starting) stack = PHASE_TEXT[session.phase] || session.phase_label || "starting";
+      else { stack = "not started"; stackOk = true; }
+      const done = this.serverAt !== null && this.rosUp && stackOk;
+      if (done && this.doneAt === null) this.doneAt = now;
+      if (!done) this.doneAt = null;
+      if (this.doneAt !== null && now - this.doneAt > OUTAGE_DONE_MS) {
+        this.downAt = null; el.hidden = true; clearInterval(this.timer); this.timer = null; return;
+      }
+      if (now - this.downAt < OUTAGE_SHOW_MS || this.dismissed) return;
+      el.hidden = false;
+      if (!this.timer) this.timer = setInterval(() => this.tick(), 1000);
+      const row = (ok, pend, text, at) => `<li class="${ok ? "ok" : pend ? "pend" : "wait"}"><i>${ok ? "&#10003;" : pend ? "&hellip;" : "&middot;"}</i><span>${text}</span><time>${at}</time></li>`;
+      $("#outage-title").textContent = done ? "Robot back online" : this.serverAt === null ? "Robot offline: rebooting or out of Wi-Fi" : "Robot coming back";
+      $("#outage-time").textContent = mmss(now - this.downAt);
+      $("#outage-steps").innerHTML =
+        row(this.serverAt !== null, this.serverAt === null, this.serverAt === null ? "Waiting for the robot's computer (a boot takes about a minute)" : "GUI server back", since(this.serverAt)) +
+        row(this.rosUp && this.rosAt !== null, this.serverAt !== null && !this.rosUp, "Live link (rosbridge)", since(this.rosAt)) +
+        row(stackOk && this.serverAt !== null, this.serverAt !== null && !stackOk, `Robot stack${stack ? ": " + esc(stack) : ""}`, "");
+      const late = this.serverAt === null && now - this.downAt > 180000;
+      $("#outage-hint").hidden = !late;
+      $("#outage-start").hidden = !(this.serverAt !== null && controlAvailable && !running && !starting);
+    },
+  };
+
   // -- rosbridge --------------------------------------------------------------
 
   const ros = new ROSLIB.Ros({ url: ROSBRIDGE_URL });
-  ros.on("connection", () => { $("#link-down").hidden = true; });
+  ros.on("connection", () => { $("#link-down").hidden = true; outage.ros(true); });
   ros.on("close", () => {
     $("#link-down").hidden = false;
+    outage.ros(false);
     setTimeout(() => ros.connect(ROSBRIDGE_URL), 2000);
   });
   ros.on("error", (e) => { $("#link-down").hidden = false; console.error("rosbridge error", e); });
@@ -214,6 +279,7 @@
 
   function resize() {
     const r = canvas.parentElement.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+    if (!r.width || !r.height) return; // the left bar has taken the whole window: keep the last fit
     cssW = r.width; cssH = r.height;
     canvas.width = Math.round(cssW * d); canvas.height = Math.round(cssH * d);
     ctx.setTransform(d, 0, 0, d, 0, 0);
@@ -243,20 +309,38 @@
   // (<id>/odom, or base_link when it had no odom TF). Both are placed in `map` once, on
   // arrival, with the poses /tf gives right then, so a marker stays put while the robot
   // carries on moving instead of swinging around with it until the next message.
+  // The Kalman look-ahead (`pred`, points in the world frame) and the position
+  // covariance (`cov`) go through the world frame's full pose, not just its yaw.
   function obstaclesInMap(p, base, world) {
     const c = Math.cos(base.yaw), s = Math.sin(base.yaw);
     const toMap = (x, y) => [base.x + c * x - s * y, base.y + s * x + c * y];
-    const vyaw = world ? world.yaw : base.yaw;
-    const vc = Math.cos(vyaw), vs = Math.sin(vyaw);
+    const w = world || base, vc = Math.cos(w.yaw), vs = Math.sin(w.yaw);
+    const wToMap = (x, y) => [w.x + vc * x - vs * y, w.y + vs * x + vc * y];
     return (p.obstacles || []).map((o) => {
       const [x0, y0] = o.min, [x1, y1] = o.max, v = o.vel || [0, 0];
+      let cov = null;
+      if (o.cov) { // R C R^T for the 2x2 [[sxx, sxy], [sxy, syy]]
+        const [a, b, d] = o.cov;
+        cov = [vc * (vc * a - vs * b) - vs * (vc * b - vs * d),
+               vs * (vc * a - vs * b) + vc * (vc * b - vs * d),
+               vs * (vs * a + vc * b) + vc * (vs * b + vc * d)];
+      }
       return {
         id: o.track_id, moving: !!o.moving, speed: o.speed_mps || 0, range: o.range_m,
         at: toMap(o.centroid[0], o.centroid[1]),
         corners: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]].map(([a, b]) => toMap(a, b)),
         vel: [vc * v[0] - vs * v[1], vs * v[0] + vc * v[1]],
+        pred: (o.pred || []).map(([h, x, y]) => [h, ...wToMap(x, y)]),
+        cov,
       };
     });
+  }
+  // 2-sigma ellipse axes (semi-major, semi-minor, angle) of a [sxx, sxy, syy] covariance.
+  function covEllipse(cov) {
+    const [a, b, d] = cov, tr = (a + d) / 2, det = a * d - b * b;
+    const disc = Math.sqrt(Math.max(0, tr * tr - det));
+    const l1 = Math.max(tr + disc, 1e-9), l2 = Math.max(tr - disc, 1e-9);
+    return [2 * Math.sqrt(l1), 2 * Math.sqrt(l2), Math.abs(b) < 1e-12 ? (a >= d ? 0 : Math.PI / 2) : Math.atan2(l1 - a, b)];
   }
   function onObstacles(r, p) {
     r.obstacles = p; r.obstaclesAt = performance.now();
@@ -294,12 +378,103 @@
         ctx.lineTo(ex - Math.cos(ang - 0.45) * 8, ey - Math.sin(ang - 0.45) * 8);
         ctx.lineTo(ex - Math.cos(ang + 0.45) * 8, ey - Math.sin(ang + 0.45) * 8);
         ctx.closePath(); ctx.fill();
+        // The Kalman look-ahead: a dotted line through the predicted points and a
+        // 2-sigma ellipse of the position uncertainty at the last one — where the
+        // costmap's predicted ribbon ends. Faint, so it never reads as a plan.
+        if (o.pred && o.pred.length) {
+          ctx.globalAlpha = 0.6; ctx.setLineDash([3, 4]); ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.moveTo(a, b);
+          for (const [, px, py] of o.pred) { const [qa, qb] = toPx(px, py); ctx.lineTo(qa, qb); }
+          ctx.stroke(); ctx.setLineDash([]);
+          // The end point solid: it is where the costmap's predicted ribbon ends.
+          const [, lx, ly] = o.pred[o.pred.length - 1], [la, lb] = toPx(lx, ly);
+          ctx.globalAlpha = 1; ctx.beginPath(); ctx.arc(la, lb, 3.5, 0, 7); ctx.fill();
+          if (o.cov) {
+            const [r1, r2, ang] = covEllipse(o.cov);
+            ctx.globalAlpha = 0.15; ctx.beginPath();
+            ctx.ellipse(la, lb, Math.max(3, r1 * view.scale), Math.max(3, r2 * view.scale), -ang, 0, 7);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1; ctx.lineWidth = 2;
+        }
         const label = `moving · ${o.speed.toFixed(1)} m/s`;
         const tw = ctx.measureText(label).width + 10;
         ctx.fillRect(a - tw / 2, b - 30, tw, 16);
         ctx.fillStyle = "#fff"; ctx.fillText(label, a, b - 18);
       }
     }
+  }
+
+  // Camera tile, in a world with packages: what the plate detector found, which is what the
+  // pick aims at. The obstacle boxes would only frame the table. Green is the plate the pick
+  // controller has locked (/pick_status); amber is everything else the detector reports. Both
+  // solid and labelled: a faint dashed box vanished against cardboard (2026-11-05).
+  const PLATE_INK = "#22c55e", PLATE_OTHER_INK = "#f59e0b", BOX_INK = "#38bdf8";
+  const PLATES_TTL_MS = 1500, PLATE_SEEN_S = 0.35, PLATE_TARGET_M = 0.2;
+  const packageWorld = () => !!(worldLayout && worldLayout.packages && worldLayout.packages.length);
+  // In a world whose packages carry markers, a colour guess is noise: printed cartons
+  // are full of dark shapes.
+  const markerWorld = () => packageWorld() && worldLayout.packages.some((k) => k.marker != null);
+  const platesSeen = (r) => (r.plates && performance.now() - r.platesAt < PLATES_TTL_MS
+    ? (r.plates.plates || []).filter((p) => (p.age_s || 0) <= PLATE_SEEN_S && (p.marker != null || !markerWorld())) : []);
+  function plateTarget(r, plates) {
+    const t = r.pick && r.pick.target;
+    if (!t) return null;
+    const dist = (p) => Math.hypot(p.x - t[0], p.y - t[1], p.z - t[2]);
+    const best = plates.reduce((a, p) => (!a || dist(p) < dist(a) ? p : a), null);
+    return best && dist(best) <= PLATE_TARGET_M ? best : null;
+  }
+  function drawCamPlates(c, g, r) {
+    const plates = platesSeen(r), target = plateTarget(r, plates), iw = r.plates && r.plates.w, ih = r.plates && r.plates.h;
+    const boxes = r.boxes && performance.now() - r.boxesAt < PLATES_TTL_MS ? r.boxes.boxes || [] : [];
+    syncPerception(c, r, plates, target, boxes);
+    if ((!plates.length && !boxes.length) || !iw || !ih) return;
+    g.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; g.textBaseline = "bottom";
+    for (const pic of c.el.querySelectorAll(".pic")) {
+      const pw = pic.offsetWidth, ph = pic.offsetHeight, px = pic.offsetLeft, py = pic.offsetTop;
+      if (!pw || !ph) continue;
+      const k = Math.max(pw / iw, ph / ih), ox = px + (pw - iw * k) / 2, oy = py + (ph - ih * k) / 2;
+      g.save(); g.beginPath(); g.rect(px, py, pw, ph); g.clip();
+      for (const b of boxes) { // from depth alone: the box, where the plates below are its magnet
+        const [u, v, bw, bh] = b.px, x = ox + u * k, y = oy + v * k;
+        g.strokeStyle = BOX_INK; g.lineWidth = 2.5; g.strokeRect(x, y, bw * k, bh * k);
+        const label = `box · ${b.size.map((s) => Math.round(s * 100)).join(" × ")} cm`, tw = g.measureText(label).width + 8, ly = Math.min(y + bh * k + 15, py + ph);
+        g.fillStyle = BOX_INK; g.fillRect(x, ly - 15, tw, 15);
+        g.fillStyle = "#04202e"; g.fillText(label, x + 4, ly - 1);
+      }
+      for (const p of plates) {
+        const [u, v, bw, bh] = p.px, x = ox + u * k, y = oy + v * k, on = p === target;
+        g.strokeStyle = on ? PLATE_INK : PLATE_OTHER_INK; g.lineWidth = on ? 3 : 2;
+        g.strokeRect(x, y, bw * k, bh * k);
+        const cx = ox + p.uv[0] * k, cy = oy + p.uv[1] * k;
+        g.beginPath(); g.moveTo(cx - 7, cy); g.lineTo(cx + 7, cy); g.moveTo(cx, cy - 7); g.lineTo(cx, cy + 7); g.stroke();
+        const label = `${p.marker != null ? `marker ${p.marker}` : on ? "target plate" : "plate?"} · ${p.range_m.toFixed(2)} m`, tw = g.measureText(label).width + 8, ly = Math.max(y, py + 16);
+        g.fillStyle = on ? PLATE_INK : PLATE_OTHER_INK; g.fillRect(x, ly - 15, tw, 15);
+        g.fillStyle = "#14130a"; g.fillText(label, x + 4, ly - 1);
+      }
+      g.restore();
+    }
+  }
+  // The same detection in words: where it was in the picture, how far the depth image says
+  // it is, and where those two put it on the map.
+  function syncPerception(c, r, plates, target, boxes) {
+    const set = (key, text) => { const el = c.perc.querySelector(`[data-p="${key}"]`); if (el.textContent !== text) el.textContent = text; };
+    const shown = target || plates.reduce((a, p) => (!a || p.conf * p.px[2] * p.px[3] > a.conf * a.px[2] * a.px[3] ? p : a), null);
+    const aim = r.pick && r.pick.target;
+    c.perc.classList.toggle("locked", !!target);
+    set("state", target ? "On target" : aim ? "Aiming at its last fix" : plates.length ? "Candidates" : "Nothing in view");
+    set("n", String(plates.length));
+    set("mode", r.pick && r.pick.mode === "manipulation" ? "Manipulation" : "Nav");
+    set("marker", shown && shown.marker != null ? `ArUco ${shown.marker}: this side has the magnet` : "—");
+    const b = boxes[0];
+    set("box", b ? `x ${b.x.toFixed(3)}  y ${b.y.toFixed(3)}  z ${b.z.toFixed(3)}, on a surface at ${b.support_z.toFixed(2)} m` : "—");
+    if (shown) {
+      set("img", `pixel (${shown.uv.map((v) => Math.round(v)).join(", ")}), ${shown.px[2]} × ${shown.px[3]} px`);
+      set("depth", `${shown.range_m.toFixed(3)} m from the lens, plane fit`);
+    } else { set("img", "—"); set("depth", "—"); }
+    const at = shown ? [shown.x, shown.y, shown.z] : aim;
+    set("map", at ? `x ${at[0].toFixed(3)}  y ${at[1].toFixed(3)}  z ${at[2].toFixed(3)}` : "—");
+    set("face", shown ? `${(Math.atan2(shown.ny, shown.nx) * 180 / Math.PI).toFixed(1)}° in the map, ${Math.round(shown.conf * 100)}% confidence` : "—");
   }
 
   // Camera tile: every obstacle, boxed in the depth image's pixels (in sim one camera
@@ -315,20 +490,33 @@
     const g = cv.getContext("2d");
     g.clearRect(0, 0, w, h);
     const r = robots.get(id), p = r && r.obstacles;
+    c.perc.hidden = !packageWorld();
+    if (r && packageWorld()) return drawCamPlates(c, g, r);
+    // Manipulation mode: the boxes are the table and the package the arm is working on, and
+    // they covered what the operator was aiming at (2026-11-16). Back in nav mode.
+    if (r && r.mode && r.mode.mode === "manip") return;
     if (!p || performance.now() - r.obstaclesAt > OBSTACLE_TTL_MS || !p.w || !p.h) return;
-    const k = Math.max(w / p.w, h / p.h), ox = (w - p.w * k) / 2, oy = (h - p.h * k) / 2;
     g.font = '600 10px "IBM Plex Sans", system-ui, sans-serif'; g.textBaseline = "bottom";
-    for (const o of p.obstacles || []) {
-      const [u0, v0, u1, v1] = o.uv;
-      const x = ox + u0 * k, y = oy + v0 * k, bh = (v1 - v0) * k, color = o.moving ? OBSTACLE_RED : "#f5a524";
-      g.strokeStyle = color; g.lineWidth = o.moving ? 2.5 : 1.5;
-      g.strokeRect(x, y, (u1 - u0) * k, bh);
-      const label = o.moving ? `moving · ${o.range_m.toFixed(1)} m` : `${o.range_m.toFixed(1)} m`;
-      // Inside the box's bottom edge: the top of the tile belongs to the Camera/Depth
-      // switch, and a person's box reaches it.
-      const tw = g.measureText(label).width + 6, ly = Math.min(y + bh, h);
-      g.fillStyle = color; g.fillRect(x, ly - 13, tw, 13);
-      g.fillStyle = o.moving ? "#fff" : "#15191e"; g.fillText(label, x + 3, ly - 1);
+    // Each picture showing gets the boxes: the depth is aligned to colour, so the same
+    // pixels apply to both.
+    for (const pic of c.el.querySelectorAll(".pic")) {
+      const pw = pic.offsetWidth, ph = pic.offsetHeight, px = pic.offsetLeft, py = pic.offsetTop;
+      if (!pw || !ph) continue;
+      const k = Math.max(pw / p.w, ph / p.h), ox = px + (pw - p.w * k) / 2, oy = py + (ph - p.h * k) / 2;
+      g.save(); g.beginPath(); g.rect(px, py, pw, ph); g.clip();
+      for (const o of p.obstacles || []) {
+        const [u0, v0, u1, v1] = o.uv;
+        const x = ox + u0 * k, y = oy + v0 * k, bh = (v1 - v0) * k, color = o.moving ? OBSTACLE_RED : "#f5a524";
+        g.strokeStyle = color; g.lineWidth = o.moving ? 2.5 : 1.5;
+        g.strokeRect(x, y, (u1 - u0) * k, bh);
+        const label = o.moving ? `moving · ${o.range_m.toFixed(1)} m` : `${o.range_m.toFixed(1)} m`;
+        // Inside the box's bottom edge: the top of the tile belongs to the Camera/Depth
+        // switch, and a person's box reaches it.
+        const tw = g.measureText(label).width + 6, ly = Math.min(y + bh, py + ph);
+        g.fillStyle = color; g.fillRect(x, ly - 13, tw, 13);
+        g.fillStyle = o.moving ? "#fff" : "#15191e"; g.fillText(label, x + 3, ly - 1);
+      }
+      g.restore();
     }
   }
 
@@ -339,6 +527,8 @@
   // and whether the robot's red obstacle marker sits on it. Same data and look as
   // app.js's overlay; neither topic exists on a real robot, so nothing draws there.
   const WORLD_TRUTH_TTL_MS = 3000; // sim gone quiet: stop drawing walkers frozen mid-stride
+  const PACKAGE_HELD_INK = "#16a34a";   // a package the magnet is holding
+  const PACKAGE_PLATE_INK = "#1b1b1f";  // the magnet plate's face (simtest.world.PLATE_COLOR, near-black)
   let worldLayout = null, worldTruth = null, worldTruthAt = -Infinity;
   topic("/sim/world", "std_msgs/String").subscribe((msg) => {
     try { worldLayout = JSON.parse(msg.data); } catch (e) { return; }
@@ -347,6 +537,7 @@
   topic("/sim/ground_truth", "std_msgs/String", { throttle_rate: 100, queue_length: 1 }).subscribe((msg) => {
     try { worldTruth = JSON.parse(msg.data); } catch (e) { return; }
     worldTruthAt = performance.now(); dirty = true;
+    syncHeads();
     // The Sim camera's pose as Isaac has it, unless the viewer is mid-move (their
     // newer pose would be overwritten by one the sim hasn't caught up to yet).
     if (stageView === "sim" && !$("#simview").classList.contains("dragging") && performance.now() - simCam.lastSend > 1000) simCamFromTruth();
@@ -365,8 +556,10 @@
     ctx.closePath();
   }
   function actorShape(a, p) {
-    if (a.shape === "cylinder") return ["circle", [p.x, p.y], a.radius];
-    const [sx, sy] = a.size, c = Math.cos(p.yaw), s = Math.sin(p.yaw);
+    // usd actors (a person, a forklift) carry the floor footprint the metrics
+    // score against: a disc (radius) or a rectangle along their heading.
+    if (a.shape === "cylinder" || (a.shape === "usd" && a.radius)) return ["circle", [p.x, p.y], a.radius];
+    const [sx, sy] = a.shape === "usd" ? a.footprint : a.size, c = Math.cos(p.yaw), s = Math.sin(p.yaw);
     return ["poly", [[sx / 2, sy / 2], [-sx / 2, sy / 2], [-sx / 2, -sy / 2], [sx / 2, -sy / 2]]
       .map(([x, y]) => [p.x + c * x - s * y, p.y + s * x + c * y])];
   }
@@ -379,6 +572,52 @@
       ctx.fill(); ctx.stroke();
     }
     ctx.font = '600 11px "IBM Plex Sans", system-ui, sans-serif'; ctx.textAlign = "center";
+    const deferred = []; // drawn over the packages
+    // Marked areas: where a place test wants the package set down. Under the packages.
+    for (const m of worldLayout.marks || []) {
+      const [x, y, yaw] = m.pose, [hx, hy] = [m.size[0] / 2, m.size[1] / 2], c = Math.cos(yaw), s = Math.sin(yaw);
+      traceShape(["poly", [[hx, hy], [-hx, hy], [-hx, -hy], [hx, -hy]].map(([a, b]) => [x + c * a - s * b, y + s * a + c * b])]);
+      ctx.fillStyle = rgba(m.color, 0.3); ctx.strokeStyle = rgba(m.color, 1); ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 3]); ctx.fill(); ctx.stroke(); ctx.setLineDash([]);
+    }
+    // Where the robot itself thinks the plate is, with a tick along its normal: on the box,
+    // if the camera, the depth and the transforms all agree with ground truth.
+    for (const r of robots.values()) {
+      const seen = plateTarget(r, platesSeen(r));
+      if (!seen) continue;
+      const [ax, ay] = toPx(seen.x, seen.y), [bx, by] = toPx(seen.x + seen.nx * 0.25, seen.y + seen.ny * 0.25);
+      deferred.push(() => {
+        ctx.strokeStyle = PLATE_INK; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.arc(ax, ay, 7, 0, 2 * Math.PI); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+      });
+    }
+    // Packages the magnet effector picks up (simtest/magnet.py). Where one IS comes from
+    // ground truth; it turns green while the magnet holds it, and the thick dark edge is
+    // the face that carries the magnet plate (the side the arm has to come at).
+    const PLATE_EDGE = { "+x": [[1, 1], [1, -1]], "-x": [[-1, 1], [-1, -1]],
+                         "+y": [[1, 1], [-1, 1]], "-y": [[1, -1], [-1, -1]] };
+    for (const k of worldLayout.packages || []) {
+      const p = worldTruth.packages && worldTruth.packages[k.id];
+      if (!p) continue;
+      const held = !!p.held_by, [sx, sy] = k.size, c = Math.cos(p.yaw), s = Math.sin(p.yaw);
+      const at = (x, y) => [p.x + c * x - s * y, p.y + s * x + c * y];
+      traceShape(["poly", [[sx / 2, sy / 2], [-sx / 2, sy / 2], [-sx / 2, -sy / 2], [sx / 2, -sy / 2]]
+        .map(([x, y]) => at(x, y))]);
+      ctx.fillStyle = rgba(k.color, 0.95); ctx.strokeStyle = held ? PACKAGE_HELD_INK : palette.robotInk;
+      ctx.lineWidth = held ? 3 : 1.5; ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = PACKAGE_PLATE_INK; ctx.lineWidth = 4; ctx.beginPath();
+      if (PLATE_EDGE[k.magnet_face]) {
+        const [[ax, ay], [bx, by]] = PLATE_EDGE[k.magnet_face];
+        const [pa, pb] = [at(ax * sx / 2, ay * sy / 2), at(bx * sx / 2, by * sy / 2)].map(([x, y]) => toPx(x, y));
+        ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]);
+      } else { // a plate on top: a dot in the middle
+        const [cx0, cy0] = toPx(p.x, p.y); ctx.moveTo(cx0, cy0); ctx.lineTo(cx0 + 0.1, cy0);
+      }
+      ctx.stroke();
+      const [lx, ly] = toPx(p.x, p.y);
+      ctx.fillStyle = held ? PACKAGE_HELD_INK : palette.ink;
+      ctx.fillText((k.label || k.id) + (held ? " (held)" : ""), lx, ly + Math.max(sx, sy) * view.scale / 2 + 13);
+    }
     for (const a of worldLayout.actors || []) {
       // The route it walks: dotted and faint, so it never reads as a Nav2 plan.
       ctx.setLineDash([2, 5]); ctx.strokeStyle = rgba(a.color, 0.5); ctx.lineWidth = 1.5;
@@ -398,6 +637,7 @@
       ctx.setLineDash([]);
       ctx.fillStyle = palette.ink; ctx.fillText(a.label || a.id, px, py + r + 13);
     }
+    for (const draw of deferred) draw();
     ctx.restore();
   }
 
@@ -504,7 +744,7 @@
       id, color: COLORS[robots.size % COLORS.length], pose: null, linkAt: -Infinity, plan: [],
       explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity, queueDepth: 0,
       nav: null, seenStamp: {}, odom: null, odomAt: -Infinity,
-      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [],
+      obstacles: null, obstaclesAt: -Infinity, obstaclesMap: [], subs: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity, head: null, headAt: -Infinity, arm: null, armAt: -Infinity, mode: null,
     };
     robots.set(id, r);
     // Kept so removeRobot can drop them when a run leaves this robot out.
@@ -516,6 +756,74 @@
       let p;
       try { p = JSON.parse(msg.data); } catch (e) { return; }
       onObstacles(r, p);
+    });
+
+    // What the plate detector sees and what the pick is aiming at, for the camera tile.
+    sub(`/${id}/packages`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
+      try { r.plates = JSON.parse(msg.data); } catch (e) { return; }
+      r.platesAt = performance.now(); dirty = true;
+      drawCamObstacles(id);
+    });
+    sub(`/${id}/boxes`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
+      try { r.boxes = JSON.parse(msg.data); } catch (e) { return; }
+      r.boxesAt = performance.now();
+      drawCamObstacles(id);
+    });
+    // The real head (nodes/arm_driver.py): where it is, in the sim's radians, so the sliders
+    // under the camera tile show and track it as they do the sim's (syncHeads).
+    sub(`/${id}/head_state`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
+      let h;
+      try { h = JSON.parse(msg.data); } catch (e) { return; }
+      const was = r.head && r.head.state;
+      // A report without a pose (arm_driver couldn't read one this time) keeps the last pose:
+      // blanking it hid the sliders and the head pad every other second (2026-11-16).
+      if (typeof h.pan !== "number" && r.head && typeof r.head.pan === "number") { h.pan = r.head.pan; h.tilt = r.head.tilt; }
+      else if (typeof h.pan === "number") r.headAt = performance.now();
+      const wasBoard = r.head && r.head.board;
+      r.head = h; r.headMsgAt = performance.now();
+      if ((h.state === "busy" || h.state === "error") && h.state !== was) toast(`${nameOf(id)}: head ${h.state}. ${h.message || ""}`);
+      noteBoard(id, "arm/head board", wasBoard, h);
+      syncHeads();
+    });
+    // The real arm and magnet (arm_driver's arm_state): shows the arm pad, reports refusals.
+    sub(`/${id}/arm_state`, "std_msgs/String", { throttle_rate: 200, queue_length: 1 }).subscribe((msg) => {
+      let a;
+      try { a = JSON.parse(msg.data); } catch (e) { return; }
+      const was = r.arm && r.arm.state, wasMag = r.arm && r.arm.magnet && r.arm.magnet.state;
+      r.arm = a; r.armAt = performance.now();
+      if ((a.state === "busy" || a.state === "error") && a.state !== was) toast(`${nameOf(id)}: arm ${a.state}. ${a.message || ""}`);
+      if (a.magnet && a.magnet.state === "error" && wasMag !== "error") toast(`${nameOf(id)}: ${a.magnet.message}`);
+      if (a.note) toast(`${nameOf(id)}: ${a.note}`);
+      syncArmPads();
+    });
+    // Nav / manipulation (arm_driver): every page follows the robot's mode, so the pad in front
+    // is the one that mode is for. Head is a manipulation pad, so manip leaves it in front.
+    sub(`/${id}/robot_mode`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
+      let m;
+      try { m = JSON.parse(msg.data); } catch (e) { return; }
+      const was = r.mode && r.mode.mode, wasNote = r.mode && r.mode.note;
+      r.mode = m;
+      if (m.note && m.note !== wasNote) toast(`${nameOf(id)}: ${m.note}`);
+      const c = cams.get(id);
+      if (c && m.mode !== was) { c.padMode = m.mode === "manip" ? "arm" : "drive"; applyPadMode(c); }
+      if (c) syncHeadLock(c, r);
+      if (m.mode !== was) drawCamObstacles(id);   // clear or restore the boxes now, not on the next obstacle message
+      if (c) syncPickLine(c);
+    });
+    sub(`/${id}/pick_status`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
+      try { r.pick = JSON.parse(msg.data); } catch (e) { /* keep the last one */ }
+      const c = cams.get(id);
+      if (c) syncPickLine(c);
+    });
+    // The real base (nodes/base_driver.py): say why the pad doesn't move it. Without this
+    // a held arrow on a board the Robot view holds, or one unplugged, did nothing silently.
+    sub(`/${id}/base_status`, "std_msgs/String", { queue_length: 1 }).subscribe((msg) => {
+      let b;
+      try { b = JSON.parse(msg.data); } catch (e) { return; }
+      const was = r.base && r.base.state, wasBoard = r.base && r.base.board;
+      r.base = b; r.baseAt = performance.now();
+      if ((b.state === "busy" || b.state === "error") && b.state !== was) toast(`${nameOf(id)}: base ${b.state}. ${b.message || ""}`);
+      noteBoard(id, "wheel board", wasBoard, b);
     });
 
     // Only the twist is used (speed / turn rate on the card); the pose comes from /tf.
@@ -794,6 +1102,15 @@
         <button class="btn small" data-ack="${esc(a.id)}" title="Acknowledge. The alarm leaves once its condition has also cleared">Acknowledge</button></li>`).join("");
   }
   $("#alarms").addEventListener("click", () => { $("#alarm-pop").hidden = !$("#alarm-pop").hidden; });
+  // The display buttons' popover, below 1600 px (operator.html). It stays open through a
+  // click on one of them, so hiding both side bars is one trip.
+  const setViewOpts = (open) => {
+    $("#view-opts").classList.toggle("open", open);
+    $("#view-more").setAttribute("aria-expanded", String(open));
+  };
+  $("#view-more").addEventListener("click", () => setViewOpts(!$("#view-opts").classList.contains("open")));
+  document.addEventListener("click", (e) => { if (!e.target.closest("#view-box")) setViewOpts(false); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") setViewOpts(false); });
   $("#alarm-pop").addEventListener("click", (e) => {
     const id = e.target.dataset.ack;
     if (id !== undefined) publishString("/fleet/alarm_ack", JSON.stringify({ id: Number(id) }));
@@ -849,9 +1166,28 @@
       turn: tw ? `${Math.round((tw.angular.z * 180) / Math.PI)}°/s` : "—",
       togo,
       batt: battOf(r) == null ? "—" : `${battOf(r).toFixed(0)}%`,
+      hw: hardwareOf(r),
     };
   }
-  const FACTS = [["pos", "Position"], ["heading", "Heading"], ["speed", "Speed"], ["turn", "Turn rate"], ["togo", "To go"], ["obst", "Obstacles"], ["batt", "Battery"]];
+  const FACTS = [["pos", "Position"], ["heading", "Heading"], ["speed", "Speed"], ["turn", "Turn rate"], ["togo", "To go"], ["obst", "Obstacles"], ["batt", "Battery"], ["hw", "Hardware"]];
+  // The real robot's boards, as the drivers' own checks see them (feetech.probe's words). The
+  // drivers look every few seconds and reconnect by themselves; this line and the toasts are
+  // how the operator knows, instead of finding out from a press that did nothing (2026-11-19).
+  const BOARD_WORD = { ok: "ok", no_usb: "unplugged", no_power: "no power", busy: "in use by another program", unknown: "checking…" };
+  const boardWord = (b) => b.board === "partial" ? `servo${b.missing.length > 1 ? "s" : ""} ${b.missing.join(", ")} not answering` : BOARD_WORD[b.board] || b.board;
+  const BOARD_TTL_MS = 5000;
+  function noteBoard(id, what, was, b) {
+    if (!b.board || b.board === was || !was || was === "unknown" || b.board === "unknown") return;
+    toast(`${nameOf(id)}: ${what} ${b.board === "ok" ? "connected" : boardWord(b)}`);
+  }
+  function hardwareOf(r) {
+    const now = performance.now(), parts = [];
+    if (r.head && r.head.board && now - r.headMsgAt < BOARD_TTL_MS) parts.push(`Arm/head ${boardWord(r.head)}`);
+    if (r.base && r.base.board && now - r.baseAt < BOARD_TTL_MS) parts.push(`Wheels ${boardWord(r.base)}`);
+    const m = r.arm && r.arm.magnet;
+    if (m && now - r.armAt < BOARD_TTL_MS) parts.push(`Magnet ${m.state === "error" ? "not answering" : m.state === "ok" ? "ok" : "checking…"}`);
+    return parts.length ? parts.join(" · ") : "—";
+  }
   // Only the board knows it (fleet_tasks.py: a real BatteryState, or the sim model).
   const battOf = (r) => { const fr = fleetOf(r); return fr && typeof fr.battery_pct === "number" ? fr.battery_pct : null; };
 
@@ -880,43 +1216,153 @@
         <div class="l2">${st.tag === "on a task" ? tile.title + (tile.sub ? ` · ${tile.sub}` : "") : esc(st.detail) + (r.queueDepth ? ` · ${r.queueDepth} waiting` : "")}</div>
         ${isOpen ? `<div class="more">
           <div class="cam-slot" data-cam="${esc(r.id)}"></div>
-          <dl class="facts" data-id="${esc(r.id)}">${FACTS.map(([k, label]) => `<div${k === "pos" ? ' class="wide"' : k === "obst" ? ' class="full"' : ""}><dt>${label}</dt><dd data-f="${k}">${esc(f[k])}</dd></div>`).join("")}</dl>
+          <dl class="facts" data-id="${esc(r.id)}">${FACTS.map(([k, label]) => `<div${k === "pos" ? ' class="wide"' : k === "obst" || k === "hw" ? ' class="full"' : ""}><dt>${label}</dt><dd data-f="${k}">${esc(f[k])}</dd></div>`).join("")}</dl>
           <div class="acts"><button class="btn small" data-act="stop">Stop</button>
             <button class="btn small" data-act="explore">${st.tag === "exploring" ? "Stop exploring" : "Explore"}</button>
             ${busy ? `<button class="btn small" data-act="clear" title="Cancel this robot's current task and everything queued behind it">Clear tasks</button>` : ""}</div>
         </div>` : ""}
       </div>`;
     }).join("") : `<div class="none">No robots found.</div>`;
-    for (const slot of document.querySelectorAll("#fleet .cam-slot")) slot.replaceWith(camFor(slot.dataset.cam).el);
+    for (const slot of document.querySelectorAll("#fleet .cam-slot")) { const c = camFor(slot.dataset.cam); slot.replaceWith(c.el, c.perc, c.head); }
     renderTargets();
   }
 
   // Camera tile per open robot: short /snapshot polls, never MJPEG, and always
   // qos_profile=sensor_data (see app.js for the failure mode both avoid). The element
   // outlives list rebuilds (renderFleet re-slots it), so the picture doesn't blink.
-  // Camera or depth, per card; a new card starts on whichever was picked last.
+  // Camera, depth or both stacked, per card; a new card starts on whichever was picked last.
   const CAM_TOPIC = { rgb: "camera/rgb", depth: "camera/depth_color" };
-  const cams = new Map(); // id -> {el, pic, msg, mode, timer, token}
+  const CAM_LABEL = { rgb: "camera", depth: "depth" };
+  const feedsOf = (mode) => (mode === "split" ? ["rgb", "depth"] : [mode]);
+  const cams = new Map(); // id -> {el, head, pics: {rgb, depth}, mode, timers, token}
   let camDefault = "rgb";
-  try { if (localStorage.getItem("sortbots.camMode") === "depth") camDefault = "depth"; } catch (e) { /* storage blocked: rgb */ }
+  try { const m = localStorage.getItem("sortbots.camMode"); if (m === "depth" || m === "split") camDefault = m; } catch (e) { /* storage blocked: rgb */ }
 
   function camFor(id) {
     let c = cams.get(id);
     if (c) return c;
     const el = document.createElement("div");
     el.className = "cam";
-    el.innerHTML = `<div class="pic"></div><canvas class="obst"></canvas><span class="msg">Connecting to camera…</span>
-      <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button></div>
+    el.innerHTML = `<div class="pics"><div class="pic" data-feed="rgb" data-label="Camera"><span class="msg"></span></div><div class="pic" data-feed="depth" data-label="Depth"><span class="msg"></span></div></div><canvas class="obst"></canvas><canvas class="feat"></canvas>
+      <button type="button" class="featbtn" data-cam-features aria-pressed="false" title="Show the visual features RTAB-Map is tracking (green = inlier driving the pose, amber = matched to the map, grey = detected only)">Features</button>
+      <span class="featstat"></span>
+      <div class="camsel" role="group" aria-label="Camera view"><button type="button" data-cam-mode="rgb">Camera</button><button type="button" data-cam-mode="depth">Depth</button><button type="button" data-cam-mode="split" title="Camera and depth, stacked">Split</button></div>
+      <div class="padmode" role="tablist" aria-label="What the pad controls" hidden><button type="button" data-padmode="drive" role="tab" title="Nav mode: drive the base, mapping runs (M switches)">Nav</button><button type="button" data-padmode="arm" role="tab" title="Manipulation mode: the arm, pick and rest, and the head (keys I/K/J/L, H centres); mapping pauses">Manip</button></div>
       <div class="drive" role="group" aria-label="Drive by hand" title="Drive by hand: hold an arrow. Keys W/A/S/D move, Q/E rotate, Space stops (they drive the robot in control)">
         <span></span><button type="button" data-drive="fwd" aria-label="Forward">&#9650;</button><span></span>
         <button type="button" data-drive="left" aria-label="Strafe left">&#9664;</button><button type="button" data-drive="stop" aria-label="Stop">&#9632;</button><button type="button" data-drive="right" aria-label="Strafe right">&#9654;</button>
         <button type="button" data-drive="rot-left" aria-label="Rotate left">&#8634;</button><button type="button" data-drive="back" aria-label="Back">&#9660;</button><button type="button" data-drive="rot-right" aria-label="Rotate right">&#8635;</button>
+        <button type="button" class="lvl" data-drive-level="0" title="Speed L1: 0.1 m/s, 30 deg/s" hidden>L1</button><button type="button" class="lvl" data-drive-level="1" title="Speed L2: 0.2 m/s, 60 deg/s" hidden>L2</button><button type="button" class="lvl" data-drive-level="2" title="Speed L3: 0.3 m/s, 90 deg/s" hidden>L3</button>
+      </div>
+      <div class="pickline" hidden><b></b><span></span></div>
+      <div class="armpad" role="group" aria-label="Move the arm" hidden>
+        <div class="tp hand" title="Drag to move the hand: up = away, down = toward, left / right; let go and it stops. Keys: arrows"><i class="ax t">away</i><i class="ax b">toward</i><i class="ax l">left</i><i class="ax r">right</i><b class="knob"></b></div>
+        <div class="tp z" title="Drag up / down to raise / lower the hand. Keys: Page Up / Page Down"><i class="ax t">up</i><i class="ax b">down</i><b class="knob"></b></div>
+        <div class="side">
+          <button type="button" data-wf="1" title="Wrist up (hold, or the Z key)">wrist &#8593;</button><button type="button" data-wf="-1" title="Wrist down (hold, or the X key)">wrist &#8595;</button>
+          <div class="lv" role="group" aria-label="Arm speed" title="Arm speed (keys 1-4); Space stops the arm"><button type="button" data-lv="0">L1</button><button type="button" data-lv="1">L2</button><button type="button" data-lv="2">L3</button><button type="button" data-lv="3">L4</button></div>
+          <button type="button" data-arm-act="magnet" title="Magnet on / off">Magnet</button><button type="button" data-arm-act="pick" title="One-button pick and place">Pick</button><button type="button" data-arm-act="unload" title="Look down into the body, pick the package there and put it on the taught table pose (the base stays put: drive up to the table first)">Unload</button><div class="restrow"><button type="button" data-arm-act="rest" title="Back to the rest pose. With the magnet on it lets go first: whatever it holds drops where the hand is">Rest</button><details class="armmore"><summary title="Teach the place and table poses" aria-label="More arm actions">&#8943;</summary><div class="menu"><button type="button" data-arm-act="save_table" title="Save where the arm is now as the table pose Unload puts packages on (Unload with none saved picks and holds: drive it over the table, then this)">Save table</button><button type="button" data-arm-act="pick_hold" hidden title="Pick, then hand the arm back to the pad with the package held (no place): drive it to the new place spot">Pick &amp; hold</button><button type="button" data-arm-act="save_place" hidden title="Save where the arm is now as the place pose the next Pick uses">Save place</button></div></details></div>
+        </div>
       </div>`;
-    c = { el, pic: el.querySelector(".pic"), overlay: el.querySelector("canvas.obst"), msg: el.querySelector(".msg"), mode: camDefault, timer: null, token: 0 };
+    const perc = document.createElement("div");
+    perc.className = "perc"; perc.hidden = true;
+    perc.innerHTML = `<div class="ph">Plate detection<i><span data-p="state"></span> · <span data-p="n"></span> seen</i></div>
+      <dl><dt>State</dt><dd data-p="mode"></dd><dt>Box</dt><dd data-p="box"></dd><dt>Marker</dt><dd data-p="marker"></dd><dt>Image</dt><dd data-p="img"></dd><dt>Depth</dt><dd data-p="depth"></dd><dt>Map</dt><dd data-p="map"></dd><dt>Facing</dt><dd data-p="face"></dd></dl>`;
+    const head = document.createElement("div");
+    head.className = "headctl"; head.hidden = true;
+    head.innerHTML = HEAD_AXES.map(([key, label, lo, hi]) => `<label>${label}<input type="range" data-head="${key}" min="${lo}" max="${hi}" step="0.01" value="0" aria-label="Head ${key}"><output data-head-out="${key}"></output></label>`).join("");
+    c = { el, head, perc, pics: { rgb: el.querySelector('[data-feed="rgb"]'), depth: el.querySelector('[data-feed="depth"]') },
+          overlay: el.querySelector("canvas.obst"), feat: el.querySelector("canvas.feat"), featStat: el.querySelector(".featstat"),
+          mode: camDefault, timers: {}, token: 0, headAt: -Infinity, headSent: 0, features: false, featSub: null, featData: null, featAt: -Infinity };
     cams.set(id, c);
+    wireHead(id, c);
+    wireHeadKeys(id, c);
+    wireArmPad(id, c, el.querySelector(".armpad"));
+    wirePadMode(id, c, el);
     syncCamButtons(c);
     wireDrivePad(id, el.querySelector(".drive"));
     return c;
+  }
+
+  // -- the head (the sliders under the camera tile) ----------------------------------------------
+  // Tilt > 0 looks down. Limits are xlerobot.urdf's. The readout is where the head IS, from
+  // /sim/ground_truth, so it can be read off and put in a world's `head:`; the camera's
+  // TF follows it in Isaac (simtest/head.py), so moving it doesn't throw off the map.
+  const HEAD_AXES = [["tilt", "Tilt", -0.76, 1.45], ["pan", "Pan", -1.57, 1.57]];
+  const HEAD_HZ = 10, HEAD_HANDS_OFF_MS = 1000;
+  const headText = (rad) => `${(rad * 180 / Math.PI).toFixed(1)}° · ${rad.toFixed(2)} rad`;
+  function wireHead(id, c) {
+    const send = () => {
+      c.headSent = performance.now();
+      const v = (key) => Number(c.head.querySelector(`[data-head="${key}"]`).value);
+      publish(`/${id}/head_cmd`, "sensor_msgs/JointState", { name: ["head_pan_joint", "head_tilt_joint"], position: [v("pan"), v("tilt")] });
+    };
+    c.head.addEventListener("input", (e) => {
+      c.headAt = performance.now();
+      c.head.querySelector(`[data-head-out="${e.target.dataset.head}"]`).textContent = headText(Number(e.target.value));
+      if (performance.now() - c.headSent >= 1000 / HEAD_HZ) send();
+    });
+    c.head.addEventListener("change", send); // the last position, whatever the rate limit dropped
+    c.headSend = send;
+  }
+  // Head keys (2026-11-20, replacing the Head tab's pad): hold I/K to look up/down, J/L
+  // left/right; H centres. They move the sliders, which stay the one source of what is sent,
+  // so a key and a drag can't disagree. Tilt > 0 looks down, pan > 0 left.
+  const HEAD_KEY_RAD_S = 1.2, HEAD_KEYS = { i: ["tilt", -1], k: ["tilt", 1], j: ["pan", 1], l: ["pan", -1] };
+  function wireHeadKeys(id, c) {
+    const setAxis = (key, rad) => {
+      const inp = c.head.querySelector(`[data-head="${key}"]`);
+      inp.value = Math.max(Number(inp.min), Math.min(Number(inp.max), rad));
+      c.head.querySelector(`[data-head-out="${key}"]`).textContent = headText(Number(inp.value));
+    };
+    const held = new Set();
+    let timer = null, last = 0;
+    const step = () => {
+      const now = performance.now(), dt = (now - last) / 1000; last = now;
+      c.headAt = now;
+      for (const k of held) {
+        const [key, sign] = HEAD_KEYS[k];
+        setAxis(key, Number(c.head.querySelector(`[data-head="${key}"]`).value) + sign * HEAD_KEY_RAD_S * dt);
+      }
+      c.headSend();
+    };
+    const stop = () => { clearInterval(timer); timer = null; c.headSend(); };
+    c.headKeys = {
+      down(e) {
+        const k = e.key.toLowerCase();
+        if (k === "h") { c.headAt = performance.now(); setAxis("pan", 0); setAxis("tilt", 0); c.headSend(); return true; }
+        if (!HEAD_KEYS[k]) return false;
+        held.add(k);
+        if (!timer) { last = performance.now(); timer = setInterval(step, 1000 / HEAD_HZ); }
+        return true;
+      },
+      up(e) { if (held.delete(e.key.toLowerCase()) && !held.size && timer) stop(); },
+      release() { if (held.size) { held.clear(); stop(); } },
+      handles: (e) => e.key.toLowerCase() === "h" || !!HEAD_KEYS[e.key.toLowerCase()],
+    };
+  }
+  // Nav holds the real head forward (arm_driver ignores head_cmd there): the sliders say so
+  // instead of springing back. The sim has no robot_mode, so its head stays free.
+  function syncHeadLock(c, r) {
+    const locked = !!(r && r.mode && r.mode.mode === "nav");
+    for (const s of c.head.querySelectorAll("[data-head]")) s.disabled = locked;
+    c.head.title = locked ? "Nav mode holds the camera forward (mapping assumes it). Manip to aim it." : "";
+  }
+  function syncHeads() {
+    for (const [id, c] of cams) {
+      // The sim's ground truth, or the real head's own report (arm_driver's head_state).
+      const r = robots.get(id);
+      const real = r && r.head && typeof r.head.pan === "number" && performance.now() - r.headAt < 3000 ? r.head : null;
+      const h = (worldTruth && worldTruth.head && worldTruth.head[id]) || real;
+      c.head.hidden = !h;
+      c.hasHead = !!h;
+      applyPadMode(c);
+      if (!h || performance.now() - c.headAt < HEAD_HANDS_OFF_MS) continue; // not under the operator's hand
+      for (const [key] of HEAD_AXES) {
+        c.head.querySelector(`[data-head="${key}"]`).value = h[key];
+        c.head.querySelector(`[data-head-out="${key}"]`).textContent = headText(h[key]);
+      }
+    }
   }
 
   // -- manual drive (the camera tile's pad) ------------------------------------------------------
@@ -937,11 +1383,32 @@
   const drives = new Map(); // id -> {held: Set, timer}
   const driveOf = (id) => drives.get(id) || drives.set(id, { held: new Set(), timer: null }).get(id);
 
+  // The real base's speed levels: XLeRobot's three, the same as configs/drive_base.yaml's
+  // speed_levels and the Robot view's gamepad. base_driver clamps to the top one whatever is sent.
+  // Each page starts at L1, so a stray touch after a reload never starts fast. The sim keeps
+  // DRIVE_LINEAR_MPS (its base's URDF limit): the levels are a real-robot thing.
+  const DRIVE_LEVELS = [[0.1, 30], [0.2, 60], [0.3, 90]];
+  function driveScale(id) {
+    if (platform !== "real") return [1, 1];
+    const [mps, dps] = DRIVE_LEVELS[driveOf(id).level || 0];
+    return [mps / DRIVE_LINEAR_MPS, (dps * Math.PI / 180) / DRIVE_ANGULAR_RADPS];
+  }
   function drivePublish(id) {
     const d = driveOf(id);
     let x = 0, y = 0, z = 0;
     for (const cmd of d.held) { const v = DRIVE_VECTORS[cmd]; x += v[0]; y += v[1]; z += v[2]; }
-    publish(`/${id}/cmd_vel`, "geometry_msgs/Twist", { linear: { x, y, z: 0 }, angular: { x: 0, y: 0, z } });
+    const [kl, ka] = driveScale(id);
+    x *= kl; y *= kl; z *= ka;
+    if (platform === "real") {
+      // Stamped with the send time on its own topic: nodes/base_driver.py drops a command
+      // that arrives backlogged (rosbridge behind under load) instead of replaying it late.
+      const t = Date.now();
+      publish(`/${id}/cmd_vel_pad`, "geometry_msgs/TwistStamped", {
+        header: { stamp: { sec: Math.floor(t / 1000), nanosec: (t % 1000) * 1e6 }, frame_id: "teleop" },
+        twist: { linear: { x, y, z: 0 }, angular: { x: 0, y: 0, z } } });
+    } else {
+      publish(`/${id}/cmd_vel`, "geometry_msgs/Twist", { linear: { x, y, z: 0 }, angular: { x: 0, y: 0, z } });
+    }
     const c = cams.get(id);
     if (c) for (const b of c.el.querySelectorAll("[data-drive]")) b.classList.toggle("held", d.held.has(b.dataset.drive));
   }
@@ -973,6 +1440,19 @@
     drivePublish(id);
   }
   function wireDrivePad(id, pad) {
+    const levels = pad.querySelectorAll("[data-drive-level]");
+    const showLevel = () => levels.forEach((b) => {
+      b.hidden = platform !== "real";
+      b.classList.toggle("sel", Number(b.dataset.driveLevel) === (driveOf(id).level || 0));
+    });
+    for (const b of levels) b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      driveOf(id).level = Number(b.dataset.driveLevel);
+      showLevel();
+      if (driveOf(id).held.size) drivePublish(id);   // a held arrow changes speed right away
+    });
+    pad.showLevel = showLevel;
+    showLevel();
     for (const b of pad.querySelectorAll("[data-drive]")) {
       const cmd = b.dataset.drive;
       b.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); b.setPointerCapture(e.pointerId); driveStart(id, cmd); });
@@ -985,6 +1465,197 @@
     pad.addEventListener("pointerdown", () => { pad.classList.add("on"); clearTimeout(fade); });
     pad.addEventListener("pointerup", () => { clearTimeout(fade); fade = setTimeout(() => pad.classList.remove("on"), 3000); });
   }
+  // -- the real arm (nodes/arm_driver.py on /<id>/arm_cmd) -------------------------------------
+  // Hold a button to move the HAND that way (arm_driver solves the joints); the pad re-sends
+  // at 10 Hz while held, the deadman, and a stop the moment nothing is held. Several held
+  // buttons add up (out + up = diagonal), like the drive pad. Magnet toggles; Pick asks the
+  // pick node for the one-button pick and place.
+  // handeye.py's touchpad (its page, 2026-11-13): a 2D pad for the hand (up = away, right =
+  // clockwise from above) and a tall one for height, proportional to how far the finger is from
+  // the centre, re-sent every 80 ms while a finger is down and zeroed when it lifts.
+  const ARM_SEND_MS = 80, ARM_DEAD = 0.08;
+  const armCmd = (id, cmd) => publishString(`/${id}/arm_cmd`, JSON.stringify(cmd));
+  function wireArmPad(id, c, pad) {
+    c.armPad = pad;
+    c.pickLine = pad.parentElement.querySelector(".pickline");
+    const J = { out: 0, left: 0, up: 0, tilt: 0, wf: 0, roll: 0 };
+    let timer = null, level = null;
+    const live = () => Object.values(J).some((v) => v);
+    const send = () => armCmd(id, level == null ? { jog: { ...J } } : { jog: { ...J }, level });
+    // A stop goes out only when the pad WAS moving the arm: arm_driver aborts a running pick on
+    // any stop or pad touch, and a stop sent on a mere focus change (window blur, a screenshot
+    // tool) aborted a pick that had just locked on (2026-11-16).
+    const update = () => {
+      if (live()) { if (!timer) { send(); timer = setInterval(send, ARM_SEND_MS); } }
+      else if (timer) { clearInterval(timer); timer = null; armCmd(id, { stop: true }); }
+    };
+    const dz = (v) => (Math.abs(v) < ARM_DEAD ? 0 : v);
+    function dragger(el, f) {
+      const knob = el.querySelector(".knob");
+      const at = (e) => {
+        const r = el.getBoundingClientRect();
+        const dx = Math.max(-1, Math.min(1, (e.clientX - r.left) / r.width * 2 - 1));
+        const dy = Math.max(-1, Math.min(1, (e.clientY - r.top) / r.height * 2 - 1));
+        f(dx, dy);
+        knob.style.left = `${(dx + 1) * 50}%`; knob.style.top = `${(dy + 1) * 50}%`;
+        update();
+      };
+      const end = () => { f(0, 0); knob.style.left = "50%"; knob.style.top = "50%"; update(); };
+      el.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); el.setPointerCapture(e.pointerId); el.classList.add("on"); at(e); });
+      el.addEventListener("pointermove", (e) => { if (el.hasPointerCapture(e.pointerId)) at(e); });
+      for (const n of ["pointerup", "pointercancel", "lostpointercapture"]) el.addEventListener(n, () => { el.classList.remove("on"); end(); });
+      el.addEventListener("click", (e) => e.stopPropagation()); // not a card click
+    }
+    dragger(pad.querySelector(".tp.hand"), (dx, dy) => { J.out = dz(-dy); J.left = dz(-dx); });
+    dragger(pad.querySelector(".tp.z"), (dx, dy) => { J.up = dz(-dy); });
+    for (const b of pad.querySelectorAll("[data-wf]")) {
+      b.addEventListener("pointerdown", (e) => { e.preventDefault(); e.stopPropagation(); b.setPointerCapture(e.pointerId); b.classList.add("held"); J.wf = Number(b.dataset.wf); update(); });
+      for (const n of ["pointerup", "pointercancel", "lostpointercapture"]) b.addEventListener(n, () => { b.classList.remove("held"); J.wf = 0; update(); });
+      b.addEventListener("click", (e) => e.stopPropagation());
+    }
+    for (const b of pad.querySelectorAll("[data-lv]")) b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      level = Number(b.dataset.lv);
+      armCmd(id, { jog: { ...J }, level }); // takes effect now, even with no finger down
+      pad.querySelectorAll("[data-lv]").forEach((x) => x.classList.toggle("sel", x === b));
+    });
+    addEventListener("blur", () => { if (!live()) return; for (const k in J) J[k] = 0; update(); });
+    // Keyboard teleop (2026-11-20): the page's keydown hands keys here while this robot is
+    // selected with the Arm pad showing. Arrows move the hand, Page Up/Down raise and lower it,
+    // Z/X tilt the wrist; WASDQE stay the base's. Held keys re-send like a held finger, so
+    // letting go stops the arm through the same deadman. No magnet key: a stray press would
+    // drop a package.
+    const ARM_KEYS = { arrowup: ["out", 1], arrowdown: ["out", -1], arrowleft: ["left", 1], arrowright: ["left", -1],
+                       pageup: ["up", 1], pagedown: ["up", -1], z: ["wf", 1], x: ["wf", -1] };
+    const heldKeys = new Set();
+    const fromKeys = () => {
+      for (const ax of ["out", "left", "up", "wf"]) {
+        let v = 0;
+        for (const k of heldKeys) if (ARM_KEYS[k][0] === ax) v += ARM_KEYS[k][1];
+        J[ax] = Math.max(-1, Math.min(1, v));
+      }
+      update();
+    };
+    c.armKeys = {
+      down(e) {
+        const k = e.key.toLowerCase();
+        if (ARM_KEYS[k]) { heldKeys.add(k); fromKeys(); return true; }
+        if (/^[1-4]$/.test(k)) { pad.querySelector(`[data-lv="${Number(k) - 1}"]`).click(); return true; }
+        return false;
+      },
+      up(e) { if (heldKeys.delete(e.key.toLowerCase())) fromKeys(); },
+      stop() { heldKeys.clear(); for (const ax in J) J[ax] = 0; update(); },
+      release() { if (heldKeys.size) { heldKeys.clear(); fromKeys(); } },
+    };
+    pad.querySelector('[data-arm-act="magnet"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      const r = robots.get(id), m = r && r.arm && r.arm.magnet;
+      const on = !(m && (m.want === "on"));
+      armCmd(id, { magnet: on ? "on" : "off" });
+      toast(`${nameOf(id)}: magnet ${on ? "on" : "off"}`);
+    });
+    pad.querySelector('[data-arm-act="rest"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      const r = robots.get(id);
+      if (!r || !r.pick) return toast(`${nameOf(id)}: the arm's pick node isn't running`);
+      publishString(`/${id}/pick_request`, JSON.stringify({ cmd: "rest" }));
+    });
+    pad.querySelector('[data-arm-act="pick"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      // A pick node publishes a latched pick_status; without one nothing would answer.
+      const r = robots.get(id);
+      if (!r || !r.pick) return toast(`${nameOf(id)}: pick and place isn't running on this robot yet`);
+      publishString(`/${id}/pick_request`, JSON.stringify({ cmd: "auto" }));
+      toast(`${nameOf(id)}: pick and place started`);
+    });
+    // The ⋯ menu holds the teaching buttons: shut once one is used or the pointer goes elsewhere.
+    const more = pad.querySelector(".armmore");
+    more.querySelector(".menu").addEventListener("click", () => { more.open = false; });
+    document.addEventListener("pointerdown", (e) => { if (more.open && !more.contains(e.target)) more.open = false; });
+    // Teaching a new place spot: pick and keep holding, drive there with the pad, save it.
+    // Hidden once the place pose was taught (2026-11-19); drop `hidden` on the two buttons to
+    // teach a new one. Unload and Save table (2026-11-20) are the reverse: the body out onto a
+    // table pose taught the same way (Unload with none saved picks and holds).
+    for (const [act, msg] of [["pick_hold", "pick, then hold for you to place"], ["save_place", "saving the place pose"],
+                              ["unload", "unloading onto the table"], ["save_table", "saving the table pose"]]) {
+      pad.querySelector(`[data-arm-act="${act}"]`).addEventListener("click", (e) => {
+        e.stopPropagation();
+        const r = robots.get(id);
+        if (!r || !r.pick) return toast(`${nameOf(id)}: pick and place isn't running on this robot yet`);
+        publishString(`/${id}/pick_request`, JSON.stringify({ cmd: act }));
+        toast(`${nameOf(id)}: ${msg}`);
+      });
+    }
+    let fade = null;
+    pad.addEventListener("pointerdown", () => { pad.classList.add("on"); clearTimeout(fade); });
+    pad.addEventListener("pointerup", () => { clearTimeout(fade); fade = setTimeout(() => pad.classList.remove("on"), 3000); });
+  }
+  function syncArmPads() {
+    for (const [id, c] of cams) {
+      if (!c.armPad) continue;
+      const r = robots.get(id), a = r && r.arm && performance.now() - r.armAt < 3000 ? r.arm : null;
+      c.hasArm = !!a;
+      applyPadMode(c);
+      if (!a) continue;
+      if (typeof a.level === "number") c.armPad.querySelectorAll("[data-lv]").forEach((x) => x.classList.toggle("sel", Number(x.dataset.lv) === a.level));
+      const mag = c.armPad.querySelector('[data-arm-act="magnet"]');
+      const on = a.magnet && a.magnet.board === "ON";
+      mag.classList.toggle("on", !!on);
+      mag.textContent = on ? "Magnet ON" : "Magnet";
+    }
+  }
+
+  // -- one pad at a time over the camera: Nav (drive) / Manip (arm) (2026-11-16: all at once
+  // covered the picture; the Head tab became keys, 2026-11-20). Manip is offered only when an
+  // arm reports in (arm_state); the choice is remembered per browser.
+  const PAD_MODE_KEY = "sortbots.padMode";
+  function wirePadMode(id, c, el) {
+    c.robotId = id;
+    c.padModeEl = el.querySelector(".padmode");
+    c.drivePad = el.querySelector(".drive");
+    try { c.padMode = localStorage.getItem(PAD_MODE_KEY) || "drive"; } catch (e) { c.padMode = "drive"; }
+    for (const b of c.padModeEl.querySelectorAll("[data-padmode]")) b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      c.padMode = b.dataset.padmode;
+      try { localStorage.setItem(PAD_MODE_KEY, c.padMode); } catch (err) { /* per-page only */ }
+      // Nav and Manip are the ROBOT's mode (arm_driver pauses mapping in manipulation; nav
+      // holds the camera at its mount pose and ignores head_cmd). Without an arm there is no
+      // mode to set (the sim, a bare base).
+      const robotMode = { drive: "nav", arm: "manip" }[c.padMode];
+      if (robotMode && c.hasArm) publishString(`/${id}/robot_mode_cmd`, JSON.stringify({ mode: robotMode }));
+      applyPadMode(c);
+    });
+    applyPadMode(c);
+  }
+  function applyPadMode(c) {
+    if (!c.padModeEl) return;
+    const can = { drive: true, arm: !!c.hasArm };
+    const mode = can[c.padMode] ? c.padMode : "drive";
+    for (const b of c.padModeEl.querySelectorAll("[data-padmode]")) {
+      b.hidden = !can[b.dataset.padmode];
+      b.classList.toggle("on", b.dataset.padmode === mode);
+      b.setAttribute("aria-selected", String(b.dataset.padmode === mode));
+    }
+    c.padModeEl.hidden = !can.arm;   // drive alone: nothing to switch
+    c.drivePad.hidden = mode !== "drive";
+    if (c.armPad) c.armPad.hidden = mode !== "arm";
+    syncPickLine(c);
+  }
+  // The pick's phase and its own words (pick_status from arm_driver), over the picture in Arm
+  // mode: the page showed nothing while a pick searched, locked or failed (2026-11-16).
+  const PICK_PHASE_TONE = { FAILED: "bad", ABORTED: "bad", BUSY: "warn", PLACED: "ok", PICKED: "ok", REST: "ok", SAVED: "ok", IDLE: "" };
+  function syncPickLine(c) {
+    if (!c.pickLine) return;
+    const r = c.robotId && robots.get(c.robotId), p = r && r.pick, m = r && r.mode;
+    const show = c.padMode === "arm" && c.hasArm && p && p.phase;
+    c.pickLine.hidden = !show;
+    if (!show) return;
+    const mapping = m && m.mode === "manip" ? (m.mapping === "paused" ? " · mapping paused" : m.mapping === "unavailable" ? "" : " · pausing mapping…") : "";
+    c.pickLine.querySelector("b").textContent = p.phase;
+    c.pickLine.querySelector("span").textContent = (p.note || "") + mapping;
+    c.pickLine.dataset.tone = PICK_PHASE_TONE[p.phase] ?? (p.busy ? "busy" : "");
+  }
+
   // Keys drive the robot in control (the open card clicked into last), from anywhere on
   // the page except a form field; losing focus mid-drive releases everything, since the
   // keyup would never arrive.
@@ -992,19 +1663,113 @@
     if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.target.closest && e.target.closest("input, select, textarea")) return;
     if (!selected || !open.has(selected)) return;
-    if (e.code === "Space") { e.preventDefault(); return driveRelease(selected); }
+    // The Drive view owns WASD for the real base (operator_drive.js): a key must never
+    // drive a ROS robot and the plugged-in one at once.
+    if (stageView === "drive") return;
+    // WASDQE drive the base whatever pad is up; the arm's keys (arrows, Page Up/Down, Z/X) only
+    // with the Arm pad showing, so they never move an arm nobody is looking at. Numbers set the
+    // speed of the pad that's up; Space stops both.
+    const cam = cams.get(selected);
+    const armUp = !!(cam && cam.padMode === "arm" && cam.armKeys && !cam.armPad.hidden);
+    // M flips Nav / Manip: the same as clicking the other tab (it sets the robot's mode too).
+    if (e.key.toLowerCase() === "m" && cam && cam.hasArm && cam.padModeEl) {
+      e.preventDefault();
+      cam.padModeEl.querySelector(`[data-padmode="${cam.padMode === "arm" ? "drive" : "arm"}"]`).click();
+      return;
+    }
+    if (e.code === "Space") { e.preventDefault(); if (armUp) cam.armKeys.stop(); if (cam && cam.headKeys) cam.headKeys.release(); return driveRelease(selected); }
+    if (armUp && cam.armKeys.down(e)) { e.preventDefault(); return; }
+    // The head (I/K/J/L, H centres): any pad, but the real robot ignores head_cmd in Nav.
+    if (cam && cam.headKeys && cam.hasHead && cam.headKeys.handles(e)) {
+      e.preventDefault();
+      const r = robots.get(selected);
+      if (r && r.mode && r.mode.mode === "nav") return toast(`${nameOf(selected)}: Nav holds the head forward; switch to Manip to aim it`);
+      cam.headKeys.down(e);
+      return;
+    }
+    if (/^[1-9]$/.test(e.key) && cam && cam.drivePad) {
+      const b = cam.drivePad.querySelector(`[data-drive-level="${Number(e.key) - 1}"]`);
+      if (b && !b.hidden) { e.preventDefault(); b.click(); }
+      return;
+    }
     const cmd = DRIVE_KEYS[e.key.toLowerCase()];
     if (cmd) { e.preventDefault(); driveStart(selected, cmd); }
   });
   addEventListener("keyup", (e) => {
+    for (const c of cams.values()) { if (c.armKeys) c.armKeys.up(e); if (c.headKeys) c.headKeys.up(e); }
     const cmd = DRIVE_KEYS[e.key.toLowerCase()];
     if (cmd) for (const id of drives.keys()) driveStop(id, cmd);
   });
-  const releaseAllDrives = () => { for (const [id, d] of drives) if (d.held.size) driveRelease(id); };
+  const releaseAllDrives = () => {
+    for (const [id, d] of drives) if (d.held.size) driveRelease(id);
+    for (const c of cams.values()) { if (c.armKeys) c.armKeys.release(); if (c.headKeys) c.headKeys.release(); }
+  };
   addEventListener("blur", releaseAllDrives);
   document.addEventListener("visibilitychange", () => { if (document.hidden) releaseAllDrives(); });
+  // -- SLAM feature overlay (nodes/feature_overlay.py, real platform) -------------------------
+  // Toggle on a camera tile. /<id>/odom_features is subscribed ONLY while the toggle is on:
+  // the node watches its subscriber count and holds the (large) odom_info subscription just
+  // as long, so an untoggled tile costs the robot nothing. Sim publishes odom directly and
+  // never runs rgbd_odometry, so there the node substitutes ORB on camera/rgb (--sim).
+  const FEATURE_TTL_MS = 1500;
+  const FEATURE_COLOR = ["#9aa4ae", "#f5a524", "#3ddc84"]; // detected, matched, inlier
+  function setCamFeatures(id, on) {
+    const c = camFor(id);
+    if (c.features === on) return;
+    c.features = on;
+    c.el.querySelector("[data-cam-features]").classList.toggle("on", on);
+    c.el.querySelector("[data-cam-features]").setAttribute("aria-pressed", String(on));
+    if (c.featSub) { c.featSub.unsubscribe(); c.featSub = null; }
+    c.featData = null;
+    if (on) {
+      c.featSub = topic(`/${id}/odom_features`, "std_msgs/String", { throttle_rate: 100, queue_length: 1 });
+      c.featSub.subscribe((msg) => {
+        try { c.featData = JSON.parse(msg.data); } catch (e) { return; }
+        c.featAt = performance.now();
+        drawCamFeatures(id);
+      });
+    }
+    drawCamFeatures(id);
+  }
+  // Same cover-crop inversion as drawCamObstacles: the picture is `background-size: cover`.
+  function drawCamFeatures(id) {
+    const c = cams.get(id);
+    if (!c) return;
+    const cv = c.feat, w = cv.clientWidth, h = cv.clientHeight;
+    if (!w || !h) return;
+    if (cv.width !== w) cv.width = w;
+    if (cv.height !== h) cv.height = h;
+    const g = cv.getContext("2d");
+    g.clearRect(0, 0, w, h);
+    if (!c.features) { c.featStat.textContent = ""; return; }
+    const p = c.featData, fresh = p && performance.now() - c.featAt < FEATURE_TTL_MS;
+    if (!fresh || !p.w || !p.h) {
+      c.featStat.textContent = platform === "real" ? "Waiting for SLAM features…" : "Waiting for features (sim: ORB stand-in)";
+      return;
+    }
+    c.featStat.textContent = p.lost ? "SLAM lost" : `${p.inliers} inliers · ${p.matches} matched · ${p.features} features`;
+    // On the picture, not the whole tile: Split stacks two (the depth aligns to the colour).
+    const pic = c.pics.rgb.offsetWidth ? c.pics.rgb : c.pics.depth;
+    const pw = pic.offsetWidth, ph = pic.offsetHeight;
+    const k = Math.max(pw / p.w, ph / p.h), ox = pic.offsetLeft + (pw - p.w * k) / 2, oy = pic.offsetTop + (ph - p.h * k) / 2;
+    g.save(); g.beginPath(); g.rect(pic.offsetLeft, pic.offsetTop, pw, ph); g.clip();
+    // Weakest first, so the inliers that drive the pose are never hidden under grey dots.
+    // Plain fixed-size points: the keypoint's own scale only turned dense areas into blobs.
+    const DOT = [2, 3, 3];
+    for (const state of [0, 1, 2]) {
+      g.fillStyle = FEATURE_COLOR[state];
+      const d = DOT[state];
+      for (const [x, y, , st] of p.pts) {
+        if (st === state) g.fillRect(Math.round(ox + x * k - d / 2), Math.round(oy + y * k - d / 2), d, d);
+      }
+    }
+    g.restore();
+  }
+  setInterval(() => { for (const [id, c] of cams) if (c.features && c.featData && performance.now() - c.featAt > FEATURE_TTL_MS) drawCamFeatures(id); }, 1000);
+
   function syncCamButtons(c) {
     for (const b of c.el.querySelectorAll("[data-cam-mode]")) b.classList.toggle("on", b.dataset.camMode === c.mode);
+    c.el.dataset.view = c.mode;
   }
   function setCamMode(id, mode) {
     const c = camFor(id);
@@ -1016,28 +1781,31 @@
   }
   function startCam(id) {
     stopCam(id);
-    const c = camFor(id), token = c.token, label = c.mode === "depth" ? "depth" : "camera";
-    const tick = () => {
-      if (token !== c.token) return;
-      const probe = new Image();
-      probe.onload = () => {
+    const c = camFor(id), token = c.token;
+    for (const feed of feedsOf(c.mode)) {
+      const pic = c.pics[feed], msg = pic.querySelector(".msg"), label = CAM_LABEL[feed];
+      const tick = () => {
         if (token !== c.token) return;
-        c.pic.style.backgroundImage = `url(${probe.src})`;
-        c.msg.textContent = "";
-        c.timer = setTimeout(tick, 400);
+        const probe = new Image();
+        probe.onload = () => {
+          if (token !== c.token) return;
+          pic.style.backgroundImage = `url(${probe.src})`;
+          msg.textContent = "";
+          c.timers[feed] = setTimeout(tick, 400);
+        };
+        probe.onerror = () => {
+          if (token !== c.token) return;
+          pic.style.backgroundImage = "";
+          msg.textContent = `No ${label} feed`;
+          c.timers[feed] = setTimeout(tick, 3000);
+        };
+        probe.src = `${VIDEO_BASE}/snapshot?topic=/${id}/${CAM_TOPIC[feed]}&qos_profile=sensor_data&_=${Date.now()}`;
       };
-      probe.onerror = () => {
-        if (token !== c.token) return;
-        c.pic.style.backgroundImage = "";
-        c.msg.textContent = `No ${label} feed`;
-        c.timer = setTimeout(tick, 3000);
-      };
-      probe.src = `${VIDEO_BASE}/snapshot?topic=/${id}/${CAM_TOPIC[c.mode]}&qos_profile=sensor_data&_=${Date.now()}`;
-    };
-    c.pic.style.backgroundImage = ""; c.msg.textContent = `Connecting to ${label}…`;
-    tick();
+      pic.style.backgroundImage = ""; msg.textContent = `Connecting to ${label}…`;
+      tick();
+    }
   }
-  function stopCam(id) { const c = cams.get(id); if (c) { c.token++; clearTimeout(c.timer); } }
+  function stopCam(id) { const c = cams.get(id); if (c) { c.token++; Object.values(c.timers).forEach(clearTimeout); } }
 
   function refreshSelection() {
     lastFleetSig = "";
@@ -1051,8 +1819,21 @@
     if (fresh) startCam(id);
     refreshSelection();
   }
+  // A robot's card opens by itself the first time it comes online in a run; closed after
+  // that, it stays closed. Control stays with whichever robot already has it.
+  const autoOpened = new Set();
+  function autoOpenCards() {
+    if (window.__noAutoOpen) return; // the operator tests drive the cards by hand
+    for (const r of robots.values()) {
+      if (!online(r) || autoOpened.has(r.id)) continue;
+      autoOpened.add(r.id);
+      const keep = selected;
+      openRobot(r.id);
+      if (keep !== null && keep !== r.id) { selected = keep; refreshSelection(); }
+    }
+  }
   function closeRobot(id) {
-    open.delete(id); stopCam(id);
+    open.delete(id); stopCam(id); setCamFeatures(id, false);
     if (selected === id) selected = [...open].pop() ?? null; // control falls to the newest still open
     refreshSelection();
   }
@@ -1160,6 +1941,166 @@
     el.title = lines.join("\n");
   }
 
+  // -- sim or real, and the other consoles (serve.py /api/consoles) ---------------------------------
+  // One console per backend: the Jetson's serves the real robot, a desktop's the Isaac sim.
+  // The chip says which this page is driving, so a drive pad press is never a surprise, and
+  // its menu jumps to the other consoles (configs/consoles.yaml).
+  let consoles = [];
+  async function loadConsoles() {
+    let body;
+    try { const r = await fetch("/api/consoles"); if (!r.ok) return; body = await r.json(); } catch (e) { return; }
+    const chip = $("#platform-chip"), plat = body.platform;
+    if (plat !== "sim" && plat !== "real") { chip.hidden = true; return; }
+    consoles = body.consoles || [];
+    chip.hidden = false;
+    chip.dataset.platform = plat;
+    $("#estop-latch").hidden = plat !== "real";
+    $("#platform-label").textContent = plat === "real" ? "REAL" : "SIM";
+    chip.title = plat === "real" ? "Driving the real robot (this console runs on the robot)" : "Driving the Isaac simulation";
+    const here = location.host;
+    const list = $("#platform-list");
+    list.replaceChildren();
+    for (const c of consoles) {
+      const li = document.createElement("li");
+      let cur = false;
+      try { cur = new URL(c.url, location.href).host === here; } catch (e) { /* bad url: listed, not marked */ }
+      const a = document.createElement(cur ? "span" : "a");
+      if (!cur) a.href = c.url;
+      a.className = "console" + (cur ? " here" : "");
+      a.dataset.platform = c.platform;
+      a.innerHTML = `<b></b><span class="name"></span><span class="url"></span>`;
+      a.querySelector("b").textContent = c.platform === "real" ? "REAL" : "SIM";
+      a.querySelector(".name").textContent = c.name + (cur ? " (this page)" : "");
+      a.querySelector(".url").textContent = c.url;
+      li.appendChild(a);
+      list.appendChild(li);
+    }
+    $("#platform-none").hidden = consoles.some((c) => { try { return new URL(c.url, location.href).host !== here; } catch (e) { return false; } });
+  }
+  $("#platform-chip").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const pop = $("#platform-pop");
+    pop.hidden = !pop.hidden;
+    $("#platform-chip").setAttribute("aria-expanded", String(!pop.hidden));
+  });
+  document.addEventListener("click", (e) => {
+    const pop = $("#platform-pop");
+    if (!pop.hidden && !pop.contains(e.target)) { pop.hidden = true; $("#platform-chip").setAttribute("aria-expanded", "false"); }
+  });
+
+  // -- the live map: save / load / clear without a restart ------------------------------------------
+  // serve.py's /api/map/{save,load,clear}: RTAB-Map's backup, load_database (on a COPY of the
+  // library file) and reset + reset_odom. Load and Clear throw away whatever wasn't saved, so
+  // both take a second click within CONFIRM_MS.
+  const MAPS_CONFIRM_MS = 4000;
+  const mapsRobot = () => (selected && robots.has(selected) ? selected : "robot_0");
+  const mapsLive = () => !!(session && session.state === "running" && !session.read_only);
+  function mapsMsg(text, bad) { const m = $("#maps-msg"); m.textContent = text || ""; m.hidden = !text; m.classList.toggle("bad", !!bad); }
+  function syncMapsBtn() { $("#maps-btn").hidden = !mapsLive(); if (!mapsLive()) $("#maps-pop").hidden = true; }
+  function armConfirm(btn, label, armedLabel) {
+    // First click arms (the label asks), a second within MAPS_CONFIRM_MS returns true.
+    if (btn.dataset.armed) { clearTimeout(btn._t); delete btn.dataset.armed; btn.textContent = label; return true; }
+    btn.dataset.armed = "1"; btn.textContent = armedLabel;
+    btn._t = setTimeout(() => { delete btn.dataset.armed; btn.textContent = label; }, MAPS_CONFIRM_MS);
+    return false;
+  }
+  async function mapsCall(url, body, busyText) {
+    mapsMsg(busyText);
+    for (const b of $("#maps-pop").querySelectorAll("button")) b.disabled = true;
+    try {
+      const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(out.error || res.statusText);
+      return out;
+    } catch (e) {
+      mapsMsg(`Failed: ${e.message}`, true);
+      return null;
+    } finally {
+      for (const b of $("#maps-pop").querySelectorAll("button")) b.disabled = false;
+    }
+  }
+  // Extend (mapping) or Localize only, live (serve.py /api/map/mode -> RTAB-Map's set_mode_*).
+  // Never switched in this session: whatever the scenario started it in.
+  let mapsMode = "mapping";
+  function showMapsMode() {
+    for (const b of $("#maps-mode").querySelectorAll("[data-mode]")) b.classList.toggle("active", b.dataset.mode === mapsMode);
+  }
+  async function fetchMapsMode() {
+    let m = null;
+    try { m = (await (await fetch(`/api/map/mode?robot_id=${encodeURIComponent(mapsRobot())}`)).json()).mode; } catch (e) { /* fall back */ }
+    mapsMode = m || (session && session.run && session.run.localize ? "localize" : "mapping");
+    showMapsMode();
+  }
+  for (const b of document.querySelectorAll("#maps-mode [data-mode]")) b.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (b.dataset.mode === mapsMode) return;
+    const out = await mapsCall("/api/map/mode", { mode: b.dataset.mode, robot_id: mapsRobot() },
+      b.dataset.mode === "localize" ? "Switching to localize only…" : "Switching to mapping…");
+    if (!out) return;
+    mapsMode = out.mode; showMapsMode();
+    mapsMsg(mapsMode === "localize" ? "Localize only: the map is used as it is and never changes." : "Mapping: the map grows as the robot drives.");
+    toast(mapsMode === "localize" ? "Map: localize only" : "Map: extending");
+  });
+  async function refreshMaps() {
+    fetchMapsMode();
+    const loaded = session && session.map_name;
+    $("#maps-current").textContent = loaded ? `· loaded from ${loaded}` : "· not saved yet";
+    const name = $("#maps-name");
+    if (!name.value) {
+      const d = new Date(), p2 = (n) => String(n).padStart(2, "0");
+      name.value = loaded || `map-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}`;
+    }
+    let maps = [];
+    try { maps = (await (await fetch("/api/maps")).json()).maps || []; } catch (e) { /* list stays empty */ }
+    const list = $("#maps-list");
+    list.innerHTML = maps.map((m) => {
+      const area = m.coverage && m.coverage.known_m2 != null ? `${Math.round(m.coverage.known_m2)} m²` : "";
+      const when = (m.updated || m.created || "").slice(0, 10);
+      return `<li><span class="nm" title="${esc(m.description || m.title || m.name)}">${esc(m.name)}</span><span class="sub">${esc([area, when].filter(Boolean).join(" · "))}</span><button class="btn small" type="button" data-load="${esc(m.name)}">Load</button></li>`;
+    }).join("");
+    $("#maps-empty").hidden = maps.length > 0;
+    for (const b of list.querySelectorAll("[data-load]")) b.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!armConfirm(b, "Load", "Replace live map?")) return mapsMsg("Loading replaces the live map: anything not saved is lost. Click again to load.");
+      // Loaded in whichever mode the toggle shows: Extend keeps adding to it, Localize only uses it as is.
+      const out = await mapsCall("/api/map/load", { name: b.dataset.load, robot_id: mapsRobot(), mode: mapsMode }, `Loading ${b.dataset.load}…`);
+      if (out) {
+        mapsMsg(`Loaded ${b.dataset.load} (${mapsMode === "localize" ? "localize only" : "extending it"}). Point the camera at somewhere it has seen and the robot snaps into the map.`);
+        toast(`Map ${b.dataset.load} loaded`); pollSession();
+      }
+    });
+  }
+  $("#maps-btn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const pop = $("#maps-pop");
+    pop.hidden = !pop.hidden;
+    $("#maps-btn").setAttribute("aria-expanded", String(!pop.hidden));
+    if (!pop.hidden) { mapsMsg(""); $("#maps-name").value = ""; refreshMaps(); }
+  });
+  document.addEventListener("click", (e) => {
+    const pop = $("#maps-pop");
+    if (!pop.hidden && !pop.contains(e.target) && e.target.id !== "maps-btn") { pop.hidden = true; $("#maps-btn").setAttribute("aria-expanded", "false"); }
+  });
+  $("#maps-save").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name = $("#maps-name").value.trim();
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) return mapsMsg("Name: lowercase letters, digits, - and _", true);
+    // Blocking on the server: the grid off /map plus RTAB-Map's own backup of its database.
+    const out = await mapsCall("/api/map/save", { name, robot_id: mapsRobot() }, `Saving ${name}… (tens of seconds)`);
+    if (!out) return;
+    const pending = out.db_state && out.db_state !== "complete";
+    mapsMsg(pending ? `Saved ${name}: the grid is in, the pose graph is still pending (it completes on the next stop).` : `Saved ${name}.`);
+    toast(`Map saved as ${name}`);
+    refreshMaps();
+  });
+  $("#maps-clear").addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const b = e.currentTarget;
+    if (!armConfirm(b, "Clear map", "Wipe it? Click again")) return mapsMsg("Clearing wipes the live map and restarts at the origin: anything not saved is lost.");
+    const out = await mapsCall("/api/map/clear", { robot_id: mapsRobot() }, "Clearing…");
+    if (out) { mapsMsg("Cleared: mapping starts over from here."); toast("Map cleared"); }
+  });
+
   // -- gateway pin (comms overlay) -------------------------------------------------------------------
   // Where the fleet's gateway / access point stands, per platform (serve.py:
   // data/comms_gateway.json). Not a waypoint: nothing drives there.
@@ -1191,6 +2132,7 @@
         $('#tools [data-t="tp"]').hidden = platform !== "sim";
         if (platform !== "sim" && tool === "tp") setTool("select");
         $('#view [data-v="sim"]').hidden = platform !== "sim";
+        for (const c of cams.values()) { const pad = c.el.querySelector(".drive"); if (pad && pad.showLevel) pad.showLevel(); }
         if (platform !== "sim" && stageView === "sim") setView("2d");
         try { if (platform === "sim" && stageView === "2d" && localStorage.getItem("sortbots.mapView") === "sim") setView("sim"); } catch (e) { /* stay on the map */ }
       }
@@ -1435,7 +2377,10 @@
     // Premapped on a saved, read-only map. Changing it means a restart, from Session.
     const mapName = cfg && cfg.map && cfg.map !== "new" ? (cfg.map === "working" ? "last map" : cfg.map) : "";
     const mode = cfg ? (premapped ? "Premapped" : "Mapping") + (mapName ? ` · ${mapName}` : "") : "";
-    const label = !s ? "No session" : { starting: `Starting: ${s.phase_label || "…"}`, running: "Session running", stopping: "Stopping…", failed: "Session failed" }[s.state] || "No session";
+    // What the operator is actually starting and stopping: "session" meant nothing to anyone
+    // looking at an empty page.
+    const stack = platform === "real" ? "Robots" : "Sim";
+    const label = (s && { starting: `Starting: ${s.phase_label || "…"}`, running: `${stack} running`, stopping: "Stopping…", failed: `${stack} failed` }[s.state]) || `${stack} not running`;
     $("#s-label").textContent = controlAvailable ? label : "Session";
     $("#session-chip").dataset.mode = mode;
     $("#session-chip").title = mode ? `${mode}. Start, stop or save the session` : "Start, stop or save the session";
@@ -1461,6 +2406,13 @@
     sim_ready: "Simulation up", ros_starting: "Starting navigation and mapping", ros_ready: "Navigation up",
   };
   function bootProgress() {
+    // A start was just asked for and the session hasn't said so yet (a test takes a few
+    // seconds to get to launching one): the bar shows now, not at the next poll.
+    if (startAskedAt !== null) {
+      if (session && session.state === "starting") startAskedAt = null;
+      else if (performance.now() - startAskedAt > START_WAIT_MS) startAskedAt = null;
+      else return { p: 0.02, text: "Starting…" };
+    }
     if (!session || !["starting", "running"].includes(session.state)) return null;
     const list = [...robots.values()], up = list.filter(online).length;
     if (session.state === "running") {
@@ -1489,16 +2441,29 @@
   function renderEmpty() {
     const boot = renderBoot();
     const anyOnline = [...robots.values()].some(online);
-    const show = !anyOnline && !mapInfo;
+    // Booting beats a map: a map on screen during a boot can only be the last run's.
+    const show = !anyOnline && (!mapInfo || !!boot);
     $("#empty").hidden = !show;
     if (!show) return;
     const starting = !!boot || (session && session.state === "stopping");
-    $("#empty-title").textContent = boot ? "Starting up" : session && session.state === "stopping" ? "Stopping"
-      : controlAvailable ? "No session running" : "Waiting for the robots";
-    $("#empty-sub").textContent = boot ? boot.text : starting ? "" : controlAvailable
-      ? "Start a session to see your robots and give them tasks."
-      : "No robot is reporting yet. Check that the robot console is running.";
-    $("#empty-go").hidden = starting || !controlAvailable;
+    const real = platform === "real", what = real ? "robot stack" : "simulation";
+    // Searching: the stack is up (or this console can't start one) and no robot is reporting.
+    // Before it's up, the start-up phases keep their progress bar.
+    const list = [...robots.values()];
+    const searching = (session && session.state === "running") || !controlAvailable;
+    $("#empty-radar").hidden = !searching;
+    $("#empty-boot").hidden = searching || !boot;
+    if (searching) {
+      $("#empty-title").textContent = "No robots found";
+      $("#empty-sub").textContent = list.length ? `Searching… (${list.filter(online).length} of ${list.length} online)` : "Searching for robots…";
+    } else {
+      $("#empty-title").textContent = boot ? "Starting up" : session && session.state === "stopping" ? "Stopping"
+        : `${real ? "Robot stack" : "Simulation"} not running`;
+      $("#empty-sub").textContent = boot ? boot.text : starting ? "" : `Start the ${what} to see your robots and give them tasks.`;
+    }
+    $("#empty-go").textContent = `Start ${what}`;
+    $("#empty-go").hidden = starting || searching || !controlAvailable;
+    $("#empty-test").hidden = starting || searching || !controlAvailable || real; // tests drive Isaac
   }
 
   // A session started with demo: true (the Fleet demo preset) runs the task demo by
@@ -1515,6 +2480,41 @@
     runDemo();
   }
 
+  // Everything a run leaves on screen, gone: nothing of it says anything about the next one.
+  function clearRun() {
+    tasks = []; renderTasks();
+    mapInfo = null; mapCanvas = null; lastMap = null; knownBox = null; mappedM2 = 0;
+    view.moved = false;
+    tfTree.clear();
+    worldLayout = null; worldTruth = null; worldTruthAt = -Infinity;
+    for (const r of robots.values()) {
+      Object.assign(r, { pose: null, linkAt: -Infinity, plan: [], explore: null, exploreAt: -Infinity, task: null, taskAt: -Infinity,
+                         queueDepth: 0, nav: null, seenStamp: {}, odom: null, odomAt: -Infinity, obstacles: null, obstaclesAt: -Infinity,
+                         obstaclesMap: [], plates: null, platesAt: -Infinity, pick: null, boxes: null, boxesAt: -Infinity });
+    }
+    for (const [id, c] of cams) {
+      c.head.hidden = true; c.perc.hidden = true; c.featData = null; drawCamFeatures(id);
+      c.overlay.getContext("2d").clearRect(0, 0, c.overlay.width, c.overlay.height);
+      if (open.has(id)) startCam(id); else for (const pic of Object.values(c.pics)) pic.style.backgroundImage = "";
+    }
+    autoOpened.clear();
+    lastFleetSig = ""; dirty = true;
+    renderFleet(); renderEmpty();
+  }
+  // Called the moment a session or test is asked for, from whichever panel started it.
+  window.sortbotsRunStarting = () => {
+    startAskedAt = performance.now();
+    clearRun();
+    clearTimeout(sessionTimer); pollSession();
+  };
+
+  // A test is over and has stopped its sim: back to the empty screen, its score on top.
+  window.sortbotsRunEnded = () => {
+    startAskedAt = null;
+    clearRun();
+    clearTimeout(sessionTimer); pollSession();
+  };
+
   let sessionTimer = null, lastSessionId = null;
   async function pollSession() {
     try {
@@ -1523,14 +2523,16 @@
         controlAvailable = true;
         session = await res.json();
         if (session.session_id !== lastSessionId) { // a new run: last run's tasks mean nothing
-          if (lastSessionId !== null) { tasks = []; renderTasks(); }
+          if (lastSessionId !== null) clearRun();
           lastSessionId = session.session_id;
           refreshRoster();
         }
       }
-    } catch (e) { /* the console is down; keep the last known state */ }
+      outage.server(true);
+    } catch (e) { outage.server(false); /* the console is down; keep the last known state */ }
     renderHeader();
-    sessionTimer = setTimeout(pollSession, sessionActive() && session.state !== "running" ? 1000 : 3000);
+    syncMapsBtn();
+    sessionTimer = setTimeout(pollSession, outage.downAt !== null || (sessionActive() && session.state !== "running") ? 1000 : 3000);
   }
 
   function openSession() {
@@ -1687,6 +2689,7 @@
     const id = row.dataset.id;
     const act = e.target.closest("[data-act]"), cam = e.target.closest("[data-cam-mode]");
     if (cam) return setCamMode(id, cam.dataset.camMode);
+    if (e.target.closest("[data-cam-features]")) return setCamFeatures(id, !camFor(id).features);
     if (act) {
       if (act.dataset.act === "stop") { stopRobot(id); toast(`${nameOf(id)} stopped`); }
       if (act.dataset.act === "explore") toggleExplore(id);
@@ -1716,6 +2719,40 @@
       saveWaypoints(waypoints.filter((w) => w.name !== del));
     }
   });
+  // E-STOP (real robot): latch /<id>/estop on every robot (nodes/base_driver.py brakes and then
+  // ignores all driving; arm_driver aborts a pick; the explorer stops), and cancel goals here
+  // too. Sent three times: a Bool lost on a flaky link must not leave the robot moving. The
+  // button reads the latch back from base_status, so every open page shows it, and release
+  // takes a second click within 4 s.
+  function sendEstop(on) {
+    for (const id of robots.keys()) {
+      for (let i = 0; i < 3; i++) setTimeout(() => publish(`/${id}/estop`, "std_msgs/Bool", { data: on }), i * 150);
+      if (on) stopRobot(id);
+    }
+  }
+  const estopLatched = () => [...robots.values()].some((r) => r.base && r.base.estop && performance.now() - (r.baseAt || 0) < 5000);
+  function syncEstop() {
+    const b = $("#estop-latch");
+    const on = estopLatched();
+    b.classList.toggle("latched", on);
+    if (!b.dataset.armed) b.textContent = on ? "E-STOPPED · Release" : "E-STOP";
+    b.title = on ? "E-stop is latched on the robot: wheels braked, all driving refused. Click twice to release"
+                 : "Emergency stop: brake every robot's wheels NOW and refuse all driving (pad, Nav2, explore) until released";
+  }
+  $("#estop-latch").addEventListener("click", () => {
+    const b = $("#estop-latch");
+    if (!estopLatched()) { sendEstop(true); b.classList.add("latched"); b.textContent = "E-STOPPED · Release"; toast("E-STOP: every robot braked"); return; }
+    if (!b.dataset.armed) {
+      b.dataset.armed = "1"; b.textContent = "Release? Click again";
+      setTimeout(() => { delete b.dataset.armed; syncEstop(); }, 4000);
+      return;
+    }
+    delete b.dataset.armed;
+    sendEstop(false);
+    toast("E-stop released: driving allowed again");
+  });
+  setInterval(syncEstop, 500);
+
   // Stop all: halt every robot NOW (it is still the emergency button), then end the
   // sim, asking only what can't be undone: whether this run's map is kept. Same server
   // calls as the session panel's Stop and Save & finish, so nobody has to go through
@@ -1785,10 +2822,24 @@
     stopCall("/api/session/finish", { name }, `Saving ${name}, then shutting the sim down…`);
   });
   $("#session-chip").addEventListener("click", openSession);
+  $("#outage-start").addEventListener("click", () => { $("#outage").hidden = true; openSession(); });
+  $("#outage-close").addEventListener("click", () => { outage.dismissed = true; $("#outage").hidden = true; });
   $("#empty-go").addEventListener("click", openSession);
   $("#sp-x").addEventListener("click", closeSession);
+  // Keyboard shortcuts: the ? button or key (not while typing); Esc, × or a click outside closes.
+  const keysDlg = $("#keys-dlg");
+  $("#keys-btn").addEventListener("click", () => { keysDlg.hidden = !keysDlg.hidden; });
+  $("#kd-x").addEventListener("click", () => { keysDlg.hidden = true; });
+  keysDlg.addEventListener("click", (e) => { if (e.target === keysDlg) keysDlg.hidden = true; });
+  addEventListener("keydown", (e) => {
+    if (e.key !== "?" || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.target.closest && e.target.closest("input, select, textarea")) return;
+    e.preventDefault();
+    keysDlg.hidden = !keysDlg.hidden;
+  });
   $("#session").addEventListener("click", (e) => { if (e.target.id === "session") closeSession(); });
   addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("#keys-dlg").hidden) { $("#keys-dlg").hidden = true; return; }
     if (e.key === "Escape" && !$("#stop-dlg").hidden) { closeStopDialog(); return; }
     if (e.key === "Escape") {
       if (drag) { drag = null; press = null; dirty = true; canvas.style.cursor = "grab"; return; } // abandon a send mid-drag
@@ -1796,6 +2847,7 @@
       return;
     }
     if (e.target.closest && e.target.closest("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (stageView === "drive") return; // map tools have no map to act on
     const t = { v: "select", f: "wp", r: "gw", t: "tp" }[e.key.toLowerCase()];
     if (t && !(t === "tp" && platform !== "sim")) setTool(t);
   });
@@ -1813,6 +2865,7 @@
     if (v === true) v = "3d"; else if (v === false) v = "2d";
     if (v === "3d" && !window.sortbotsCloud) v = "2d";
     if (v === "sim" && platform !== "sim") v = "2d";
+    if (v === "drive" && !(window.sortbotsDrive && window.sortbotsDrive.available)) v = "2d";
     stageView = v; view3d = v === "3d";
     const onMap = v === "2d";
     for (const b of document.querySelectorAll("#view button")) b.classList.toggle("active", b.dataset.v === v);
@@ -1826,6 +2879,10 @@
       window.sortbotsCloud.show(); syncCloudRobots();
     } else if (cloudMounted) window.sortbotsCloud.hide();
     setSimView(v === "sim");
+    $("#driveview").hidden = v !== "drive";
+    $("#stage").classList.toggle("driving", v === "drive");
+    // operator_drive.js starts and stops its camera polls and gamepad loop on this.
+    dispatchEvent(new CustomEvent("sortbots:view", { detail: v }));
     if (onMap) { setTool(tool); dirty = true; }
     try { localStorage.setItem("sortbots.mapView", v); } catch (e) { /* this tab only */ }
   }
@@ -2018,11 +3075,24 @@
   // The grid's outer columns are --left-w / --right-w on <body>. Each handle drags its
   // bar's inner edge; widths persist per browser, double-click resets. The stage
   // canvases size from their parent, so a resize event re-fits the map and overlay.
-  const SIDES = { left: { min: 200, max: 520, dflt: 260 }, right: { min: 240, max: 560, dflt: 296 } };
+  // The left bar has no ceiling but the window, for watching the cameras big: it eats
+  // the map, then pushes the task list off the edge, and snaps to full width near the end.
+  const SIDES = { left: { min: 200, max: Infinity, dflt: 260 }, right: { min: 240, max: 560, dflt: 296 } };
+  const LEFT_SNAP_PX = 24;
+  function syncMapGone() {
+    const px = (side) => (document.body.classList.contains(`hide-${side}`) ? 0
+      : parseFloat(document.body.style.getPropertyValue(`--${side}-w`)) || SIDES[side].dflt);
+    // The phone layouts stack the panes and have no handles: there the widths mean nothing.
+    const sideBySide = getComputedStyle($("#rz-left")).display !== "none";
+    document.body.classList.toggle("map-gone", sideBySide && px("left") + px("right") >= innerWidth);
+    document.body.classList.toggle("left-full", sideBySide && px("left") >= innerWidth);
+  }
   function setSide(side, w, save = true) {
     const { min, max, dflt } = SIDES[side];
-    const v = w == null ? dflt : Math.round(Math.min(max, Math.max(min, w)));
+    let v = w == null ? dflt : Math.round(Math.min(max, innerWidth, Math.max(min, w)));
+    if (side === "left" && w != null && v >= innerWidth - LEFT_SNAP_PX) v = innerWidth;
     document.body.style.setProperty(`--${side}-w`, `${v}px`);
+    syncMapGone();
     if (save) { try { if (w == null) localStorage.removeItem(`sortbots.${side}W`); else localStorage.setItem(`sortbots.${side}W`, String(v)); } catch (e) { /* this tab only */ } }
     dispatchEvent(new Event("resize"));
   }
@@ -2040,6 +3110,26 @@
     const end = (e) => { if (h.hasPointerCapture(e.pointerId)) h.releasePointerCapture(e.pointerId); h.classList.remove("drag"); document.body.classList.remove("resizing"); };
     h.addEventListener("pointerup", end); h.addEventListener("pointercancel", end);
     h.addEventListener("dblclick", () => setSide(side, null));
+  }
+  addEventListener("resize", syncMapGone);
+  // Either side bar can be put away altogether; the choice is kept per browser.
+  for (const [side, name] of [["left", "robot list"], ["right", "task list"]]) {
+    const btn = $(`#hide-${side}`), key = `sortbots.hide.${side}`;
+    const apply = (hide) => {
+      document.body.classList.toggle(`hide-${side}`, hide);
+      btn.classList.toggle("on", !hide);
+      btn.title = btn.ariaLabel = `${hide ? "Show" : "Hide"} the ${name}`;
+      syncMapGone();
+      dispatchEvent(new Event("resize"));
+    };
+    let hidden = false;
+    try { hidden = localStorage.getItem(key) === "1"; } catch (e) { /* no storage: shown */ }
+    apply(hidden);
+    btn.addEventListener("click", () => {
+      const hide = !document.body.classList.contains(`hide-${side}`);
+      try { localStorage.setItem(key, hide ? "1" : "0"); } catch (e) { /* this tab only */ }
+      apply(hide);
+    });
   }
 
   let toastTimer = null;
@@ -2072,13 +3162,13 @@
       r.obstacles = null; r.obstaclesMap = [];
       drawCamObstacles(r.id); // clears it
     }
-    renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending(); renderPaneBadges(); renderSimFollow();
+    autoOpenCards(); renderFleet(); renderEmpty(); maybeAutoDemo(); renderAlarms(); expirePending(); renderPaneBadges(); renderSimFollow();
     if (window.sortbotsComms) window.sortbotsComms.sync();
   }, 250);
 
   // -- boot ----------------------------------------------------------------------------------------------------------------------
   applyTheme(); resize(); setTool("select"); renderTasks(); renderWaypoints();
-  refreshRoster(); loadWaypoints(); loadGateway(); pollSession(); loadVersion();
+  refreshRoster(); loadWaypoints(); loadGateway(); pollSession(); loadVersion(); loadConsoles();
   // "sim" waits for loadWaypoints to learn the platform (it's sim-only), see there.
   try { const v = localStorage.getItem("sortbots.mapView"); if (v === "3d") setView("3d"); } catch (e) { /* default: 2D */ }
   setInterval(loadWaypoints, 10000); // another operator may have added pins
@@ -2088,5 +3178,5 @@
   setInterval(refreshRoster, 15000);
 
   // Test hook: the offline test (tests/operator_test.mjs) drives state through here.
-  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane, setView, get stageView() { return stageView; }, simCam, loadVersion };
+  window.__operator = { robots, tfTree, lookupPose, onTf, addRobot, statusOf, noteStatus, get tasks() { return tasks; }, get waypoints() { return waypoints; }, select, open, get selected() { return selected; }, cams, loadWaypoints, loadGateway, get gateway() { return gateway; }, view, toPx, toWorld, onBoard, get board() { return board; }, obstaclesInMap, onObstacles, get drag() { return drag; }, get platform() { return platform; }, setPane, setView, get stageView() { return stageView; }, simCam, loadVersion, loadConsoles };
 })();

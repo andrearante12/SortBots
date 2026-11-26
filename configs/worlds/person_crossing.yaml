@@ -1,0 +1,42 @@
+# A world layout (simtest/world.py has the full schema and the rationale).
+# Referenced by name from a scenario's `run: world:` or a test's overrides —
+# never by path.
+#
+# Coordinates are the `map` frame, which IS Isaac's world frame: every robot's
+# map -> <rid>/map anchor is its configs/robots.yaml spawn pose, so a point
+# here, on the dashboard's map and in /sim/ground_truth is the same point.
+# Placed against the fleet_warehouse_test grid (origin/sim/infrastructure,
+# 2026-08-27): racks along +y at x ~ -10 and x ~ -6 bound robot_0's aisle for
+# y ~ 9..16, and the aisle opens south onto clear floor (x -15..-5.5, y -2..8.5).
+#
+# Actors are `preset:` obstacles (simtest/world.py PRESETS): a real NVIDIA
+# character/vehicle asset in depth and RGB, with the floor footprint the
+# metrics score against. Without the asset server they degrade to the same
+# footprint as a primitive, so a run still scores.
+
+name: person_crossing
+title: Aisle mouth — a person crossing
+description: >
+  A person walks back and forth across the mouth of robot_0's aisle (y = 6.5,
+  x -11 -> -6), perpendicular to the obvious route from the spawn pose out
+  onto the open floor. The baseline moving-obstacle case: a robot driving
+  south has to see them, slow or stop, and let them pass. With the goal sent
+  at t0 the robot reaches this line ~13-15 sim-s in and the person crosses it
+  at ~15 s, so on a typical run they meet.
+
+scenes: [nvidia]
+
+# Live demos: actors move from the moment the sim plays. Tests ignore this and
+# reset + start the world clock at their own t0 (see /sim/world_cmd).
+autostart: true
+
+actors:
+  - id: person_0
+    label: person
+    preset: person
+    path:
+      waypoints: [[-11.0, 6.5], [-6.0, 6.5]]
+      speed_mps: 1.2      # a purposeful walk; 1.0 is unhurried, 1.4 is a hurry
+      mode: pingpong
+      start_at_s: 0.0
+      dwell_s: 1.0        # pause at each end, like someone glancing down an aisle

@@ -1,6 +1,6 @@
 """Fleet-scale metrics: deliveries, contacts, comms, map divergence, nav.
 
-Written for fleetsim (fleetsim/README.md), which emits these streams on top
+Written for fleetsim (docs/fleetsim.md), which emits these streams on top
 of the ones Isaac runs share (gt, dispatch, task). They are ordinary simtest
 metrics: deterministic functions of the event stream, versioned, and
 re-scorable from a recorded run (`python3 -m fleetsim rescore DIR`).

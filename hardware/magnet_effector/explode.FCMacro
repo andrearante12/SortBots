@@ -24,7 +24,7 @@ EXPLODE = [
     ("springs", "App::Part", 55.0),
     ("plunger", "Part::Feature", 70.0),
     ("m3x", "App::Part", 95.0),
-    ("magnet_Adafruit", "App::Part", 125.0),
+    ("magnet_uxcell", "App::Part", 125.0),
 ]
 FRAMES = 24
 HOME = "SortbotsHome"

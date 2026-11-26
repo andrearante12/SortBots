@@ -99,7 +99,7 @@ def list_runs(root: Path | None = None, limit: int = 50) -> list[dict]:
             "seed": scn.get("seed"),
             "sim_s": summ.get("sim_s") if summ else None,
             "reason": summ.get("reason") if summ else None,
-            # No summary.json: still running, or it died (README "Known issues").
+            # No summary.json: still running, or it died (docs/fleetsim.md "Known issues").
             "finished": summ is not None,
             "verdict": None if sc is None else ("PASS" if sc.get("ok") else "FAIL"),
             "replayable": _has_world(d / "events.jsonl.gz"),

@@ -76,6 +76,13 @@ def _segments_intersect(a, b, c, d) -> bool:
     def orient(p, q, r):
         return (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
     o1, o2, o3, o4 = orient(a, b, c), orient(a, b, d), orient(c, d, a), orient(c, d, b)
+    if o1 == 0 and o2 == 0 and o3 == 0 and o4 == 0:
+        # Collinear: the orientation test says "intersect" for ANY two segments
+        # on one line, including two far apart. Found 2026-11-06 when a
+        # forklift's footprint and a crate 4 m away shared the line y = 5.5
+        # and clearance read 0. Intersect only if their extents overlap.
+        return (min(a[0], b[0]) <= max(c[0], d[0]) and min(c[0], d[0]) <= max(a[0], b[0])
+                and min(a[1], b[1]) <= max(c[1], d[1]) and min(c[1], d[1]) <= max(a[1], b[1]))
     return (o1 * o2 <= 0) and (o3 * o4 <= 0)
 
 

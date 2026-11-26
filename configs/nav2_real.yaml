@@ -1,0 +1,86 @@
+# The real robot's Nav2 overrides, merged over configs/nav2_params.yaml at launch
+# (launch/sortbots_nav2.launch.py overlay_file; sortbots_bringup.launch.py passes it on
+# platform:=real). Only what differs from the sim lives here; the sim file's reasoning
+# (diff-drive on an omni base, the /**/ keys, collision monitor's "approach") still applies.
+#
+# Why each change, 2026-11-19:
+# - Obstacles: the real stack publishes /<id>/obstacles (nodes/obstacle_cloud.py: raw D435
+#   depth in base_link, already cut to 0.05-1.5 m above the floor), not the sim's
+#   depth_static / dynamic / predicted clouds (dynamic_obstacle_filter is off on the Orin).
+# - Floor: obstacles start 0.12 m up, not 0.05 (nodes/obstacle_cloud.py --min-height-m in the
+#   bringup too): far floor read 5-10 cm high and was marked as obstacles.
+# - Speed: slow on purpose for a first autonomous run of a 1.2 m tall base on visual
+#   odometry, under nodes/base_driver.py's own cap (configs/drive_base.yaml, 0.3 m/s).
+# - CPU: MPPI at the sim's 2000 samples x 56 steps x 20 Hz is about a core on the Orin
+#   Nano, next to RTAB-Map and the camera; and the Jetson has browned out under load.
+#   600 x 30 x 10 Hz keeps a 3 s horizon.
+
+/**/controller_server:
+  ros__parameters:
+    controller_frequency: 10.0
+    FollowPath:
+      vx_max: 0.15
+      vx_min: -0.08
+      wz_max: 0.6
+      model_dt: 0.1
+      time_steps: 30
+      batch_size: 600
+
+/**/local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      # The real base, 0.45 x 0.4 m (the sim's is 0.5 x 0.4). Inflation stays the sim's 0.65:
+      # it doesn't close gaps (only the 0.2 m inscribed radius is lethal), and 0.4 is what made
+      # the sim base scrape and dither (nav2_params.yaml has the story).
+      footprint: "[[0.225, 0.2], [0.225, -0.2], [-0.225, -0.2], [-0.225, 0.2]]"
+      obstacle_layer:
+        observation_sources: obstacles
+        obstacles:
+          topic: /robot_0/obstacles
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          max_obstacle_height: 1.5
+          min_obstacle_height: 0.12
+          obstacle_max_range: 3.5
+          raytrace_max_range: 4.0
+
+/**/global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 2.0
+      footprint: "[[0.225, 0.2], [0.225, -0.2], [-0.225, -0.2], [-0.225, 0.2]]"
+      obstacle_layer:
+        observation_sources: obstacles
+        obstacles:
+          topic: /robot_0/obstacles
+          data_type: "PointCloud2"
+          marking: true
+          clearing: true
+          max_obstacle_height: 1.5
+          min_obstacle_height: 0.12
+          obstacle_max_range: 3.5
+          raytrace_max_range: 4.0
+
+/**/behavior_server:
+  ros__parameters:
+    max_rotational_vel: 0.6
+    min_rotational_vel: 0.3
+
+/**/velocity_smoother:
+  ros__parameters:
+    max_velocity: [0.15, 0.0, 0.6]
+    min_velocity: [-0.08, 0.0, -0.6]
+    max_accel: [0.5, 0.0, 1.0]
+    max_decel: [-0.8, 0.0, -1.5]
+
+/**/collision_monitor:
+  ros__parameters:
+    observation_sources: ["obstacles"]
+    obstacles:
+      type: "pointcloud"
+      topic: "/robot_0/obstacles"
+      min_height: 0.12
+      max_height: 1.5
+      enabled: true

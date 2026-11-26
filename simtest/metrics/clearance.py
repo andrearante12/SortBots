@@ -26,13 +26,15 @@ MAX_DT = 0.5  # s — a gap in ground truth longer than this isn't integrated ac
 @register
 class Clearance(Metric):
     name = "clearance"
-    version = 1
+    version = 2   # v2 (2026-11-04): `peers` — robot-to-robot pairs
     streams = {"gt"}
-    summary = "Minimum robot-to-actor gap, contacts and near-miss time (ground truth)."
+    summary = "Minimum robot-to-actor (or prop, or peer robot) gap, contacts and near-miss time."
     params = {
         "robots": (list, None, "robot ids to check (default: all in the run)"),
         "actors": (list, None, "actor ids to check (default: every actor in the world)"),
         "props": (bool, False, "also measure against the world's static props"),
+        "peers": (bool, False, "also measure every checked robot against the other robots "
+                               "in the run (both at their Nav2 footprint)"),
         "near_m": (float, 0.5, "gap below which time counts as a near miss"),
         "contact_m": (float, 0.02, "gap at or below which it counts as contact"),
     }
@@ -55,9 +57,12 @@ class Clearance(Metric):
         self.samples = 0
 
     def check_context(self):
-        if not self.targets:
+        peers = self.p["peers"] and len(self.ctx.robots) >= 2
+        if self.p["peers"] and len(self.ctx.robots) < 2:
+            raise MetricError("clearance: peers: true needs a run with at least two robots")
+        if not self.targets and not peers:
             raise MetricError("clearance: the world has no actors to measure against "
-                              "(set props: true, or use a world with actors)")
+                              "(set props: true or peers: true, or use a world with actors)")
         if self.p["actors"]:
             missing = set(self.p["actors"]) - {a["id"] for a in self.ctx.actors()}
             if missing:
@@ -73,12 +78,24 @@ class Clearance(Metric):
             if rp is None:
                 continue
             fp = geometry.footprint_poly(self.ctx.footprint, rp["x"], rp["y"], rp["yaw"])
-            for kind, item in self.targets:
+            targets = list(self.targets)
+            if self.p["peers"]:
+                # Every other robot in the run, each pair once (sorted ids),
+                # at its own true pose and the same Nav2 footprint.
+                for other in self.ctx.robots:
+                    op = ev["robots"].get(other)
+                    if other <= rid or op is None:
+                        continue
+                    targets.append(("peer", {"id": other, "pose": op}))
+            for kind, item in targets:
                 if kind == "actor":
                     ap = ev["actors"].get(item["id"])
                     if ap is None:
                         continue
                     shape = wl.footprint(item, ap["x"], ap["y"], ap["yaw"])
+                elif kind == "peer":
+                    op = item["pose"]
+                    shape = geometry.footprint_poly(self.ctx.footprint, op["x"], op["y"], op["yaw"])
                 else:
                     shape = self.prop_shapes[item["id"]]
                 gap = geometry.distance(fp, shape)

@@ -6,7 +6,7 @@ world, each robot's belief, its costmap. Row 0 is at the origin's y (the
 OccupancyGrid convention), so `occ[cy, cx]` is the cell whose lower-left
 corner is (ox + cx * res, oy + cy * res).
 
-Cell size is the main fidelity/cost knob (fleetsim/README.md, "Resolution").
+Cell size is the main fidelity/cost knob (docs/fleetsim.md, "Resolution").
 A saved map (maps/<name>/grid.pgm, 0.05 m) is downsampled by max-pooling: a
 coarse cell is occupied if ANY fine cell in it is, the same rule
 nodes/grid_dist.py uses. That keeps thin walls from vanishing, at the price of

@@ -1,0 +1,59 @@
+# A test case: one scored, repeatable question (simtest/spec.py has the full
+# schema; docs/testing.md the how-to).
+#
+# The negative case. A plate below the arm's envelope (a 0.30 m deck, or the floor)
+# has no IK solution; the right behaviour is to say so and leave the box alone, not to
+# wave the arm at it, energize the magnet over nothing or report a pick. A controller
+# that "succeeds" here is lying, and this catches it.
+
+name: pick_unreachable
+title: Package below the arm's reach — refuse cleanly
+section: Pick and place
+parked: true       # off the Tests tab for now; scripts/simtest.py still runs it
+description: >
+  One box on a 0.30 m deck (variant: on the floor). Pass = the task ends FAILED
+  within the pick timeout, the robot never held the box, never picked anything else,
+  and task_manager is left idle (nothing unfinished).
+
+  Runs with ORACLE perception, on purpose. The head camera is 1.24 m up with a 21.6
+  degree vertical half-FOV, so a plate 0.9 m below the lens is out of its view from
+  anywhere nearer than 2.6 m (and the floor from anywhere inside its 4 m range): a
+  camera run of this test would end in "plate not found" after a two-minute search,
+  which is a true but different failure. This test is about the arm's refusal, which
+  the oracle reaches in seconds.
+
+scenario: pick_bench
+overrides: {world: pick_low, perception: oracle}
+
+warmup_s: 2
+
+tasks:
+  - {robot: robot_0, package: pkg_0, place: {shift: [-0.12, 0.0]}}
+
+stop:
+  sim_s: 150
+  until: [tasks_done]
+  settle_s: 3
+
+metrics:
+  - metric: pick_place
+    pass:
+      picked: {eq: 0}
+      placed: {eq: 0}
+      false_picks: {eq: 0}
+      drops: {eq: 0}
+  - metric: tasks
+    pass:
+      failed: {eq: 1}
+      done: {eq: 0}
+      unfinished: {eq: 0}
+  - metric: run_stats
+    pass:
+      stop_reason: {eq: tasks_done}
+
+repeats: 1
+pass_rate: 1.0
+
+variants:
+  - {label: low_deck, set: {overrides.world: pick_low}}
+  - {label: floor, set: {overrides.world: pick_floor}}

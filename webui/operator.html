@@ -57,7 +57,7 @@
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.4 "IBM Plex Sans", system-ui, sans-serif;
-         font-variant-numeric: tabular-nums; display: grid; grid-template-columns: var(--left-w, 260px) 1fr var(--right-w, 296px); grid-template-rows: 50px 1fr; overflow: hidden; }
+         font-variant-numeric: tabular-nums; display: grid; grid-template-columns: min(var(--left-w, 260px), 100vw) minmax(0, 1fr) min(var(--right-w, 296px), max(0px, calc(100vw - var(--left-w, 260px)))); grid-template-rows: 50px 1fr; overflow: hidden; }
   button, select, input { font: inherit; color: inherit; }
   button { cursor: pointer; }
   button:disabled { cursor: not-allowed; opacity: .5; }
@@ -70,6 +70,10 @@
   .btn.primary:hover:not(:disabled) { background: var(--muted); }
   .btn.stop { color: var(--stop); border-color: var(--stopb); }
   .btn.stop:hover:not(:disabled) { background: var(--stoph); }
+  #estop-latch { flex: none; background: #d42020; border-color: #a01010; color: #fff; font-weight: 700; letter-spacing: .06em; padding: 5px 16px; }
+  #estop-latch:hover { background: #b81414; }
+  #estop-latch.latched { background: #fff; color: #c01010; border: 2px solid #d42020; animation: estop-blink 1s steps(2, start) infinite; }
+  @keyframes estop-blink { to { background: #ffd6d6; } }
   .btn.small { padding: 3px 10px; font-size: .8rem; }
   select, input[type="number"] { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; }
   #lf-render_every { width: 4.5em; }
@@ -91,6 +95,21 @@
   #mode-strip { overflow-x: auto; scrollbar-width: none; }
   #mode-strip::-webkit-scrollbar { display: none; }
   @media (max-width: 1480px) { h1 { width: auto; } #coverage { display: none !important; } }
+  /* The four display buttons are the least used things up here, so below 1600 px they fold
+     behind one: the strip scrolled instead, and Comms went off its end (2026-11-06). The
+     tools keep their words, see below. display: contents leaves them plain
+     header buttons where there's room. */
+  #view-box, #view-opts { display: contents; }
+  #view-more { display: none; }
+  #view-opts .btn { flex: none; }
+  @media (max-width: 1600px) {
+    header { gap: 12px; }
+    #view-box { display: block; position: relative; flex: none; }
+    #view-more { display: grid; place-items: center; height: 100%; }
+    #view-opts { display: none; position: absolute; top: calc(100% + 8px); right: 0; z-index: 6; gap: 6px; padding: 6px;
+                 background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 24px var(--shadow); }
+    #view-opts.open { display: flex; }
+  }
   /* Symbol plus word: the shapes alone (arrow, diamond, triangle) didn't say what they do. */
   #tools button { display: inline-flex; align-items: center; gap: 6px; }
   #tools button .ic { font-size: .9em; }
@@ -98,11 +117,48 @@
   header .spacer { flex: 1; }
   .btn.icon { width: 34px; padding: 6px 0; line-height: 1; font-size: 1rem; }
   #session-chip { display: inline-flex; align-items: center; gap: 8px; }
-  #build { flex: 0 1 auto; min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  #build { flex: 0 1000 auto; min-width: 72px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
            font: 500 .76rem ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
            padding: 3px 8px; border: 1px solid var(--line); border-radius: 99px; margin-left: -6px; cursor: default; }
   #build.stale { color: var(--warnink); background: var(--warnbg); border-color: var(--warnline); }
   @media (max-width: 1100px) { #build { max-width: 120px; } }
+  #platform-chip { display: inline-flex; align-items: center; gap: 7px; padding: 4px 10px; margin-left: -6px;
+                   font: 600 .74rem/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .06em; }
+  #platform-chip .dot { width: 8px; height: 8px; border-radius: 50%; }
+  #platform-chip[data-platform="real"] { color: var(--go); border-color: var(--go); }
+  #platform-chip[data-platform="real"] .dot { background: var(--go); }
+  #platform-chip[data-platform="sim"] { color: var(--info); border-color: var(--info); }
+  #platform-chip[data-platform="sim"] .dot { background: var(--info); }
+  #platform-pop { position: fixed; top: 54px; left: 150px; z-index: 6; width: 360px; max-width: calc(100vw - 24px);
+                  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px var(--shadow); padding: 12px; }
+  #platform-pop h3 { margin: 0 0 8px; font-size: .9rem; }
+  #platform-pop ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+  #platform-pop .console { display: grid; grid-template-columns: auto 1fr; column-gap: 10px; align-items: baseline;
+                           padding: 8px 10px; border-radius: 8px; color: var(--ink); text-decoration: none; }
+  #platform-pop a.console:hover { background: var(--hover2); }
+  #platform-pop .console.here { background: var(--sel); }
+  #platform-pop .console b { grid-row: span 2; font: 600 .7rem ui-monospace, monospace; letter-spacing: .06em; }
+  #platform-pop .console[data-platform="real"] b { color: var(--go); }
+  #platform-pop .console[data-platform="sim"] b { color: var(--info); }
+  #platform-pop .console .url { font-size: .76rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #platform-pop .hint { margin: 8px 0 0; font-size: .8rem; color: var(--muted); }
+  #maps-btn { padding: 3px 10px; font-size: .84rem; }
+  #maps-pop { position: fixed; top: 54px; left: 50%; transform: translateX(-50%); z-index: 6; width: 380px; max-width: calc(100vw - 24px);
+              background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 6px 24px var(--shadow); padding: 12px; }
+  #maps-pop h3 { margin: 4px 0 8px; font-size: .9rem; }
+  #maps-pop h3 .muted { font-weight: 400; color: var(--muted); font-size: .8rem; }
+  #maps-pop #maps-mode { display: flex; margin-bottom: 10px; }
+  #maps-pop #maps-mode button { flex: 1; }
+  #maps-pop .row { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+  #maps-pop .row.end { justify-content: flex-end; margin: 10px 0 0; }
+  #maps-pop input { flex: 1; min-width: 0; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--ink); font: inherit; }
+  #maps-pop ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; max-height: 40vh; overflow: auto; }
+  #maps-pop li { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; }
+  #maps-pop li:hover { background: var(--hover2); }
+  #maps-pop li .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #maps-pop li .sub { font-size: .76rem; color: var(--muted); white-space: nowrap; }
+  #maps-pop .hint { margin: 8px 0 0; font-size: .8rem; color: var(--muted); }
+  #maps-pop .hint.bad { color: var(--stop); }
   #alarms { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
   #alarms .dot { background: var(--faint); }
   #alarms.on { color: var(--stop); border-color: var(--stopb); font-weight: 600; }
@@ -121,14 +177,30 @@
   aside { background: var(--surface); display: flex; flex-direction: column; min-height: 0; overflow: auto; }
   #left { border-right: 1px solid var(--line); }
   #right { border-left: 1px solid var(--line); }
+  /* Placed, not auto-flowed: with a side bar hidden the rest must stay in their columns. */
+  #left { grid-column: 1; grid-row: 2; } #stage { grid-column: 2; grid-row: 2; } #right { grid-column: 3; grid-row: 2; }
+  @media (min-width: 761px) and (min-height: 521px) {
+    body.hide-left { --left-w: 0px !important; }
+    body.hide-right { --right-w: 0px !important; }
+    body.hide-left #left, body.hide-left #rz-left, body.hide-right #right, body.hide-right #rz-right { display: none; }
+  }
   /* Drag handles on the inner edge of each side bar (operator.js: drag to resize,
      double-click to reset). Outside the asides, which scroll. */
   .resizer { position: fixed; top: 50px; bottom: 0; width: 9px; z-index: 4; cursor: col-resize; touch-action: none; }
   .resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 4px; width: 1px; background: transparent; transition: background .1s; }
   .resizer:hover::after, .resizer.drag::after { background: var(--info); width: 2px; left: 3.5px; }
-  #rz-left { left: calc(var(--left-w, 260px) - 5px); }
+  #rz-left { left: min(calc(var(--left-w, 260px) - 5px), calc(100vw - 9px)); }
   #rz-right { right: calc(var(--right-w, 296px) - 4px); }
   body.resizing { cursor: col-resize; user-select: none; }
+  /* The left bar has taken the map's whole column: the task list is past the window's
+     edge, and what's left of the stage must not float over the bar. */
+  body.map-gone #stage { visibility: hidden; overflow: hidden; }
+  body.map-gone #rz-right { display: none; }
+  /* The columns always fit the window, because the header spans them and Stop all has to
+     stay on screen; so the task list keeps its width and slides out past its shrinking column. */
+  body.map-gone #right { min-width: var(--right-w, 296px); }
+  /* Off the window entirely: out of the layout too, or tabbing into it scrolls the page. */
+  body.left-full #right { display: none; }
   .head { display: flex; align-items: baseline; gap: 8px; padding: 14px 16px 8px; position: sticky; top: 0; background: var(--surface); z-index: 1; }
   .head h2 { margin: 0; font-size: .95rem; font-weight: 600; }
   .head .muted { font-size: .82rem; margin-left: auto; white-space: nowrap; }
@@ -150,7 +222,25 @@
   .more { margin: 10px 0 2px 18px; display: grid; gap: 10px; }
   .more { cursor: default; }
   .more .cam { width: 100%; aspect-ratio: 16/9; border-radius: 6px; background: #0b0d10; position: relative; overflow: hidden; }
-  .more .cam .pic { position: absolute; inset: 0; background: center / cover no-repeat; }
+  .more .cam .pics { position: absolute; inset: 0; display: grid; grid-auto-rows: minmax(0, 1fr); gap: 2px; }
+  .more .cam .pic { position: relative; min-width: 0; min-height: 0; background: center / cover no-repeat; }
+  .more .cam[data-view="rgb"] .pic:not([data-feed="rgb"]), .more .cam[data-view="depth"] .pic:not([data-feed="depth"]) { display: none; }
+  /* Split: the feeds stacked, each at the camera's own 16:9 so nothing is cropped. */
+  .more .cam[data-view="split"] { aspect-ratio: 16/18; }
+  /* What the plate detector made of the frame (operator.js syncPerception). */
+  .perc { display: grid; gap: 3px; padding: 8px 10px; border-radius: 6px; background: var(--ground); font-size: .8rem; }
+  .perc .ph { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; }
+  .perc .ph i { font-style: normal; font-weight: 500; color: var(--muted); }
+  .perc.locked .ph i { color: #16a34a; }
+  .perc dl { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: 1px 8px; margin: 0; }
+  .perc dt { color: var(--muted); } .perc dd { margin: 0; }
+  /* Head sliders (operator.js camFor): shown once the sim reports the head's angles. */
+  .headctl { display: grid; gap: 4px; font-size: .8rem; color: var(--muted); }
+  .headctl label { display: grid; grid-template-columns: 30px minmax(0, 1fr) 118px; gap: 8px; align-items: center; }
+  .headctl input { width: 100%; margin: 0; accent-color: var(--info); }
+  .headctl output { color: var(--ink); text-align: right; white-space: nowrap; }
+  .more .cam[data-view="split"] .pic::before { content: attr(data-label); position: absolute; right: 6px; bottom: 6px; padding: 1px 6px; border-radius: 4px;
+                                               background: rgba(10,12,16,.6); color: #e6ebf0; font-size: .7rem; }
   .more .cam canvas.obst { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .more .cam .msg { position: absolute; inset: 0; display: grid; place-items: center; color: #8b95a0; font-size: .8rem; pointer-events: none; }
   .more .cam .msg:empty { display: none; }
@@ -165,7 +255,70 @@
   .cam .drive button:hover { background: rgba(10,12,16,.85); }
   .cam .drive button.held { background: rgba(255,255,255,.9); color: #15191e; }
   .cam .drive [data-drive="stop"] { color: #ff8a80; }
+  .cam .drive .lvl { font: 600 .62rem system-ui, sans-serif; }
+  .cam .drive .lvl[hidden] { display: none; }
+  .cam .drive .lvl.sel { background: rgba(255,255,255,.9); color: #15191e; }
   @media (pointer: coarse) { .cam .drive { grid-template-columns: repeat(3, 36px); } .cam .drive button { width: 36px; height: 32px; font-size: .9rem; } }
+  /* The pick's phase and note in Arm mode (operator.js syncPickLine), under the mode switch. */
+  .cam .pickline { position: absolute; top: 36px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 24px);
+                   display: flex; gap: 8px; align-items: baseline; padding: 4px 10px; border-radius: 6px;
+                   background: rgba(10,12,16,.72); color: #e6ebf0; font: .7rem/1.3 system-ui, sans-serif; }
+  .cam .pickline[hidden] { display: none; }
+  .cam .pickline b { font: 700 .66rem ui-monospace, monospace; letter-spacing: .04em; white-space: nowrap; }
+  .cam .pickline span { overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .cam .pickline[data-tone="busy"] b { color: #f2b705; }
+  .cam .pickline[data-tone="ok"] b { color: #34c47c; }
+  .cam .pickline[data-tone="bad"] b { color: #ff7a6e; }
+  .cam .pickline[data-tone="warn"] b { color: #f0c36a; }
+  /* Drive / Head / Arm: which pad is over the picture (operator.js applyPadMode). */
+  .cam .padmode { position: absolute; top: 6px; left: 50%; transform: translateX(-50%); display: flex; padding: 2px; gap: 2px;
+                  border-radius: 7px; background: rgba(10,12,16,.6); border: 1px solid rgba(255,255,255,.18); }
+  .cam .padmode[hidden], .cam .padmode button[hidden], .cam .drive[hidden] { display: none; }
+  .cam .padmode button { height: 22px; padding: 0 10px; border: 0; border-radius: 5px; background: transparent; color: #c8d0d8;
+                         font: 600 .66rem system-ui, sans-serif; cursor: pointer; }
+  .cam .padmode button:hover { background: rgba(255,255,255,.12); }
+  .cam .padmode button.on { background: rgba(255,255,255,.9); color: #15191e; }
+  /* Arm touchpad, bottom-centre (operator.js wireArmPad): handeye.py's page, shrunk onto the
+     tile. A 2D pad for the hand, a tall one for height, then wrist up/down, the speed level,
+     Magnet and Pick. The head has keys (I/K/J/L, operator.js wireHeadKeys), not a pad. */
+  .cam .armpad { position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); display: flex; gap: 6px; align-items: flex-end;
+                 opacity: .8; transition: opacity .15s; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .cam .armpad[hidden] { display: none; }
+  .cam:hover .armpad { opacity: 1; }
+  .cam .armpad .tp { position: relative; border-radius: 9px; background: rgba(29,38,51,.4); border: 1px solid rgba(120,150,190,.45); touch-action: none; cursor: grab; }
+  .cam .armpad .tp.on { background: rgba(29,38,51,.6); cursor: grabbing; }
+  .cam .armpad .tp.hand { width: 140px; height: 140px; }
+  .cam .armpad .tp.z { width: 40px; height: 140px; }
+  .cam .armpad .knob { position: absolute; left: 50%; top: 50%; width: 20px; height: 20px; border-radius: 50%; background: rgba(74,144,226,.85);
+                       transform: translate(-50%, -50%); pointer-events: none; }
+  .cam .armpad .ax { position: absolute; font: normal .58rem system-ui, sans-serif; color: rgba(170,190,210,.75); pointer-events: none; }
+  .cam .armpad .ax.t { top: 3px; left: 50%; transform: translateX(-50%); } .cam .armpad .ax.b { bottom: 3px; left: 50%; transform: translateX(-50%); }
+  .cam .armpad .ax.l { left: 3px; top: 50%; transform: translateY(-50%); } .cam .armpad .ax.r { right: 3px; top: 50%; transform: translateY(-50%); }
+  .cam .armpad .side { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; }
+  .cam .armpad .restrow { display: flex; gap: 3px; align-items: stretch; min-width: 0; }
+  .cam .armpad .restrow [data-arm-act="rest"] { flex: 1 1 auto; min-width: 0; }
+  .cam .armpad .armmore { position: relative; display: flex; flex: 0 0 auto; }
+  .cam .armpad .armmore > summary { list-style: none; height: 22px; width: 22px; display: flex; align-items: center; justify-content: center; cursor: pointer;
+    border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65); color: #e6ebf0; font: 600 .8rem system-ui, sans-serif; }
+  .cam .armpad .armmore > summary::-webkit-details-marker { display: none; }
+  .cam .armpad .armmore[open] > summary { background: rgba(255,255,255,.9); color: #15191e; }
+  .cam .armpad .armmore .menu { position: absolute; right: 0; bottom: calc(100% + 3px); z-index: 2; display: flex; flex-direction: column; gap: 3px;
+    padding: 3px; min-width: 92px; border: 1px solid rgba(255,255,255,.28); border-radius: 6px; background: rgba(10,12,16,.9); }
+  .cam .armpad .armmore .menu button { white-space: nowrap; text-align: left; }
+  .cam .armpad .lv { grid-column: 1 / -1; display: flex; gap: 2px; }
+  .cam .armpad button { height: 22px; padding: 0 7px; border: 1px solid rgba(255,255,255,.28); border-radius: 5px; background: rgba(10,12,16,.65);
+                        color: #e6ebf0; font: 600 .64rem system-ui, sans-serif; line-height: 1; touch-action: none; white-space: nowrap; }
+  .cam .armpad .lv button { flex: 1; padding: 0 4px; }
+  .cam .armpad button:hover { background: rgba(10,12,16,.85); }
+  .cam .armpad button.held, .cam .armpad button.sel { background: rgba(255,255,255,.9); color: #15191e; }
+  .cam .armpad [data-arm-act="magnet"].on { background: rgba(242,183,5,.9); color: #15191e; border-color: rgba(242,183,5,1); }
+  .cam .armpad [data-arm-act="pick"] { color: #8fd3a8; }
+  @media (pointer: coarse) { .cam .armpad .tp.hand { width: 160px; height: 160px; } .cam .armpad .tp.z { width: 46px; height: 160px; } .cam .armpad button, .cam .armpad .armmore > summary { height: 28px; } .cam .armpad .armmore > summary { width: 28px; } }
+  .more .cam canvas.feat { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .featbtn { position: absolute; top: 6px; left: 6px; background: rgba(10,12,16,.6); border: 1px solid transparent; color: #c3cad2; font-size: .72rem; padding: 3px 9px; border-radius: 6px; }
+  .featbtn.on { background: rgba(61,220,132,.9); color: #15191e; font-weight: 600; }
+  .featstat { position: absolute; top: 32px; left: 6px; font-size: .68rem; color: #e6eaee; background: rgba(10,12,16,.6); padding: 1px 6px; border-radius: 4px; pointer-events: none; }
+  .featstat:empty { display: none; }
   .camsel { position: absolute; top: 6px; right: 6px; display: flex; background: rgba(10,12,16,.6); border-radius: 6px; padding: 2px; }
   .camsel button { background: none; border: none; color: #c3cad2; font-size: .72rem; padding: 2px 8px; border-radius: 4px; }
   .camsel button.on { background: rgba(255,255,255,.9); color: #15191e; font-weight: 600; }
@@ -202,9 +355,51 @@
   #simview .sv-bar select { padding: 3px 6px; }
   #simview .sv-help { position: absolute; right: 12px; bottom: 10px; font-size: .76rem; color: #8b95a0; background: rgba(10,12,16,.6); padding: 3px 8px; border-radius: 5px; pointer-events: none; }
   @media (pointer: coarse) { #simview .sv-help { display: none; } }
+  /* The Drive view: the real robot's D435 + driving the omni base with a gamepad
+     (operator_drive.js). Dark letterbox like the Sim view: it is a camera picture. */
+  #driveview { position: absolute; inset: 0; background: #0a0c10; }
+  #driveview .pic { position: absolute; inset: 0; background: center / contain no-repeat; }
+  #driveview .msg { position: absolute; inset: 0; display: grid; place-items: center; padding: 0 24px; text-align: center; color: #8b95a0; font-size: .9rem; pointer-events: none; }
+  #driveview .msg:empty { display: none; }
+  #driveview .dv-bar { top: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; padding: 6px 10px; font-size: .84rem; }
+  #driveview .dv-bar .sp { flex: 1; }
+  #driveview .dv-st { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+  #driveview .dv-st .dot { background: var(--faint); }
+  #driveview .dv-st.ok .dot { background: var(--go); }
+  #driveview .dv-st.bad .dot { background: var(--stop); }
+  #driveview .dv-st.warn .dot { background: var(--tape); }
+  #driveview .dv-err { bottom: 56px; left: 12px; right: calc(46% + 24px); padding: 8px 12px; font-size: .84rem; color: var(--warnink); background: var(--warnbg); border-color: var(--warnline); }
+  #driveview .dv-err p { margin: 0; } #driveview .dv-err p + p { margin-top: 4px; }
+  #driveview .dv-live { bottom: 12px; left: 12px; display: flex; gap: 14px; align-items: center; padding: 6px 10px; font-size: .84rem; }
+  #driveview .dv-live b { font-weight: 600; }
+  #driveview .dv-live.on { border-color: var(--go); box-shadow: 0 0 0 2px var(--go); }
+  #driveview .dv-boot { display: block; margin-top: 6px; font-size: .78rem; color: #6c7681; }
+  #driveview .dv-pickst { bottom: 56px; right: 12px; max-width: 46%; display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; font-size: .84rem; }
+  #driveview .dv-pickst b { font-weight: 600; }
+  #driveview .dv-pickst.moving { border-color: var(--tape); box-shadow: 0 0 0 2px var(--tape); }
+  #driveview .dv-pickst.aborted b { color: var(--stop); }
+  #driveview .dv-help { position: absolute; right: 12px; top: 60px; max-width: min(520px, 60%); font-size: .76rem; color: #c1c8cf; background: rgba(10,12,16,.7); padding: 6px 10px; border-radius: 6px; pointer-events: none; }
+  #driveview .dv-help kbd { font: inherit; font-weight: 600; color: #fff; }
+  @media (max-width: 760px) { #driveview .dv-help { display: none; } }
+  /* The map's overlays say nothing about the camera picture. */
+  #stage.driving #empty, #stage.driving #link-down { display: none !important; }
+  /* A splat is of a SAVED map, built after the run: it needs no robot online, and the
+     "waiting for the robots" card would wash over the whole scene (seen 2026-11-17). */
+  #stage.splatting #empty, #stage.splatting #link-down { display: none !important; }
   #simview .note { position: absolute; left: 12px; bottom: 10px; font-size: .76rem; color: #8b95a0; background: rgba(10,12,16,.6); padding: 3px 8px; border-radius: 5px; }
   /* Sits on the always-dark 3D scene, so fixed colours rather than theme tokens. */
-  #cloud .cloud-info { position: absolute; bottom: 14px; left: 14px; color: #8b95a0; font-size: .8rem; pointer-events: none; }
+  #cloud .cloud-info { position: absolute; bottom: 14px; left: 14px; color: #8b95a0; font-size: .8rem; pointer-events: none; z-index: 1; }
+  /* Point cloud vs Gaussian splat (operator_splat.js). The bar is a work surface, so it
+     takes the theme; the message sits on the always-dark scene, so it doesn't. */
+  #cloud .cl-bar { top: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 5px 8px; font-size: .84rem; z-index: 2; }
+  #cloud .cl-bar .seg button { padding: 3px 12px; }
+  #cloud .cl-bar select { padding: 3px 6px; max-width: 220px; }
+  #splat-ctl { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  #splat-ctl .sep { width: 1px; align-self: stretch; background: var(--line); margin: 0 4px; }
+  #splat-status:empty, #splat-msg:empty { display: none; }
+  #splat-status { font-size: .8rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+  #splat-msg { position: absolute; inset: 0; display: grid; place-items: center; padding: 0 32px; text-align: center; color: #8b95a0; font-size: .9rem; pointer-events: none; z-index: 1; }
+  #cloud canvas.splat-canvas { position: absolute; inset: 0; pointer-events: none; }
   #comms { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   /* An on/off switch, not a button: it layers the model over the map, it doesn't
      change view, so it must not read as a third tab next to Map / 3D cloud. */
@@ -271,9 +466,39 @@
   #coverage b { font-weight: 600; color: var(--ink); }
   #coverage[hidden] { display: none; }
   #empty { position: absolute; inset: 0; background: var(--scrim); display: flex; flex-direction: column; gap: 8px; align-items: center; justify-content: center; z-index: 3; text-align: center; padding: 24px; }
-  #empty b { font-size: 1.15rem; font-weight: 600; } #empty .btn { margin-top: 8px; }
+  #empty b { font-size: 1.15rem; font-weight: 600; }
+  /* "No robots found": a radar sweep while the page waits for any robot to report
+     (operator.js renderEmpty). Rings expand from the dot, staggered. */
+  #empty .radar { position: relative; width: 84px; height: 84px; margin-bottom: 6px; }
+  #empty .radar[hidden] { display: none; }
+  #empty .radar i { position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--info); opacity: 0;
+                    animation: radar-ping 2.4s cubic-bezier(.2,.6,.3,1) infinite; }
+  #empty .radar i:nth-child(2) { animation-delay: .8s; }
+  #empty .radar i:nth-child(3) { animation-delay: 1.6s; }
+  #empty .radar b { position: absolute; left: 50%; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%;
+                    background: var(--info); box-shadow: 0 0 0 4px color-mix(in srgb, var(--info) 25%, transparent); }
+  @keyframes radar-ping { 0% { transform: scale(.15); opacity: .9; } 100% { transform: scale(1); opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    #empty .radar i { animation: none; opacity: .35; } #empty .radar i:nth-child(1) { transform: scale(.4); }
+    #empty .radar i:nth-child(2) { transform: scale(.7); } #empty .radar i:nth-child(3) { transform: scale(1); }
+  }
+  .empty-acts { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
   #toast { position: absolute; top: 16px; left: 50%; z-index: 3; transform: translateX(-50%); background: var(--ink); color: var(--on-ink); padding: 6px 14px; border-radius: 6px; font-size: .84rem; opacity: 0; transition: opacity .2s; pointer-events: none; }
   #toast.on { opacity: 1; }
+  #outage { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: var(--veil); }
+  #outage[hidden] { display: none; }
+  #outage .card { width: 440px; max-width: calc(100vw - 24px); background: var(--surface); color: var(--ink); border: 1px solid var(--border);
+                  border-radius: 12px; box-shadow: 0 12px 40px var(--shadow); padding: 18px 20px; display: grid; gap: 12px; }
+  #outage .hd { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  #outage .hd b { font-size: 1rem; }
+  #outage time { font: 500 .8rem ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
+  #outage ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+  #outage li { display: grid; grid-template-columns: 18px 1fr auto; gap: 8px; align-items: baseline; font-size: .88rem; color: var(--muted); }
+  #outage li i { font-style: normal; text-align: center; }
+  #outage li.ok { color: var(--ink); } #outage li.ok i { color: var(--go); }
+  #outage li.pend { color: var(--ink); } #outage li.pend i { color: var(--info); }
+  #outage .hint { margin: 0; font-size: .8rem; color: var(--warnink); background: var(--warnbg); border: 1px solid var(--warnline); border-radius: 6px; padding: 6px 9px; }
+  #outage .acts { display: flex; gap: 8px; justify-content: flex-end; }
   #link-down { position: absolute; top: 14px; right: 14px; background: var(--warnbg); border: 1px solid var(--warnline); color: var(--warnink); border-radius: 6px; padding: 5px 12px; font-size: .84rem; }
 
   /* Scrolls on its own: as a plain flex child it shrank but still painted its overflow
@@ -327,6 +552,17 @@
   .veil[hidden] { display: none; }
   #stop-dlg .card { background: var(--surface); border-radius: 12px; box-shadow: 0 12px 40px var(--shadow); width: 440px; max-width: calc(100vw - 24px); padding: 20px 22px; display: grid; gap: 12px; }
   #stop-dlg h3 { margin: 0; font-size: 1.05rem; font-weight: 600; }
+  #keys-btn { font-weight: 700; }
+  #keys-dlg .card { background: var(--surface); color: var(--ink); border-radius: 12px; box-shadow: 0 12px 40px var(--shadow); width: 420px;
+                    max-width: calc(100vw - 32px); max-height: calc(100vh - 160px); overflow: auto; padding: 18px 22px; }
+  #keys-dlg h3 { display: flex; align-items: center; margin: 0 0 4px; font-size: 1.05rem; font-weight: 600; }
+  #keys-dlg h3 .x { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 1.4rem; line-height: 1; cursor: pointer; }
+  #keys-dlg h4 { margin: 14px 0 6px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+  #keys-dlg table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+  #keys-dlg td { padding: 4px 0; border-top: 1px solid var(--border); vertical-align: middle; }
+  #keys-dlg td:first-child { width: 42%; white-space: nowrap; }
+  #keys-dlg kbd { display: inline-block; min-width: 1.6em; padding: 1px 6px; margin-right: 3px; border: 1px solid var(--border); border-bottom-width: 2px;
+                  border-radius: 5px; background: var(--raise); font: 600 .78rem system-ui, sans-serif; text-align: center; }
   #stop-dlg p { margin: 0; color: var(--muted); font-size: .9rem; line-height: 1.45; }
   #sd-name-row { display: grid; gap: 4px; font-size: .84rem; color: var(--muted); }
   #sd-name-row[hidden], #sd-err[hidden] { display: none; }
@@ -395,29 +631,40 @@
   @keyframes tp-pulse { 50% { opacity: .3; } }
   #tp-log, #fr-log { flex-basis: 100%; margin: 4px 0 0; max-height: 220px; overflow: auto; font: .72rem/1.45 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; }
   .tp-h { margin: 0 0 4px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
-  /* Test cases: a list, not cards. A row is title, one line of what it runs, Run;
-     click it for what it checks and how often. */
+  /* Test cases: a list, not cards. A row is its name, Run and a chevron; open it for what
+     the test is, what it takes to pass, and a clip of a pass. */
+  .tp-sec { margin-top: 18px; }
+  .tp-sec:first-child { margin-top: 0; }
+  .tp-sec-h { margin: 0; padding: 6px 4px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
   .tp-test { border-top: 1px solid var(--line); }
   .tp-test:last-child { border-bottom: 1px solid var(--line); }
-  .tp-row { display: grid; grid-template-columns: 14px 1fr auto; gap: 2px 10px; align-items: center; padding: 10px 4px; cursor: pointer; }
+  .tp-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 8px 4px; cursor: pointer; }
   .tp-row:hover { background: var(--hover); }
-  .tp-row .chev { color: var(--faint); font-size: .7rem; transition: transform .15s; }
-  .tp-test.open .chev { transform: rotate(90deg); }
   .tp-row .t { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .tp-row .btn { grid-column: 3; }
   .tp-row .num { display: inline-block; min-width: 1.6em; color: var(--faint); font-variant-numeric: tabular-nums; }
+  .tp-disc { grid-column: 3; display: grid; place-items: center; width: 32px; height: 32px; padding: 0; background: none; border: none; border-radius: 6px; color: var(--muted); }
+  .tp-disc svg { transition: transform .15s; }
+  .tp-row:hover .tp-disc { color: var(--ink); }
+  .tp-disc[aria-expanded="true"] svg { transform: rotate(180deg); }
+  @media (prefers-reduced-motion: reduce) { .tp-disc svg { transition: none; } }
   .tp-test.invalid .t { color: var(--muted); }
   .tp-more .err { color: var(--warnink); }
-  .tp-more { display: none; padding: 0 4px 14px 28px; font-size: .84rem; gap: 10px; }
+  /* Text and clip side by side where both fit, stacked where they don't: auto-fit, because
+     this panel's width isn't the window's. */
+  .tp-more { display: none; padding: 4px 4px 18px; font-size: .88rem; gap: 14px 24px; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); }
   .tp-test.open .tp-more { display: grid; }
-  .tp-more p { margin: 0; color: var(--muted); line-height: 1.45; }
-  .tp-more dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; }
-  .tp-more dt { color: var(--muted); } .tp-more dd { margin: 0; }
-  .tp-more ul { margin: 0; padding-left: 16px; } .tp-more li { margin: 1px 0; }
-  .tp-more .opts { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  .tp-text { display: grid; gap: 10px; align-content: start; }
+  .tp-more p { margin: 0; line-height: 1.45; }
+  .tp-text h5 { margin: 0 0 -6px; font-size: inherit; font-weight: 600; }
+  .tp-more ul { margin: 0; padding-left: 18px; color: var(--muted); line-height: 1.45; }
+  .tp-more li { margin: 2px 0; }
+  .tp-more .opts { display: flex; gap: 6px 16px; align-items: center; flex-wrap: wrap; margin-top: 2px; }
   .tp-more .opts label { display: flex; gap: 6px; align-items: center; color: var(--muted); }
   .tp-more .opts input { width: 4em; }
-  .tp-more code { font-size: .76rem; color: var(--faint); }
+  .tp-more .runs { color: var(--faint); font-size: .8rem; }
+  .tp-clip { margin: 0; }
+  .tp-clip img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; background: var(--segbg); }
+  .tp-clip figcaption { margin-top: 5px; font-size: .76rem; color: var(--faint); }
   /* Run a fleet sim form (operator_fleetsim.js) */
   #fr-form { display: grid; gap: 10px; }
   .fr-fields { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: flex-end; }
@@ -483,6 +730,7 @@
     #mode-strip::-webkit-scrollbar { display: none; }
     #session-chip #s-label { max-width: 34vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #session-chip, #estop, #alarms, #theme { flex: none; }
+    #hide-left, #hide-right { display: none; }  /* phones show one pane at a time already */
     #left, #stage, #right { grid-row: 2; grid-column: 1; border: none; }
     body:not([data-pane="robots"]) #left, body:not([data-pane="tasks"]) #right { display: none; }
     body[data-pane="robots"] #stage, body[data-pane="tasks"] #stage { visibility: hidden; }
@@ -549,14 +797,23 @@
        checked out on the host, so say so. Amber when the server code is older than the
        checkout and a console restart is needed. -->
   <span id="build" hidden></span>
+  <!-- SIM or REAL: what this console's drive pad and Stop all act on (serve.py /api/consoles).
+       Its menu jumps to the other consoles, one per backend machine. -->
+  <button class="btn" id="platform-chip" hidden aria-haspopup="true" aria-expanded="false"><span class="dot"></span><span id="platform-label"></span></button>
+  <div id="platform-pop" hidden role="dialog" aria-label="Consoles">
+    <h3>Consoles</h3>
+    <ul id="platform-list"></ul>
+    <p id="platform-none" class="hint">No other console is configured. Add one to <code>configs/consoles.yaml</code>.</p>
+  </div>
   <!-- Map / 3D cloud / Sim picks what the stage shows. How the session was started
        (mapping vs. a premapped, read-only map) is the session chip's tooltip: it was a
        header tile until 2026-10-24, squeezed to an unreadable "MODE" at laptop widths. -->
   <div id="mode-strip">
     <div class="seg" id="view" role="group" aria-label="Map view">
       <button data-v="2d" class="active" title="Occupancy map: tools, waypoints and routes">Map</button>
-      <button data-v="3d" title="The fleet's 3D point cloud (/fleet/recon_cloud). Drag to orbit, scroll to zoom, right-drag to pan">3D cloud</button>
+      <button data-v="3d" title="The fleet's 3D point cloud (/fleet/recon_cloud), or a Gaussian splat of a saved map. Drag to orbit, scroll to zoom, right-drag to pan">3D cloud</button>
       <button data-v="sim" hidden title="What Isaac Sim actually renders: one camera on the whole floor (configs/sim_view.yaml). Rendered only while this view is open, so it costs nothing otherwise">Sim</button>
+      <button data-v="drive" hidden title="The real robot: its head camera, driving its base and pick and place from a gamepad (serve.py --drive, on the machine the robot is plugged into)">Robot</button>
     </div>
     <!-- Map tools live up here, not over the map: the map gets the whole stage. -->
     <div class="seg" id="tools" role="toolbar" aria-label="Map tools">
@@ -570,18 +827,51 @@
          only ever draws on the map; the robot cards and alarms stay the real fleet's. -->
     <button id="comms-toggle" type="button" role="switch" aria-checked="false" title="Overlay the comms model on the map: predicted radio links, mesh routes and every message hop, for where the robots are now"><span class="sw"></span>Comms</button>
     <span id="coverage" hidden title="Area of the map the fleet has seen"><b id="cov-n"></b> mapped</span>
+    <!-- The live map: save it to the library, load one, or start over, all while the stack
+         runs (serve.py /api/map/{save,load,clear}: RTAB-Map's own backup, load_database and
+         reset services). Before 2026-11-19 the only way in was Stop all's save dialog. -->
+    <button class="btn" id="maps-btn" hidden aria-haspopup="true" aria-expanded="false" title="Save, load or clear the live map without restarting">Maps</button>
+  </div>
+  <div id="maps-pop" hidden role="dialog" aria-label="Maps">
+    <h3>Live map <span id="maps-current" class="muted"></span></h3>
+    <div class="seg" id="maps-mode" role="group" aria-label="What RTAB-Map does with the map">
+      <button type="button" data-mode="mapping" title="Mapping: the map grows as the robot drives. After a Load, it keeps adding to the loaded map (only the live copy; the library entry changes when you Save)">Extend</button>
+      <button type="button" data-mode="localize" title="Localization only: the robot finds itself in the map and never changes it. After a Load, the saved map is used exactly as it is">Localize only</button>
+    </div>
+    <form id="maps-save" class="row">
+      <input id="maps-name" type="text" spellcheck="false" autocomplete="off" pattern="[a-z0-9][a-z0-9_-]{0,63}" title="lowercase letters, digits, - and _" aria-label="Map name">
+      <button class="btn small" type="submit">Save</button>
+    </form>
+    <h3>Library</h3>
+    <ul id="maps-list"></ul>
+    <p id="maps-empty" class="hint" hidden>No saved maps yet.</p>
+    <div class="row end"><button class="btn small stop" id="maps-clear" type="button" title="Wipe the live map and restart odometry at the origin. What isn't saved is lost">Clear map</button></div>
+    <p id="maps-msg" class="hint" hidden></p>
   </div>
   <span class="spacer"></span>
 <div id="test-chip" hidden title="A scored test is driving the sim"><span class="tp-dot"></span><span class="k">Test</span>
     <button type="button" class="name" id="tc-name" title="Open the Tests tab"></button><span id="tc-time" class="muted"></span>
     <button type="button" class="btn small stop" id="tc-cancel">Stop test</button></div>
-  <button class="btn icon" id="fullscreen" hidden aria-label="Full screen" title="Full screen">&#x26F6;</button>
-  <button class="btn icon" id="theme" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
-  <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">No session</span></button>
+  <button class="btn icon" id="keys-btn" type="button" aria-label="Keyboard shortcuts" aria-haspopup="dialog" title="Keyboard shortcuts (?)">?</button>
+  <div id="view-box">
+    <button class="btn icon" id="view-more" aria-label="View options" aria-haspopup="true" aria-expanded="false" title="View options"><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><g fill="currentColor"><circle cx="3" cy="8" r="1.4"/><circle cx="8" cy="8" r="1.4"/><circle cx="13" cy="8" r="1.4"/></g></svg></button>
+    <div id="view-opts">
+      <button class="btn icon" id="hide-left" aria-label="Hide the robot list" title="Hide the robot list">&#x25E7;</button>
+      <button class="btn icon" id="hide-right" aria-label="Hide the task list" title="Hide the task list">&#x25E8;</button>
+      <button class="btn icon" id="fullscreen" hidden aria-label="Full screen" title="Full screen">&#x26F6;</button>
+      <button class="btn icon" id="theme" aria-label="Switch to dark mode" title="Switch to dark mode"></button>
+    </div>
+  </div>
+  <button class="btn" id="session-chip" title="Start, stop or save the session"><span class="dot idle" id="s-dot"></span><span id="s-label">Sim not running</span></button>
   <!-- The fleet gateway's latched alarms (/fleet/task_board): red while a condition
        holds, quiet once it has cleared but nobody has acknowledged it. Hidden at none. -->
   <button class="btn" id="alarms" hidden aria-haspopup="true" title="Fleet alarms"><span class="dot"></span><span id="alarms-label"></span></button>
   <div id="alarm-pop" hidden role="dialog" aria-label="Fleet alarms"><h3>Fleet alarms</h3><ul id="alarm-list"></ul></div>
+  <!-- The real robot's E-STOP: /<id>/estop latched in nodes/base_driver.py (wheels braked, every
+       cmd_vel ignored), the explorer stopped, Nav2 goals cancelled, a pick aborted. The latch
+       lives on the robot, so it survives this page closing; release is a second, deliberate
+       click. Real platform only: the sim has Stop all. -->
+  <button class="btn" id="estop-latch" hidden title="Emergency stop: brake every robot's wheels NOW and refuse all driving (pad, Nav2, explore) until released">E-STOP</button>
   <button class="btn stop" id="estop" title="Halt every robot now, then shut the sim down (you choose whether to keep the map)">Stop all</button>
 </header>
 
@@ -590,7 +880,7 @@
   <div id="fleet"></div>
 </aside>
 
-<div class="resizer" id="rz-left" role="separator" aria-orientation="vertical" aria-label="Resize the robot list" title="Drag to resize · double-click to reset"></div>
+<div class="resizer" id="rz-left" role="separator" aria-orientation="vertical" aria-label="Resize the robot list" title="Drag to resize, all the way to the window's edge to fill it · double-click to reset"></div>
 <div class="resizer" id="rz-right" role="separator" aria-orientation="vertical" aria-label="Resize the task list" title="Drag to resize · double-click to reset"></div>
 
 <!-- Phones: one pane at a time, switched here (operator.js setPane). Hidden on wide screens. -->
@@ -603,7 +893,25 @@
 <main id="stage">
   <canvas id="map"></canvas>
   <canvas id="comms" hidden></canvas>
-  <div id="cloud" hidden></div>
+  <!-- The 3D view (operator_cloud.js): the live fused point cloud, or a Gaussian splat of
+       a SAVED map, trained after the run by the splat worker on the workstation's GPU
+       (operator_splat.js, splat/worker.py, scripts/splat.sh). -->
+  <div id="cloud" hidden>
+    <div class="cl-bar float" role="toolbar" aria-label="3D view">
+      <div class="seg" id="cl-mode" role="group" aria-label="3D view mode">
+        <button type="button" data-m="cloud" class="active" title="The fleet's live point cloud (/fleet/recon_cloud)">Point cloud</button>
+        <button type="button" data-m="splat" title="A photoreal Gaussian splat of a saved map, trained on the workstation's GPU after the run">Splat</button>
+      </div>
+      <span id="splat-ctl" hidden>
+        <select id="splat-pick" aria-label="Splat to show" title="Finished splats on the splat worker, newest first"></select>
+        <span class="sep" aria-hidden="true"></span>
+        <select id="splat-map" aria-label="Saved map to build from" title="Saved map (maps/ on this console's machine) to build a splat from"></select>
+        <button type="button" class="btn small" id="splat-build" title="Train a splat from this saved map on the workstation's GPU (a few minutes)">Build</button>
+      </span>
+      <span id="splat-status"></span>
+    </div>
+    <div id="splat-msg"></div>
+  </div>
   <!-- The Sim view: Isaac's own render of the floor, /sim/view/rgb via /snapshot polls.
        Isaac renders that camera only while this view sends its heartbeat (operator.js). -->
   <div id="simview" hidden><div class="pic"></div><span class="msg">Starting the sim camera&hellip;</span>
@@ -613,6 +921,25 @@
       <button type="button" class="btn small" id="sv-reset" title="Back to the default view (configs/sim_view.yaml)">Reset view</button>
     </div>
     <span class="sv-help" id="sv-help">Drag to orbit · right-drag or Shift to pan · scroll to zoom</span></div>
+  <!-- The Drive view: the real robot's D435 colour stream and gamepad driving of its omni
+       base, through serve.py --drive -> scripts/drive_bridge.py (operator_drive.js). -->
+  <div id="driveview" hidden><div class="pic"></div><span class="msg" id="dv-msg"></span>
+    <div class="float dv-bar" role="toolbar" aria-label="Drive">
+      <span class="dv-st" id="dv-cam" title="The D435's colour stream"><i class="dot"></i><span>Camera</span></span>
+      <span class="dv-st" id="dv-arm" title="The arm and its pick program (scripts/handeye.py), on the arm's own board"><i class="dot"></i><span>Arm</span></span>
+      <span class="dv-st" id="dv-base" title="The three wheel servos (configs/drive_base.yaml)"><i class="dot"></i><span>Wheels</span></span>
+      <span class="dv-st" id="dv-pad" title="A gamepad seen by this browser. Press any button on it if it is plugged in but not listed"><i class="dot"></i><span>No gamepad</span></span>
+      <span class="sp"></span>
+      <button type="button" class="btn small primary" id="dv-pick" hidden title="handeye pick's one button: find the package, pick it, carry it to the taught place spot, release, back to rest. Pad: A">Pick &amp; place</button>
+      <button type="button" class="btn small stop" id="dv-abort" hidden title="Stop the arm where it is (it holds). Pad: B">Abort</button>
+      <button type="button" class="btn small primary" id="dv-connect" title="Start the robot: with the arm plugged in, the arm's pick program too (camera, arm, magnet, base; pick and place on pad A; the arm moves to its rest pose as it starts). Without it, the camera and the wheels only">Start</button>
+      <button type="button" class="btn small stop" id="dv-disconnect" hidden title="Stop the robot: wheels stopped and freed, camera and boards released. With the arm running: magnet off and arm torque OFF (support the arm)">Stop</button>
+    </div>
+    <div class="float dv-err" id="dv-err" hidden></div>
+    <div class="float dv-live" id="dv-live" aria-live="polite"><span id="dv-level">Speed 1</span><span id="dv-cmd" class="muted">Hold RT to drive</span></div>
+    <div class="float dv-pickst" id="dv-pickst" hidden aria-live="polite"><b id="dv-pflag"></b> <span id="dv-ptitle"></span><span id="dv-pmsg" class="muted"></span></div>
+    <div class="dv-help" id="dv-help"><kbd>RT</kbd> hold to drive &middot; <kbd>left stick</kbd> move &amp; strafe &middot; <kbd>right stick</kbd> turn &middot; <kbd>d-pad &uarr;&darr;</kbd> speed<br><kbd>A</kbd> pick &amp; place &middot; <kbd>B</kbd> abort<br>No pad: hold <kbd>W A S D</kbd> to move, <kbd>Q E</kbd> to turn</div>
+  </div>
   <div class="float" id="comms-bar" hidden role="toolbar" aria-label="Comms model">
     <span id="cm-state" class="muted"></span>
     <span id="cm-hint" class="muted"></span>
@@ -667,7 +994,7 @@
     </div>
   </section>
   <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
-  <div id="empty" hidden><b id="empty-title">No session running</b><span class="muted" id="empty-sub">Start a session to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><button class="btn primary" id="empty-go">Start a session</button></div>
+  <div id="empty" hidden><div class="radar" id="empty-radar" hidden aria-hidden="true"><i></i><i></i><i></i><b></b></div><b id="empty-title">Simulation not running</b><span class="muted" id="empty-sub">Start the simulation to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><div class="empty-acts"><button class="btn primary" id="empty-go">Start simulation</button><button class="btn" id="empty-test">Run a test</button><button class="btn" id="empty-robot" hidden title="The robot plugged into this machine: camera, driving, pick and place">Open the Robot view</button></div></div>
   <div id="toast" role="status"></div>
 </main>
 
@@ -713,6 +1040,13 @@
       <button type="submit" class="btn primary" id="sd-save">Save &amp; stop</button>
     </div>
   </form>
+</div>
+<!-- Keyboard shortcuts (2026-11-20): the ? button or the ? key; Esc or a click outside closes. -->
+<div id="keys-dlg" class="veil" hidden>
+  <div class="card" role="dialog" aria-labelledby="kd-title">
+    <h3 id="kd-title">Keyboard shortcuts <button class="x" id="kd-x" type="button" title="Close (Esc)" aria-label="Close">&times;</button></h3>
+    <h4>Robot (click its card first)</h4><table><tr><td><kbd>W</kbd> <kbd>S</kbd> <kbd>A</kbd> <kbd>D</kbd></td><td>drive forward, back, left, right</td></tr><tr><td><kbd>Q</kbd> <kbd>E</kbd></td><td>turn left, right</td></tr><tr><td><kbd>M</kbd></td><td>switch Nav / Manip</td></tr><tr><td><kbd>1</kbd>&ndash;<kbd>4</kbd></td><td>speed of the pad showing</td></tr><tr><td><kbd>Space</kbd></td><td>stop the base, arm and head</td></tr></table><h4>Manip</h4><table><tr><td><kbd>&uarr;</kbd> <kbd>&darr;</kbd></td><td>arm away, toward</td></tr><tr><td><kbd>&larr;</kbd> <kbd>&rarr;</kbd></td><td>arm left, right</td></tr><tr><td><kbd>PgUp</kbd> <kbd>PgDn</kbd></td><td>arm up, down</td></tr><tr><td><kbd>Z</kbd> <kbd>X</kbd></td><td>wrist up, down</td></tr><tr><td><kbd>I</kbd> <kbd>K</kbd> <kbd>J</kbd> <kbd>L</kbd></td><td>head up, down, left, right</td></tr><tr><td><kbd>H</kbd></td><td>centre the head</td></tr></table><h4>Map</h4><table><tr><td><kbd>V</kbd></td><td>drive tool</td></tr><tr><td><kbd>F</kbd></td><td>add waypoint</td></tr><tr><td><kbd>R</kbd></td><td>place the gateway</td></tr><tr><td><kbd>T</kbd></td><td>teleport (sim)</td></tr><tr><td><kbd>Esc</kbd></td><td>close, or deselect the robot</td></tr><tr><td><kbd>?</kbd></td><td>this list</td></tr></table>
+  </div>
 </div>
 <div id="session" hidden>
   <div class="card" role="dialog" aria-label="Session">
@@ -805,7 +1139,6 @@
         <pre id="tp-log" hidden></pre>
       </div>
       <section>
-        <h4 class="tp-h">Test cases <span class="muted" id="tp-count"></span></h4>
         <div id="tp-list"></div>
       </section>
       <!-- Run a fleet sim form, see operator_fleetsim.js -->
@@ -857,10 +1190,22 @@
   </div>
 </div>
 
+<!-- The robot's computer rebooting or off Wi-Fi: what has come back so far (operator.js outage). -->
+<div id="outage" hidden role="dialog" aria-live="polite" aria-label="Robot connection">
+  <div class="card">
+    <div class="hd"><b id="outage-title"></b><time id="outage-time"></time></div>
+    <ul id="outage-steps"></ul>
+    <p id="outage-hint" class="hint" hidden>Over 3 minutes: check the robot has power, and that nothing is plugged into its USB-C port (that hangs it at boot).</p>
+    <div class="acts"><button class="btn primary" id="outage-start" hidden>Start the robot stack&hellip;</button><button class="btn" id="outage-close">Hide</button></div>
+  </div>
+</div>
+
 <script src="vendor/roslib.min.js"></script>
 <!-- three.js + OrbitControls (vendored) for the 3D cloud view. -->
 <script src="vendor/three.min.js"></script>
 <script src="vendor/OrbitControls.js"></script>
+<!-- Splat renderer + controls for the 3D view; before operator_cloud.js, which uses it. -->
+<script src="operator_splat.js"></script>
 <script src="operator_cloud.js"></script>
 <script src="operator_comms.js"></script>
 <script src="operator.js"></script>
@@ -868,5 +1213,6 @@
 <script src="operator_tests.js"></script>
 <script src="operator_replay.js"></script>
 <script src="operator_fleetsim.js"></script>
+<script src="operator_drive.js"></script>
 </body>
 </html>

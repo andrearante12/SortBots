@@ -5,6 +5,7 @@
     scripts/simtest.py validate [NAME ...]        # exit 2 if any is invalid
     scripts/simtest.py show NAME                  # the resolved plan, per variant
     scripts/simtest.py metrics                    # the metric catalog (simtest/metrics)
+    scripts/simtest.py assets                     # every usd asset the worlds name is on the asset root
     scripts/simtest.py run NAME [--set k=v ...] [--repeats N] [--variant LABEL]
                                 [--dry-run] [--force] [--keep]
     scripts/simtest.py rescore DIR [--current-spec]   # re-score recorded events
@@ -56,10 +57,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # file. (Run it as a script; don't import it.)
 sys.path.insert(0, str(REPO_ROOT))
 
+from simtest import clip as clip_lib  # noqa: E402
 from simtest import events as ev_lib  # noqa: E402
 from simtest import metrics as metrics_lib  # noqa: E402
 from simtest import report as report_lib  # noqa: E402
 from simtest import spec  # noqa: E402
+from simtest import world as world_lib  # noqa: E402
 
 SIM_CTL = REPO_ROOT / "scripts" / "sim_ctl.sh"
 # Stand-in for `bash` wherever ROS is sourced: the distrobox fallback on hosts
@@ -118,6 +121,37 @@ def cmd_validate(a) -> int:
     return 2 if bad else 0
 
 
+# The 5.1 asset root the pip-installed Isaac resolves (isaacsim.storage.native
+# get_assets_root_path). Checked with plain HTTP so a world that names an
+# asset nobody has streamed yet fails here, in seconds, not as a grey box
+# five minutes into a run (spawn_warehouse falls back to the primitive).
+ASSET_ROOT_URL = os.environ.get(
+    "SORTBOTS_ISAAC_ASSET_ROOT",
+    "https://omniverse-content-production.s3-us-west-2.amazonaws.com/Assets/Isaac/5.1")
+
+
+def cmd_assets(_a) -> int:
+    import urllib.error
+    import urllib.request
+
+    refs = world_lib.usd_refs()
+    bad = 0
+    for ref, users in sorted(refs.items()):
+        url = f"{ASSET_ROOT_URL.rstrip('/')}/{ref}"
+        try:
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                size = resp.headers.get("Content-Length")
+            log(f"ok       {ref}  ({int(size) // 1024 if size else '?'} KB)  <- {', '.join(users)}")
+        except urllib.error.HTTPError as e:
+            bad += 1
+            log(f"MISSING  {ref}  (HTTP {e.code})  <- {', '.join(users)}")
+        except (urllib.error.URLError, OSError) as e:
+            bad += 1
+            log(f"ERROR    {ref}  ({e})  <- {', '.join(users)}")
+    return 2 if bad else 0
+
+
 def _overrides_args(resolved: dict) -> list[str]:
     return [f"{k}={str(v).lower() if isinstance(v, bool) else v}"
             for k, v in resolved["overrides"].items()]
@@ -146,6 +180,15 @@ def cmd_show(a) -> int:
             log(f"  goal {g['id']}: {g['robot']} -> {g['waypoint'] or g['pose']}  "
                 f"(at_s>={g['at_s']:g}, timeout {g['timeout_s']:g}s)")
         for tk in r["tasks"]:
+            if tk.get("package"):
+                leg = lambda v: "dock" if v is None else (v["name"] if v["name"] != "pose"  # noqa: E731
+                                                          else f"({v['x']:g}, {v['y']:g})")
+                pl = tk["place"] or {"x": 0.0, "y": 0.0, "z": 0.0, "support": "(hold: stays on the magnet)"}
+                log(f"  task {tk['id']}: {tk['robot']} picks {tk['package']} "
+                    f"[{leg(tk['pickup'])} -> {leg(tk['dropoff'])}], places it at "
+                    f"({pl['x']:g}, {pl['y']:g}) on {pl['support']} z={pl['z']:g} "
+                    f"(at_s>={tk['at_s']:g})")
+                continue
             log(f"  task {tk['id']}: {tk['robot']} {tk['pickup']} -> {tk['dropoff']} "
                 f"(at_s>={tk['at_s']:g})")
         for e in r["metrics"]:
@@ -235,6 +278,8 @@ def run_once(label: str, resolved: dict, streams: set[str], run_dir: Path, a,
             return {"error": "console start failed (scripts/sim_ctl.sh console start)"}
     started = time.monotonic()
     probe_rc = None
+    clip = None
+    clip_dir = run_dir / "clip"
     try:
         args = ["start", resolved["scenario"], *_overrides_args(resolved)]
         log(f"  sim_ctl {' '.join(args)}")
@@ -255,6 +300,11 @@ def run_once(label: str, resolved: dict, streams: set[str], run_dir: Path, a,
                                      "streams": sorted(streams)}, indent=2))
         cmd = (f"exec python3 -m simtest.probe --variant {shlex.quote(str(vjson))} "
                f"--out {shlex.quote(str(run_dir))}")
+        if a.clip or a.preview:
+            clip_dir.mkdir(exist_ok=True)
+            with open(run_dir / "clip.log", "w") as fh:
+                clip = subprocess.Popen(_ros_shell(clip_lib.capture_cmd(clip_dir, resolved)),
+                                        cwd=REPO_ROOT, stdout=fh, stderr=subprocess.STDOUT)
         with open(run_dir / "probe.log", "w") as fh:
             p = subprocess.Popen(_ros_shell(cmd), cwd=REPO_ROOT, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, text=True)
@@ -291,6 +341,8 @@ def run_once(label: str, resolved: dict, streams: set[str], run_dir: Path, a,
                     "meta": body["meta"]}
         return body
     finally:
+        if clip:
+            clip_lib.stop(clip_dir, clip)
         if not (a.keep and state.data.get("last")):
             log("  stopping the sim")
             _sim_ctl("stop", timeout=240)
@@ -370,6 +422,12 @@ def cmd_run(a) -> int:
                     line.update(ok=body["score"]["ok"], score=body["score"], meta=body["meta"])
                     verdict = "PASS" if body["score"]["ok"] else "FAIL"
                     log(f"[simtest] [{label}] repeat {rep}: {verdict}")
+                    if a.clip and body["score"]["ok"]:
+                        gif = clip_lib.encode(run_dir / "clip", clip_lib.media_path(t["name"]))
+                        log(f"[simtest] clip: {gif}")
+                    if a.preview:
+                        gif = clip_lib.encode(run_dir / "clip", clip_lib.preview_path(t["name"]))
+                        log(f"[simtest] preview clip: {gif}")
                     for m in body["score"]["metrics"]:
                         for c in m["criteria"]:
                             if not c["ok"]:
@@ -494,6 +552,8 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list").set_defaults(fn=cmd_list)
     sub.add_parser("metrics").set_defaults(fn=cmd_metrics)
+    sub.add_parser("assets", help="check every usd asset the worlds and presets name "
+                   "against the Isaac asset root").set_defaults(fn=cmd_assets)
     v = sub.add_parser("validate")
     v.add_argument("names", nargs="*")
     v.set_defaults(fn=cmd_validate)
@@ -504,7 +564,7 @@ def main(argv=None) -> int:
     r = sub.add_parser("run")
     r.add_argument("name")
     r.add_argument("--set", action="append", default=[], metavar="K=V",
-                   help="change a test field before validation, e.g. overrides.world=aisle_head_on "
+                   help="change a test field before validation, e.g. overrides.world=person_head_on "
                         "or stop.sim_s=60")
     r.add_argument("--repeats", type=int)
     r.add_argument("--variant", action="append", help="run only this variant (repeatable)")
@@ -513,6 +573,11 @@ def main(argv=None) -> int:
                    help="stop an already-running sim instead of refusing")
     r.add_argument("--keep", action="store_true",
                    help="leave the sim up after the LAST run, to look around")
+    r.add_argument("--clip", action="store_true",
+                   help="record the Sim view; a passing run writes webui/test_media/NAME.gif")
+    r.add_argument("--preview", action="store_true",
+                   help="record the Sim view and write webui/test_media/NAME.preview.gif "
+                        "whatever the verdict: a picture of what the test sets up")
     r.add_argument("--out", help="results dir (default data/simtests/<UTC>_<name>)")
     r.set_defaults(fn=cmd_run)
     rs = sub.add_parser("rescore")
@@ -525,6 +590,11 @@ def main(argv=None) -> int:
     rp.add_argument("dirs", nargs="+")
     rp.set_defaults(fn=cmd_report)
     a = ap.parse_args(argv)
+    # The dashboard's Stop test is a SIGINT, but a console started by `sim_ctl.sh console
+    # start` is a background job: bash leaves SIGINT ignored for it, this process inherits
+    # that, and Python then installs no handler. Stop did nothing until the probe was up
+    # (rclpy sets its own), and a run whose sim had died sat in startup (2026-11-05).
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     # SIGTERM (dashboard cancel fallback) behaves like Ctrl-C: stop the sim cleanly.
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
     return a.fn(a)

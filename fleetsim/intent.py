@@ -1,7 +1,7 @@
 """Path intents: where each robot will be, and when, so the lower-priority
 robot of a future conflict waits somewhere safe instead of meeting it.
 
-Design (2026-11-17; fleetsim/README.md "Path intents"):
+Design (2026-11-17; docs/fleetsim.md "Path intents"):
 
   * A robot with a path announces the next `horizon_s` of it as a few
     timestamped points (`announce`), on every replan and at `hz`, to the

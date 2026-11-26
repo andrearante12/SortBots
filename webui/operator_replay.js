@@ -544,7 +544,7 @@
     const v = $("#rp-verdict");
     v.textContent = verdict; v.hidden = !verdict; v.className = `rp-v ${verdict === "PASS" ? "pass" : "fail"}`;
     $("#rp-meta").textContent = `${r.robots.length} robots · ${r.network} · seed ${r.seed}${r.truncated ? " · ended early" : ""}`;
-    $("#rp-meta").title = r.truncated ? "No end event: the run crashed or was still running when this was read (fleetsim/README.md, Known issues)" : "";
+    $("#rp-meta").title = r.truncated ? "No end event: the run crashed or was still running when this was read (docs/fleetsim.md, Known issues)" : "";
     $("#rp-links").disabled = !r.links.length;
     $("#rp-links").closest("label").title = r.links.length ? "One-hop radio links, darker = stronger" : "Recorded on radio-network runs only: an ideal network links everyone";
     $("#rp-sel").innerHTML = `<option value="-1">No robot</option>` + r.robots.map((rid, i) => `<option value="${i}">${esc(titleOf(rid))}${(r.belief_maps[rid] || []).length ? " · own map" : ""}</option>`).join("");

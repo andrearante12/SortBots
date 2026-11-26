@@ -23,12 +23,18 @@
 #
 # --slam-role robot keeps only odometry, the live obstacle cloud and a ~2 Hz
 # compressed keyframe stream here; RTAB-Map mapping runs on the workstation
-# (launch/sortbots_slam_workstation.launch.py, tasks/slam_offload.md). The
+# (launch/sortbots_slam_workstation.launch.py, tasks/slam_offload.md@6501799). The
 # default `all` maps on the Jetson as before, at lower CPU priority.
 #
-# Not started, on purpose: Nav2, task_manager, scripted_pick and the explorer.
-# There is no base driver yet, so nothing would move; the dashboard's drive
-# pad publishes /<id>/cmd_vel into the void until nodes/base_driver.py exists.
+# --nav adds Nav2, the explorer and task_manager (configs/nav2_real.yaml,
+# explorer_real.yaml): the operator view's Explore button, click-to-go and the Tasks
+# pane's point-to-point tasks then work as in the sim. Off by default: Nav2 is real CPU
+# on the Orin next to RTAB-Map, and the Jetson has browned out under load. task_manager
+# rides on --nav because without Nav2 every task it took would just fail; on the robot
+# its tasks are nav-only (pickup/dropoff dwell, or goto). Never started: magnet_pick
+# (the arm's pick is nodes/arm_driver.py's).
+# nodes/base_driver.py drives the wheels from /<id>/cmd_vel (the drive pad, or Nav2),
+# capped at configs/drive_base.yaml's ros.speed_level and latched by /<id>/estop.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,12 +56,13 @@ PIPELINE_PATTERNS=(realsense2_camera_node rtabmap_slam rgbd_odometry rtabmap_viz
                    controller_server planner_server smoother_server behavior_server \
                    bt_navigator waypoint_follower velocity_smoother lifecycle_manager \
                    collision_monitor component_container \
-                   task_manager.py scripted_pick.py explorer.py \
+                   task_manager.py scripted_pick.py magnet_pick.py explorer.py \
                    rtabmap_cloud_pump.py recon_cloud_relay.py \
                    map_merge.py static_transform_publisher \
                    fleet_radio.py fleet_tasks.py dynamic_obstacle_filter.py recon_cloud_merge.py \
                    depth_colorizer.py feature_overlay.py obstacle_cloud.py \
-                   obstacle_detector.py map_handoff.py rtabmap_sync \
+                   obstacle_detector.py package_detector.py map_handoff.py rtabmap_sync \
+                   base_driver.py arm_driver.py \
                    sortbots_bringup.launch.py)
 KEEP_CONSOLE=false
 
@@ -75,6 +82,11 @@ stop_pipeline() {
     pkill -9 -f "$p" 2>/dev/null || true
   done
   sleep 1
+  # An STS3215 keeps its last speed: a base_driver that only died to the -9 above
+  # (it releases the wheels on SIGINT, but a hung one wouldn't) leaves the base
+  # rolling. Zero the wheels now that nothing holds their board. Skips a board
+  # the Robot view's drive bridge holds; that one has its own watchdog.
+  python3 "$REPO_ROOT/nodes/base_driver.py" --stop 2>&1 | sed 's/^/  /' || true
   # SIGKILLed Fast DDS participants never unlink their shared-memory segments
   # (16 MB each with configs/dds/fastdds_large_shm.xml), and /dev/shm is RAM —
   # the Orin's 8 GB, shared with the GPU. On the bench, 1,058 leaked segments
@@ -90,7 +102,7 @@ if [[ "${1:-}" == "stop" ]]; then
   exit 0
 fi
 
-ROBOT_ID=robot_0; LOCALIZE=false; RESUME=false; MAP_DB=""; SLAM_ROLE=all
+ROBOT_ID=robot_0; LOCALIZE=false; RESUME=false; MAP_DB=""; SLAM_ROLE=all; NAV=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --robot-id) ROBOT_ID="$2"; shift 2;;
@@ -99,7 +111,8 @@ while [[ $# -gt 0 ]]; do
     --map)      MAP_DB="$2"; shift 2;;
     --keep-console) KEEP_CONSOLE=true; shift;;
     --slam-role) SLAM_ROLE="$2"; shift 2;;
-    -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    --nav)      NAV=true; shift;;
+    -h|--help) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "[run_robot] unknown arg: $1"; exit 2;;
   esac
 done
@@ -153,7 +166,7 @@ ROS_ENV="source '$ROS_SETUP'; \
   export FASTRTPS_DEFAULT_PROFILES_FILE='$REPO_ROOT/configs/dds/fastdds_large_shm.xml'"
 # ^ Fast DDS's default 512 KB shared-memory segment is smaller than one D435
 #   frame (1.2 MB), so every image fell back to fragmented UDP. On the bench
-#   (tasks/slam_offload.md) that delivered 1.6 Hz of 11.7 Hz published, and
+#   (tasks/slam_offload.md@6501799) that delivered 1.6 Hz of 11.7 Hz published, and
 #   odometry processed 23 of 832 frames. Unset it to compare.
 
 echo "[run_robot] launching RTAB-Map + RealSense D435 for $ROBOT_ID..."
@@ -163,7 +176,7 @@ setsid bash -c "$ROS_ENV; \
   exec ros2 launch '$REPO_ROOT/launch/sortbots_bringup.launch.py' \
        platform:=real robot_id:=$ROBOT_ID robot_ids:=$ROBOT_ID \
        use_sim_time:=false rviz:=false \
-       nav2:=false task_manager:=false scripted_pick:=false explore:=false \
+       nav2:=$NAV task_manager:=$NAV scripted_pick:=false explore:=$NAV explore_autostart:=false \
        webui:=$WEBUI dashboard_port:=$DASHBOARD_PORT \
        localization:=$LOCALIZE database_path:='$MAP_DB' \
        delete_db_on_start:=$DELETE_DB_ON_START slam_role:=$SLAM_ROLE" \
@@ -193,7 +206,7 @@ cat <<EOF
   SortBots robot is UP  ($ROBOT_ID, RealSense D435)
     * Web dashboard : http://localhost:$DASHBOARD_PORT/  (or the tailnet URL above)
         - head camera, live SLAM map, 3D reconstruction
-        - drive pad / nav goals do nothing yet: no base driver
+        - drive pad (base_driver); $( [[ "$NAV" == "true" ]] && echo "Nav2 + tasks + Explore ON" || echo "no Nav2: click-to-go, tasks and Explore need --nav" )
     * RTAB-Map      : visual odometry, no IMU; mapping $( [[ "$SLAM_ROLE" == "robot" ]] && echo "on the WORKSTATION (keyframes sent from here)" || echo "here, at nice 10" )
     * Map           : $MAP_DB $( [[ "$LOCALIZE" == "true" ]] && echo "(localization — read-only)" || { [[ "$RESUME" == "true" ]] && echo "(resumed — extending existing map)" || echo "(mapping — rebuilt this run)"; } )
   Log  : $BRINGUP_LOG

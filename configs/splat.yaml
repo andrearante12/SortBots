@@ -1,4 +1,4 @@
-# Gaussian-splat reconstruction (splat/, scripts/splat.sh, docs/splat.md).
+# Gaussian-splat reconstruction (splat/, scripts/splat.sh, docs/real-robot.md).
 # Read by splat/worker.py (and handed to splat/train.py) on the WORKSTATION, and
 # by webui/serve.py on whichever host serves the dashboard (only `worker_url`).
 
@@ -22,7 +22,21 @@ worker:
   # 8 GB card can't hold both. Jobs wait as `waiting_for_gpu`; force=true skips.
   wait_for_isaac: true
 
+extract:
+  # How a pose graph becomes keyframes (splat/extract.py). auto = python:
+  # splat/rtabmap_db.py, no ROS (Ubuntu 26.04 has no Jazzy), and the only backend
+  # that applies dataset.poses. `rtabmap-export` uses system Jazzy's binary, which
+  # always exports the optimized graph (3.8 cm vs 0.6 cm on the sim map, 2026-11-17).
+  backend: auto
+
 dataset:
+  # Camera poses to train on (the python extract backend; rtabmap-export always
+  # gives the optimized graph): optimized (loop-closed pose graph), odometry (the
+  # chain of odometry links), or auto: whichever agrees better with the keyframes'
+  # own depth (splat/rtabmap_db.py, "Which poses"). Isaac's odometry beat its own
+  # loop closures, 0.6 vs 3.8 cm (2026-11-17); a real robot's visual odometry
+  # drifts and wants the closures.
+  poses: auto
   stride: 1                # keep every Nth keyframe (RTAB-Map already decimates)
   init_points: 300000      # init cloud budget after voxel downsampling
   init_voxel: 0.03         # m

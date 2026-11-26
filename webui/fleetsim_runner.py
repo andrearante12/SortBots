@@ -130,7 +130,7 @@ class FleetsimRunner(SimtestRunner):
         if exit_code == 130:
             return "STOPPED"
         # Exit 1 can mean a failed criterion or a Python crash (see Known issues
-        # in fleetsim/README.md). Only a run that wrote a score actually failed.
+        # in docs/fleetsim.md). Only a run that wrote a score actually failed.
         try:
             score = json.loads((self.results_dir / self.run_dir / "score.json").read_text())
         except (OSError, ValueError):

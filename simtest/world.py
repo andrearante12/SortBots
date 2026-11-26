@@ -4,7 +4,7 @@ A world (configs/worlds/<name>.yaml) is the third layer of a test, under the
 scenario (how the stack is launched) and the test case (what is asked of it
 and how it is scored):
 
-    world     props + scripted movers, placed in a named scene
+    world     props + scripted movers + graspable packages, placed in a named scene
     scenario  world + stack config (robots, map mode, explore, render knobs)
     test      scenario + goals + stop condition + metrics with pass criteria
 
@@ -60,11 +60,93 @@ USD_REF_RX = re.compile(r"^Isaac/[A-Za-z0-9_][A-Za-z0-9_./-]*\.usdz?$")
 
 SCENES = ("nvidia", "primitive")
 SHAPES = ("box", "cylinder", "usd")
-ACTOR_SHAPES = ("box", "cylinder")
+ACTOR_SHAPES = ("box", "cylinder", "usd")
 MODES = ("once", "loop", "pingpong")
+
+# Named obstacles a world can ask for by `preset:` instead of spelling out a
+# USD reference, its floor footprint and its height every time. Every key is
+# an ordinary item key, so a world can override any of them (`{preset:
+# person, radius: 0.35}`), and `fallback` is what spawn_warehouse authors
+# when the asset root is unreachable: the primitive of the same footprint,
+# so a run without the asset server still scores against the same shape.
+#
+# The refs were checked against the 5.1 asset root on 2026-11-04 and the
+# numbers measured with scripts/measure_assets.py on 2026-11-06 (headless
+# Isaac, UsdGeom.BBoxCache at identity):
+#
+#   person    male_adult_construction_01_new, ~1.75 m, facing -y
+#   worker    male_adult_construction_05_new, ~1.72 m, facing -y
+#   forklift  bbox 1.21 x 3.49 x 2.15, long axis y
+#   amr       iw_hub 1.43 x 0.66 x 0.23, body centre 0.32 behind the origin,
+#             wheels 0.08 below
+#   amr_tall  nova_carter 0.73 x 0.90 x 0.69, centre 0.22 off, base 0.14 below
+#
+# `anim: walk_cycle` (person, worker) plays a REAL walk, not a bind pose:
+# the characters are Isaac's dressed construction workers (hard hat, hi-vis
+# vest, work trousers, boots), and spawn_warehouse.py's _spawn_walk_actor
+# retargets one straight stride of Isaac's walk-clip library onto their
+# skeleton (scripts/walk_retarget.py — the library is authored for a
+# different 81-joint rig and omni.anim.people, which would map it, isn't in
+# this install), looped off the world clock (see WALKERS there). Any
+# *_new character on the same 101-joint rig works as a walking `ref`.
+# The footprint the metrics score is the body (radius); yaw_offset_deg turns
+# the model to face +x, the direction of travel (these characters face -y,
+# so 90); z puts the feet on the floor (soles at the origin, so 0).
+# Footprints/heights are the declared values the METRICS use.
+PRESETS = {
+    "person": {
+        "shape": "usd",
+        "ref": "Isaac/People/Characters/male_adult_construction_01_new/"
+               "male_adult_construction_01_new.usd",
+        "anim": "walk_cycle",
+        "radius": 0.30, "height": 1.75, "z": 0.0, "yaw_offset_deg": 90.0,
+        "color": (0.95, 0.45, 0.10), "fallback": "cylinder",
+    },
+    "worker": {
+        "shape": "usd",
+        "ref": "Isaac/People/Characters/male_adult_construction_05_new/"
+               "male_adult_construction_05_new.usd",
+        "anim": "walk_cycle",
+        "radius": 0.32, "height": 1.72, "z": 0.0, "yaw_offset_deg": 90.0,
+        "color": (0.95, 0.70, 0.10), "fallback": "cylinder",
+    },
+    "forklift": {
+        "shape": "usd", "ref": "Isaac/Props/Forklift/forklift.usd",
+        "footprint": (3.5, 1.2), "height": 2.15, "yaw_offset_deg": 90.0,
+        "color": (0.90, 0.60, 0.05), "fallback": "box",
+    },
+    "amr": {
+        "shape": "usd", "ref": "Isaac/Robots/Idealworks/iwhub/iw_hub.usd",
+        "footprint": (1.43, 0.66), "height": 0.23, "z": 0.08, "origin_offset": (0.315, 0.0),
+        "color": (0.25, 0.55, 0.85), "fallback": "box",
+    },
+    "amr_tall": {
+        "shape": "usd", "ref": "Isaac/Robots/NVIDIA/NovaCarter/nova_carter.usd",
+        "footprint": (0.9, 0.73), "height": 0.69, "z": 0.14, "yaw_offset_deg": 90.0,
+        "origin_offset": (0.225, 0.0),
+        "color": (0.25, 0.55, 0.85), "fallback": "box",
+    },
+}
+FALLBACKS = ("box", "cylinder")
 MAX_SPEED = 3.0          # m/s — a brisk human is ~1.4; anything faster is a typo
 MAX_COORD = 200.0        # m — the NVIDIA warehouse is ~30 x 40
 MAX_ITEMS = 64
+MAX_PACKAGES = 16
+# Which face of a package carries the magnet plate: the four sides in the
+# package's own frame (+x is the way yaw 0 points), or the top.
+FACES = ("+x", "-x", "+y", "-y", "top")
+# A "very light amazon box", small enough that the SO-101's ~0.33 m horizontal
+# reach (docs/manipulation.md) still has room for the box's own depth.
+DEFAULT_PACKAGE_SIZE = (0.24, 0.18, 0.12)
+DEFAULT_PACKAGE_COLOR = (0.76, 0.60, 0.42)   # cardboard
+DEFAULT_MARK_COLOR = (0.16, 0.65, 0.35)
+# The magnet plate. Both colours are authored by the sim and thresholded on by
+# nodes/package_detector.py (configs/package_detector.yaml): change them together.
+PLATE_COLOR = (0.05, 0.05, 0.06)
+PLATE_THICKNESS_M = 0.004   # how far the plate stands proud of the box face
+PLATE_FRACTION = 0.6        # the plate covers this fraction of the face's width and height
+SUPPORT_EPS_M = 0.001    # a package's bottom must match its deck's top within this
+SUPPORT_MARGIN_M = 0.03  # the package may overhang its deck by this much
 
 DEFAULT_ACTOR_COLOR = (0.95, 0.45, 0.10)
 DEFAULT_PROP_COLOR = (0.55, 0.42, 0.28)
@@ -132,14 +214,38 @@ def _shape(raw: dict, what: str, allowed) -> dict:
         out["ref"] = ref
         out["scale"] = _num(raw.get("scale", 1.0), f"{what}.scale", 0.0, 100.0, strict_lo=True)
         # The asset's own geometry is opaque to everything but Isaac, so the
-        # metrics need to be told how much floor it covers.
-        fp = raw.get("footprint")
-        if not isinstance(fp, (list, tuple)) or len(fp) != 2:
-            raise WorldError(f"{what}.footprint: usd props need [x, y] metres for the metrics")
-        out["footprint"] = tuple(_num(s, f"{what}.footprint", 0.0, 20.0, strict_lo=True)
-                                 for s in fp)
+        # metrics need to be told how much floor it covers: a rectangle
+        # (`footprint: [x, y]`, along the asset's forward axis) or a disc
+        # (`radius`, a person).
+        fp, radius = raw.get("footprint"), raw.get("radius")
+        if (fp is None) == (radius is None):
+            raise WorldError(f"{what}: usd items need exactly one of footprint: [x, y] "
+                             "or radius, metres, for the metrics")
+        if fp is not None:
+            if not isinstance(fp, (list, tuple)) or len(fp) != 2:
+                raise WorldError(f"{what}.footprint: expected [x, y] metres")
+            out["footprint"] = tuple(_num(s, f"{what}.footprint", 0.0, 20.0, strict_lo=True)
+                                     for s in fp)
+        else:
+            out["radius"] = _num(radius, f"{what}.radius", 0.0, 5.0, strict_lo=True)
         out["height"] = _num(raw.get("height", 1.0), f"{what}.height", 0.0, 10.0,
                              strict_lo=True)
+        # Assets don't agree on which way is forward or where their origin
+        # sits: yaw_offset_deg turns the model so its front faces the path's
+        # direction of travel, z lifts one whose origin isn't on the floor.
+        out["yaw_offset_deg"] = _num(raw.get("yaw_offset_deg", 0.0), f"{what}.yaw_offset_deg",
+                                     -360.0, 360.0)
+        out["z"] = _num(raw.get("z", 0.0), f"{what}.z", -1.0, 1.0)
+        # Where the model's body centre is in its OWN frame: the model is
+        # moved by this (before yaw_offset) so that centre lands on the pose.
+        off = raw.get("origin_offset", (0.0, 0.0))
+        if not isinstance(off, (list, tuple)) or len(off) != 2:
+            raise WorldError(f"{what}.origin_offset: expected [dx, dy] metres")
+        out["origin_offset"] = tuple(_num(v, f"{what}.origin_offset", -5.0, 5.0) for v in off)
+        fb = raw.get("fallback", "cylinder" if radius is not None else "box")
+        if fb not in FALLBACKS:
+            raise WorldError(f"{what}.fallback: expected one of {list(FALLBACKS)}, got {fb!r}")
+        out["fallback"] = fb
     return out
 
 
@@ -175,11 +281,25 @@ def _validate_path(raw, what) -> dict:
 def _validate_item(raw, what, *, actor: bool) -> dict:
     if not isinstance(raw, dict):
         raise WorldError(f"{what}: expected a mapping")
-    allowed = {"id", "shape", "size", "radius", "height", "color", "label"}
-    allowed |= {"path"} if actor else {"pose", "ref", "scale", "footprint", "collider"}
+    allowed = {"id", "shape", "size", "radius", "height", "color", "label", "preset",
+               "ref", "scale", "footprint", "yaw_offset_deg", "z", "origin_offset", "fallback"}
+    allowed |= {"path", "anim"} if actor else {"pose", "collider", "style"}
     unknown = set(raw) - allowed
     if unknown:
         raise WorldError(f"{what}: unknown key(s) {sorted(unknown)}")
+    preset = raw.get("preset")
+    if preset is not None:
+        if preset not in PRESETS:
+            raise WorldError(f"{what}.preset: expected one of {sorted(PRESETS)}, got {preset!r}")
+        # The preset is the base; whatever the world wrote on top wins. A
+        # world that gives its own radius for a `person` drops the preset's
+        # footprint and vice versa, so the two never both reach _shape.
+        base = dict(PRESETS[preset])
+        if "radius" in raw:
+            base.pop("footprint", None)
+        if "footprint" in raw:
+            base.pop("radius", None)
+        raw = {**base, **{k: v for k, v in raw.items() if k != "preset"}}
     iid = raw.get("id")
     if not isinstance(iid, str) or not ID_RX.match(iid):
         raise WorldError(f"{what}.id: must match {ID_RX.pattern}")
@@ -189,13 +309,172 @@ def _validate_item(raw, what, *, actor: bool) -> dict:
                           DEFAULT_ACTOR_COLOR if actor else DEFAULT_PROP_COLOR)
     if actor:
         out["path"] = _validate_path(raw.get("path"), f"{what}.path")
+        # A real skeletal walk cycle (person/worker presets), not a bind
+        # pose: spawn_warehouse.py._spawn_walk_actor binds and loops one of
+        # Isaac's walk clips. Only meaningful on a usd actor.
+        anim = raw.get("anim")
+        if anim is not None:
+            if out["shape"] != "usd":
+                raise WorldError(f"{what}.anim: only a usd actor can have one")
+            if anim != "walk_cycle":
+                raise WorldError(f"{what}.anim: expected 'walk_cycle', got {anim!r}")
+        out["anim"] = anim
     else:
         out["pose"] = _pose(raw.get("pose"), f"{what}.pose")
         collider = raw.get("collider", True)
         if not isinstance(collider, bool):
             raise WorldError(f"{what}.collider: expected a boolean")
         out["collider"] = collider
+        # What a box prop looks like. `table`: a top on four legs, the same size and collider
+        # as the box, so nothing that measures it changes.
+        style = raw.get("style", "box")
+        if style not in ("box", "table") or (style == "table" and out["shape"] != "box"):
+            raise WorldError(f"{what}.style: expected box, or table on a box prop; got {style!r}")
+        out["style"] = style
     return out
+
+
+def _validate_package(raw, what) -> dict:
+    if not isinstance(raw, dict):
+        raise WorldError(f"{what}: expected a mapping")
+    unknown = set(raw) - {"id", "size", "pose", "z", "magnet_face", "color", "label", "marker"}
+    if unknown:
+        raise WorldError(f"{what}: unknown key(s) {sorted(unknown)}")
+    pid = raw.get("id")
+    if not isinstance(pid, str) or not ID_RX.match(pid):
+        raise WorldError(f"{what}.id: must match {ID_RX.pattern}")
+    size = raw.get("size", DEFAULT_PACKAGE_SIZE)
+    if not isinstance(size, (list, tuple)) or len(size) != 3:
+        raise WorldError(f"{what}.size: expected [x, y, z] metres")
+    face = raw.get("magnet_face", "+x")
+    if face not in FACES:
+        raise WorldError(f"{what}.magnet_face: expected one of {list(FACES)}, got {face!r}")
+    size = tuple(_num(v, f"{what}.size", 0.0, 1.0, strict_lo=True) for v in size)
+    marker = raw.get("marker")
+    if marker is not None:
+        from . import aruco
+
+        if marker not in aruco.DATA:
+            raise WorldError(f"{what}.marker: expected one of {sorted(aruco.DATA)}, got {marker!r}")
+        if min(s for s in plate_geometry(size, face)[0] if s > PLATE_THICKNESS_M) < aruco.BACKING_M - 1e-9:
+            raise WorldError(f"{what}.marker: the plate on face {face} is too small for a "
+                             f"{aruco.BACKING_M * 100:g} cm marker")
+    return {
+        "id": pid,
+        "size": size,
+        "pose": _pose(raw.get("pose"), f"{what}.pose"),
+        "z": _num(raw.get("z", 0.0), f"{what}.z", 0.0, 3.0),   # BOTTOM height
+        "magnet_face": face,
+        "marker": marker,       # the ArUco id printed on the plate, or None (simtest/aruco.py)
+        "color": _color(raw.get("color"), f"{what}.color", DEFAULT_PACKAGE_COLOR),
+        "label": str(raw.get("label") or pid)[:40],
+    }
+
+
+def top_z(item: dict) -> float:
+    """Height of a prop's top surface above the floor (props stand on it)."""
+    if item["shape"] == "box":
+        return item["size"][2]
+    return item["height"]
+
+
+def package_footprint(pkg: dict) -> tuple:
+    x, y, yaw = pkg["pose"]
+    return geometry.rect(x, y, yaw, pkg["size"][0], pkg["size"][1])
+
+
+def plate_geometry(size, face: str) -> tuple[tuple, tuple]:
+    """The magnet plate as a box in the package's own frame: (size, centre), centre
+    relative to the package's (x, y, bottom z). A thin slab on the named face, standing
+    PLATE_THICKNESS_M proud of it. This is what scripts/spawn_warehouse.py authors and
+    what nodes/package_vision.py looks for; its INNER face is the face plane that
+    simtest.magnet.magnet_face_pose reports."""
+    sx, sy, sz = size
+    t, f = PLATE_THICKNESS_M, PLATE_FRACTION
+    if face in ("+x", "-x"):
+        return (t, f * sy, f * sz), (math.copysign(sx / 2 + t / 2, 1 if face == "+x" else -1),
+                                     0.0, sz / 2)
+    if face in ("+y", "-y"):
+        return (f * sx, t, f * sz), (0.0, math.copysign(sy / 2 + t / 2, 1 if face == "+y" else -1),
+                                     sz / 2)
+    return (f * sx, f * sy, t), (0.0, 0.0, sz + t / 2)
+
+
+def support_for(w: dict, pkg: dict) -> dict | None:
+    """The prop a package stands on, or None when it stands on the floor.
+
+    Raises WorldError for a layout that cannot exist: a package floating with
+    nothing under it (or on a prop of a different height), or sunk into a prop.
+    Packages never move by themselves, so this is checked once at load rather
+    than left to the physics."""
+    fp = package_footprint(pkg)
+    x, y, _ = pkg["pose"]
+    if pkg["z"] <= SUPPORT_EPS_M:
+        for prop in w["props"]:
+            if geometry.distance(fp, prop_footprint(prop)) <= 0.0:
+                raise WorldError(f"package {pkg['id']!r}: sits on the floor inside prop "
+                                 f"{prop['id']!r} — give it z: {top_z(prop):g} to put it on top")
+        return None
+    for prop in w["props"]:
+        pf = prop_footprint(prop)
+        if abs(top_z(prop) - pkg["z"]) > SUPPORT_EPS_M:
+            continue
+        if geometry.contains(pf, (x, y)) and all(
+                geometry.contains(pf, c, SUPPORT_MARGIN_M) for c in fp[1]):
+            return prop
+    raise WorldError(f"package {pkg['id']!r}: floating at z={pkg['z']:g} — no prop of that "
+                     f"height under it (props' tops: "
+                     f"{sorted({round(top_z(p), 3) for p in w['props']})})")
+
+
+def _validate_head(raw) -> dict | None:
+    """Where the head starts, radians. Tilt > 0 looks down. Per world, because a tilted
+    camera sees less of what is ahead: exploration and Nav2 keep theirs level."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) - {"pan", "tilt"}:
+        raise WorldError("head: expected {pan, tilt} in radians")
+    return {"pan": _num(raw.get("pan", 0.0), "head.pan", -1.57, 1.57),
+            "tilt": _num(raw.get("tilt", 0.0), "head.tilt", -0.76, 1.45)}
+
+
+def _validate_view(raw) -> dict | None:
+    """Where the Sim camera starts in this world, instead of configs/sim_view.yaml's."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or set(raw) != {"eye", "target"}:
+        raise WorldError("view: expected {eye: [x, y, z], target: [x, y, z]}")
+    out = {}
+    for key in ("eye", "target"):
+        v = raw[key]
+        if not isinstance(v, (list, tuple)) or len(v) != 3:
+            raise WorldError(f"view.{key}: expected [x, y, z]")
+        out[key] = [_num(c, f"view.{key}", -200, 200) for c in v]
+    return out
+
+
+def _validate_mark(raw, what) -> dict:
+    """A painted rectangle on a surface: where a place test wants a package set down.
+    Nothing to collide with and nothing a package rests on: it only shows the spot."""
+    if not isinstance(raw, dict):
+        raise WorldError(f"{what}: expected a mapping")
+    unknown = set(raw) - {"id", "size", "pose", "z", "color", "label"}
+    if unknown:
+        raise WorldError(f"{what}: unknown key(s) {sorted(unknown)}")
+    mid = raw.get("id")
+    if not isinstance(mid, str) or not ID_RX.match(mid):
+        raise WorldError(f"{what}.id: must match {ID_RX.pattern}")
+    size = raw.get("size")
+    if not isinstance(size, (list, tuple)) or len(size) != 2:
+        raise WorldError(f"{what}.size: expected [x, y] metres")
+    return {
+        "id": mid,
+        "size": tuple(_num(v, f"{what}.size", 0.0, 5.0, strict_lo=True) for v in size),
+        "pose": _pose(raw.get("pose"), f"{what}.pose"),
+        "z": _num(raw.get("z", 0.0), f"{what}.z", 0.0, 3.0),     # the surface it is painted on
+        "color": _color(raw.get("color"), f"{what}.color", DEFAULT_MARK_COLOR),
+        "label": str(raw.get("label") or mid)[:40],
+    }
 
 
 def validate(raw, *, stem: str | None = None) -> dict:
@@ -203,7 +482,7 @@ def validate(raw, *, stem: str | None = None) -> dict:
     if not isinstance(raw, dict):
         raise WorldError("world file must contain a YAML mapping")
     unknown = set(raw) - {"name", "title", "description", "scenes", "autostart",
-                          "props", "actors"}
+                          "props", "actors", "packages", "marks", "head", "view"}
     if unknown:
         raise WorldError(f"unknown key(s) {sorted(unknown)}")
     name = raw.get("name")
@@ -221,7 +500,9 @@ def validate(raw, *, stem: str | None = None) -> dict:
     items = {}
     out = {"name": name, "title": str(raw.get("title") or name),
            "description": str(raw.get("description") or "").strip(),
-           "scenes": list(scenes), "autostart": autostart, "props": [], "actors": []}
+           "scenes": list(scenes), "autostart": autostart, "props": [], "actors": [],
+           "packages": [], "marks": [], "head": _validate_head(raw.get("head")),
+           "view": _validate_view(raw.get("view"))}
     for key, actor in (("props", False), ("actors", True)):
         lst = raw.get(key) or []
         if not isinstance(lst, list) or len(lst) > MAX_ITEMS:
@@ -232,6 +513,28 @@ def validate(raw, *, stem: str | None = None) -> dict:
                 raise WorldError(f"{key}[{i}].id: duplicate id {v['id']!r}")
             items[v["id"]] = v
             out[key].append(v)
+    pk = raw.get("packages") or []
+    if not isinstance(pk, list) or len(pk) > MAX_PACKAGES:
+        raise WorldError(f"packages: expected a list of at most {MAX_PACKAGES}")
+    for i, item in enumerate(pk):
+        v = _validate_package(item, f"packages[{i}]")
+        if v["id"] in items:
+            raise WorldError(f"packages[{i}].id: duplicate id {v['id']!r}")
+        items[v["id"]] = v
+        out["packages"].append(v)
+    for v in out["packages"]:
+        support_for(out, v)     # raises on a floating or buried package
+    mk = raw.get("marks") or []
+    if not isinstance(mk, list) or len(mk) > MAX_PACKAGES:
+        raise WorldError(f"marks: expected a list of at most {MAX_PACKAGES}")
+    for i, item in enumerate(mk):
+        v = _validate_mark(item, f"marks[{i}]")
+        if v["id"] in items:
+            raise WorldError(f"marks[{i}].id: duplicate id {v['id']!r}")
+        items[v["id"]] = v
+        out["marks"].append(v)
+        # paint goes on something: the same check a package gets, as a flat package
+        support_for(out, {**v, "size": (*v["size"], 0.01)})
     return out
 
 
@@ -252,6 +555,23 @@ def load(name: str) -> dict:
     return validate(raw, stem=p.stem)
 
 
+def usd_refs() -> dict[str, list[str]]:
+    """{asset ref: [where it is used]} across the presets and every committed
+    world — what `scripts/simtest.py assets` checks against the asset root."""
+    out: dict[str, list[str]] = {}
+    for name, p in PRESETS.items():
+        out.setdefault(p["ref"], []).append(f"preset {name}")
+    for p in sorted(WORLDS_DIR.glob("*.yaml")):
+        try:
+            w = load(p.stem)
+        except WorldError:
+            continue
+        for item in w["props"] + w["actors"]:
+            if item["shape"] == "usd":
+                out.setdefault(item["ref"], []).append(f"{w['name']}/{item['id']}")
+    return out
+
+
 def list_worlds() -> list[dict]:
     """Every configs/worlds/*.yaml, with invalid ones kept and explained —
     the same rule session.load_scenarios follows."""
@@ -261,10 +581,12 @@ def list_worlds() -> list[dict]:
             w = load(p.stem)
             out.append({"name": w["name"], "title": w["title"], "description": w["description"],
                         "scenes": w["scenes"], "props": len(w["props"]),
-                        "actors": len(w["actors"]), "status": "ready"})
+                        "actors": len(w["actors"]), "packages": len(w["packages"]),
+                        "status": "ready"})
         except WorldError as e:
             out.append({"name": p.stem, "title": p.stem, "description": "", "scenes": [],
-                        "props": 0, "actors": 0, "status": "invalid", "error": str(e)})
+                        "props": 0, "actors": 0, "packages": 0, "status": "invalid",
+                        "error": str(e)})
     return out
 
 
@@ -340,7 +662,7 @@ def pose_at(path: dict, t: float) -> dict:
 
 def footprint(item: dict, x: float, y: float, yaw: float) -> tuple:
     """The floor-plane shape of a prop or actor at a pose (simtest.geometry)."""
-    if item["shape"] == "cylinder":
+    if item["shape"] == "cylinder" or (item["shape"] == "usd" and "radius" in item):
         return geometry.circle(x, y, item["radius"])
     if item["shape"] == "box":
         return geometry.rect(x, y, yaw, item["size"][0], item["size"][1])
@@ -359,7 +681,7 @@ def actor_footprint(actor: dict, t: float) -> tuple:
 
 def half_extent(item: dict) -> float:
     """Radius of the smallest circle around the item's footprint."""
-    if item["shape"] == "cylinder":
+    if "radius" in item:
         return item["radius"]
     sx, sy = item["size"][:2] if item["shape"] == "box" else item["footprint"]
     return math.hypot(sx, sy) / 2.0

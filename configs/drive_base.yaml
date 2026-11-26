@@ -1,0 +1,72 @@
+# The real robot's omni base and head camera, driven from the operator view's Drive
+# view (webui/operator_drive.js -> serve.py --drive -> scripts/drive_bridge.py).
+# Read by scripts/drive_bridge.py; serve.py only passes the path along.
+
+# The wheels' own servo board, by USB serial: plugging it in renumbered the arm's board
+# from ttyACM0 to ttyACM1 (2026-11-15), so a ttyACM path names whichever came up first.
+# Same board as scripts/base.py on the arm branch (BASE_BOARD_SERIAL).
+port: /dev/serial/by-id/usb-1a86_USB_Single_Serial_5B79016064-if00
+
+# Wheel servo ids: XLeRobot's own 7/8/9. They don't clash with the head's 7/8, which are on
+# the arm's board. `scripts/drive_bridge.py scan` lists what answers.
+wheels:
+  base_left_wheel: 7
+  base_back_wheel: 8
+  base_right_wheel: 9
+
+# XLeRobot / LeKiwi base geometry (lerobot's lekiwi.py _body_to_wheel_raw).
+wheel_radius_m: 0.05
+base_radius_m: 0.125
+# Wheels mounted at these angles (deg) minus 90, in left/back/right order.
+wheel_angles_deg: [240, 0, 120]
+# +1 drives toward LeKiwi's front; -1 if this robot's front (where the head camera looks in
+# nav mode) is the other way. Strafe and turn are untouched; if strafe is swapped too, the
+# whole base is mounted 180° round and y wants the same flip. Flipped to -1 on 2026-11-17
+# for "forward and back swapped", which was wrong: with -1 both the pad's arrows and W/S
+# drove backwards (2026-11-19). +1 is right for this robot.
+forward_sign: 1
+
+# Per-wheel ceiling in raw Goal_Velocity steps/s (4096 steps a turn): all three are
+# scaled down together past it, so the direction of travel is kept.
+max_raw: 3000
+
+# The operator's speed levels (d-pad up/down on the pad), XLeRobot's own three.
+# The bridge clamps every command to the fastest level, whatever the page sends.
+speed_levels:
+  - {xy_mps: 0.1, theta_dps: 30}
+  - {xy_mps: 0.2, theta_dps: 60}
+  - {xy_mps: 0.3, theta_dps: 90}
+
+# Software ramp on the body velocity. A tall robot on omni wheels tips or skids on a
+# step change; 1 m/s^2 still stops from the top speed in 0.3 s.
+accel_mps2: 1.0
+alpha_dps2: 180
+# The operator view's E-STOP (nodes/base_driver.py): brakes harder than the ramp above, but
+# still ramps (0.3 m/s to 0 in 0.1 s), then holds the wheels at 0 until it is released.
+estop_decel_mps2: 3.0
+
+# No command for this long and the wheels are ramped to a stop: a closed tab, a
+# dropped Wi-Fi link or a crashed browser must never leave the robot driving.
+watchdog_s: 0.3
+
+camera:
+  enabled: true
+  width: 640
+  height: 480
+  # Tried in order: a D435 on a USB 2 port can't do 30 fps at 640x480 (docs/real-robot.md).
+  fps: [30, 15]
+  jpeg_quality: 70
+
+# The ROS path: nodes/base_driver.py on /<id>/cmd_vel (the operator view's drive pad on the
+# Map view, later Nav2 and the explorer). Not the Robot view above, which has its own levels.
+ros:
+  # Index into speed_levels: the CAP on every cmd_vel. The operator view's Nav pad picks
+  # L1..L3 itself (2026-11-16) and starts each page at L1; this clamp is the backstop, at L3,
+  # the base's ceiling (max_raw).
+  speed_level: 2
+  # The pad republishes at 10 Hz while held. Rosbridge over Wi-Fi adds jitter on top of
+  # that, so the ROS path waits a little longer than the Robot view's 0.3 s before stopping.
+  watchdog_s: 0.5
+  # Stopped this long and the board is released (wheels 0, torque off), so the Robot view
+  # and `handeye pick` can open it.
+  idle_release_s: 3.0

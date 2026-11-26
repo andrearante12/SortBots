@@ -229,7 +229,7 @@
         # peer/person blobs from nodes/dynamic_obstacle_filter.py. Splitting
         # them keeps SLAM from painting robots into /map while Nav2 still
         # sees movers with aggressive clearing on the dynamic source.
-        observation_sources: depth_scan dynamic_scan
+        observation_sources: depth_scan dynamic_scan predicted_scan
         depth_scan:
           topic: /robot_0/camera/depth_static/points
           data_type: "PointCloud2"
@@ -250,6 +250,34 @@
           raytrace_max_range: 5.0
           # Shorter persistence than static: once the peer leaves the frustum
           # raytrace clears marks quickly on the next empty/clearing cloud.
+          observation_persistence: 0.0
+          expected_update_rate: 0.0
+        # Where the movers WILL be: nodes/obstacle_detector.py sweeps each
+        # moving track's footprint 1.5 s ahead along its Kalman velocity, so
+        # the controller routes behind a walker instead of through the floor
+        # they are about to occupy. LOCAL costmap only — a 1-2 s claim has no
+        # place in the global plan. The cloud is in base_link (range is
+        # measured from the cloud frame's origin) and arrives every detector
+        # frame, EMPTY when nothing moves: with observation_persistence 0 the
+        # buffer keeps only the latest message, so the empty cloud is what
+        # retires a ribbon. clearing: false — raytracing from base_link to a
+        # predicted point would clear the real obstacles between. The layer
+        # applies every clearing source before any marking one in an update
+        # (nav2_costmap_2d 1.3.12 ObstacleLayer::updateBounds), so depth_scan's
+        # raytrace can't erase these marks within a cycle. These marks are
+        # lethal like any other: prediction biases the plan, and the collision
+        # monitor on depth_static stays the safety floor. Turn the source off
+        # with predict_cloud: false in configs/obstacle_detector.yaml (the
+        # topic then never publishes and the layer just sees no observations).
+        predicted_scan:
+          topic: /robot_0/predicted_obstacles
+          data_type: "PointCloud2"
+          marking: true
+          clearing: false
+          max_obstacle_height: 1.5
+          min_obstacle_height: 0.05
+          obstacle_max_range: 4.0
+          raytrace_max_range: 5.0
           observation_persistence: 0.0
           expected_update_rate: 0.0
       inflation_layer:

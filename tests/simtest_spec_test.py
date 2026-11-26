@@ -16,13 +16,13 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from simtest import report, spec, world  # noqa: E402
+from simtest import clip, plain, report, spec, world  # noqa: E402
 from simtest.probe import ProbeCore  # noqa: E402
 
 BASE = {
     "name": "unit",
     "scenario": "moving_obstacles",   # fresh map: no saved-map dependency in unit tests
-    "overrides": {"world": "aisle_crossing"},
+    "overrides": {"world": "person_crossing"},
     "warmup_s": 2,
     "goals": [{"robot": "robot_0", "pose": [-8.0, 3.0, 0.0], "timeout_s": 30},
               {"robot": "robot_0", "waypoint": "shelf_a", "at_s": 50}],
@@ -71,6 +71,44 @@ def test_committed_tests_validate(name):
     assert t["variants"] and all(label for label, _ in t["variants"])
 
 
+def test_every_test_case_names_its_section():
+    missing = [t["name"] for t in spec.list_tests() if t["section"] == spec.DEFAULT_SECTION]
+    assert missing == []
+
+
+def test_every_listed_test_reads_in_plain_words():
+    """The Tests tab shows these to whoever is at the console: one sentence on what it
+    tests, and every pass criterion as a sentence rather than the raw check."""
+    for t in spec.listed_tests():
+        if t["status"] != "ready":
+            continue                    # a saved map this machine doesn't have
+        assert t["description"].count(". ") == 0 and len(t["description"]) < 130, t["name"]
+        assert t["passes_when"], t["name"]
+        raw = [c for c in t["passes_when"] if any(op in c for op in ("==", ">=", "<=", "!="))]
+        assert not raw, (t["name"], raw)
+
+
+def test_a_sentence_only_claims_what_the_threshold_scores():
+    clearance = {"metric": "clearance", "params": {}}
+    assert plain.sentence(clearance, "contacts", "eq", 0) == "Never touches a walker"
+    assert plain.sentence(clearance, "contacts", "eq", 2) is None
+    assert plain.sentence({"metric": "clearance", "params": {"actors": [], "props": True}},
+                          "contacts", "eq", 0) == "Never touches a crate, barrel or pallet"
+    goals = {"metric": "goals", "params": {}}
+    assert plain.sentence(goals, "success_rate", "gte", 1.0) == "Reaches every goal"
+    assert plain.sentence(goals, "success_rate", "gte", 0.8) == "Reaches at least 80% of its goals"
+    assert plain.sentence(goals, "path_m", "lte", 9) is None
+
+
+def test_clips_cover_the_whole_run_and_follow_only_without_a_framed_world():
+    frames = list(range(1000))
+    picks = clip.pick_frames(frames, 80)
+    assert len(picks) == 80 and picks[0] == 0 and picks[-1] == 999
+    assert clip.pick_frames(frames[:5], 80) == frames[:5]
+    assert clip.follow_for({"robots": ["robot_0"], "world": None}) == "robot_0"
+    assert clip.follow_for({"robots": ["robot_0"], "world": {"view": {"eye": [0, 0, 1]}}}) is None
+
+
 def test_list_tests_reports_every_file():
     names = {t["name"]: t for t in spec.list_tests()}
     assert set(names) == {p.stem for p in spec.TESTS_DIR.glob("*.yaml")}
@@ -85,7 +123,7 @@ def test_resolves_waypoint_goal_and_robots():
     t = spec.validate(raw())
     label, r = t["variants"][0]
     assert label == "base" and r["robots"] == ["robot_0"]
-    assert r["world"]["name"] == "aisle_crossing"
+    assert r["world"]["name"] == "person_crossing"
     assert r["goals"][1]["pose"][:2] == [-4.5, 5.5] and r["goals"][1]["at_s"] == 50
 
 
@@ -129,11 +167,11 @@ def test_named_waypoints_need_a_saved_map():
 
 def test_variants_resolve_independently():
     t = spec.validate(raw(variants=[
-        {"label": "cross", "set": {"overrides.world": "aisle_crossing"}},
-        {"label": "head_on", "set": {"overrides.world": "aisle_head_on", "stop.sim_s": 40}}]))
+        {"label": "cross", "set": {"overrides.world": "person_crossing"}},
+        {"label": "head_on", "set": {"overrides.world": "person_head_on", "stop.sim_s": 40}}]))
     (l1, a), (l2, b) = t["variants"]
     assert (l1, l2) == ("cross", "head_on")
-    assert a["world"]["name"] == "aisle_crossing" and b["world"]["name"] == "aisle_head_on"
+    assert a["world"]["name"] == "person_crossing" and b["world"]["name"] == "person_head_on"
     assert b["stop"]["sim_s"] == 40 and a["stop"]["sim_s"] == 100
 
 
@@ -155,10 +193,10 @@ class FakeRecorder:
 
 
 def _gt(sim, wt, running=True, x=-7.15, y=11.62):
-    return {"t": sim, "wt": wt, "running": running, "world": "aisle_crossing",
+    return {"t": sim, "wt": wt, "running": running, "world": "person_crossing",
             "robots": {"robot_0": {"x": x, "y": y, "yaw": 0.0}},
             "actors": {"walker_0": world.pose_at(
-                world.load("aisle_crossing")["actors"][0]["path"], wt)}}
+                world.load("person_crossing")["actors"][0]["path"], wt)}}
 
 
 def _resolved_json(r):
@@ -292,3 +330,24 @@ def test_report_flags_mixed_metric_versions():
     a, b = _result("a", 0, True, 0), _result("a", 1, True, 0)
     b["score"]["metrics"][0]["version"] = 2
     assert report.version_notes([a, b])
+
+
+def test_a_passing_clip_wins_over_a_preview(tmp_path, monkeypatch):
+    monkeypatch.setattr(clip, "MEDIA_DIR", tmp_path)
+    assert spec._clip_of("t") == (None, None)
+    clip.preview_path("t").write_bytes(b"GIF89a")
+    assert spec._clip_of("t") == (f"{tmp_path.name}/t.preview.gif", "preview")
+    clip.media_path("t").write_bytes(b"GIF89a")
+    assert spec._clip_of("t") == (f"{tmp_path.name}/t.gif", "pass")
+
+
+def test_clip_view_fixes_the_clip_camera():
+    view = {"eye": [0.0, 0.0, 9.0], "target": [1.0, 2.0, 0.0]}
+    assert spec._clip_view(None) is None
+    assert spec._clip_view(view) == view
+    with pytest.raises(spec.SpecError, match="clip_view"):
+        spec._clip_view({"eye": [0, 0]})
+    resolved = {"robots": ["robot_0"], "world": None, "clip_view": view}
+    assert clip.follow_for(resolved) is None
+    cmd = clip.capture_cmd(Path("/x"), resolved)
+    assert "--eye=0.0,0.0,9.0 --target=1.0,2.0,0.0" in cmd and "--follow" not in cmd

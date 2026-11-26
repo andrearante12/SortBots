@@ -25,9 +25,9 @@
 #   scripts/sim_ctl.sh stop --save-map NAME # ...saving the map into maps/ first
 #   scripts/sim_ctl.sh stop --save-map NAME --splat
 #                                         # ...then queue a Gaussian splat of it on
-#                                         # the splat worker (docs/splat.md)
+#                                         # the splat worker (docs/real-robot.md)
 #
-# Saved maps (the library at maps/, see maps/README.md) are managed by
+# Saved maps (the library at maps/, see docs/running.md) are managed by
 # scripts/maps.sh; `stop --save-map NAME` is the one-gesture wrapper, since a
 # complete entry needs the grid captured while the stack is up and the pose
 # graph copied once it's down. Load one back with:

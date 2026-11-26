@@ -6,7 +6,7 @@ nodes/map_fuse.py's "occupied beats free": in a map with no central owner,
 that rule means a box that was moved stays in every robot's map forever,
 because no later "free" can overrule an earlier "occupied".
 
-Sharing follows the commsim design brief (commsim/docs/brief.md, "Obstacles
+Sharing follows the commsim design brief (commsim/docs/brief.md@6501799, "Obstacles
 and maps"):
   * the floor is cut into square tiles; a robot publishes only the cells ITS
     OWN sensing changed (MapUpdate), per tile, with a per-(robot, tile)

@@ -69,6 +69,7 @@ from simtest import report as simtest_report
 from simtest import spec as simtest_spec
 from simtest import world as simtest_world
 from simtest_runner import SimtestRunner
+from drive_proxy import DriveProxy
 import fleetsim_runner
 # The fleet replay (Tests tab -> Fleet sim runs): fleetsim's recorded runs,
 # read-only. fleetsim/replay.py is stdlib + simtest; launching is fleetsim_runner's.
@@ -143,6 +144,18 @@ TESTS: SimtestRunner | None = None
 # the Jetson a fleet sim would take CPU from the robot it is running on.
 FLEET: fleetsim_runner.FleetsimRunner | None = None
 
+# The Drive view's bridge to the real base and D435 (webui/drive_proxy.py). None unless
+# --drive: these routes move a physical robot, and this server has no authentication and
+# may be on a public Funnel URL (module docstring), so they are opt-in on the one machine
+# the robot is plugged into, and answer only a browser ON that machine (_drive_allowed).
+DRIVE: DriveProxy | None = None
+
+# Headers a reverse proxy adds. Tailscale Serve/Funnel connect from 127.0.0.1, so a
+# loopback peer alone does not prove the browser is local: a request that came through
+# one of them is refused by the drive routes.
+PROXY_HEADERS = ("X-Forwarded-For", "Forwarded", "X-Real-IP", "Tailscale-User-Login",
+                 "Tailscale-Funnel-Request")
+
 # sim | real — which platform's scenarios this console lists and can start.
 # Set by main() from --platform (default: session_mod.detect_platform()).
 PLATFORM = "sim"
@@ -158,6 +171,28 @@ def _read_comms_gateways() -> dict:
     except (OSError, ValueError):
         return {}
     return raw if isinstance(raw, dict) else {}
+
+
+CONSOLES_FILE = Path(__file__).resolve().parent.parent / "configs" / "consoles.yaml"
+
+
+def _load_consoles(path: Path | None = None) -> list[dict]:
+    """configs/consoles.yaml: one entry per backend machine, for the header's SIM/REAL menu.
+    Entries without a name, an http(s) url and a sim/real platform are dropped: the page
+    turns each into a link."""
+    try:
+        raw = yaml.safe_load((path or CONSOLES_FILE).read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return []
+    out = []
+    for c in raw.get("consoles") or []:
+        if not isinstance(c, dict):
+            continue
+        name, url, plat = c.get("name"), c.get("url"), c.get("platform")
+        if isinstance(name, str) and isinstance(url, str) and url.startswith(("http://", "https://")) \
+                and plat in session_mod.PLATFORMS:
+            out.append({"name": name, "url": url, "platform": plat})
+    return out
 
 
 def _load_comms_gateway() -> dict:
@@ -222,6 +257,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_scenarios()
         elif route == "/api/maps":
             self._serve_maps()
+        elif route == "/api/map/mode":
+            self._with_control(self._serve_map_mode)
         elif route.startswith("/api/maps/") and route.endswith("/db"):
             self._serve_map_db(route[len("/api/maps/"):-len("/db")])
         elif route == "/api/demo_tasks":
@@ -230,6 +267,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_splat_config()
         elif route == "/api/comms_gateway":
             self._serve_json(_load_comms_gateway())
+        elif route == "/api/consoles":
+            self._serve_json({"platform": PLATFORM, "consoles": _load_consoles()})
         elif route == "/api/version":
             now = _git_state()
             self._serve_json({**now, "started": _STARTED,
@@ -243,7 +282,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         elif route == "/api/worlds":
             self._serve_json({"worlds": simtest_world.list_worlds()})
         elif route == "/api/tests":
-            self._serve_json({"tests": simtest_spec.list_tests(),
+            self._serve_json({"tests": simtest_spec.listed_tests(),
                               "metrics": simtest_metrics.catalog(),
                               "control": TESTS is not None})
         elif route == "/api/tests/results":
@@ -260,6 +299,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_json({**fleetsim_runner.catalog(), "control": FLEET is not None})
         elif route == "/api/fleetsim/launch":
             self._with_fleet(lambda: self._serve_run_state(FLEET))
+        elif route == "/api/drive":
+            self._serve_drive_state()
+        elif route == "/api/drive/frame":
+            self._with_drive(self._serve_drive_frame)
         elif route == "/":
             # The operator view is the only GUI (the per-robot dashboard,
             # index.html + app.js, was removed 2026-10-23).
@@ -292,6 +335,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_control(self._clear_map)
         elif route == "/api/map/load":
             self._with_control(self._load_map)
+        elif route == "/api/map/mode":
+            self._with_control(self._set_map_mode)
         elif route == "/api/tests/run":
             self._with_tests(self._start_test)
         elif route == "/api/tests/cancel":
@@ -300,8 +345,69 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_fleet(self._start_fleetsim)
         elif route == "/api/fleetsim/cancel":
             self._with_fleet(lambda: self._serve_json(FLEET.cancel()))
+        elif route == "/api/drive/start":
+            self._with_drive(lambda: self._serve_json(DRIVE.start()))
+        elif route == "/api/drive/stop":
+            self._with_drive(lambda: self._serve_json(DRIVE.stop()))
+        elif route == "/api/drive/cmd":
+            self._with_drive(self._drive_cmd)
+        elif route == "/api/drive/robot/start":
+            self._with_drive(lambda: self._serve_json(DRIVE.start_robot()))
+        elif route == "/api/drive/robot/stop":
+            self._with_drive(lambda: self._serve_json(DRIVE.stop_robot()))
+        elif route == "/api/drive/pick/start":
+            self._with_drive(lambda: self._serve_json(DRIVE.start_pick()))
+        elif route == "/api/drive/pick/stop":
+            self._with_drive(lambda: self._serve_json(DRIVE.stop_pick()))
+        elif route == "/api/drive/pick":
+            self._with_drive(lambda: self._serve_json(DRIVE.pick()))
+        elif route == "/api/drive/abort":
+            self._with_drive(lambda: self._serve_json(DRIVE.abort()))
         else:
             self._serve_error(404, f"no such endpoint: {route}")
+
+    # -- Drive view (real base + D435, webui/drive_proxy.py) ----------------
+
+    def _drive_allowed(self) -> str | None:
+        """None if this request may drive the robot, else why not."""
+        if DRIVE is None:
+            return "drive is off: start serve.py with --drive on the machine the robot is plugged into"
+        if self.client_address[0] not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            return "drive answers only a browser on the robot's own machine (localhost)"
+        if any(self.headers.get(h) for h in PROXY_HEADERS):
+            return "drive is not available through a proxy or Funnel URL: open http://localhost:<port>/"
+        return None
+
+    def _with_drive(self, fn) -> None:
+        why = self._drive_allowed()
+        if why:
+            self._serve_error(403, why)
+            return
+        fn()
+
+    def _serve_drive_state(self):
+        why = self._drive_allowed()
+        if why:
+            self._serve_json({"enabled": False, "reason": why})
+            return
+        self._serve_json({"enabled": True, **DRIVE.state()})
+
+    def _serve_drive_frame(self):
+        jpeg = DRIVE.frame()
+        if jpeg is None:
+            self._serve_error(503, "no camera frame")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(jpeg)))
+        self.end_headers()
+        self.wfile.write(jpeg)
+
+    def _drive_cmd(self):
+        body = self._read_json_body()
+        if body is None:
+            return
+        self._serve_json(DRIVE.cmd(body.get("x", 0), body.get("y", 0), body.get("w", 0)))
 
     # -- config endpoints --------------------------------------------------
 
@@ -701,6 +807,28 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except OSError as exc:
             self._serve_error(500, f"failed to clear map: {exc}")
 
+    def _session_id(self):
+        return (SESSIONS.status() or {}).get("session_id")
+
+    def _serve_map_mode(self):
+        """{"mode": "localize" | "mapping" | null}: null = never switched in this session, so
+        whatever the scenario started it in (the session's run.localize)."""
+        rid = parse_qs(urlsplit(self.path).query).get("robot_id", ["robot_0"])[0]
+        self._serve_json({"mode": session_mod.map_mode(rid, self._session_id()), "robot_id": rid})
+
+    def _set_map_mode(self):
+        """Localize only <-> mapping, live (RTAB-Map's set_mode_* services)."""
+        body = self._read_json_body()
+        if body is None:
+            return
+        try:
+            self._serve_json(session_mod.set_map_mode_blocking(
+                str(body.get("mode", "")), body.get("robot_id") or "robot_0", self._session_id()))
+        except maps_lib.MapError as exc:
+            self._serve_error(400, str(exc))
+        except OSError as exc:
+            self._serve_error(500, f"failed to switch the map mode: {exc}")
+
     def _load_map(self):
         """Load a library entry into the running RTAB-Map (from a copy)."""
         body = self._read_json_body()
@@ -711,8 +839,11 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_error(400, "name must be a string")
             return
         try:
-            self._serve_json(session_mod.load_map_blocking(
-                name, body.get("robot_id") or "robot_0"))
+            out = session_mod.load_map_blocking(name, body.get("robot_id") or "robot_0")
+            if body.get("mode") in session_mod.MAP_MODES:
+                out.update(session_mod.set_map_mode_blocking(
+                    body["mode"], out["robot_id"], self._session_id()))
+            self._serve_json(out)
         except maps_lib.MapError as exc:
             self._serve_error(400, str(exc))
         except OSError as exc:
@@ -869,7 +1000,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
-    global SESSIONS, PLATFORM, TESTS, FLEET
+    global SESSIONS, PLATFORM, TESTS, FLEET, DRIVE
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8081)
@@ -883,6 +1014,11 @@ def main() -> None:
         "--control", action="store_true",
         help="enable the Scenarios tab's start/stop API (see this file's docstring)",
     )
+    parser.add_argument(
+        "--drive", action="store_true",
+        help="enable the Drive view: live D435 + gamepad driving of the real omni base "
+             "(scripts/drive_bridge.py in the lerobot env; localhost browsers only, docs/drive.md)",
+    )
     args = parser.parse_args()
 
     PLATFORM = args.platform or session_mod.detect_platform()
@@ -891,6 +1027,8 @@ def main() -> None:
         if PLATFORM == "sim":
             TESTS = SimtestRunner(session_mod.clean_env)
             FLEET = fleetsim_runner.FleetsimRunner(session_mod.clean_env)
+    if args.drive:
+        DRIVE = DriveProxy()
 
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
     mode = "control" if args.control else "read-only"
@@ -899,6 +1037,11 @@ def main() -> None:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        if DRIVE is not None:
+            DRIVE.stop()  # wheels to 0, torque off, bus and camera released
+            if DRIVE.pick_running():
+                DRIVE.stop_pick()  # a pick started from the page: its own quit, not a hang-up
 
 
 if __name__ == "__main__":

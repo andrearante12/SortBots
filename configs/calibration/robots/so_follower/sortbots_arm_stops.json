@@ -1,0 +1,26 @@
+{
+ "time": "2026-11-15 20:55:02",
+ "raw": {
+  "shoulder_pan": [
+   734,
+   3461
+  ],
+  "shoulder_lift": [
+   657,
+   3234
+  ],
+  "elbow_flex": [
+   932,
+   3122
+  ],
+  "wrist_flex": [
+   770,
+   3262
+  ],
+  "wrist_roll": [
+   0,
+   4095
+  ]
+ },
+ "note": "read off the measure screen (Enter didn't reach the tool)"
+}

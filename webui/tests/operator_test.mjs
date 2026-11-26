@@ -36,12 +36,14 @@ const SCREENSHOT_DIR = args.includes('--screenshot')
 const ROSLIB_STUB = `
 window.__topics = {}; window.__published = []; window.__ops = []; window.__services = [];
 window.__emit = (name, msg) => (window.__topics[name] || []).forEach((cb) => cb(msg));
+window.__noAutoOpen = true; // the card checks below open and close them by hand
 window.ROSLIB = {
   Ros: function () { this.on = () => {}; this.connect = () => {}; this.close = () => {};
                      this.callOnConnection = (op) => window.__ops.push(op); },
   Topic: function (o) { this.name = o.name;
-    this.subscribe = (cb) => { (window.__topics[o.name] = window.__topics[o.name] || []).push(cb); };
-    this.unsubscribe = () => {}; this.advertise = () => {};
+    let mine = null;
+    this.subscribe = (cb) => { mine = cb; (window.__topics[o.name] = window.__topics[o.name] || []).push(cb); };
+    this.unsubscribe = () => { if (mine && window.__topics[o.name]) window.__topics[o.name] = window.__topics[o.name].filter((x) => x !== mine); }; this.advertise = () => {};
     this.publish = (m) => window.__published.push({ topic: o.name, msg: m }); },
   Message: function (d) { Object.assign(this, d); },
   Service: function (o) { this.callService = (req) => window.__services.push({ name: o.name, req }); },
@@ -64,6 +66,7 @@ window.fetch = (url, opts) => {
   }
   if (u.startsWith('/api/session') && !u.startsWith('/api/session/') && window.__fakeSession) return json(window.__fakeSession);
   if (u.startsWith('/api/version') && window.__fakeVersion) return json(window.__fakeVersion);
+  if (u.startsWith('/api/consoles') && window.__fakeConsoles) return json(window.__fakeConsoles);
   if (u.startsWith('/api/robots') && window.__fakeRobots) return json({ default: window.__fakeRobots[0], robots: window.__fakeRobots });
   // Stop all's dialog: record, never stop anything real.
   if ((u.startsWith('/api/session/stop') || u.startsWith('/api/session/finish')) && opts && opts.method === 'POST') {
@@ -91,6 +94,25 @@ window.fetch = (url, opts) => {
     return json(window.__fleetRun);
   }
   if (u.startsWith('/api/fleetsim/cancel')) { window.__fleetRun = { ...window.__fleetRun, running: false, exit: 130, verdict: 'STOPPED' }; return json(window.__fleetRun); }
+  // The Drive view (operator_drive.js): a fake bridge, seeded from sessionStorage before
+  // a load because the page asks /api/drive as it loads. Never the real serve.py --drive.
+  if (u.startsWith('/api/drive')) {
+    if (window.__fakeDrive === undefined) window.__fakeDrive = JSON.parse(sessionStorage.getItem('__fakeDrive') || 'null');
+    const d = window.__fakeDrive;
+    if (!d) return json({ enabled: false, reason: 'drive is off' });
+    window.__drivePosts = window.__drivePosts || [];
+    if (u.startsWith('/api/drive/cmd')) { window.__drivePosts.push({ t: performance.now(), ...JSON.parse(opts.body) }); return json({ ok: true }); }
+    if (u.startsWith('/api/drive/robot/start')) {
+      if (d.arm_board) { window.__pickStarted = true; Object.assign(d, { pick_starting: true, pick_log: ['loading the camera'] }); return json({ ok: true, starting: true, mode: 'arm' }); }
+      Object.assign(d, d.onStart || {}, { running: true, note: "The arm isn't plugged in: camera and wheels only." }); return json({ ok: true, mode: 'drive' });
+    }
+    if (u.startsWith('/api/drive/robot/stop')) {
+      if (d.backend === 'handeye' || d.pick_starting) window.__pickStopped = true; else window.__driveStopped = true;
+      Object.assign(d, { running: false, backend: undefined, pick: undefined, pick_starting: false, note: null }); return json({ ok: true });
+    }
+    if (u.startsWith('/api/drive/pick') || u.startsWith('/api/drive/abort')) { (window.__drivePicks = window.__drivePicks || []).push(u.split('/').pop()); return json({ ok: true }); }
+    return json(d);
+  }
   return realFetch(url, opts);
 };
 window.confirm = () => true;
@@ -198,7 +220,9 @@ async function main() {
                { cwd: REPO_ROOT, env: { ...process.env, SORTBOTS_SESSIONS_DIR: sessionsDir, FLEETSIM_RESULTS_DIR: fleetDir,
                  // The gateway pin is saved by the real serve.py: never into data/.
                  SORTBOTS_COMMS_GATEWAY: path.join(sessionsDir, 'comms_gateway.json') } });
-  await waitFor(async () => (await fetch(`http://127.0.0.1:${PORT}/operator.html`)).ok, { what: 'serve.py' });
+  // Read the body, not just .ok: an unread response left undici's parser paused, and once the page
+  // outgrew its buffer the socket's end tripped an assert inside undici (node 24, 2026-11-16).
+  await waitFor(async () => { const r = await fetch(`http://127.0.0.1:${PORT}/operator.html`); await r.arrayBuffer(); return r.ok; }, { what: 'serve.py' });
   const roster = (await (await fetch(`http://127.0.0.1:${PORT}/api/robots`)).json()).robots || [];
   check('roster has at least two robots', roster.length >= 2, roster.join(','));
   const [r0, r1] = roster;
@@ -228,6 +252,11 @@ async function main() {
       return cdpApi.send('Fetch.fulfillRequest', { requestId, responseCode: 200,
         responseHeaders: [{ name: 'Content-Type', value: 'application/javascript' }],
         body: Buffer.from(ROSLIB_STUB).toString('base64') });
+    }
+    if (request.url.includes('/api/drive/frame')) { // a 1x1 picture: the Drive view's camera
+      return cdpApi.send('Fetch.fulfillRequest', { requestId, responseCode: 200,
+        responseHeaders: [{ name: 'Content-Type', value: 'image/png' }],
+        body: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' });
     }
     if (request.url.includes('/snapshot') || request.url.includes('fonts.googleapis')) {
       return cdpApi.send('Fetch.failRequest', { requestId, errorReason: 'Failed' });
@@ -268,16 +297,29 @@ async function main() {
     await sleep(1500);
 
     // -- nothing running --------------------------------------------------------
-    check(`${vp.label}: no session shows the empty state`, await visible('#empty') && (await $text('#empty-title')) === 'No session running');
-    check(`${vp.label}: header says no session`, (await $text('#s-label')) === 'No session', await $text('#s-label'));
+    check(`${vp.label}: no session shows the empty state`, await visible('#empty') && (await $text('#empty-title')) === 'Simulation not running');
+    check(`${vp.label}: header says the sim is off`, (await $text('#s-label')) === 'Sim not running', await $text('#s-label'));
     check(`${vp.label}: no mode on the session chip without a session`, (await page.eval(`document.getElementById('session-chip').dataset.mode || ''`)) === '');
     check(`${vp.label}: page does not scroll`, await page.eval(`document.documentElement.scrollWidth <= innerWidth && document.documentElement.scrollHeight <= innerHeight`));
+    check(`${vp.label}: every map control fits the top bar, Comms included`,
+      await page.eval(`document.getElementById('comms-toggle').getBoundingClientRect().right <= document.getElementById('mode-strip').getBoundingClientRect().right + 1`));
+    if (await visible('#view-more')) {
+      await click('#view-more');
+      check(`${vp.label}: the view options open from the top bar`, await page.eval(`getComputedStyle(document.getElementById('view-opts')).display === 'flex'`));
+      await click('#view-more');
+      check(`${vp.label}: ... and close again`, await page.eval(`getComputedStyle(document.getElementById('view-opts')).display === 'none'`));
+    }
     await shot(`${vp.label}-empty`);
 
     // -- session panel (scenarios.js, reused) ------------------------------------
+    await click('#empty-test');
+    await sleep(500);
+    check(`${vp.label}: Run a test opens the Tests tab`, await visible('#session') && await visible('#tests-pane') && !(await visible('#launch-form')));
+    await click('#sp-x');
+    await sleep(200);
     await click('#empty-go');
     await sleep(800);
-    check(`${vp.label}: Start a session opens the session panel`, await visible('#session') && await visible('#launch-form'));
+    check(`${vp.label}: Start simulation opens the session panel, on Launch whatever tab was last open`, await visible('#session') && await visible('#launch-form'));
     check(`${vp.label}: launch form is filled from the API`, await page.eval(`document.querySelectorAll('#lf-preset option').length > 1`));
     check(`${vp.label}: Start is wired (not disabled by a missing console)`, await page.eval(`!document.getElementById('lf-start').disabled`));
     check(`${vp.label}: with no session the panel is just the form`, await visible('#launch-form') && !(await visible('#session-pane')) && !(await visible('#lf-command')) && !(await visible('#lf-summary')));
@@ -324,7 +366,54 @@ async function main() {
     await page.eval(`window.__operator.cams.get(${JSON.stringify(r0)}).mode = 'rgb'`); // the last pick is remembered across loads
     await click(`#fleet .robot[data-id="${r0}"] [data-cam-mode="depth"]`);
     check(`${vp.label}: the camera tile switches to depth`, await page.eval(`window.__operator.cams.get(${JSON.stringify(r0)}).mode === 'depth' && document.querySelector('#fleet .robot[data-id="${r0}"] [data-cam-mode="depth"]').classList.contains('on')`));
+    await click(`#fleet .robot[data-id="${r0}"] [data-cam-mode="split"]`);
+    await sleep(100);
+    const panes = JSON.parse(await page.eval(`JSON.stringify([...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')].map((p) => ({ w: p.offsetWidth, msg: p.textContent })))`));
+    check(`${vp.label}: split shows the camera and the depth`, panes.length === 2 && panes.every((p) => p.w > 0), JSON.stringify(panes));
+    check(`${vp.label}: split streams both feeds`, /camera/.test(panes[0].msg) && /depth/.test(panes[1].msg), JSON.stringify(panes));
+    check(`${vp.label}: split stacks them vertically`, await page.eval(`(() => { const p = [...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')]; return p[0].offsetLeft === p[1].offsetLeft && p[0].offsetTop < p[1].offsetTop; })()`));
+    await emit('/sim/world', { data: JSON.stringify({ world: 't', title: 't', props: [], actors: [], marks: [], packages: [{ id: 'pkg_0', label: 'b', size: [0.1, 0.1, 0.1], color: [0.7, 0.6, 0.4], magnet_face: '+x', z: 0, marker: 0 }] }) });
+    await emit(`/${r0}/pick_status`, { data: JSON.stringify({ phase: 'dock', target: [-6.5, 11.49, 1.0] }) });
+    await emit(`/${r0}/packages`, { data: JSON.stringify({ w: 848, h: 480, plates: [
+      { x: -6.501, y: 11.487, z: 1.0, nx: -1, ny: 0, nz: 0, conf: 0.97, px: [380, 300, 90, 60], uv: [425, 330], range_m: 0.742, age_s: 0, marker: 0 },
+      { x: -6.0, y: 12.3, z: 0.8, nx: -1, ny: 0, nz: 0, conf: 0.3, px: [100, 40, 30, 20], uv: [115, 50], range_m: 2.1, age_s: 0 }] }) });
+    await emit(`/${r0}/pick_status`, { data: JSON.stringify({ phase: 'dock', mode: 'manipulation', target: [-6.5, 11.49, 1.0] }) });
+    await emit(`/${r0}/boxes`, { data: JSON.stringify({ w: 848, h: 480, boxes: [{ x: -6.43, y: 11.487, z: 1.0, yaw: 0, size: [0.14, 0.14, 0.1], support_z: 0.95, conf: 1, px: [340, 250, 180, 150] }] }) });
+    await sleep(150);
+    const percSel = `#fleet .robot[data-id="${r0}"] .perc`;
+    check(`${vp.label}: the panel names the manipulation state and the box geometry found`, /Manipulation/.test(await $text(`${percSel} [data-p="mode"]`)) && /-6\.430/.test(await $text(`${percSel} [data-p="box"]`)), await $text(`${percSel} dl`));
+    check(`${vp.label}: the detection panel shows in a package world`, await visible(percSel));
+    check(`${vp.label}: it locks the marker the pick is aiming at, and drops the colour guess`, /On target/.test(await $text(`${percSel} .ph`)) && /1 seen/.test(await $text(`${percSel} .ph`)), await $text(`${percSel} .ph`));
+    check(`${vp.label}: it names the ArUco marker`, /ArUco 0/.test(await $text(`${percSel} [data-p="marker"]`)), await $text(`${percSel} [data-p="marker"]`));
+    check(`${vp.label}: it spells out pixel, depth and map`, /425, 330/.test(await $text(`${percSel} [data-p="img"]`)) && /0\.742 m/.test(await $text(`${percSel} [data-p="depth"]`)) && /-6\.501/.test(await $text(`${percSel} [data-p="map"]`)), await $text(`${percSel} dl`));
+    check(`${vp.label}: the plate is drawn on the camera tile in green`, await page.eval(`(() => { const c = window.__operator.cams.get(${JSON.stringify(r0)}).overlay, d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; for (let i = 0; i < d.length; i += 4) if (d[i + 1] > 150 && d[i] < 90 && d[i + 3] > 200) return true; return false; })()`));
+    await emit('/sim/world', { data: JSON.stringify({ world: null, props: [], actors: [], packages: [], marks: [] }) });
+    await emit('/sim/ground_truth', { data: JSON.stringify({ t: 1, wt: 1, robots: {}, actors: {}, head: { [r0]: { pan: 0.1, tilt: 0.5 } } }) });
+    await sleep(100);
+    const headSel = `#fleet .robot[data-id="${r0}"] .headctl`;
+    check(`${vp.label}: the head sliders appear once the sim reports the head`, await visible(headSel));
+    check(`${vp.label}: the head readout shows degrees and radians`, /^28\.6° · 0\.50 rad$/.test(await $text(`${headSel} [data-head-out="tilt"]`)), await $text(`${headSel} [data-head-out="tilt"]`));
+    await page.eval(`(() => { const s = document.querySelector('${headSel} [data-head="tilt"]'); s.value = '0.8'; s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    const headCmd = JSON.parse(await page.eval(`JSON.stringify(window.__published.filter((x) => x.topic === '/${r0}/head_cmd').at(-1) || null)`));
+    check(`${vp.label}: moving a slider commands the head`, !!headCmd && headCmd.msg.name[1] === 'head_tilt_joint' && headCmd.msg.position[1] === 0.8 && headCmd.msg.position[0] === 0.1, JSON.stringify(headCmd));
+    // Unload / Save table (2026-11-20): the arm pad's reverse of Pick, one pick_request each.
+    await page.eval(`window.__published.length = 0; (() => { const el = window.__operator.cams.get(${JSON.stringify(r0)}).el; el.querySelector('[data-arm-act="unload"]').click(); el.querySelector('[data-arm-act="save_table"]').click(); })()`);
+    const pickReqs = JSON.parse(await page.eval(`JSON.stringify(window.__published.filter((x) => x.topic === '/${r0}/pick_request').map((x) => JSON.parse(x.msg.data).cmd))`));
+    check(`${vp.label}: Unload and Save table send their pick requests`, JSON.stringify(pickReqs) === '["unload","save_table"]', JSON.stringify(pickReqs));
+    await click(`#fleet .robot[data-id="${r0}"] [data-cam-mode="depth"]`);
+    await sleep(100);
+    check(`${vp.label}: leaving split shows one picture again`, (await page.eval(`[...document.querySelectorAll('#fleet .robot[data-id="${r0}"] .cam .pic')].filter((p) => p.offsetWidth).length`)) === 1);
     check(`${vp.label}: the other card keeps its own camera mode`, await page.eval(`window.__operator.cams.get(${JSON.stringify(r1)}).mode === ${JSON.stringify(r1Mode)}`));
+    // SLAM features: subscribed only while the tile's toggle is on, drawn on canvas.feat.
+    const featSubs = () => page.eval(`(window.__topics['/${r0}/odom_features'] || []).length`);
+    const featPx = () => page.eval(`(() => { const c = document.querySelector('#fleet .robot[data-id="${r0}"] canvas.feat'); const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++; return n; })()`);
+    check(`${vp.label}: no feature subscription until the toggle is on`, (await featSubs()) === 0);
+    await click(`#fleet .robot[data-id="${r0}"] [data-cam-features]`);
+    check(`${vp.label}: the Features toggle subscribes to odom_features`, (await featSubs()) === 1 && await page.eval(`document.querySelector('#fleet .robot[data-id="${r0}"] [data-cam-features]').classList.contains('on')`));
+    await emit(`/${r0}/odom_features`, { data: JSON.stringify({ w: 848, h: 480, lost: false, features: 3, matches: 2, inliers: 1, pts: [[100, 100, 12, 0], [200, 150, 12, 1], [400, 240, 12, 2]] }) });
+    check(`${vp.label}: tracked features are drawn on the camera tile`, (await featPx()) > 20);
+    await click(`#fleet .robot[data-id="${r0}"] [data-cam-features]`);
+    check(`${vp.label}: toggling off drops the subscription and clears the overlay`, (await featSubs()) === 0 && (await featPx()) === 0);
     check(`${vp.label}: a click inside a card leaves both open`, (await page.eval(`document.querySelectorAll('#fleet .robot.sel').length`)) === 2);
     await emit(`/${r0}/odom`, { twist: { twist: { linear: { x: 0.5, y: 0, z: 0 }, angular: { x: 0, y: 0, z: Math.PI / 4 } } } });
     await emit(`/${r0}/task_status`, { data: JSON.stringify({ task_id: 'tt1', state: 'NAV_TO_GOAL', queue_depth: 1, task: { task_id: 'tt1', kind: 'goto', goto: 'Dock' }, queue: [] }) });
@@ -353,7 +442,9 @@ async function main() {
     const obstacles = (moving) => ({ data: JSON.stringify({ stamp: 1, frame: `${r0}/base_link`, world_frame: null, floor_z: 0,
       w: 848, h: 480, count: 2, moving: moving ? 1 : 0, obstacles: [
         { track_id: 4, moving, speed_mps: 1.2, vel: [0, -1.2], centroid: [2.0, 0, 0.9], min: [1.9, -0.2, 0.1], max: [2.1, 0.2, 1.7],
-          extent_m: 0.4, height_m: 1.7, range_m: 1.9, bearing_deg: 0, n: 900, uv: [380, 60, 470, 470], clipped: false, hits: 8 },
+          extent_m: 0.4, height_m: 1.7, range_m: 1.9, bearing_deg: 0, n: 900, uv: [380, 60, 470, 470], clipped: false, hits: 8,
+          // Kalman look-ahead in the (base_link) world frame: 1.5 s of walking to the robot's right.
+          pos_w: [2.0, 0], cov: [0.01, 0, 0.02], pred: [[0.5, 2.0, -0.6], [1.0, 2.0, -1.2], [1.5, 2.0, -1.8]] },
         { track_id: 2, moving: false, speed_mps: 0, vel: [0, 0], centroid: [3.0, 1.0, 0.3], min: [2.9, 0.8, 0.1], max: [3.1, 1.2, 0.5],
           extent_m: 0.4, height_m: 0.5, range_m: 3.0, bearing_deg: 18, n: 200, uv: [100, 300, 200, 400], clipped: false, hits: 30 },
       ] }) });
@@ -376,7 +467,12 @@ async function main() {
     const [ax, ay] = await page.eval(`window.__operator.toPx(${ahead[0]}, ${ahead[1]})`);
     // The marker, its 1 s velocity arrow and its label, all around the obstacle.
     const near = await redPx('#map', ax, ay, 90), all = await redPx('#map');
-    check(`${vp.label}: a moving obstacle is marked on the map 2 m ahead of its robot`, near > 30 && near === all, `near=${near} all=${all}`);
+    // The 1.5 s look-ahead point: 1.8 m to the robot's right of the obstacle, in map.
+    const pend = [ahead[0] + 1.8 * Math.sin(0.5), ahead[1] - 1.8 * Math.cos(0.5)];
+    const [px, py] = await page.eval(`window.__operator.toPx(${pend[0]}, ${pend[1]})`);
+    const atPred = await redPx('#map', px, py, 10);
+    check(`${vp.label}: a moving obstacle is marked on the map 2 m ahead of its robot`, near > 30, `near=${near} all=${all}`);
+    check(`${vp.label}: ... with its predicted path drawn out to the 1.5 s point`, atPred > 3, `atPred=${atPred}`);
     check(`${vp.label}: the card counts obstacles, moving ones and the nearest`, (await f0('obst')) === '2, 1 moving · nearest 1.9 m', await f0('obst'));
     check(`${vp.label}: the camera tile boxes the obstacles`, (await redPx(`#fleet .robot[data-id="${r0}"] canvas.obst`)) > 50);
     await emit(`/${r0}/obstacle_tracks`, obstacles(false));
@@ -389,11 +485,13 @@ async function main() {
     check(`${vp.label}: ... from the camera tile`, (await redPx(`#fleet .robot[data-id="${r0}"] canvas.obst`)) === 0);
     check(`${vp.label}: ... and from the card`, (await f0('obst')) === '—', await f0('obst'));
     const tfm = await page.eval(`JSON.stringify([
-      window.__operator.obstaclesInMap({ obstacles: [{ track_id: 1, centroid: [1, 0, 0], min: [1, 0, 0], max: [1, 0, 0], vel: [1, 0] }] }, { x: 1, y: 2, yaw: Math.PI / 2 }, { yaw: 0 })[0],
-      window.__operator.obstaclesInMap({ obstacles: [{ track_id: 1, centroid: [1, 0, 0], min: [1, 0, 0], max: [1, 0, 0], vel: [1, 0] }] }, { x: 1, y: 2, yaw: Math.PI / 2 }, null)[0]])`);
+      window.__operator.obstaclesInMap({ obstacles: [{ track_id: 1, centroid: [1, 0, 0], min: [1, 0, 0], max: [1, 0, 0], vel: [1, 0], pred: [[1, 5, 0]], cov: [0.04, 0, 0.01] }] }, { x: 1, y: 2, yaw: Math.PI / 2 }, { x: 0, y: 0, yaw: 0 })[0],
+      window.__operator.obstaclesInMap({ obstacles: [{ track_id: 1, centroid: [1, 0, 0], min: [1, 0, 0], max: [1, 0, 0], vel: [1, 0], pred: [[1, 1, 0]], cov: [0.04, 0, 0.01] }] }, { x: 1, y: 2, yaw: Math.PI / 2 }, null)[0]])`);
     const [wOdom, wBase] = JSON.parse(tfm), close = (a, b) => a.every((v, i) => Math.abs(v - b[i]) < 1e-9);
     check(`${vp.label}: obstacle positions go base_link -> map, velocity stays in its world frame`, close(wOdom.at, [1, 3]) && close(wOdom.vel, [1, 0]), tfm);
     check(`${vp.label}: velocity without a world frame is rotated like a position`, close(wBase.vel, [0, 1]), tfm);
+    check(`${vp.label}: predicted points go through the world frame's pose, covariance rotates with it`,
+      close(wOdom.pred[0], [1, 5, 0]) && close(wBase.pred[0], [1, 1, 3]) && close(wBase.cov, [0.01, 0, 0.04]), tfm);
     // That wait also outlasted ONLINE_TTL_MS for both robots; a live one keeps sending /tf.
     await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5));
     await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
@@ -406,40 +504,60 @@ async function main() {
     check(`${vp.label}: closing a card hands control back to the other open one`, (await page.eval(`window.__operator.selected`)) === r1 && (await page.eval(`document.querySelectorAll('#fleet .robot.sel').length`)) === 1);
 
     // -- scored tests: the Session panel's Tests tab, the map chip, the walkers ----------------
+    // Starting and ending a run wipes the page, and the checks after this one still want this
+    // fleet on screen: that wipe has its own section, 'new run'.
+    await page.eval(`window.sortbotsRunStarting = window.sortbotsRunEnded = () => {}`);
     await click('#session-chip');
     await sleep(300);
     await click('#sp-tabs [data-tab="tests"]');
     await sleep(900);
     check(`${vp.label}: the session panel has a Tests tab`, await visible('#tests-pane') && !(await visible('#launch-form')));
     const cards = await page.eval(`[...document.querySelectorAll('#tp-list .tp-test')].map((c) => c.dataset.name || 'invalid')`);
-    const onDisk = fs.readdirSync(path.join(REPO_ROOT, 'configs', 'tests')).filter((f) => f.endsWith('.yaml')).length;
-    check(`${vp.label}: it lists every test case in configs/tests/`, cards.length === onDisk, cards.join(','));
-    check(`${vp.label}: the smoke test is runnable here`,
-      await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"] [data-run]'); return !!c && !c.disabled; })()`));
-    const smokeTitle = await $text('#tp-list .tp-test[data-name="pipeline_smoke"] .t');
-    check(`${vp.label}: rows are numbered short names`, /^\d+Pipeline smoke$/.test(smokeTitle), smokeTitle);
+    const onDisk = fs.readdirSync(path.join(REPO_ROOT, 'configs', 'tests')).filter((f) => f.endsWith('.yaml') && !/^parked: true/m.test(fs.readFileSync(path.join(REPO_ROOT, 'configs', 'tests', f), 'utf8'))).length;
+    check(`${vp.label}: it lists every test case in configs/tests/ that isn't parked`, cards.length === onDisk, cards.join(','));
+    check(`${vp.label}: a parked test stays off the list`, !cards.includes('pick_orientations'), cards.join(','));
+    const secOf = (name) => page.eval(`document.querySelector('#tp-list .tp-test[data-name="${name}"]').closest('.tp-sec').dataset.section`);
+    check(`${vp.label}: tests sit under their sections`, (await secOf('pick_block')) === 'Pick and place' && (await secOf('crossing_yield')) === 'Obstacle avoidance', await secOf('pick_block'));
+    check(`${vp.label}: only obstacle avoidance and pick and place are listed`,
+      (await page.eval(`[...document.querySelectorAll('#tp-list .tp-sec')].map((x) => x.dataset.section).join()`)) === 'Obstacle avoidance,Pick and place');
+    check(`${vp.label}: no triangle glyphs in the list`, !/[▶▼]/.test(await $text('#tp-list')));
+    check(`${vp.label}: a test is runnable here`,
+      await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pick_block"] [data-run]'); return !!c && !c.disabled; })()`));
+    const pickTitle = await $text('#tp-list .tp-test[data-name="pick_block"] .t');
+    check(`${vp.label}: rows are numbered short names`, /^\d+Pick block$/.test(pickTitle), pickTitle);
     check(`${vp.label}: no time/variant line under the names`, !(await page.eval(`!!document.querySelector('#tp-list .tp-row .m')`)));
-    const smokeName = 'Pipeline smoke';
-    check(`${vp.label}: rows start collapsed`, !(await visible('#tp-list .tp-test[data-name="pipeline_smoke"] .tp-more')));
+    const pickName = 'Pick block';
+    check(`${vp.label}: rows start collapsed`, !(await visible('#tp-list .tp-test[data-name="pick_block"] .tp-more')));
     await click('#tp-list .tp-test[data-name="crossing_yield"] .tp-row .t');
     await sleep(100);
     const more = await $text('#tp-list .tp-test[data-name="crossing_yield"] .tp-more');
     // crossing_yield localizes on the fleet_warehouse_test library map, which is local
     // to the machines that recorded it (not in git, docs/testing.md). Without it the
     // row must say why it can't run, not what it checks; both are the page working.
-    if (fs.existsSync(path.join(REPO_ROOT, 'maps', 'fleet_warehouse_test', 'map.json'))) {
-      check(`${vp.label}: clicking a row shows what it checks`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Passes when/.test(more) && /recall ≥ 0.3/.test(more), more.slice(0, 160));
+    if (fs.existsSync(path.join(process.env.SORTBOTS_MAPS_DIR || path.join(REPO_ROOT, 'maps'), 'fleet_warehouse_test', 'map.json'))) {
+      check(`${vp.label}: clicking a row shows what it checks`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Passes when/.test(more) && /Never touches a walker/.test(more) && /at least 30% of the frames/.test(more), more.slice(0, 160));
     } else {
       check(`${vp.label}: clicking a row whose map is missing says why it can't run`, await visible('#tp-list .tp-test[data-name="crossing_yield"] .tp-more') && /Can't run here/.test(more) && /fleet_warehouse_test/.test(more), more.slice(0, 160));
     }
-    await click('#tp-list .tp-test[data-name="pipeline_smoke"] .tp-row .t');
-    await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pipeline_smoke"]'); c.querySelector('[data-repeats]').value = '2'; c.querySelector('[data-run]').click(); })()`);
+    await click('#tp-list .tp-test[data-name="pick_block"] .tp-disc');
+    await sleep(100);
+    const pickMore = await $text('#tp-list .tp-test[data-name="pick_block"] .tp-more');
+    check(`${vp.label}: the chevron opens a row and says so`, await visible('#tp-list .tp-test[data-name="pick_block"] .tp-more') &&
+      (await page.eval(`document.querySelector('#tp-list .tp-test[data-name="pick_block"] .tp-disc').getAttribute('aria-expanded')`)) === 'true');
+    check(`${vp.label}: a row opens on one sentence, then plain pass criteria`, /^\s*The robot finds the block/.test(pickMore) && /The magnet picks the block up/.test(pickMore), pickMore.slice(0, 160));
+    await shot(`${vp.label}-tests-open`);
+    check(`${vp.label}: no raw checks or file paths in it`, !/configs\/tests|≥|==|success rate/.test(pickMore), pickMore);
+    if (fs.existsSync(path.join(REPO_ROOT, 'webui', 'test_media', 'pick_block.gif'))) {
+      check(`${vp.label}: a recorded clip loads beside it`,
+        await page.eval(`(async () => { const i = document.querySelector('#tp-list .tp-test[data-name="pick_block"] .tp-clip img'); if (!i) return false; await i.decode().catch(() => {}); return i.naturalWidth > 0; })()`));
+    }
+    await page.eval(`(() => { const c = document.querySelector('#tp-list .tp-test[data-name="pick_block"]'); c.querySelector('[data-repeats]').value = '2'; c.querySelector('[data-run]').click(); })()`);
     await sleep(400);
     const posted = JSON.parse(await page.eval(`JSON.stringify(window.__testPosts)`));
-    check(`${vp.label}: Run starts that test with the chosen repeats`, posted.length === 1 && posted[0].name === 'pipeline_smoke' && posted[0].repeats === 2, JSON.stringify(posted));
+    check(`${vp.label}: Run starts that test with the chosen repeats`, posted.length === 1 && posted[0].name === 'pick_block' && posted[0].repeats === 2, JSON.stringify(posted));
     check(`${vp.label}: ... and closes the panel to watch it on the map`, !(await visible('#session')));
     check(`${vp.label}: a chip over the map names the running test and its clock`,
-      await visible('#test-chip') && (await $text('#tc-name')) === smokeName && (await $text('#tc-time')) === '1:15', `${await $text('#tc-name')} ${await $text('#tc-time')}`);
+      await visible('#test-chip') && (await $text('#tc-name')) === pickName && (await $text('#tc-time')) === '1:15', `${await $text('#tc-name')} ${await $text('#tc-time')}`);
     await shot(`${vp.label}-test-running`);
     await click('#tc-name');
     await sleep(500);
@@ -449,7 +567,7 @@ async function main() {
     check(`${vp.label}: while a test runs, the session's own Stop gives way to Stop test`,
       await page.eval(`document.querySelector('#session .card').classList.contains('testing')`) &&
       await page.eval(`getComputedStyle(document.getElementById('session-stop')).display === 'none' && getComputedStyle(document.getElementById('sp-test-note')).display !== 'none'`));
-    await page.eval(`window.__testResults = [{ dir: '20261022T190000Z_pipeline_smoke', name: 'pipeline_smoke', state: 'done', complete: true, verdict: 'FAIL', done: 1, planned: 1,
+    await page.eval(`window.__testResults = [{ dir: '20261022T190000Z_pick_block', name: 'pick_block', state: 'done', complete: true, verdict: 'FAIL', done: 1, planned: 1,
       runs: [{ ok: false, error: null, sim_s: 41.2, criteria: [{ label: 'clearance.contacts == 0', ok: false, actual: 3 }, { label: 'goals.success_rate >= 1', ok: true, actual: 1 }] }] }]`);
     await click('#sp-x');
     await click('#tc-cancel');
@@ -485,7 +603,7 @@ async function main() {
       }
       return n; })()`);
     check(`${vp.label}: no walker drawn without a sim world`, (await greenNear(1, 1, 30)) === 0);
-    await emit('/sim/world', { data: JSON.stringify({ world: 'aisle_crossing', title: 'Aisle crossing', props: [],
+    await emit('/sim/world', { data: JSON.stringify({ world: 'person_crossing', title: 'Person crossing', props: [],
       actors: [{ id: 'walker_1', label: 'walker', shape: 'cylinder', radius: 0.3, color: [0.1, 0.75, 0.2], path: [[-1, 1], [3, 1]], mode: 'pingpong' }] }) });
     await emit('/sim/ground_truth', { data: JSON.stringify({ wt: 4.2, running: true, actors: { walker_1: { x: 1, y: 1, yaw: 0, moving: true } } }) });
     await sleep(300);
@@ -493,6 +611,35 @@ async function main() {
     await shot(`${vp.label}-walker`);
     await sleep(3600); // > WORLD_TRUTH_TTL_MS with no ground truth
     check(`${vp.label}: walkers vanish when the sim stops sending ground truth`, (await greenNear(1, 1, 30)) === 0);
+
+    // Packages the magnet picks up: cardboard-coloured at their ground-truth pose, green
+    // while the magnet holds one (simtest/magnet.py; configs/worlds/pick_*.yaml).
+    const cardboardNear = (x, y, rad) => page.eval(`(() => {
+      const c = document.getElementById('map'), s = c.width / c.clientWidth, [cx, cy] = window.__operator.toPx(${x}, ${y});
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; let n = 0;
+      for (let py = 0; py < c.height; py++) for (let px = 0; px < c.width; px++) {
+        if (Math.hypot(px / s - cx, py / s - cy) > ${rad}) continue;
+        const i = (py * c.width + px) * 4;
+        if (d[i] > 175 && d[i] < 210 && d[i + 1] > 135 && d[i + 1] < 170 && d[i + 2] > 92 && d[i + 2] < 130) n++;
+      }
+      return n; })()`);
+    const packageWorld = { world: 'pick_bench', title: 'Pick bench', props: [], actors: [],
+      packages: [{ id: 'pkg_0', label: 'box A', size: [0.8, 0.6, 0.12], color: [0.76, 0.6, 0.42], magnet_face: '+x', z: 0.8 }] };
+    const packageTruth = (heldBy) => ({ t: 9, wt: 4.2, running: true, robots: {}, actors: {},
+      packages: { pkg_0: { x: 2, y: 0, z: 0.8, yaw: 0.3, held_by: heldBy } } });
+    await emit('/sim/world', { data: JSON.stringify(packageWorld) });
+    await emit('/sim/ground_truth', { data: JSON.stringify(packageTruth(null)) });
+    await sleep(300);
+    check(`${vp.label}: a package is drawn at its ground-truth pose`, (await cardboardNear(2, 0, 16)) > 40, String(await cardboardNear(2, 0, 16)));
+    check(`${vp.label}: ... and is not green while nothing holds it`, (await greenNear(2, 0, 22)) === 0, String(await greenNear(2, 0, 22)));
+    await shot(`${vp.label}-package`);
+    await emit('/sim/ground_truth', { data: JSON.stringify(packageTruth('robot_0')) });
+    await sleep(300);
+    check(`${vp.label}: ... and turns green while the magnet holds it`, (await greenNear(2, 0, 22)) > 15, String(await greenNear(2, 0, 22)));
+    await emit('/sim/ground_truth', { data: JSON.stringify({ t: 10, wt: 4.3, running: true, robots: {}, actors: {} }) });
+    await sleep(200);
+    check(`${vp.label}: a package missing from ground truth is not drawn`, (await cardboardNear(2, 0, 30)) === 0 && (await greenNear(2, 0, 30)) === 0);
+    await sleep(3400); // let the stale package world lapse (WORLD_TRUTH_TTL_MS) before the checks below
     await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); // that wait outlasted ONLINE_TTL_MS
     await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
 
@@ -795,7 +942,7 @@ async function main() {
     // -- a premapped session in the header -------------------------------------------------------------------
     await page.eval(`window.__fakeSession = { state: 'running', phase: 'running', phase_label: 'running', session_id: 's1', scenario: 'library_localize', config: { map: 'warehouse', mode: 'readonly', robots: 2 } }`);
     await sleep(3400);
-    check(`${vp.label}: running session shows in the header`, (await $text('#s-label')) === 'Session running', await $text('#s-label'));
+    check(`${vp.label}: running session shows in the header`, (await $text('#s-label')) === 'Sim running', await $text('#s-label'));
     check(`${vp.label}: a read-only saved map reads as Premapped on the session chip`, (await page.eval(`document.getElementById('session-chip').title`)).startsWith('Premapped · warehouse'), await page.eval(`document.getElementById('session-chip').title`));
     check(`${vp.label}: no mode tile in the header any more`, !(await page.eval(`!!document.getElementById('mode-tile')`)));
     check(`${vp.label}: the view toggle sits in the header`, await page.eval(`!!document.querySelector('header #view')`));
@@ -853,6 +1000,9 @@ async function main() {
     // A demo: true session (the Fleet demo preset) starts the task demo by itself, once.
     await page.eval(`window.__published.length = 0; window.__fakeSession = { ...window.__fakeSession, session_id: 's-demo', config: { ...window.__fakeSession.config, demo: true } }`);
     await sleep(3600);
+    // A new session wipes the last one's robots; this one's report in, as they would.
+    await emit('/tf', tf('map', `${r0}/base_link`, -3, 2, 0.5)); await emit('/tf', tf('map', `${r1}/base_link`, 4, -2, 3.1));
+    await sleep(600);
     check(`${vp.label}: a demo session runs the task demo by itself`, await page.eval(`localStorage.getItem('sortbots.autoDemo.s-demo') === '1'`));
     check(`${vp.label}: ...and only once per session`, await page.eval(`(() => { const n = document.getElementById('tk-demo').textContent; return n === 'Run demo' || n === 'Stop demo'; })()`));
     if ((await $text('#tk-demo')) === 'Stop demo') await click('#tk-demo');
@@ -1099,6 +1249,18 @@ async function main() {
   await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'e' }))`);
   await page.eval(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', bubbles: true }))`);
   await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'w' }))`);
+  // Arm keyboard teleop (2026-11-20): with the Arm pad up, arrows and Page Up/Down move the hand.
+  await emit(`/${r1}/arm_state`, { data: JSON.stringify({ engaged: true, state: 'holding', level: 1 }) }); await sleep(150);
+  await page.eval(`window.__operator.cams.get(${JSON.stringify(r1)}).el.querySelector('[data-padmode="arm"]').click()`); await sleep(100);
+  await page.eval(`window.__published.length = 0; window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp' })); window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown' }))`);
+  await sleep(250);
+  const armJogs = JSON.parse(await page.eval(`JSON.stringify(window.__published.filter((x) => x.topic === '/${r1}/arm_cmd').map((x) => JSON.parse(x.msg.data)))`));
+  check('arm keys: Up + Page Down jog the hand away and down, re-sent while held', armJogs.length >= 2 && armJogs.every((m) => m.jog && m.jog.out === 1 && m.jog.up === -1), JSON.stringify(armJogs.slice(0, 2)));
+  check('arm keys: and never drive the base', (await twists()).length === 0, JSON.stringify(await twists()));
+  await page.eval(`window.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowUp' })); window.dispatchEvent(new KeyboardEvent('keyup', { key: 'PageDown' }))`); await sleep(150);
+  const armLast = JSON.parse(await page.eval(`JSON.stringify(window.__published.filter((x) => x.topic === '/${r1}/arm_cmd').map((x) => JSON.parse(x.msg.data)).at(-1) || null)`));
+  check('arm keys: letting go stops the arm', !!armLast && armLast.stop === true, JSON.stringify(armLast));
+  await page.eval(`window.__operator.cams.get(${JSON.stringify(r1)}).el.querySelector('[data-padmode="drive"]').click()`);
   await shot('drive-pad');
   await page.eval(`window.__operator.select(null)`);
 
@@ -1113,6 +1275,31 @@ async function main() {
   check('branch: amber, with the restart command, when the server code is older than the checkout',
         await page.eval(`document.getElementById('build').classList.contains('stale') && /systemctl --user restart sortbots-console/.test(document.getElementById('build').title)`));
   await page.eval(`window.__fakeVersion = null; window.__operator.loadVersion()`); await sleep(200);
+
+  // -- SIM / REAL chip and the console menu -----------------------------------------------------------
+  console.log('\n--- platform chip ---');
+  await waitFor(async () => /\S/.test(await $text('#platform-label')), { what: 'the platform chip', tries: 20 });
+  check('platform: the header says SIM on a sim console', (await visible('#platform-chip')) && (await $text('#platform-label')) === 'SIM');
+  await page.eval(`window.__fakeConsoles = { platform: 'real', consoles: [
+    { name: 'Jetson', url: location.origin + '/', platform: 'real' },
+    { name: 'Workstation', url: 'http://workstation.example:8081/', platform: 'sim' }] }; window.__operator.loadConsoles()`);
+  await sleep(200);
+  check('platform: REAL, in the go colour, on the robot\'s console',
+        (await $text('#platform-label')) === 'REAL' && await page.eval(`document.getElementById('platform-chip').dataset.platform === 'real'`));
+  await page.eval(`document.getElementById('platform-chip').click()`); await sleep(100);
+  check('platform: the menu opens and marks this page, linking only the other console',
+        (await visible('#platform-pop')) && await page.eval(`(() => {
+          const here = document.querySelector('#platform-list .console.here'), links = [...document.querySelectorAll('#platform-list a.console')];
+          return here && /this page/.test(here.textContent) && links.length === 1 && links[0].href === 'http://workstation.example:8081/' && document.getElementById('platform-none').hidden;
+        })()`));
+  await page.eval(`document.body.click()`); await sleep(100);
+  check('platform: a click elsewhere closes the menu', !(await visible('#platform-pop')));
+  await page.eval(`window.__fakeConsoles = null; window.__operator.loadConsoles()`); await sleep(200);
+
+  // -- the real base's status: say why the pad doesn't move it --------------------------------------
+  await page.eval(`window.__emit('/robot_0/base_status', { data: JSON.stringify({ state: 'busy', message: 'The wheel board is in use by pid 42 (drive_bridge.py)' }) })`);
+  await sleep(150);
+  check('base: a busy wheel board is toasted with its holder', /base busy.*pid 42/.test(await page.eval(`document.body.innerText`)));
 
   // -- phones ---------------------------------------------------------------------------------------
   console.log('\n--- phone ---');
@@ -1212,7 +1399,63 @@ async function main() {
         await page.eval(`(() => { const c = document.getElementById('map'), r = c.getBoundingClientRect(); return Math.abs(c.width / (window.devicePixelRatio || 1) - r.width) < 2 && Math.abs(c.height / (window.devicePixelRatio || 1) - r.height) < 2; })()`));
   await page.eval(`document.body.style.removeProperty('--left-w')`); await sleep(200);
   check('side bars: double-click resets both', Math.abs((await widths())[0] - l0) < 2 && Math.abs((await widths())[1] - r0w) < 2, JSON.stringify(await widths()));
+  const vw = await page.eval(`innerWidth`);
+  await dragX('#rz-left', 700); await sleep(200);
+  check('side bars: the robot list can grow well past its old limit', Math.abs((await widths())[0] - (l0 + 700)) < 4, JSON.stringify(await widths()));
+  await dragX('#rz-left', vw - (l0 + 700) - 8); await sleep(200);
+  check('side bars: dragged to the edge, the robot list fills the window', (await widths())[0] === vw, `${(await widths())[0]} of ${vw}`);
+  check('side bars: the map and task list give way', await page.eval(`document.body.classList.contains('map-gone') && getComputedStyle(document.getElementById('stage')).visibility === 'hidden' && getComputedStyle(document.getElementById('right')).display === 'none'`));
+  check('side bars: nothing scrolls sideways at full width', await page.eval(`document.documentElement.scrollWidth <= innerWidth`));
+  check('side bars: Stop all stays on screen at full width', await page.eval(`(() => { const r = document.getElementById('estop').getBoundingClientRect(); return r.width > 0 && r.right <= innerWidth; })()`));
+  check('side bars: its handle stays on screen', await page.eval(`(() => { const r = document.getElementById('rz-left').getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth; })()`));
+  await load();
+  check('side bars: full width survives a reload', (await widths())[0] === vw && await page.eval(`document.body.classList.contains('map-gone')`), JSON.stringify(await widths()));
+  await dragX('#rz-left', -(vw - l0)); await sleep(300);
+  check('side bars: dragging back brings the map and its size back', await page.eval(`(() => { const c = document.getElementById('map'), r = c.getBoundingClientRect(); return !document.body.classList.contains('map-gone') && r.width > 300 && Math.abs(c.width / (window.devicePixelRatio || 1) - r.width) < 2; })()`));
   await page.eval(`localStorage.clear()`);
+
+  // -- a new run on a page that is still showing the last one --------------------------------------
+  console.log('\n--- new run ---');
+  await page.eval(`localStorage.clear()`); await load();
+  await emit('/map', { info: { width: 4, height: 4, resolution: 0.5, origin: { position: { x: 0, y: 0, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } }, data: new Array(16).fill(0) });
+  await emit('/sim/world', { data: JSON.stringify({ world: 'old', title: 'old', props: [], actors: [], marks: [], packages: [] }) });
+  await sleep(500);
+  check('new run: the last run\'s map hides the empty screen', !(await visible('#empty')));
+  await page.eval(`window.sortbotsRunStarting()`);
+  await sleep(500);
+  check('new run: the starting screen shows at once', await visible('#empty') && /Starting up/.test(await $text('#empty-title')), await $text('#empty-title'));
+  check('new run: with a progress bar', await visible('#empty-boot'));
+  check('new run: the old map is gone', !(await visible('#coverage')));
+  check('new run: no robot still reads as online', await page.eval(`[...window.__operator.robots.values()].every((r) => !r.pose)`));
+  await page.eval(`localStorage.clear()`); await load();
+  await emit('/map', { info: { width: 4, height: 4, resolution: 0.5, origin: { position: { x: 0, y: 0, z: 0 }, orientation: { x: 0, y: 0, z: 0, w: 1 } } }, data: new Array(16).fill(0) });
+  await sleep(500);
+  await page.eval(`window.sortbotsRunEnded()`);
+  await sleep(500);
+  check('new run: a test ending goes back to the empty screen', await visible('#empty') && !/Starting/.test(await $text('#empty-title')) && !(await visible('#coverage')), await $text('#empty-title'));
+  await page.eval(`localStorage.clear()`); await load();
+
+  // -- cards open by themselves, and side bars can be put away -----------------------------------
+  console.log('\n--- panels ---');
+  const anyId = await page.eval(`[...window.__operator.robots.keys()][0]`);
+  await page.eval(`(() => { window.__noAutoOpen = false; const r = window.__operator.robots.get(${JSON.stringify(anyId)}); r.pose = { x: 0, y: 0, yaw: 0 }; r.linkAt = performance.now() + 60000; })()`);
+  await sleep(600);
+  check('panels: a robot coming online opens its details by itself', await page.eval(`!!document.querySelector('#fleet .robot.sel[data-id="${anyId}"] .cam')`));
+  await click(`#fleet .robot[data-id="${anyId}"] .l1`);
+  await sleep(600);
+  check('panels: closing them keeps them closed', !(await page.eval(`!!document.querySelector('#fleet .robot.sel[data-id="${anyId}"]')`)));
+  const stageW = () => page.eval(`document.getElementById('stage').getBoundingClientRect().width`);
+  const w0 = await stageW();
+  await click('#hide-right'); await sleep(200);
+  check('panels: the task list hides and the map takes its room', !(await visible('#right')) && (await stageW()) > w0 + 200, String(await stageW()));
+  check('panels: Stop all stays on screen', await page.eval(`document.getElementById('estop').getBoundingClientRect().right <= innerWidth`));
+  await click('#hide-left'); await sleep(200);
+  check('panels: the robot list hides too, leaving the map the window', !(await visible('#left')) && Math.abs((await stageW()) - (await page.eval(`innerWidth`))) < 2, String(await stageW()));
+  await load();
+  check('panels: hidden side bars stay hidden after a reload', !(await visible('#left')) && !(await visible('#right')));
+  await click('#hide-left'); await click('#hide-right'); await sleep(200);
+  check('panels: and come back', await visible('#left') && await visible('#right') && Math.abs((await stageW()) - w0) < 4, String(await stageW()));
+  await page.eval(`localStorage.clear()`); await load();
 
   // -- 2D map / 3D cloud -----------------------------------------------------------------------
   console.log('\n--- 3d view ---');
@@ -1340,6 +1583,122 @@ async function main() {
   await shot('replay-phone');
   await click('#rp-x');
   await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+
+  // -- Drive view: the real base + D435 over serve.py --drive (operator_drive.js) -------------
+  console.log('\n--- drive view ---');
+  await page.eval(`localStorage.clear(); sessionStorage.removeItem('__fakeDrive')`); await load();
+  check('drive: no Drive view unless serve.py offers it (--drive, localhost)', !(await visible('#view [data-v="drive"]')));
+  await page.eval(`sessionStorage.setItem('__fakeDrive', JSON.stringify({ enabled: true, running: false, arm_board: false,
+    speed_levels: [{ xy_mps: 0.1, theta_dps: 30 }, { xy_mps: 0.2, theta_dps: 60 }, { xy_mps: 0.3, theta_dps: 90 }],
+    onStart: { camera: { ok: true, fps: 29.7, error: null }, base: { ok: false, error: 'wheel servos {9, 10, 11}: missing id 11', ids: { l: 9, b: 10, r: 11 }, port: '/dev/ttyACM0' } } }))`);
+  await load();
+  check('drive: offered when serve.py says this browser may drive', await visible('#view [data-v="drive"]'));
+  check('drive: the view is called Robot, not the map tool\'s "Drive"', (await $text('#view [data-v="drive"]')) === 'Robot');
+  check('drive: the map\'s empty screen points to the Robot view', await page.eval(`!document.getElementById('empty-robot').hidden`));
+  await click('#view [data-v="drive"]'); await sleep(200); await load();
+  check('drive: the Robot view is reopened on reload when it was the last one', await visible('#driveview'));
+  await click('#view [data-v="2d"]'); await sleep(200);
+  await click('#empty-robot'); await sleep(200);
+  check('drive: its button opens the Robot view', await visible('#driveview'));
+  await click('#view [data-v="2d"]'); await sleep(200);
+  await click('#view [data-v="drive"]'); await sleep(300);
+  check('drive: the view swaps the map for the camera', await visible('#driveview') && !(await visible('#map')) && !(await visible('#tools')));
+  check('drive: not started says so, offers one Start, and the arm light says it is unplugged', /Not started/.test(await $text('#dv-msg')) && /no arm plugged in/.test(await $text('#dv-msg'))
+        && await visible('#dv-connect') && !(await visible('#dv-disconnect')) && /No arm/.test(await $text('#dv-arm')), await $text('#dv-msg'));
+  check('drive: the map\'s "not running" overlay stays off the camera', !(await visible('#empty')) && !(await visible('#link-down')));
+  await click('#dv-connect'); await sleep(1300);
+  check('drive: no arm: Start drives the camera and wheels in the same view, without asking, and says why', await visible('#dv-disconnect') && !(await visible('#dv-connect'))
+        && await visible('#driveview') && /arm isn't plugged in/.test(await $text('#dv-err')), await $text('#dv-err'));
+  check('drive: camera frames are shown', /url\(/.test(await page.eval(`document.querySelector('#driveview .pic').style.backgroundImage`)) && /fps/.test(await $text('#dv-cam')));
+  check('drive: a wheel bus problem is spelled out, camera still up', /missing id 11/.test(await $text('#dv-err')) && await visible('#dv-err')
+        && (await page.eval(`document.getElementById('dv-base').className`)).includes('bad'), await $text('#dv-err'));
+  await shot('drive-view');
+  // A fake standard-mapping pad: axes [lx, ly, rx, ry], buttons by index (7 = RT, 12/13 = d-pad).
+  await page.eval(`window.__pad = { id: 'Xbox Wireless Controller (STANDARD GAMEPAD)', connected: true, mapping: 'standard',
+      axes: [0, -1, 0, 0], buttons: Array.from({ length: 17 }, () => ({ pressed: false, value: 0 })) };
+    Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => [window.__pad] });
+    window.__drivePosts = [];`);
+  await sleep(400);
+  check('drive: a stick without the RT deadman sends nothing', (await page.eval(`window.__drivePosts.length`)) === 0 && /Hold RT/.test(await $text('#dv-cmd')));
+  check('drive: the pad is named', /Xbox Wireless Controller/.test(await $text('#dv-pad')), await $text('#dv-pad'));
+  await page.eval(`window.__pad.buttons[7] = { pressed: true, value: 1 }; window.__drivePosts = []`); await sleep(500);
+  const dvDriving = await page.eval(`window.__drivePosts`);
+  check('drive: RT + left stick up drives forward at speed 1, ~20 Hz', dvDriving.length >= 6 && dvDriving.every((c) => c.x === 0.1 && c.y === 0 && c.w === 0), `${dvDriving.length} posts, last ${JSON.stringify(dvDriving.at(-1))}`);
+  check('drive: the readout shows the live command', /forward 0\.10/.test(await $text('#dv-cmd')) && (await page.eval(`document.getElementById('dv-live').classList.contains('on')`)));
+  await page.eval(`window.__pad.buttons[12] = { pressed: true, value: 1 }`); await sleep(150);
+  await page.eval(`window.__pad.buttons[12] = { pressed: false, value: 0 }`); await sleep(200);
+  check('drive: d-pad up is one speed level per press', (await page.eval(`window.__drivePosts.at(-1).x`)) === 0.2 && /Speed 2\/3/.test(await $text('#dv-level')));
+  await page.eval(`window.__pad.axes = [-1, 0, 0.5, 0]`); await sleep(150);
+  const dvStrafe = await page.eval(`window.__drivePosts.at(-1)`);
+  check('drive: left stick left strafes left, right stick right turns clockwise', dvStrafe.x === 0 && dvStrafe.y === 0.2 && dvStrafe.w < 0, JSON.stringify(dvStrafe));
+  await page.eval(`window.__pad.axes = [0.7, -0.7, 0, 0]`); await sleep(150);
+  const dvDiag = await page.eval(`window.__drivePosts.at(-1)`);
+  check('drive: a diagonal is no faster than straight', Math.hypot(dvDiag.x, dvDiag.y) <= 0.2 + 1e-3, JSON.stringify(dvDiag));
+  await page.eval(`window.__pad.buttons[7] = { pressed: false, value: 0 }`); await sleep(150);
+  const dvN1 = await page.eval(`window.__drivePosts.length`); await sleep(400);
+  const dvLast = await page.eval(`window.__drivePosts.at(-1)`);
+  check('drive: letting go of RT sends one stop, then nothing', dvLast.x === 0 && dvLast.y === 0 && dvLast.w === 0 && (await page.eval(`window.__drivePosts.length`)) === dvN1, `${JSON.stringify(dvLast)}`);
+  await page.eval(`Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => [] }); window.__drivePosts = []; window.__published.length = 0`);
+  await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'w', code: 'KeyW', text: 'w' }); await sleep(250);
+  const dvKeyed = await page.eval(`window.__drivePosts.at(-1)`);
+  await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'w', code: 'KeyW' }); await sleep(150);
+  check('drive: no pad, W drives forward while held and stops on release',
+        dvKeyed && dvKeyed.x > 0 && (await page.eval(`window.__drivePosts.at(-1).x`)) === 0, JSON.stringify(dvKeyed));
+  check('drive: WASD in the Drive view never reaches a ROS robot\'s cmd_vel', !(await page.eval(`window.__published.some((p) => /cmd_vel/.test(p.topic))`)));
+  await page.eval(`Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => [window.__pad] }); window.__pad.buttons[7] = { pressed: true, value: 1 }`);
+  await sleep(200);
+  await click('#view [data-v="2d"]'); await sleep(150);
+  const dvN2 = await page.eval(`window.__drivePosts.length`); await sleep(400);
+  check('drive: leaving the view stops driving, even with RT still held', (await page.eval(`window.__drivePosts.length`)) === dvN2
+        && (await page.eval(`window.__drivePosts.at(-1).x`)) === 0 && await visible('#map'));
+  await click('#view [data-v="drive"]'); await sleep(200);
+  await page.eval(`window.__pad.buttons[7] = { pressed: false, value: 0 }`); await sleep(150);
+  await click('#dv-disconnect'); await sleep(400);
+  check('drive: Stop stops it (no arm: no question asked)', (await page.eval(`!!window.__driveStopped`)) && await visible('#dv-connect'));
+  await page.eval(`window.__pad.buttons[0] = { pressed: true, value: 1 }`); await sleep(150);
+  await page.eval(`window.__pad.buttons[0] = { pressed: false, value: 0 }`); await sleep(150);
+  check('drive: A without the arm running says what it needs, and sends nothing', /needs the arm/.test(await $text('#dv-err'))
+        && !(await page.eval(`(window.__drivePicks || []).length`)) && !(await visible('#dv-pick')), await $text('#dv-err'));
+  // handeye pick running: it owns the hardware, the view goes through it, A is pick-and-place.
+  await page.eval(`sessionStorage.setItem('__fakeDrive', JSON.stringify({ enabled: true, running: true, backend: 'handeye',
+    speed_levels: [{ xy_mps: 0.1, theta_dps: 30 }, { xy_mps: 0.2, theta_dps: 60 }, { xy_mps: 0.3, theta_dps: 90 }],
+    camera: { ok: true }, base: { ok: true }, pick: { flag: 'HELD', state: 'lock', title: 'Pick: lock the target', msg: '', place_set: true } }))`);
+  await load(); await click('#view [data-v="drive"]'); await sleep(400);
+  check('drive (handeye): Pick & place, Abort and Stop offered, no Start', await visible('#dv-pick') && await visible('#dv-abort')
+        && !(await visible('#dv-connect')) && await visible('#dv-disconnect'));
+  check('drive (handeye): the pick\'s state is shown', /HELD/.test(await $text('#dv-pickst')) && /lock the target/.test(await $text('#dv-pickst')), await $text('#dv-pickst'));
+  await shot('drive-view-handeye');
+  await page.eval(`window.__pad = { id: 'Xbox Wireless Controller (STANDARD GAMEPAD)', connected: true, mapping: 'standard', axes: [0, 0, 0, 0],
+      buttons: Array.from({ length: 17 }, () => ({ pressed: false, value: 0 })) };
+    Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => [window.__pad] }); window.__drivePicks = [];`);
+  await sleep(150);
+  await page.eval(`window.__pad.buttons[0] = { pressed: true, value: 1 }`); await sleep(400);
+  check('drive (handeye): pad A is ONE pick-and-place, however long it is held', JSON.stringify(await page.eval(`window.__drivePicks`)) === '["pick"]', JSON.stringify(await page.eval(`window.__drivePicks`)));
+  await page.eval(`window.__pad.buttons[0] = { pressed: false, value: 0 }; window.__pad.buttons[1] = { pressed: true, value: 1 }`); await sleep(200);
+  check('drive (handeye): pad B aborts', (await page.eval(`window.__drivePicks.at(-1)`)) === 'abort');
+  await page.eval(`window.__pad.buttons[1] = { pressed: false, value: 0 }; window.__fakeDrive.pick = { flag: 'DESCENDING', state: 'planned', title: 'Pick: plan ready', msg: 'descending' }`);
+  await sleep(800);
+  check('drive (handeye): the arm light is on', (await page.eval(`document.getElementById('dv-arm').className`)).includes('ok'));
+  check('drive (handeye): Stop is offered', await visible('#dv-disconnect'));
+  await page.eval(`window.confirm = () => false`);
+  await click('#dv-disconnect'); await sleep(200);
+  check('drive (handeye): Stop arm asks first (torque goes off), and a No stops nothing', !(await page.eval(`!!window.__pickStopped`)));
+  await page.eval(`window.confirm = () => true`);
+  check('drive (handeye): while the arm moves the status is marked and Pick is greyed out', (await page.eval(`document.getElementById('dv-pickst').classList.contains('moving')`))
+        && (await page.eval(`document.getElementById('dv-pick').disabled`)));
+  await click('#dv-disconnect'); await sleep(600);
+  check('drive (handeye): Stop (confirmed) quits the pick; Start is back', (await page.eval(`!!window.__pickStopped`)) && await visible('#dv-connect'));
+  await page.eval(`window.__fakeDrive.arm_board = true`); await sleep(700);
+  check('drive: arm plugged in: the light and the message say Start runs the pick', /Arm/.test(await $text('#dv-arm')) && !/No arm/.test(await $text('#dv-arm'))
+        && /pick program/.test(await $text('#dv-msg')), await $text('#dv-msg'));
+  await page.eval(`window.confirm = () => false`);
+  await click('#dv-connect'); await sleep(200);
+  check('drive: Start arm asks first (the arm moves to rest), and a No starts nothing', !(await page.eval(`!!window.__pickStarted`)));
+  await page.eval(`window.confirm = () => true`);
+  await click('#dv-connect'); await sleep(900);
+  check('drive: Start arm starts the pick and shows it booting', (await page.eval(`!!window.__pickStarted`)) && /Starting the arm/.test(await $text('#dv-msg'))
+        && /loading the camera/.test(await $text('#dv-msg')) && !(await visible('#dv-connect')) && await visible('#dv-disconnect'), await $text('#dv-msg'));
+  await page.eval(`sessionStorage.removeItem('__fakeDrive'); localStorage.clear()`); await load();
 
   // -- light / dark: follows the system until the toggle pins a choice ------------------------
   console.log('\n--- theme ---');

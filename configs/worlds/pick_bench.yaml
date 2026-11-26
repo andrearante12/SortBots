@@ -1,0 +1,34 @@
+# A world layout (simtest/world.py has the full schema). See aisle_crossing.yaml
+# for how these coordinates were chosen; docs/manipulation.md for the pick model.
+#
+# Packages are graspable: nothing collides with them (the magnet SNAPS them,
+# simtest/magnet.py), they stand on the floor or on a prop whose top is exactly
+# their `z` (the BOTTOM of the package), and `magnet_face` names the side that
+# carries the magnet plate. Package yaw turns that face: with face "+x", yaw 0
+# faces +x, yaw 1.5708 faces +y, yaw 3.1416 faces -x, yaw -1.5708 faces -y.
+
+name: pick_bench
+title: One package on a bench, in robot_0's aisle
+description: >
+  A 0.7 x 0.4 m bench, 0.80 m high, 1.9 m south of robot_0's spawn pose, with one
+  light box on it whose magnet plate faces north (toward the spawn). The smoke test
+  for pick and place: the robot has to turn, find the plate, drive up to it, pick
+  the box and set it down 0.12 m to one side. The box overhangs the bench edge by
+  2 cm so the chassis, which a full-height bench stops ~16 cm from its face, still
+  leaves the plate within the arm's reach.
+
+scenes: [nvidia]
+autostart: true
+
+props:
+  - id: bench_a
+    shape: box
+    size: [0.7, 0.4, 0.80]
+    pose: [-7.9, 9.8, 0.0]
+
+packages:
+  - id: pkg_0
+    label: box A
+    pose: [-7.9, 9.9, 1.5708]    # centre x, y, yaw; the plate is at y = 10.02
+    z: 0.80                      # bottom of the box = top of bench_a
+    magnet_face: "+x"
