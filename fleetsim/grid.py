@@ -17,6 +17,8 @@ floor the pooling cost so a run can say when that happened.
 from __future__ import annotations
 
 import math
+import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,7 +26,11 @@ import numpy as np
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MAPS_DIR = REPO_ROOT / "maps"
+# The same library, and the same override, as scripts/maps_lib.py: the scenario
+# editor (webui/fleetsim_editor.py) lists maps from there, and its tests point
+# both at a temp dir.
+MAPS_DIR = Path(os.environ.get("SORTBOTS_MAPS_DIR") or REPO_ROOT / "maps")
+MAP_NAME_RX = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")  # maps_lib.NAME_RX
 
 
 @dataclass(frozen=True)
@@ -100,6 +106,11 @@ def _read_pgm(path: Path) -> np.ndarray:
 
 
 def resolve_map_dir(name_or_path: str) -> Path:
+    # A library name first: a cwd-relative directory of the same name (a map
+    # called `sim` or `docs`, run from the repo root) used to win, so the run
+    # and the editor's preview could load different floors (2026-11-26).
+    if MAP_NAME_RX.match(name_or_path or "") and (MAPS_DIR / name_or_path).is_dir():
+        return MAPS_DIR / name_or_path
     p = Path(name_or_path)
     if p.is_dir():
         return p

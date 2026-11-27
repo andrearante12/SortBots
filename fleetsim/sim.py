@@ -119,6 +119,21 @@ class Sim:
         self.counts = {"contacts": 0, "announced": 0}
         self._schedule_inputs()
 
+    @classmethod
+    def world_only(cls, scenario: dict) -> "Sim":
+        """The true floor, waypoints, gateway and (via _homes) parking spots
+        exactly as a run of `scenario` builds them, and nothing else: no
+        robots, network or schedule. For the scenario editor's map
+        (fleetsim/preview.py), which has to show the floor a run gets without
+        running one, so it calls the same _build_world rather than a copy."""
+        self = cls.__new__(cls)
+        self.scn = scenario
+        self.cfg = scenario["config"]
+        self.seed = int(scenario["seed"])
+        self.notes = []
+        self._build_world()
+        return self
+
     # ---- world -------------------------------------------------------------
 
     def _build_world(self) -> None:

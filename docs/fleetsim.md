@@ -642,6 +642,82 @@ Not covered: `kill: gateway` doesn't kill the gateway. `_disturb` indexes
 `robots[node - 1]`, so it kills the last robot. To take the gateway away,
 cut it off with `partition: [[gateway], rest]`.
 
+## Scenario editor
+
+The operator view edits scenarios on their own floor. Open the Session panel,
+go to the **Tests** tab, and find the scenario under **Fleet sim scenarios**:
+**Edit** opens it, **New from** starts a new one as a copy under a free name.
+The editor covers everything below the header until it is closed. None of it
+is the live fleet.
+
+- **Floor:** the true floor a run of the scenario gets: waypoints (named when
+  zoomed in, or on hover), each robot's home (numbered), the gateway,
+  blockages, the fixed tasks as pickup → dropoff lines, and the movers'
+  paths. `fleetsim/preview.py` builds it with the sim's own `_build_world` and
+  `_homes` (`Sim.world_only`), so synthetic options and saved maps look as
+  they will run. It is rebuilt when the world options, the robot count or the
+  seed change.
+- **Timeline:** fixed tasks are ticks along the top, the task stream's window
+  is a band, and each disturbance is a bar. Drag a bar to move it, or its
+  right end to change how long it lasts. The slider shows the floor at that
+  time: the blockages that are up, where the movers are, and the homes
+  coloured by partition group (red: switched off).
+- **Map tools:** **Tasks** (click a pickup, then a dropoff), **Blockage**
+  (drag a rectangle; it appears at the timeline's time), **Mover** (click its
+  path; Enter or a double-click ends it), **Gateway** (saved maps only; the
+  synthetic warehouse puts its gateway on the apron). In **Pan**, select a
+  pickup or dropoff field and click a waypoint to fill it in. Click a
+  blockage, a path or a task's line to select it in the form.
+- **Form:** name, title, description, seed, robots, duration and stop rule;
+  the world (synthetic options as rows, or a map from the maps library);
+  tasks; the Poisson stream; disturbances (blockage, partition groups written
+  `robot_0, robot_1`, `0-3` or `rest`, switch off and on, cut link, and any
+  kind added later as a YAML value); inline movers; settings (overrides of
+  `base.yaml` by dotted name); metrics with pass criteria; and any other
+  top-level key. Values in key/value rows are YAML, read like
+  `--set key=value`, so `false`, `[robot_0]` and `0.5` mean what they mean
+  in a terminal.
+
+Keys: V, T, B, M and G pick a tool. Esc puts the tool down, and then closes
+the editor. ←/→ move the timeline 1 s (with Shift, 10 s). Ctrl+S saves. Drag
+to pan, scroll to zoom, double-click to fit.
+
+**Checking.** The server checks every edit a moment after it is made. The
+scenario goes through `config.resolve`, the validation `fleetsim run` does.
+Then the floor is checked for what only the floor can show: a task that names
+a waypoint that isn't there (fleet_tasks would reject it silently), a
+`task_arrival` pattern that matches nothing, a blockage off the map, a
+disturbance that names a robot the fleet doesn't have, more robots than
+there is room to park. Errors are marked on their field and listed above the
+buttons; click one to go to it. Warnings (a disturbance after the run ends,
+a `world.gateway` the floor doesn't use) don't block a save.
+
+**Saving** writes `fleetsim/scenarios/<name>.yaml` and nothing else, and
+only from the sim console (`--control`), like launching a run. **Save as**
+writes a new file and leaves the original as it is; it and **New from** copy
+the original's untouched sections, as below. A file that changed on disk
+after it was opened isn't overwritten. The leading comment block is
+kept (edit it under **File**), and so is every top-level section that wasn't
+changed, line for line, comments included. A changed section is rewritten in
+the hand-written files' style and **loses its comments**. **File** lists the
+comments a save would drop, so you can move them into the header or the
+description first. **Run** saves, then picks the scenario in **Run a fleet
+sim**.
+
+**Untrusted input.** The console can be reachable from the internet, so
+`webui/fleetsim_editor.py` treats every field as untrusted. The name must
+match `config.NAME_RX`. `config.world.map` must name a map in the maps
+library: fleetsim also takes a directory path there, and the console never
+does. No other string under `config:` may look like a path. YAML values are
+parsed with `safe_load`, and only plain data is accepted. A synthetic floor
+is capped at 4 M cells. A `/usr/bin/python3` child builds the floor, one at
+a time, with a time and memory limit. A saved scenario can still set any
+knob in `base.yaml`; the run form's robot and duration caps and its Stop
+still bound what a launch can cost.
+
+From a terminal, `/usr/bin/python3 -m fleetsim.preview NAME` prints a
+scenario's floor and the same problems.
+
 ## Known issues
 
 - **Intermittent interpreter faults on the development machine — cause not

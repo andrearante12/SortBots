@@ -19,6 +19,13 @@ FLEET REPLAY (fleetsim/replay.py): /api/fleetsim/runs lists data/fleetsim/ and
 replay. Read-only, so no --control. Launching one (/api/fleetsim/launch) does
 need --control, and goes through webui/fleetsim_runner.py's own allowlist.
 
+SCENARIO EDITOR (webui/fleetsim_editor.py): /api/fleetsim/editor lists what it
+can edit, /api/fleetsim/editor/scenario?name= reads one file, and
+/api/fleetsim/editor/check validates a scenario and draws its floor; none of
+them changes anything, so none needs --control. /api/fleetsim/editor/save
+writes fleetsim/scenarios/<name>.yaml and is gated exactly like launching a
+run (FLEET), because a saved scenario is then something that form launches.
+
 TESTS (configs/tests/, scripts/simtest.py): /api/tests, /api/worlds and
 /api/tests/results are readable without --control (the Tests view should show
 what exists and what last happened even with the console down); running and
@@ -71,6 +78,7 @@ from simtest import world as simtest_world
 from simtest_runner import SimtestRunner
 from drive_proxy import DriveProxy
 import fleetsim_runner
+import fleetsim_editor
 # The fleet replay (Tests tab -> Fleet sim runs): fleetsim's recorded runs,
 # read-only. fleetsim/replay.py is stdlib + simtest; launching is fleetsim_runner's.
 from fleetsim import replay as fleetsim_replay
@@ -299,6 +307,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_json({**fleetsim_runner.catalog(), "control": FLEET is not None})
         elif route == "/api/fleetsim/launch":
             self._with_fleet(lambda: self._serve_run_state(FLEET))
+        elif route == "/api/fleetsim/editor":
+            self._serve_json({**fleetsim_editor.catalog(), "control": FLEET is not None})
+        elif route == "/api/fleetsim/editor/scenario":
+            self._serve_scenario_file()
         elif route == "/api/drive":
             self._serve_drive_state()
         elif route == "/api/drive/frame":
@@ -345,6 +357,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._with_fleet(self._start_fleetsim)
         elif route == "/api/fleetsim/cancel":
             self._with_fleet(lambda: self._serve_json(FLEET.cancel()))
+        elif route == "/api/fleetsim/editor/check":
+            self._check_scenario()
+        elif route == "/api/fleetsim/editor/save":
+            self._with_fleet(self._save_scenario)
         elif route == "/api/drive/start":
             self._with_drive(lambda: self._serve_json(DRIVE.start()))
         elif route == "/api/drive/stop":
@@ -926,6 +942,40 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_error(409, str(exc))
         except OSError as exc:
             self._serve_error(500, f"failed to launch: {exc}")
+
+    # -- scenario editor (webui/fleetsim_editor.py) -----------------------------
+
+    def _serve_scenario_file(self):
+        name = parse_qs(urlsplit(self.path).query).get("name", [""])[0]
+        try:
+            self._serve_json(fleetsim_editor.read(name))
+        except fleetsim_editor.EditorError as exc:
+            self._serve_json({"error": str(exc), "where": exc.where}, code=exc.code)
+
+    def _check_scenario(self):
+        # Not behind --control: it changes nothing. It does start a child to
+        # build the floor; fleetsim_editor runs one at a time, size-checked
+        # and time- and memory-limited, because this route is public.
+        body = self._read_json_body(fleetsim_editor.MAX_BODY_BYTES)
+        if body is None:
+            return
+        try:
+            out = fleetsim_editor.check(body.get("scenario"), grid=body.get("grid") is True)
+        except fleetsim_editor.EditorError as exc:
+            self._serve_json({"error": str(exc), "where": exc.where}, code=exc.code)
+            return
+        self._serve_json(out, gzip_ok=True)  # a floor's grid can be a few hundred kB
+
+    def _save_scenario(self):
+        body = self._read_json_body(fleetsim_editor.MAX_BODY_BYTES)
+        if body is None:
+            return
+        try:
+            self._serve_json(fleetsim_editor.save(body))
+        except fleetsim_editor.EditorError as exc:
+            self._serve_json({"error": str(exc), "where": exc.where}, code=exc.code)
+        except OSError as exc:
+            self._serve_error(500, f"couldn't write the scenario: {exc.strerror}")
 
     # -- plumbing ----------------------------------------------------------
 

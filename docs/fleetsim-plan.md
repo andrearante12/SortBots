@@ -49,6 +49,8 @@ its map — checked against Isaac with a 2-robot task list after this groundwork
 | A6 | Per-robot service times and capabilities | todo |
 | A7 | Swappable local-avoidance layer (for ORCA) | todo |
 
+C12 editor: done (fs-c12b)
+
 Later, separate tracks: Isaac calibration (2-robot task list), grid export for
 PIBT/RHCR anchor runs, Ack/TaskQuery in the DES and emulation stubs, map
 sharing on the real robots (Isaac side of #30), the comparison methods
