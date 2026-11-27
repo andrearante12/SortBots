@@ -41,6 +41,11 @@ SETTABLE = {
     "record.belief_maps": {"label": "Own maps recorded", "options": ["all"]},
     "dispatch.method": {"label": "Task assignment",
                         "options": ["auction", "central_greedy", "central_hungarian"]},
+    "map_share.recipients": {"label": "Map patches to", "options": ["radius", "all", "subscribers"]},
+    "traffic.keep_right.enabled": {"label": "Keep right", "options": ["false", "true"]},
+    "traffic.passages.enabled": {"label": "Single-lane passages", "options": ["false", "true"]},
+    "nav.local": {"label": "Local avoidance", "options": ["stop_replan", "orca"]},
+    "intent.enabled": {"label": "Path intents", "options": ["false", "true"]},
 }
 
 
