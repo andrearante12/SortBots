@@ -293,6 +293,31 @@ def test_a_status_without_the_claim_releases_it_at_once():
 
 # ---- defaults ------------------------------------------------------------------------
 
+# The narrow-aisle run below with every default, on the tree before traffic.py
+# (c7bf064, 2026-11-26): every event but wall, wall_s and summary.
+GOLDEN = {"numpy": "2.3.5", "events": 2501,
+          "sha256": "3107351263918571dab03290bbbc69f123703d455dc6b84730ec0a5bb1e5036b"}
+
+
+@pytest.mark.skipif(np.__version__ != GOLDEN["numpy"], reason="golden recorded with another numpy")
+def test_defaults_reproduce_the_event_stream_from_before_traffic():
+    import hashlib
+    import json
+    tasks = [{"at_s": 1 + 3 * i, "pickup": f"shelf_2_{i % 4}", "dropoff": f"dock_{i % 4}"}
+             for i in range(12)]
+    raw = {"name": "t", "seed": 1, "duration_s": 600, "robots": 6,
+           "config": {"world": {"synthetic": {**SMALL, "narrow_aisles": [2]}},
+                      "map_share": {"prior": "truth"}},
+           "tasks": tasks, "stop": {"until": "tasks_done", "settle_s": 1}}
+    s = sim.Sim(config.resolve(raw))
+    s.run()
+    h = hashlib.sha256()
+    for e in s.events:
+        h.update(json.dumps({k: v for k, v in e.items() if k not in ("wall", "wall_s", "summary")},
+                            sort_keys=True).encode())
+    assert (len(s.events), h.hexdigest()) == (GOLDEN["events"], GOLDEN["sha256"])
+
+
 def test_with_both_off_nothing_of_it_runs():
     scn = config.resolve({"name": "t", "seed": 1, "duration_s": 60, "robots": 3,
                           "config": {"world": {"synthetic": {**SMALL, "narrow_aisles": [2]}},
