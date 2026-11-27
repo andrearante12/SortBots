@@ -53,7 +53,7 @@ from array import array
 import numpy as np
 
 from .grid import inflate_bool
-from .planner import NEIGHBOURS_INT, OCC
+from .planner import FREE, NEIGHBOURS_INT, OCC
 
 # Corridor weight fades over this much width past max_width_m, and over
 # length / width from 1 to 3: a 2.4 m square room is no aisle.
@@ -285,8 +285,8 @@ def attach_lanes(cm, cfg: dict, single_lane_m: float) -> Lanes:
 
 class PassageMap:
     """Single-lane passages on one robot's own map: connected (8-way)
-    regions of free cells whose free width is at most single_lane_m, with at
-    least one cell the robot can stand on. `labels` holds 1 + the passage's
+    regions of cells seen free whose free width is at most single_lane_m,
+    with at least one cell the robot can stand on. `labels` holds 1 + the passage's
     index; `boxes[i]` its extent in metres, which is how robots name a
     passage to each other: two robots' maps may cut one passage slightly
     differently, and overlapping boxes still match."""
@@ -309,7 +309,12 @@ class PassageMap:
         self.occ = occ
         free = ~occ
         width = np.minimum(run_lengths(free), run_lengths(free.T.copy()).T) * self.g.res
-        single = free & (width <= self.single + 1e-6)
+        # Seen free, not just not seen: unknown counts as free for the width
+        # (as for the planner), but a blind robot that had seen both faces of
+        # a 1.2 m rack read its unknown inside as a 0.8 m single lane, and
+        # claimed and held for slivers like that all over fleet_scale
+        # (2026-11-26).
+        single = (self.state == FREE) & (width <= self.single + 1e-6)
         drivable = ~inflate_bool(occ, self.g, self.r_lethal) if single.any() else None
         self._label(single, drivable)
         self.version += 1

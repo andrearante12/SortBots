@@ -188,6 +188,15 @@ def test_passages_found_on_a_narrow_aisle_and_a_dead_end_bay():
     pm = TR.PassageMap(g, st, SINGLE, 0.35)
     pm.refresh()
     assert pm.boxes == []  # the plain floor has none
+    # ...nor does a blind robot's map of it that has every rack's faces but
+    # not its inside (unknown, so free to the planner: a 0.8 m "lane").
+    occ = st == OCC
+    inner = occ.copy()
+    inner[1:-1] &= occ[:-2] & occ[2:]
+    half = np.where(inner, np.int8(-1), st)
+    pm = TR.PassageMap(g, half, SINGLE, 0.35)
+    pm.refresh()
+    assert pm.boxes == []
     g, st, wps = _floor(narrow_aisles=[2], dead_ends=[[2, 0, "west"]])
     pm = TR.PassageMap(g, st, SINGLE, 0.35)
     pm.refresh()
