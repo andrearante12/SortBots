@@ -7,18 +7,21 @@ cross-section: its length is the free width, its axis says which way the
 corridor runs, and the cell's place in it is its offset from the centre line.
 On this axis-aligned floor that is the distance-to-obstacle field measured
 across the corridor; its gradient points at the centre line, so "the left
-half" below is exactly cross(move, gradient) < 0. Two cumulative sums give
-width, axis and offset at once, where a Euclidean distance transform and a
-width estimate from it would cost ~250 shifted passes. The price: a corridor
-more than ~40 degrees off the grid reads wider than it is, so it gets no
-lanes (and no passage) rather than wrong ones.
+half" below is exactly cross(move, gradient) < 0 (test_traffic.py checks it
+against the Euclidean field). One run extraction per axis gives width, axis
+and offset at once, where a Euclidean distance transform and a width estimate
+from it would cost ~250 shifted passes. The price: a corridor more than ~40
+degrees off the grid reads wider than it is, so it gets no lanes (and no
+passage) rather than wrong ones.
 
-Keep right (`traffic.keep_right`, B10). Most robot-caused stops measured on
-2026-11-17 were head-on meetings in 2.4 m aisles: A* ran both robots along
-the same edge of the aisle's flat band (the taut line hugs one side), so the
-local layer stopped them though the aisle fits two. A step's cost gets a
-lane term, per direction, in corridor cells (two-way width, longer than
-wide; junctions and open floor read as wide and are untouched):
+Keep right (`traffic.keep_right`, B10). Most predicted conflicts with a
+moving peer were head-on meetings along an aisle (2026-11-17), and nothing
+kept the two robots apart: shelves sit on the aisle's centre line, so a leg
+from shelf to shelf pulled taut ran down the middle, and a longer one hugged
+whichever edge of the flat band the taut line met. The local layer then
+stopped both, though a 2.4 m aisle fits two. A step's cost gets a lane term,
+per direction, in corridor cells (two-way width, longer than wide; junctions
+and open floor read as wide and are untouched):
 
     weight * corridor * along * clamp((sigma + lane_offset_m) / (2 * lane_offset_m), 0, 1)
 
@@ -606,6 +609,13 @@ class PassageAgent:
                           "after_s": round(now - h["since"], 2)})
             r.pass_hold = None
         if blocker is not None and r.pass_hold is None:
+            if r.blocked_since is not None:
+                # A held robot isn't checked for blockers, so a stop left open
+                # would book the whole hold as a stop for a robot (nav
+                # blocked_robot_s) when it ends. Close it here.
+                r.sim.record({"s": "nav", "rid": r.rid, "event": "unblocked",
+                              "after_s": round(now - r.blocked_since, 2)})
+                r.blocked_since = r.blocked_by = r.block_replan_at = None
             r.pass_hold = {"peer": blocker[0], "box": blocker[1], "since": now}
             r.counters["pass_holds"] += 1
             r.sim.record({"s": "nav", "rid": r.rid, "event": "pass_hold",
@@ -631,4 +641,7 @@ class PassageAgent:
                     new.setdefault(nb, c)
                     break
         self.claims = new
-        self._cross_key = None
+        if self.inside is not None:  # the same passage, re-cut: no exit and entry to record
+            self.inside = next((nb for nb in self.map.boxes if boxes_overlap(self.inside, nb)),
+                               self.inside)
+        self._cross_ver = None
