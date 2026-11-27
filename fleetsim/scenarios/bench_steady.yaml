@@ -1,0 +1,33 @@
+# DRAFT for review (C12, 2026-11-26). Benchmark: the open floor, UNDERLOADED.
+# The fleet keeps up, so every method delivers at the arrival rate and only
+# delivery time can differ: this is where assignment and routing quality
+# show as seconds, not as throughput. Pairs with bench_rush (same floor,
+# overloaded), where throughput is what differs.
+#
+# Regime: rate_per_robot_hz 0.003 is ~half of what a robot can do here
+# (measured 2026-11-26, seed 1, second half of 900 s runs at 2x load: ~22
+# deliveries per robot-hour at 5 and at 20 robots = 0.0062 /robot/s). The
+# rate is per robot, so the regime holds at 2, 5, 10 and 20 robots.
+# Arrivals stop at 1200 s and the run goes on to 1500 s, so tasks announced
+# late still finish (mean delivery ~150 s) and done_frac reads ~1.0 when
+# the fleet keeps up.
+# Network: ideal. The question is task allocation and traffic, not comms.
+# Measured (seed 1): see docs/fleetsim.md "Benchmark scenarios".
+name: bench_steady
+title: "DRAFT bench: open floor, underloaded (delivery time)"
+description: >
+  The default 60 x 40 m synthetic warehouse, every robot starting with the
+  true map, a Poisson task stream at 0.003 tasks per robot per second (about
+  half the fleet's capacity) from t=0 to 1200 s, any shelf to any dock. Run
+  for a fixed 1500 s so every variant is scored over the same window.
+seed: 1
+duration_s: 1500
+robots: 10
+config:
+  map_share: {prior: truth}
+task_arrival: {rate_per_robot_hz: 0.003, pickups: "shelf_*", dropoffs: "dock_*", until_s: 1200}
+metrics:
+  - metric: fleet_tasks
+  - metric: contacts
+  - metric: nav
+    pass: {empty_shelf: {eq: 0}}

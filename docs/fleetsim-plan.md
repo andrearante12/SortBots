@@ -40,7 +40,7 @@ its map — checked against Isaac with a 2-robot task list after this groundwork
 | A3 | Benchmark command (suites, seeds, sizes 2/5/10/20, one table) | todo |
 | A4 | Metrics: throughput, delivery time, time lost by cause, utilisation, lower bound | todo |
 | A5 | Crash-tolerant parallel runs + local compute logging | todo |
-| C12 | Scenario set (for review) + scenario editor in the operator view | todo |
+| C12 | Scenario set (for review) + scenario editor in the operator view | partial: scenarios drafted, editor pending |
 | B8 | Map-tile subscriptions | todo |
 | B9 | Event-driven map/intent updates | todo |
 | B10 | Keep right in aisles | todo |

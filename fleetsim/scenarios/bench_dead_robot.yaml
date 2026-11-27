@@ -1,0 +1,50 @@
+# DRAFT for review (C12, 2026-11-26). Benchmark: robots that die mid-task.
+# From 300 s, the first robot seen carrying an item goes dead for 90 s (an
+# e-stop or a power cut: it comes back with its task and its item). From
+# 700 s, the first robot seen on its way to a pickup goes dead for 120 s and
+# comes back the same way; by then its claim has lapsed and someone else
+# should have the task. Neither is named: kill: {select: carrying |
+# fetching} picks the lowest-index robot doing that, waiting up to within_s
+# for one (then any busy robot, then any), so the file works at any fleet
+# size. The disturb event records whom it took and what matched.
+# What it tests: a committed task (item aboard) must wait for its robot,
+# an uncommitted one must move to another robot, the comeback must not
+# make two robots work one task, and a dead robot's body is in the way.
+#
+# Deliberately NOT here (2026-11-26 findings, docs/fleetsim.md): a reboot
+# (fresh: true) of a robot carrying an item. It comes back IDLE with the
+# item aboard, its committed task is reclaimed, and robot after robot is
+# sent to the empty shelf for the rest of the run. Nor a robot that never
+# comes back: its body is never mapped (robots are movers to the camera),
+# so every robot sent past it stops, and one whose pickup it blocks gives
+# the leg up after block_fail_s, again and again.
+#
+# Regime: underloaded, 0.003 tasks per robot per second (~half capacity),
+# so the cost shows as delivery time. Arrivals stop at 1200 s, the run ends
+# at 1500 s. At 2 robots the two kills take half the fleet each time.
+# Network: ideal, so the recovery is the protocol's and not the radio's.
+# The fleet_tasks `duplicates` value counts a dead robot as still working
+# its task until it reports again (a metric gap, 2026-11-26): read it with
+# the kill window in mind.
+name: bench_dead_robot
+title: "DRAFT bench: a carrying robot and a fetching robot die and return"
+description: >
+  The default synthetic warehouse, ideal network, true map, a Poisson stream
+  of 0.003 tasks per robot per second until 1200 s. From 300 s the first
+  robot holding an item is switched off for 90 s; from 700 s the first robot
+  driving to a pickup is switched off for 120 s. Both come back with their
+  state. Fixed 1500 s.
+seed: 1
+duration_s: 1500
+robots: 10
+config:
+  map_share: {prior: truth}
+task_arrival: {rate_per_robot_hz: 0.003, pickups: "shelf_*", dropoffs: "dock_*", until_s: 1200}
+disturbances:
+  - {at_s: 300, duration_s: 90, kill: {select: carrying, within_s: 600}}
+  - {at_s: 700, duration_s: 120, kill: {select: fetching, within_s: 400}}
+metrics:
+  - metric: fleet_tasks
+  - metric: contacts
+  - metric: nav
+    pass: {empty_shelf: {eq: 0}}
