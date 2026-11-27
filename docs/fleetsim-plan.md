@@ -55,6 +55,69 @@ PIBT/RHCR anchor runs, Ack/TaskQuery in the DES and emulation stubs, map
 sharing on the real robots (Isaac side of #30), the comparison methods
 themselves (#50) and idle behaviour (#51).
 
+## Open decisions for the owner (from building the groundwork, 2026-11-27)
+
+Each was raised while building an item and is described in that item's
+section of `docs/fleetsim.md`. None blocks the benchmark.
+
+Comparisons and metrics
+- **Hungarian starvation (A1, A6).** When tasks outnumber robots, minimising
+  total drive time can leave a far task waiting (one waited 286 s in
+  `delivery_smoke`; p95 up to 500 s when a capability is scarce). An age term
+  in the cost would fix it, at some cost in total drive time.
+- **Central dispatch on a lossy radio (A1).** At 50 robots a lost Status makes
+  the dispatcher declare a robot lost and re-plan its task, which then gets
+  worked twice. A longer loss timeout, or asking before re-planning, are the
+  options.
+- **Why central methods cause about twice the robot-caused stops (A1)** —
+  not yet explained.
+- **`per_hour` window (A4, done):** first request to last delivery, not the
+  whole run. Revert is one line if unwanted.
+
+Scenarios (C12)
+- Which radio assumption the radio scenarios use: global contention, spatial
+  contention (the drafts), or neighbour-only Status (`fleet_scale`).
+- **The 20-robot radio cliff:** with fleet-wide Status the channel sits near
+  0.7 load, and one disturbance tips it into a collapse it never recovers from
+  (`/fleet/tasks` delivery to 0 %). A prime target for the comms scheme.
+- Fixed relays/access points for 2-robot radio runs (a far robot is out of
+  range of both the gateway and the other robot).
+- Seeds or run length at 2 robots (2-6 tasks per run is too few to read).
+- Spreading homes for small fleets (#51, idle behaviour).
+- Requests during a gateway outage: wait (the drafts) or be refused.
+- Two found gaps to fix, then make scenarios of: a rebooted robot that was
+  carrying an item comes back idle and robots are sent to the empty shelf;
+  a robot that never returns is never mapped as an obstacle.
+
+Robot types (A6)
+- Bids become "time until delivered" when types are set; on the real robots
+  `service_s` must then be set fleet-wide. Agree?
+- Stratify the capability draw per seed (the heavy share varied 11-29 %).
+- 2-robot `bench_mixed` has no standard robot (every type gets at least one).
+
+Map sharing (B8, B9)
+- Redesign the refresh: it spends whatever patch traffic leaves of the rate
+  cap and stalls when one tile outgrows the token bucket, so map bytes at 20+
+  robots compare budgets, not policies.
+- Phantom pallets (a gone pallet stays in maps until someone looks again):
+  expire occupied cells that differ from the prior, or send a robot to look.
+- Add a scenario where map news decides deliveries; no current one does.
+
+Traffic (B10, B11)
+- The camera stand-in reports the nearest point on a peer, not its centre,
+  which still costs one short stop per meeting with keep right on; fixing it
+  changes every run.
+- Lanes and passages only see corridors near the grid axes; saved RTAB-Map
+  maps can be rotated.
+- Direction-aware passage claims, or a temporary cost on held passages.
+- On the robots, claims would ride in `/fleet/status` and need clocks that
+  agree well under a second.
+
+Machine
+- All 10 python segfaults in the kernel log (2026-10-21 to 11-17) were on one
+  physical core (CPUs 10-11), and those CPUs were offline on 2026-11-26 by
+  03:32. Running the tests on another machine settles it.
+
 ## Design notes per item
 
 ### A1 — dispatcher layer
