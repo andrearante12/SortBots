@@ -32,10 +32,18 @@ class FleetTasks(Metric):
     #    is delivered (2026-11-26). Dividing by the whole run made the same
     #    delivery_smoke fleet 112/h stopped at tasks_done and 48/h left to
     #    run its 900 s: the idle tail counted as time it failed to deliver.
-    version = 3
-    streams = {"announce", "task", "dispatch", "end"}
+    # 4: (2026-11-26) delivery time starts at `requested_s` when the request
+    #    was held through a gateway outage, the operator's request being the
+    #    start; and a duplicate is two robots on one task for at least
+    #    dup_min_s, with a killed robot no longer working anything. The old
+    #    count, any overlap at all, counted 3 ms auction races (a claim and
+    #    the yield that settles it) and robots that died mid-task; that one is
+    #    still reported, as `overlaps`.
+    version = 4
+    streams = {"announce", "task", "dispatch", "end", "disturb"}
     summary = "Auctioned deliveries: completion, throughput, latency, duplicate work."
-    params = {}
+    params = {"dup_min_s": (float, 2.0, "two robots on one task for at least this long is a "
+                                         "duplicate; shorter is an auction race settling")}
     values = {
         "announced": "tasks the gateway announced",
         "done": "announced tasks some robot finished (DONE)",
@@ -43,9 +51,12 @@ class FleetTasks(Metric):
         "failed": "FAILED reports (a robot gave up a leg; the task may be redone)",
         "cancelled": "CANCELLED reports (lease lost, out-bid, or withdrawn)",
         "redispatched": "dispatches beyond the first per task (it moved robot)",
-        "duplicates": "episodes of two or more robots working the same task at once "
-                      "(the later one drives to a shelf the item has left)",
-        "mean_s": "mean sim seconds from announce (the operator's request) to DONE",
+        "duplicates": "episodes of two or more live robots working the same task at once for "
+                      "at least dup_min_s (the later one drives to a shelf the item has left)",
+        "overlaps": "episodes of two or more robots on one task for any time, races and dead "
+                    "robots included (what `duplicates` counted before version 4)",
+        "mean_s": "mean sim seconds from the operator's request (the announce, or its "
+                  "requested_s if the request waited out a gateway outage) to DONE",
         "p95_s": "95th percentile announce-to-DONE, sim seconds",
         "per_hour": "deliveries per sim hour: done x 3600 / (end - first announce), where end "
                     "is the last DONE if every announced task was delivered, else the end of "
@@ -69,21 +80,45 @@ class FleetTasks(Metric):
         self.dispatches: dict[str, int] = {}
         self.first_dispatch: dict[str, float] = {}
         self.picked_at: dict[str, float] = {}
-        self.failed = self.cancelled = self.duplicates = 0
+        self.failed = self.cancelled = self.duplicates = self.overlaps = 0
+        self.dup_since: dict[str, float] = {}  # task -> when its second live robot joined
         self.end_t = None
+
+    def _dup_check(self, tid: str, t: float, act: set) -> None:
+        """Count a pending overlap once it has lasted dup_min_s; drop it if it
+        ended sooner."""
+        since = self.dup_since.get(tid)
+        if since is None:
+            return
+        if t - since >= self.p["dup_min_s"]:
+            self.duplicates += 1
+            del self.dup_since[tid]
+        elif len(act) < 2:
+            del self.dup_since[tid]
 
     def on_event(self, ev):
         s = ev["s"]
         if s == "announce":
-            self.announced[ev["task_id"]] = ev["t"]
+            self.announced[ev["task_id"]] = ev.get("requested_s", ev["t"])
         elif s == "dispatch":
             self.dispatches[ev["task_id"]] = self.dispatches.get(ev["task_id"], 0) + 1
             self.first_dispatch.setdefault(ev["task_id"], ev["t"])
         elif s == "end":
             self.end_t = ev["t"]
+            for tid, act in self.active.items():
+                self._dup_check(tid, ev["t"], act)
+        elif s == "disturb":
+            dead = ev.get("kill") if ev.get("on") else None
+            if isinstance(dead, str) and dead.startswith("robot_"):
+                for tid, act in self.active.items():  # a dead robot works nothing
+                    if dead in act:
+                        self._dup_check(tid, ev["t"], act)
+                        act.discard(dead)
+                        self._dup_check(tid, ev["t"], act)
         elif s == "task":
             tid, st, rid = ev["task_id"], ev["state"], ev["rid"]
             act = self.active.setdefault(tid, set())
+            self._dup_check(tid, ev["t"], act)
             if st == "NAV_TO_DROPOFF":
                 # One physical item per task (sim.take_item): the first carry
                 # leg is the pick, whichever robot made it.
@@ -92,9 +127,11 @@ class FleetTasks(Metric):
                 if rid not in act:
                     act.add(rid)
                     if len(act) == 2:
-                        self.duplicates += 1
+                        self.overlaps += 1
+                        self.dup_since.setdefault(tid, ev["t"])
             elif st in FINAL:
                 act.discard(rid)
+                self._dup_check(tid, ev["t"], act)
                 if st == "DONE":
                     self.done_at.setdefault(tid, ev["t"])
                 elif st == "FAILED":
@@ -123,6 +160,7 @@ class FleetTasks(Metric):
             "cancelled": self.cancelled,
             "redispatched": sum(max(0, c - 1) for c in self.dispatches.values()),
             "duplicates": self.duplicates,
+            "overlaps": self.overlaps,
             "mean_s": round(statistics.fmean(lat), 1) if lat else None,
             "p95_s": round(_pct(lat, 95), 1) if lat else None,
             "per_hour": per_hour,
@@ -559,7 +597,9 @@ class Utilisation(Metric):
 @register
 class Bounds(Metric):
     name = "bounds"
-    version = 1
+    # 2: arrivals counted from `requested_s` when a request waited out a
+    #    gateway outage (2026-11-26), as fleet_tasks v4 does.
+    version = 2
     streams = {"announce", "task_bound", "task"}
     summary = "Per-task lower bounds, and how loaded the scenario is: could any method keep up?"
     params = {}
@@ -586,8 +626,8 @@ class Bounds(Metric):
 
     def on_event(self, ev):
         s = ev["s"]
-        if s == "announce":
-            self.announced[ev["task_id"]] = ev["t"]
+        if s == "announce":  # from the request, as fleet_tasks (v4) measures it
+            self.announced[ev["task_id"]] = ev.get("requested_s", ev["t"])
         elif s == "task_bound":
             if ev.get("lb_s") is not None:  # None: no path on the true map
                 self.lb[ev["task_id"]] = float(ev["lb_s"])

@@ -565,6 +565,35 @@ def test_fleet_tasks_per_hour_stops_at_the_last_delivery():
     assert v["per_hour"] == round(3 * 3600 / (190.0 - 10.0), 1)
 
 
+def _race_and_dup_stream():
+    """T1: a 3 ms auction race (robot_1 yields at once), then robot_0 alone.
+    T2: robot_0 and robot_1 both on it for 30 s, a real duplicate. T3:
+    robot_1 dies mid-task and robot_2 takes it over while robot_1 is dead."""
+    return [{"s": "announce", "t": 0.0, "task_id": "T1"},
+            {"s": "announce", "t": 0.0, "task_id": "T2"},
+            {"s": "announce", "t": 0.0, "task_id": "T3", "requested_s": -40.0},
+            _st(5.0, "robot_0", "T1", "NAV_TO_PICKUP"),
+            _st(5.0, "robot_1", "T1", "NAV_TO_PICKUP"),
+            _st(5.003, "robot_1", "T1", "CANCELLED"),
+            _st(10.0, "robot_0", "T2", "NAV_TO_PICKUP"),
+            _st(20.0, "robot_1", "T2", "NAV_TO_PICKUP"),
+            _st(50.0, "robot_1", "T2", "FAILED"),
+            _st(60.0, "robot_1", "T3", "NAV_TO_PICKUP"),
+            {"s": "disturb", "t": 70.0, "on": True, "kill": "robot_1"},
+            _st(71.0, "robot_2", "T3", "NAV_TO_PICKUP"),
+            _st(90.0, "robot_0", "T1", "DONE"), _st(95.0, "robot_0", "T2", "DONE"),
+            _st(100.0, "robot_2", "T3", "DONE"),
+            {"s": "end", "t": 200.0, "reason": "duration", "sim_s": 200.0, "wall_s": 1.0}]
+
+
+def test_fleet_tasks_duplicates_ignore_races_and_dead_robots():
+    v = _score("fleet_tasks", _race_and_dup_stream(), robots=("robot_0", "robot_1", "robot_2"))
+    assert v["overlaps"] == 2      # T1's race and T2 (T3 never had two LIVE robots)
+    assert v["duplicates"] == 1    # only T2 lasted dup_min_s
+    # T3 waited out a gateway outage: its delivery time runs from the request
+    assert v["mean_s"] == round((90.0 + 95.0 + 140.0) / 3, 1)
+
+
 def _util_stream(paths=True):
     """robot_0's day, with every cause of lost time once; robot_1 never
     reports and is idle throughout."""

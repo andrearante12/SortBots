@@ -816,6 +816,10 @@ and 150 s of `fleet_scale` are identical before and after.
    two robots dispatched in the same step, where the loser cancels 3 ms
    later. It also counts a dead robot as still working its task. The
    drafts' pass criterion is `nav.empty_shelf == 0` instead (0 in every run).
+   **Fixed in `fleet_tasks` v4:** a duplicate is now two live robots on one
+   task for at least `dup_min_s` (2 s); the old count is kept as `overlaps`.
+   v4 also measures delivery time from `requested_s` when a request waited
+   out a gateway outage.
 6. **Narrow aisles cost nothing while robots can avoid them.** With any
    shelf as a pickup, mean delivery at 20 robots matched the plain floor to
    0.1 s, so `bench_narrow` picks only in the narrow aisles.
