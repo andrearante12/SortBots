@@ -6,6 +6,9 @@
 //   GET  /api/fleetsim/launch      state and log of the current or last run
 //   POST /api/fleetsim/launch      start a run
 //   POST /api/fleetsim/cancel      stop it
+//
+// The scenario editor hands it a scenario it has just saved through
+// window.sortbotsFleetRun.pick(name).
 
 (() => {
   "use strict";
@@ -79,13 +82,26 @@
     $("#fr-sets").replaceChildren(...fields);
   }
 
-  async function loadCatalog() {
+  async function loadCatalog(pick) {
     catalog = await api("/api/fleetsim/scenarios");
-    for (const scenario of catalog.scenarios) $("#fr-scenario").add(new Option(scenario.name));
+    const select = $("#fr-scenario");
+    const keep = pick || select.value;
+    select.replaceChildren(...catalog.scenarios.map((scenario) => new Option(scenario.name)));
+    if (catalog.scenarios.some((s) => s.name === keep)) select.value = keep;
     $("#fr-note").hidden = catalog.control;
     applyScenario();
     render();
   }
+
+  // The scenario editor's Run (operator_fleetedit.js): list the scenarios again,
+  // since it may have just saved a new one, pick NAME and bring the form into view.
+  async function pick(name) {
+    await loadCatalog(name);
+    form.scrollIntoView({ block: "center" });
+    $("#fr-run").focus({ preventScroll: true });
+    return $("#fr-scenario").value === name;
+  }
+  window.sortbotsFleetRun = { pick, reload: () => loadCatalog() };
 
   function readForm() {
     const sets = {};

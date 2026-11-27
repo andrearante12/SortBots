@@ -462,6 +462,90 @@
   .fs-run:last-child { border-bottom: 1px solid var(--line); }
   .fs-t { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; font-size: .86rem; }
   .fs-t .muted { flex-basis: 100%; font-size: .8rem; }
+  .fs-run .fe-btns { display: flex; gap: 6px; }
+  .fs-run.invalid .fs-t b { color: var(--muted); }
+  .fs-run .err { color: var(--warnink); }
+  /* Fleet sim scenario editor (operator_fleetedit.js): one scenario's floor and its
+     form. It covers everything below the header, not just the stage like the replay:
+     the floor needs the width, and the robot and task lists are about the live fleet. */
+  #fleetedit { position: fixed; top: var(--fe-top, 50px); left: 0; right: 0; bottom: 0; z-index: 5; background: var(--map-bg); --fe-w: 430px; }
+  #fe-stage { position: absolute; top: 0; left: 0; bottom: 0; right: var(--fe-w); overflow: hidden; }
+  #fe-map { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  #fleetedit:not([data-tool="pan"]) #fe-map, #fleetedit.arming #fe-map { cursor: crosshair; }
+  #fe-bar { top: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 6px 10px; font-size: .84rem; }
+  #fe-bar .seg { padding: 2px; } #fe-bar .seg button { padding: 3px 10px; font-size: .8rem; }
+  .fe-title { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1 1 auto; }
+  #fe-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #fe-sum { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fe-state { font-size: .7rem; font-weight: 700; letter-spacing: .05em; padding: 1px 6px; border-radius: 4px; color: var(--on-ink); background: var(--muted); white-space: nowrap; }
+  .fe-state.ok { background: var(--go); } .fe-state.bad { background: var(--stop); } .fe-state.busy { background: var(--info); }
+  #fe-hint { flex-basis: 100%; color: var(--muted); font-size: .78rem; }
+  #fe-hint:empty { display: none; }
+  #fe-time { left: 12px; right: 12px; bottom: 12px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; padding: 6px 10px; font-size: .84rem; }
+  #fe-clock { white-space: nowrap; min-width: 92px; text-align: right; }
+  .fe-scrub { display: grid; min-width: 0; }
+  #fe-ticks { width: 100%; height: 30px; display: block; cursor: pointer; touch-action: none; }
+  #fe-slider { width: 100%; margin: 0; }
+  #fe-msg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); padding: 24px; text-align: center; pointer-events: none; }
+  #fe-msg.err { color: var(--stop); }
+  #fe-tip { position: absolute; pointer-events: none; padding: 2px 7px; font-size: .76rem; white-space: nowrap; z-index: 1; }
+  #fe-panel { position: absolute; top: 0; right: 0; bottom: 0; width: var(--fe-w); background: var(--surface); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  .fe-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .fe-head h3 { margin: 0; font-size: 1rem; font-weight: 600; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fe-head .x { background: none; border: none; color: var(--muted); font-size: 1.4rem; line-height: 1; padding: 0 2px; }
+  #fe-form { flex: 1; overflow: auto; padding: 2px 14px 14px; min-height: 0; }
+  .fe-sec { border-bottom: 1px solid var(--line); padding: 0 0 10px; }
+  .fe-sec > summary { cursor: pointer; padding: 9px 0 7px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .fe-sec > summary .n { text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--faint); margin-left: 4px; }
+  .fe-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 10px; }
+  .fe-grid .w2 { grid-column: span 2; } .fe-grid .w3 { grid-column: 1 / -1; }
+  #fleetedit label.f { display: grid; gap: 3px; color: var(--muted); font-size: .76rem; min-width: 0; align-content: start; }
+  #fleetedit input:not([type="checkbox"]):not([type="range"]), #fleetedit select, #fleetedit textarea { min-width: 0; width: 100%; color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; font-size: .84rem; }
+  #fleetedit #fe-bar select { width: auto; }
+  #fleetedit textarea { resize: vertical; font: inherit; font-size: .84rem; line-height: 1.4; }
+  #fleetedit .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; }
+  #fleetedit .bad { border-color: var(--stop) !important; box-shadow: 0 0 0 1px var(--stop); }
+  #fleetedit .warned { border-color: var(--warnline) !important; box-shadow: 0 0 0 1px var(--warnline); }
+  #fleetedit .armed { outline: 2px solid var(--tape); outline-offset: 1px; }
+  .fe-rows { display: grid; gap: 4px; }
+  .fe-row { display: grid; grid-template-columns: 4.6em minmax(0, 1fr) minmax(0, 1fr) 24px; gap: 4px; align-items: center; border-radius: 6px; }
+  .fe-row.kv { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) 24px; }
+  .fe-row.crit { grid-template-columns: minmax(0, 1.3fr) 4.4em minmax(0, 1fr) 24px; }
+  .fe-row.hd { color: var(--faint); font-size: .72rem; }
+  .fe-row.sel, .fe-item.sel { background: var(--sel); box-shadow: 0 0 0 4px var(--sel); }
+  .fe-item { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px 8px; display: grid; gap: 6px; }
+  .fe-items { display: grid; gap: 6px; }
+  .fe-item-h { display: flex; gap: 6px; align-items: center; }
+  .fe-item-h > select { flex: 0 1 9.5em; } .fe-item-h > .grow { flex: 1; color: var(--muted); font-size: .78rem; }
+  .fe-line { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; color: var(--muted); font-size: .78rem; }
+  .fe-line input[type="number"] { width: 5.4em !important; }
+  #fleetedit .fe-line select { width: auto; max-width: 100%; }
+  .fe-line .grow { flex: 1 1 8em; }
+  .fe-del { background: none; border: none; color: var(--muted); font-size: 1.15rem; line-height: 1; padding: 0 4px; }
+  .fe-del:hover { color: var(--stop); }
+  .fe-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+  .fe-acts select { width: auto !important; }
+  .fe-note { margin: 6px 0 0; font-size: .78rem; color: var(--muted); line-height: 1.45; }
+  .fe-note:empty { display: none; }
+  .fe-note b { color: var(--ink); font-weight: 600; }
+  .fe-cmts { margin: 4px 0 0; padding-left: 16px; font-size: .76rem; color: var(--muted); }
+  .fe-cmts li.lost { color: var(--warnink); }
+  .fe-foot { border-top: 1px solid var(--line); padding: 8px 14px 10px; display: grid; gap: 6px; }
+  #fe-err { font-size: .8rem; max-height: 128px; overflow: auto; line-height: 1.4; }
+  #fe-err:empty { display: none; }
+  #fe-err button.p { display: block; width: 100%; text-align: left; background: none; border: none; padding: 1px 0; color: var(--stop); font-size: inherit; }
+  #fe-err button.p.warning { color: var(--warnink); }
+  #fe-err .ok { color: var(--go); } #fe-err .info { color: var(--muted); }
+  .fe-foot .fe-acts { justify-content: flex-end; margin: 0; }
+  #fe-as { display: flex; gap: 6px; align-items: center; }
+  #fe-as[hidden] { display: none; }
+  #fe-as input { flex: 1; }
+  @media (max-width: 1100px) { #fleetedit { --fe-w: 370px; } }
+  @media (max-width: 760px), (max-height: 520px) and (orientation: landscape) {
+    #fe-stage { right: 0; bottom: 55%; }
+    #fe-panel { top: 45%; left: 0; width: auto; border-left: none; border-top: 1px solid var(--line); }
+    #fe-time { display: none; }
+  }
   #coverage { font-size: .86rem; color: var(--muted); white-space: nowrap; }
   #coverage b { font-weight: 600; color: var(--ink); }
   #coverage[hidden] { display: none; }
@@ -1026,6 +1110,50 @@
   </details>
 </aside>
 
+<!-- Fleet sim scenario editor (operator_fleetedit.js), opened from the Tests tab's
+     scenario list. Below the header, over the stage and both side columns. -->
+<section id="fleetedit" hidden data-tool="pan" aria-label="Fleet sim scenario editor">
+  <div id="fe-stage">
+    <canvas id="fe-map"></canvas>
+    <div id="fe-msg" hidden></div>
+    <div class="float" id="fe-tip" hidden></div>
+    <div class="float" id="fe-bar" role="toolbar" aria-label="Scenario floor">
+      <span class="fe-title"><b id="fe-name"></b><span class="fe-state" id="fe-state"></span><span id="fe-sum"></span></span>
+      <div class="seg" id="fe-tools" role="radiogroup" aria-label="Map tool">
+        <button type="button" data-tool="pan" class="active" role="radio" title="Drag to pan, scroll to zoom. With a pickup or dropoff field selected, click a waypoint to fill it in (V)">Pan</button>
+        <button type="button" data-tool="task" role="radio" title="Add tasks: click the pickup waypoint, then the dropoff (T)">Tasks</button>
+        <button type="button" data-tool="block" role="radio" title="Drag a rectangle: a blockage that appears at the timeline's time (B)">Blockage</button>
+        <button type="button" data-tool="mover" role="radio" title="Click a mover's path point by point; Enter or a double-click ends it (M)">Mover</button>
+        <button type="button" data-tool="gateway" role="radio" title="Click where the gateway goes. A saved map only: the synthetic warehouse puts it on the apron (G)">Gateway</button>
+      </div>
+      <button type="button" class="btn small" id="fe-fit" title="Fit the floor (or double-click it)">Fit</button>
+      <span id="fe-hint" aria-live="polite"></span>
+    </div>
+    <div class="float" id="fe-time" role="group" aria-label="Timeline">
+      <span id="fe-clock">0:00</span>
+      <div class="fe-scrub">
+        <canvas id="fe-ticks" title="Tasks along the top, a bar per disturbance. Drag a bar to move it, its right end to change how long it lasts"></canvas>
+        <input type="range" id="fe-slider" min="0" max="600" step="1" value="0" aria-label="Show the floor at this time" title="The floor at this time: blockages up, movers where they are, who is cut off (arrow keys: 1 s, Shift: 10 s)">
+      </div>
+    </div>
+  </div>
+  <aside id="fe-panel">
+    <div class="fe-head"><h3 id="fe-heading">Scenario</h3>
+      <button type="button" class="x" id="fe-x" title="Close the editor (Esc)" aria-label="Close the editor">&times;</button></div>
+    <form id="fe-form" autocomplete="off" novalidate></form>
+    <div class="fe-foot">
+      <div id="fe-err" aria-live="polite"></div>
+      <div id="fe-as" hidden><input id="fe-asname" spellcheck="false" aria-label="Save as name" title="lowercase letters, digits, - and _"><button type="button" class="btn small primary" id="fe-as-go">Save</button><button type="button" class="btn small" id="fe-as-no">Cancel</button></div>
+      <div class="fe-acts">
+        <button type="button" class="btn small" id="fe-validate" title="Check the scenario as a run would load it">Validate</button>
+        <button type="button" class="btn small" id="fe-saveas" title="Save under a new name; the original stays as it is">Save as&hellip;</button>
+        <button type="button" class="btn small primary" id="fe-save" title="Write fleetsim/scenarios/NAME.yaml (Ctrl+S)">Save</button>
+        <button type="button" class="btn small" id="fe-run" title="Save, then pick it in Run a fleet sim">Run&hellip;</button>
+      </div>
+    </div>
+  </aside>
+</section>
+
 <!-- Stop all: the robots are already halted by the time this shows; this is the
      sim itself, and whether this run's map is kept. operator.js fills it. -->
 <div id="stop-dlg" class="veil" hidden>
@@ -1141,6 +1269,11 @@
       <section>
         <div id="tp-list"></div>
       </section>
+      <!-- Fleet sim scenarios (fleetsim/scenarios/), edited on their own floor: operator_fleetedit.js. -->
+      <section>
+        <h4 class="tp-h">Fleet sim scenarios <span class="muted" id="fe-count"></span></h4>
+        <div id="fe-list"></div>
+      </section>
       <!-- Run a fleet sim form, see operator_fleetsim.js -->
       <section>
         <h4 class="tp-h">Run a fleet sim</h4>
@@ -1213,6 +1346,7 @@
 <script src="operator_tests.js"></script>
 <script src="operator_replay.js"></script>
 <script src="operator_fleetsim.js"></script>
+<script src="operator_fleetedit.js"></script>
 <script src="operator_drive.js"></script>
 </body>
 </html>
