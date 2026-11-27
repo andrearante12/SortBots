@@ -16,6 +16,8 @@
 #                            coordination gap.
 #   auction_traffic          the auction with keep right and single-lane passage
 #                            reservation on (docs/fleetsim.md, "Traffic")
+#   auction_orca             the auction with ORCA local avoidance instead of
+#                            stop-and-replan (docs/fleetsim.md, "Local avoidance")
 #
 # Throughput (deliveries per hour) is the headline. It only separates methods
 # in the overloaded scenarios (bench_rush, bench_burst); in the underloaded
@@ -23,15 +25,15 @@
 # `bounds.offered_load` and `fleet_tasks.backlog_end` to see which regime a
 # row is in.
 #
-# 11 scenarios x 4 sizes x 3 seeds x 6 variants = 792 runs. At most 12 at once
-# (fleetsim/bench.py MAX_DEFAULT_JOBS), roughly 40-60 min on the 30-CPU laptop.
+# 11 scenarios x 4 sizes x 3 seeds x 7 variants = 924 runs. At most 12 at once
+# (fleetsim/bench.py MAX_DEFAULT_JOBS), about 45 min on the 30-CPU laptop.
 #   /usr/bin/python3 -m fleetsim bench bench --dry-run
 #   /usr/bin/python3 -m fleetsim bench bench --only 'bench_steady_*'
 name: bench
 description: >
   Every bench_* scenario at 2, 5, 10 and 20 robots, seeds 1-3, with the robots'
   auction, central greedy and rolling-Hungarian dispatchers, and the auction
-  and Hungarian with perfect information, and the auction with the traffic layer.
+  and Hungarian with perfect information, and the auction with the traffic layer or with ORCA.
 scenarios:
   - {scenario: bench_steady, robots: [2, 5, 10, 20]}
   - {scenario: bench_rush, robots: [2, 5, 10, 20]}
@@ -50,6 +52,7 @@ variants:
   central_greedy: {dispatch.method: central_greedy}
   central_hungarian: {dispatch.method: central_hungarian}
   auction_traffic: {traffic.keep_right.enabled: true, traffic.passages.enabled: true}
+  auction_orca: {nav.local: orca}
   auction_perfect:
     info.map: truth
     info.peers: truth
