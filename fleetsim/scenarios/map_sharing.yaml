@@ -39,5 +39,6 @@ metrics:
     # (final_stale ~150 cells, seed 1). final_wrong_free stays ~10 either
     # way: faces of the pallet no camera ever saw.
     pass: {final_stale: {eq: 0}}
+  - metric: map_spread    # how long the pallet took to reach each robot heading for it
   - metric: nav
     pass: {gave_up: {eq: 0}}

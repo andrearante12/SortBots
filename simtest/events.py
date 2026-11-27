@@ -68,6 +68,12 @@ STREAMS = {
     "board": "fleetsim: the gateway's task board, counted: {tasks: {state: n}, alarms, "
              "robots_alive}",
     "disturb": "fleetsim: an injected failure starting (on: true) or ending",
+    "map_learn": "fleetsim (since 2026-11-26): a blockage reached one robot's own map: {rid, "
+                 "blockage (disturbance index), on (it appeared / it cleared), after_s (null: "
+                 "never, while it stood), how: sensed|shared|truth|already, path_s (when its path "
+                 "first ran into it while it didn't know; null if never, and for a clear)}. "
+                 "fleetsim/maplearn.py",
+    "map_pub": "fleetsim (map_share.events): an event-driven map publish: {rid, tiles, cells}",
     "path": "fleetsim (record.paths): a robot's planned path, on every plan; pts [] when it "
             "has none: {rid, purpose: task|home, pts: [[x, y], ...]}. The replay draws it; "
             "`utilisation` reads it for going home and for when a failed plan recovers",

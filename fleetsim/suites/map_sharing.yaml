@@ -1,0 +1,33 @@
+# B8 and B9 (docs/fleetsim-plan.md): who gets a robot's map patches, and when.
+# docs/fleetsim.md "Map sharing: subscriptions and event-driven updates" has
+# the measured table. About 25 min on the 30-CPU laptop at --jobs 6:
+#   /usr/bin/python3 -m fleetsim bench map_sharing --jobs 6
+# fleet_scale has no blockage, so its map_spread cells are "-": it is here for
+# what each policy costs at 50 robots on the radio, starting blind.
+name: map_sharing
+description: >
+  map_sharing (a pallet in front of every pickup, ideal network), bench_moved
+  (radio, a pallet moving between aisles) at 10 and 20 robots, and fleet_scale
+  (50 robots, radio, blind start). Recipients all, radius and subscribers, each
+  with and without event-driven publishes; subscriptions with flips kept to
+  subscribers; and info.map truth, every map perfect, as the reference.
+scenarios:
+  - {scenario: map_sharing, robots: [10]}
+  - {scenario: bench_moved, robots: [10, 20]}
+  - {scenario: fleet_scale, robots: [50]}
+seeds: [1, 2, 3]
+variants:
+  all: {map_share.recipients: all}
+  all_ev: {map_share.recipients: all, map_share.events: true}
+  radius: {map_share.recipients: radius}
+  radius_ev: {map_share.recipients: radius, map_share.events: true}
+  subs: {map_share.recipients: subscribers}
+  subs_ev: {map_share.recipients: subscribers, map_share.events: true}
+  subs_local: {map_share.recipients: subscribers, map_share.sub_flips_to: subscribers}
+  truth: {info.map: truth}         # the scenario's own recipients; every map follows the truth
+headline: fleet_tasks.per_hour
+also: [fleet_tasks.mean_s, map_divergence.mean_stale, nav.replans_shared,
+       map_spread.on_path, map_spread.late_mean_s, map_spread.spread_mean_s,
+       map_spread.missed, map_spread.never, map_spread.clear_mean_s, map_spread.clear_never,
+       comms.map_bytes_per_robot_s, comms.sub_bytes_per_robot_s,
+       comms.map_copies_per_robot_s, comms.load_mean, comms.load_max]

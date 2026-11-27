@@ -51,4 +51,5 @@ metrics:
   - metric: nav
     pass: {empty_shelf: {eq: 0}}
   - metric: map_divergence
+  - metric: map_spread
   - metric: comms

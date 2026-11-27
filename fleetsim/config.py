@@ -185,9 +185,22 @@ def _validate(s: dict) -> None:
         raise ScenarioError("config.intent.transport: status | message")
     if cfg["network"]["capacity"] not in ("enforced", "unlimited"):
         raise ScenarioError("config.network.capacity: enforced | unlimited")
-    for key in ("status", "map_share"):
-        if cfg[key]["recipients"] not in ("all", "radius"):
-            raise ScenarioError(f"config.{key}.recipients: all | radius")
+    if cfg["status"]["recipients"] not in ("all", "radius"):
+        raise ScenarioError("config.status.recipients: all | radius")
+    ms = cfg["map_share"]
+    if ms["recipients"] not in ("all", "radius", "subscribers"):
+        raise ScenarioError("config.map_share.recipients: all | radius | subscribers")
+    for key in ("sub_radius_m", "sub_min_interval_s", "event_gap_s"):
+        if not _num(ms[key]) or ms[key] < 0:
+            raise ScenarioError(f"config.map_share.{key}: a number >= 0")
+    if not _num(ms["sub_keepalive_s"]) or ms["sub_keepalive_s"] <= 0:
+        raise ScenarioError("config.map_share.sub_keepalive_s: a number > 0")
+    if ms["sub_path_m"] is not None and (not _num(ms["sub_path_m"]) or ms["sub_path_m"] < 0):
+        raise ScenarioError("config.map_share.sub_path_m: a number >= 0, or null (the whole path)")
+    if ms["sub_flips_to"] not in ("all", "subscribers"):
+        raise ScenarioError("config.map_share.sub_flips_to: all | subscribers")
+    if not isinstance(ms["events"], bool):
+        raise ScenarioError("config.map_share.events: true | false")
     if cfg["map_share"]["prior"] not in ("none", "truth"):
         raise ScenarioError("config.map_share.prior: none | truth")
     if cfg["tasks"]["bid_cost"] not in ("path", "straight"):
