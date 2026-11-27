@@ -350,10 +350,11 @@ Hungarian solve itself is under 1 ms at 20 × 20.
 | `info.dispatch` | `network` | `/fleet/tasks` is delivered instantly and never lost, through partitions too, and off the radio. A central dispatcher also reads each robot's true pose and liveness |
 
 The full perfect-information reference is all three at `truth` plus
-`network.model: ideal` with `network.ideal.delay_s: 0`. Status, map
-patches and obstacle notices still go over the network and still cost
-airtime. Robots just don't depend on them. To take map traffic out as
-well, set `map_share.enabled: false`.
+`network.model: ideal` with `network.ideal.delay_s: 0`. Status and map
+patches still go over the network and still cost airtime, but robots no
+longer depend on them. To take map traffic out as well, set
+`map_share.enabled: false`. Movers (walkers) are not peers: a robot still
+hears of one it can't see only through obstacle notices.
 
 For `auction`, `info.dispatch: truth` means the auction's own protocol
 runs on a perfect channel. Bids, claims, lease beacons, acks and completes
