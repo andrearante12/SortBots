@@ -69,8 +69,9 @@ def test_central_method_delivers_every_task(method):
     v = score(s, [{"metric": "fleet_tasks"}, {"metric": "contacts"}, {"metric": "nav"}])
     assert v["fleet_tasks"]["done"] == 3 and v["fleet_tasks"]["duplicates"] == 0
     assert v["nav"]["empty_shelf"] == 0
-    # No confirmed-pick handshake under a central planner.
-    assert not [e for e in s.events if e["s"] == "task" and e["state"] == "AWAIT_PICK"]
+    # Every pick waited for the dispatcher's word (confirmed picks).
+    waits = [e for e in s.events if e["s"] == "task" and e["state"] == "AWAIT_PICK"]
+    assert len(waits) == 3 and summary["dispatch"]["picks"] == 3
     assert summary["dispatch"]["method"] == method
 
 
@@ -119,6 +120,103 @@ def test_central_dispatch_survives_a_robot_dying_and_coming_back(fresh):
     assert v["fleet_tasks"]["done"] == 3 and v["nav"]["empty_shelf"] == 0
 
 
+ONE = [{"at_s": 1, "pickup": "shelf_2_1", "dropoff": "dock_1"}]
+NOPICK = {"fleet_tasks": {"protocol": {"confirmed_picks": False}}}
+PERFECT = {"info": {"dispatch": "truth"}}
+
+
+def _one(**cfg):
+    """The ONE task's run: who did it, when it reached the shelf, when it
+    left it with the item, when it was delivered."""
+    s, _ = run(central("central_hungarian", tasks=ONE, duration_s=400, config=cfg))
+    ev = [e for e in s.events if e["s"] == "task"]
+    owner = ev[0]["rid"]
+    at_shelf = next(e["t"] for e in ev if e["state"] in ("AWAIT_PICK", "PICKING"))
+    picked = next(e["t"] for e in ev if e["state"] == "NAV_TO_DROPOFF")
+    done = next(e["t"] for e in ev if e["state"] == "DONE")
+    return owner, at_shelf, picked, done
+
+
+@pytest.mark.parametrize("cfg", [{}, NOPICK, PERFECT], ids=["grants", "no_grants", "perfect"])
+def test_a_delivery_made_while_the_gateway_is_down_is_never_redone(cfg):
+    # The gateway dies just before the robot reaches the shelf and comes back
+    # long after the delivery would have been made. Found 2026-11-26
+    # (bench_dead_gateway): back up, the dispatcher took every robot for
+    # lost, re-planned the task it still thought unpicked, asked the robot
+    # only about the tasks it still counted as its, and sent a second robot
+    # to the empty shelf. Now it knows its own outage, asks about every task
+    # it gave, and the robot repeats the outcome until it is acked; with
+    # perfect information it reads where the item is.
+    owner, at_shelf, _picked, done = _one(**cfg)
+    down = [{"at_s": at_shelf - 3.0, "duration_s": done - at_shelf + 60.0, "kill": "gateway"}]
+    s, summary = run(central("central_hungarian", tasks=ONE, disturbances=down,
+                             duration_s=600, config=cfg))
+    v = score(s, [{"metric": "fleet_tasks"}, {"metric": "nav"}])
+    assert v["fleet_tasks"]["done"] == 1 and v["nav"]["empty_shelf"] == 0
+    assert s.gw.tasks[1].state == "done" and summary["dispatch"]["restarts"] == 1
+    back = at_shelf - 3.0 + done - at_shelf + 60.0
+    ev = [e for e in s.events if e["s"] == "task"]
+    t_done = next(e["t"] for e in ev if e["state"] == "DONE")
+    if cfg is NOPICK or cfg is PERFECT:
+        assert t_done < back  # it kept working through the outage...
+        assert [e["rid"] for e in s.events if e["s"] == "dispatch"] == [owner]  # ...and once
+    else:
+        # It asked at the shelf, nobody answered, and it gave the task back at
+        # the lease rather than stand on the spot; after the outage the task
+        # went out again, and was picked only on the dispatcher's word.
+        waits = [e for e in ev if e["rid"] == owner and e["state"] in ("AWAIT_PICK", "CANCELLED")]
+        assert [e["state"] for e in waits][:2] == ["AWAIT_PICK", "CANCELLED"]
+        assert waits[1]["t"] - waits[0]["t"] == pytest.approx(s.params.task_lease_s, abs=0.2)
+        assert t_done > back
+
+
+@pytest.mark.parametrize("cfg", [{}, NOPICK], ids=["grants", "no_grants"])
+def test_a_robot_cut_off_before_the_shelf_never_shares_it(cfg):
+    # The owner is cut off 4 s before it reaches the shelf; the dispatcher
+    # loses it and gives the task to another robot. Found 2026-11-26
+    # (bench_partition): without pick grants the cut-off robot picks anyway
+    # and the other one finds the shelf empty. With them it waits there,
+    # and after the heal it is cancelled.
+    owner, at_shelf, _picked, _done = _one()
+    cut = [{"at_s": at_shelf - 4.0, "duration_s": 80.0, "partition": [[owner], "rest"]}]
+    s, _ = run(central("central_hungarian", tasks=ONE, disturbances=cut, duration_s=500,
+                       config=cfg))
+    v = score(s, [{"metric": "fleet_tasks"}, {"metric": "nav"}])
+    assert v["fleet_tasks"]["done"] == 1
+    if cfg is NOPICK:
+        assert v["nav"]["empty_shelf"] >= 1  # the gap, kept as a control
+    else:
+        assert v["nav"]["empty_shelf"] == 0
+        assert len({e["rid"] for e in s.events if e["s"] == "dispatch"}) == 2
+
+
+def test_an_outcome_is_repeated_until_the_dispatcher_acks_it():
+    s = sim.Sim(central("central_hungarian", tasks=[]))
+    r = s.robots[0]
+    client = r.core
+    sent = []
+    s.handle_actions = lambda owner, acts: sent.extend(
+        ft.decode(v)[1] for k, v in acts if k == "publish")
+    client.on_task_status(json.dumps({"task_id": "fleet-7", "state": "DONE", "queue": []}), 0.0)
+    client._flush()
+    assert sent[-1]["finals"] == [[7, "DONE", "queued", 0.0]]
+    for k in range(1, 40):  # 4 s of steps: repeated after 1 s, then 2 s more (backing off)
+        s.now = k * 0.1
+        client.tick(s.now)
+        if client._dirty:
+            client._flush()
+    assert len(sent) == 3 and all(m["finals"] for m in sent)
+    client.on_message(0, {"type": "Ack", "finals": [7]}, s.now)
+    for k in range(40, 200):
+        s.now = k * 0.1
+        client.tick(s.now)
+    assert not client._dirty and not client.unacked
+    # ...but it still answers a Query about it.
+    client.on_message(0, {"type": "Query", "tasks": [7, 8], "seq": 1}, s.now)
+    client._flush()
+    assert sent[-1]["outcomes"] == {"7": ["DONE", "queued", 0.0]} and sent[-1]["unknown"] == [8]
+
+
 def test_a_central_planner_never_sees_a_blockage_the_robots_drive_around():
     # A pallet across aisle 1 between the cross-aisles: the robot sent past
     # it replans around (the planner's true map doesn't have it, and doesn't
@@ -139,11 +237,14 @@ def _hungarian(gain):
     return s, s.gw
 
 
-def _msgs(gw):
+def _msgs(gw, acks=False):
+    """What the dispatcher sent; Acks of outcomes only when asked for."""
     out = []
     for kind, raw in gw.drain():
         if kind == "publish":
-            out.append(ft.decode(raw)[1])
+            m = ft.decode(raw)[1]
+            if acks or m["type"] != "Ack":
+                out.append(m)
     return out
 
 
@@ -188,7 +289,7 @@ def _robot_1_delivers(gw, u, home, now):
 def test_hungarian_reassigns_when_a_much_better_robot_frees_up():
     s, gw, u, t, home, saving = _setup(10.0)
     assert saving > 20.0  # the geometry is what the test assumes
-    sent = _robot_1_delivers(gw, u, home, 3.0)
+    sent = _robot_1_delivers(gw, u, home, 2.0)
     assert gw.tasks[u].state == "done"
     assert gw.tasks[t].robot == 1
     assert [(m["type"], m["to"], m["task_id"]) for m in sent] == [("Cancel", 1, t),
@@ -199,7 +300,7 @@ def test_hungarian_reassigns_when_a_much_better_robot_frees_up():
 def test_hungarian_keeps_a_task_within_the_hysteresis():
     _s, _gw, _u, _t, _home, saving = _setup(10.0)
     s, gw, u, t, home, _ = _setup(saving + 5.0)
-    sent = _robot_1_delivers(gw, u, home, 3.0)
+    sent = _robot_1_delivers(gw, u, home, 2.0)
     assert gw.tasks[t].robot == 0 and not sent
     assert gw.stats["reassigned"] == 0
 
@@ -208,12 +309,36 @@ def test_a_cancel_never_takes_an_item_off_a_robot():
     # The Cancel crossed the pick: robot_0 already has the item. It keeps the
     # task, and the dispatcher takes it back from whoever it went to.
     s, gw, u, t, home, _ = _setup(10.0)
-    _robot_1_delivers(gw, u, home, 3.0)
+    _robot_1_delivers(gw, u, home, 2.0)
     assert gw.tasks[t].robot == 1
-    _report(gw, 0, 3.1, 1, cur=t, state="NAV_TO_DROPOFF")
+    _report(gw, 0, 2.1, 1, cur=t, state="NAV_TO_DROPOFF")
     sent = _msgs(gw)
     assert gw.tasks[t].robot == 0 and gw.tasks[t].state == "picked"
     assert [(m["type"], m["to"], m["task_id"]) for m in sent] == [("Cancel", 2, t)]
+
+
+def test_an_age_weight_lets_a_waiting_far_task_win_the_robot():
+    # One robot, two open tasks: an old one far away and a new one close by.
+    # Minimum drive time alone takes the near one; with the age term the old
+    # one wins once its wait is worth more than the extra drive.
+    picks = {}
+    for w in (0.0, 5.0):
+        s = sim.Sim(scenario(robots=1, tasks=[],
+                             config={"dispatch": {"method": "central_hungarian",
+                                                  "age_weight": w}}))
+        gw = s.gw
+        home = (s.robots[0].x, s.robots[0].y)
+        far = gw.request("shelf_3_3", "dock_3", 0.0)
+        near = gw.request("shelf_0_0", "dock_0", 50.0)
+        gw.on_status(0, 60.0, None, "idle", home)
+        gw._last_tick = 59.9
+        gw.tick(60.0)
+        sent = [m for m in _msgs(gw) if m["type"] == "Dispatch"]
+        picks[w] = sent[0]["task_id"]
+        extra = gw.costs.seconds("shelf_3_3", [gw.costs.snap(home)])[0] \
+            - gw.costs.seconds("shelf_0_0", [gw.costs.snap(home)])[0]
+        assert 0 < extra < 5.0 * 50.0  # the geometry the test assumes
+    assert picks == {0.0: near, 5.0: far}
 
 
 # ---- perfect information ---------------------------------------------------------------

@@ -236,6 +236,8 @@ def _validate(s: dict) -> None:
         raise ScenarioError(f"config.dispatch.method: {' | '.join(DISPATCH_METHODS)}")
     if not isinstance(dsp["reassign_gain_s"], (int, float)) or dsp["reassign_gain_s"] < 0:
         raise ScenarioError("config.dispatch.reassign_gain_s: a number >= 0")
+    if not isinstance(dsp["age_weight"], (int, float)) or dsp["age_weight"] < 0:
+        raise ScenarioError("config.dispatch.age_weight: a number >= 0")
     if not isinstance(dsp["resolve_period_s"], (int, float)) or dsp["resolve_period_s"] <= 0:
         raise ScenarioError("config.dispatch.resolve_period_s: a number > 0")
     for key, ok in INFO_CHOICES.items():
