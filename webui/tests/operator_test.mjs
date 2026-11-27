@@ -225,6 +225,20 @@ async function main() {
     '--set', 'record.belief_maps=[robot_0]', '--set', 'record.belief_map_s=5', '--out', path.join(fleetDir, 'fixture_run'), '--quiet'],
     { cwd: REPO_ROOT, encoding: 'utf8', timeout: 180000 });
   check('replay: the fleetsim fixture run was recorded', fs.existsSync(path.join(fleetDir, 'fixture_run', 'summary.json')), (fs1.stderr || '').slice(-300));
+  // And a real `fleetsim bench` into data/fleetsim/bench/'s layout, for the Tests tab's
+  // bench groups and the comms monitor on a radio: six robots, 60 sim-s, spatial
+  // contention, map sharing on; `busy` adds 94 % background load with capacity
+  // unlimited, so its channel runs past the 95 % cap.
+  const suiteDir = tmpDir('sortbots-suite-');
+  fs.writeFileSync(path.join(suiteDir, 'monitor.yaml'), [
+    'name: monitor', 'description: the operator test\'s bench',
+    'scenarios:', '  - {scenario: delivery_smoke, robots: [6], duration_s: 60, set: {network.model: radio, network.radio.contention: spatial, map_share.prior: none}}',
+    'seeds: [1]', 'variants:', '  radio: {}', '  busy: {network.capacity: unlimited, network.radio.background_load: 0.94}',
+    'headline: fleet_tasks.per_hour', ''].join('\n'));
+  const BENCH = '20261126T000000Z_monitor';
+  const fs2 = spawnSync('/usr/bin/python3', ['-m', 'fleetsim', 'bench', path.join(suiteDir, 'monitor.yaml'), '--out', path.join(fleetDir, 'bench', BENCH), '--jobs', '2'],
+    { cwd: REPO_ROOT, encoding: 'utf8', timeout: 180000 });
+  check('monitor: the fleetsim bench fixture was recorded', ['radio', 'busy'].every((v) => fs.existsSync(path.join(fleetDir, 'bench', BENCH, `delivery_smoke_r6_s1_${v}`, 'events.jsonl.gz'))), (fs2.stdout || '').slice(-300) + (fs2.stderr || '').slice(-300));
   // The scenario editor saves for real, so serve.py gets a copy of fleetsim/scenarios/.
   const scnDir = tmpDir('sortbots-scenarios-');
   for (const f of fs.readdirSync(path.join(REPO_ROOT, 'fleetsim', 'scenarios')).filter((f) => f.endsWith('.yaml')))
@@ -1597,6 +1611,113 @@ async function main() {
   await shot('replay-phone');
   await click('#rp-x');
   await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+
+  // -- comms traffic monitor (operator_replay.js) ------------------------------------------------
+  // The ideal fixture run first (no load: traffic only), then the bench's radio runs.
+  console.log('\n--- comms traffic monitor ---');
+  const monState = async () => (await rp()).mon;
+  await page.eval(`window.sortbotsReplay.open('fixture_run')`);
+  await waitFor(async () => (await rp()).loaded, { what: 'the replay for the monitor', tries: 40 });
+  check('monitor: closed until asked for', !(await visible('#rp-mon')) && (await monState()) === null);
+  await click('#rp-mon-toggle'); await sleep(250);
+  let ms = await monState();
+  check('monitor: Traffic shows it, under the floor and over the timeline', (await visible('#rp-mon')) && ms !== null
+        && (await page.eval(`document.getElementById('rp-mon-toggle').getAttribute('aria-pressed')`)) === 'true'
+        && (await page.eval(`document.getElementById('rp-mon').getBoundingClientRect().bottom <= document.getElementById('rp-time').getBoundingClientRect().top`)));
+  check('monitor: an ideal network has traffic but no load chart', !(await visible('#rm-load-row')) && /ideal network: no airtime/.test(await $text('#rm-model'))
+        && ms.kindMax > 0 && /status/.test(await $text('#rm-kind-leg')) && /tasks/.test(await $text('#rm-kind-leg')), await $text('#rm-model'));
+  check('monitor: Airtime is not offered without airtime', !(await visible('#rm-measure [data-m="air"]')));
+  // The x axis is the scrubber's: the cursor sits over the same time on both.
+  const axis = await page.eval(`(() => { const k = document.getElementById('rm-kind').getBoundingClientRect(), t = document.getElementById('rp-ticks').getBoundingClientRect(); return [k.left, t.left, t.right]; })()`);
+  await page.eval(`window.sortbotsReplay.seek(30)`); await sleep(200);
+  const at30 = await monState();
+  await page.eval(`window.sortbotsReplay.seek(70)`); await sleep(200);
+  const at70 = await monState();
+  const expectX = (t) => axis[1] - axis[0] + (t / 80) * (axis[2] - axis[1]);
+  check('monitor: the charts follow the clock, on the scrubber\'s own axis', at30.T === 30 && at70.T === 70 && Math.abs(at30.cursorX - expectX(30)) < 2 && Math.abs(at70.cursorX - expectX(70)) < 2
+        && /0:30/.test(at30.legend['kind-h']) && /1:10/.test(at70.legend['kind-h']), JSON.stringify([at30.cursorX, at70.cursorX, expectX(30), expectX(70), at70.legend['kind-h']]));
+  check('monitor: the legend is the traffic at that moment', /^[\d.]+k?$/.test(at70.legend['k:status']) && at70.legend['k:status'] !== '–', JSON.stringify(at70.legend));
+  // Hover reads a sample; a press seeks to it.
+  const kr = await page.eval(`(() => { const r = document.getElementById('rm-kind').getBoundingClientRect(); return [r.left, r.top, r.height]; })()`);
+  const xAt = (t) => kr[0] + expectX(t);
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: xAt(20), y: kr[1] + kr[2] / 2 }); await sleep(200);
+  ms = await monState();
+  check('monitor: hovering a chart shows every series at that second', (await visible('#rm-tip')) && ms.hover && Math.abs(ms.hover.t - 20) <= 1 && /0:19–0:20/.test(ms.tip) && /status/.test(ms.tip) && /delivered/.test(ms.tip), ms.tip);
+  await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: xAt(45), y: kr[1] + kr[2] / 2, button: 'left', clickCount: 1 });
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: xAt(45), y: kr[1] + kr[2] / 2, button: 'left', clickCount: 1 }); await sleep(200);
+  check('monitor: pressing a chart seeks there', Math.abs((await rp()).T - 45) < 1, String((await rp()).T));
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 }); await sleep(150);
+  check('monitor: the tooltip leaves with the pointer', !(await visible('#rm-tip')));
+  await click('#rm-measure [data-m="lost"]'); await sleep(150);
+  check('monitor: Lost plots copies lost per kind', (await monState()).measure === 'lost' && /Copies lost per s/.test(await $text('#rm-kind-leg')));
+  await click('#rm-measure [data-m="kbs"]'); await sleep(150);
+  check('monitor: kB/s plots bytes offered', (await monState()).measure === 'kbs' && /Offered kB\/s/.test(await $text('#rm-kind-leg')));
+  await click('#rm-kind-leg [data-kind="status"]'); await sleep(150);
+  check('monitor: a kind can be hidden from its legend', (await page.eval(`document.querySelector('#rm-kind-leg [data-kind="status"]').getAttribute('aria-pressed')`)) === 'false');
+  await click('#rm-kind-leg [data-kind="status"]'); await click('#rm-measure [data-m="sent"]'); await sleep(150);
+  await page.eval(`window.sortbotsReplay.select(1)`); await sleep(200);
+  check('monitor: the info panel has the selected robot\'s own traffic', /Its traffic/.test(await $text('#rp-info')) && /out kB\/s/.test(await $text('#rp-info')) && /status/.test(await $text('#rp-info')), await $text('#rp-info'));
+  await page.eval(`window.sortbotsReplay.select(-1)`);
+  await click('#rm-x'); await sleep(150);
+  check('monitor: x hides it', !(await visible('#rp-mon')) && (await monState()) === null);
+  await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 't', text: 't' }); await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 't' }); await sleep(150);
+  check('monitor: T brings it back', await visible('#rp-mon'));
+  await click('#rp-x');
+
+  // Benchmarks in the Tests tab: grouped, closed, their runs fetched when opened.
+  await page.eval(`window.sortbotsTests.openTests(); window.sortbotsReplay.refreshRuns()`);
+  await waitFor(async () => (await page.eval(`!!document.querySelector('#tp-fleet-list details.fs-bench[data-bench="${BENCH}"]')`)), { what: 'the bench group', tries: 40 });
+  check('bench runs: listed as a closed group under the runs', /Benchmarks/.test(await $text('#tp-fleet-list')) && /Monitor/.test(await $text(`#tp-fleet-list details.fs-bench`))
+        && /2 runs/.test(await $text('#tp-fleet-list details.fs-bench summary')) && !(await page.eval(`document.querySelector('#tp-fleet-list details.fs-bench').open`))
+        && !(await page.eval(`!!document.querySelector('#tp-fleet-list [data-dir^="bench/"]')`)), await $text('#tp-fleet-list details.fs-bench'));
+  await page.eval(`document.querySelector('#tp-fleet-list details.fs-bench summary').click()`);
+  await waitFor(async () => (await page.eval(`document.querySelectorAll('#tp-fleet-list [data-dir^="bench/"] [data-replay]:not([disabled])').length`)) === 2, { what: 'the bench\'s runs', tries: 40 });
+  check('bench runs: opening the group lists its runs with their variants', /radio · seed 1 · 6 robots/.test(await $text('#tp-fleet-list details.fs-bench')) && /busy · seed 1/.test(await $text('#tp-fleet-list details.fs-bench')), await $text('#tp-fleet-list details.fs-bench'));
+  await page.eval(`window.sortbotsReplay.refreshRuns()`); await sleep(400);
+  check('bench runs: the group stays open across a refresh', await page.eval(`document.querySelector('#tp-fleet-list details.fs-bench').open && document.querySelectorAll('#tp-fleet-list [data-dir^="bench/"]').length === 2`));
+  await click(`#tp-fleet-list [data-dir="bench/${BENCH}/delivery_smoke_r6_s1_radio"] [data-replay]`);
+  await waitFor(async () => (await rp()).loaded, { what: 'a bench run to load', tries: 40 });
+  check('bench runs: one replays like any run, and its link names it', /6 robots · radio · seed 1 · bench monitor/.test(await $text('#rp-meta'))
+        && (await page.eval(`decodeURIComponent(location.hash)`)) === `#replay=bench/${BENCH}/delivery_smoke_r6_s1_radio`, await $text('#rp-meta'));
+  // On the radio: load over time, each robot's, and on the floor.
+  // T left it up, and it stays up from run to run (remembered, like the measure).
+  await page.eval(`window.sortbotsReplay.seek(40)`); await sleep(250);
+  ms = await monState();
+  check('monitor: it stays up for the next run opened', ms !== null && (await visible('#rp-mon')));
+  check('monitor: a radio run charts channel load with the 95 % cap', (await visible('#rm-load-row')) && ms.loadMax >= 1 && /spatial contention/.test(await $text('#rm-model'))
+        && /\d+ %/.test(ms.legend.max) && /\d+ %/.test(ms.legend.mean) && (await visible('#rm-measure [data-m="air"]')), JSON.stringify(ms.legend));
+  await page.eval(`window.sortbotsReplay.select(2)`); await sleep(200);
+  ms = await monState();
+  check('monitor: the selected robot\'s own load joins the chart', /\d+ %/.test(ms.legend.robot) && /Robot 2/.test(await $text('#rm-load-leg')) && /its own airtime/.test(await $text('#rp-info')), JSON.stringify(ms.legend));
+  await click('#rm-measure [data-m="air"]'); await sleep(150);
+  check('monitor: Airtime plots each kind\'s share of the channel, batman\'s OGMs too', (await monState()).measure === 'air' && /batman OGM/.test(await $text('#rm-kind-leg')) && (await monState()).kindMax > 0);
+  await click('#rm-measure [data-m="sent"]');
+  check('monitor: Load is offered on a radio run, off until ticked', !(await page.eval(`document.getElementById('rp-load').disabled`)) && !(await page.eval(`document.getElementById('rp-load').checked`)) && (await rp()).loadLinks.length === 0);
+  await click('#rp-load'); await sleep(250);
+  const stopRgb = await page.eval(`(() => { const d = document.createElement('div'); d.style.color = getComputedStyle(document.documentElement).getPropertyValue('--stop'); document.body.append(d); const c = getComputedStyle(d).color; d.remove(); return c; })()`);
+  let st = await rp();
+  const loadNow = await page.eval(`(() => { const r = window.sortbotsReplay.state(); return r.loadNode; })()`);
+  check('monitor: Load colours each link by the busier of its ends', st.loadLinks.length > 0 && st.loadLinks.every(([, , f, c]) => f < 0.95 && /^rgb\(/.test(c)) && (await visible('#rp-load-leg')) && loadNow != null,
+        JSON.stringify(st.loadLinks.slice(0, 3)));
+  // The busy variant: every channel past the cap, the excess shaded, links red.
+  await page.eval(`window.sortbotsReplay.open('bench/${BENCH}/delivery_smoke_r6_s1_busy')`);
+  await waitFor(async () => (await rp()).loaded, { what: 'the busy bench run', tries: 40 });
+  await page.eval(`window.sortbotsReplay.seek(40); window.sortbotsReplay.load(true)`); await sleep(300);
+  st = await rp(); ms = st.mon;
+  const red = (c) => { const d = /^rgb\((\d+), (\d+), (\d+)/.exec(stopRgb), m = /^#(..)(..)(..)$/.exec(c); return !!d && !!m && [1, 2, 3].every((k) => parseInt(m[k], 16) === Number(d[k])); };
+  check('monitor: past the cap is shaded and counted, and the links go red', ms.overSamples > 10 && /capacity unlimited/.test(await $text('#rm-model')) && /^\d+ s$/.test(ms.legend.over) && ms.legend.over !== '0 s'
+        && st.loadLinks.length > 0 && st.loadLinks.every(([, , f, c]) => f >= 0.95 && red(c)), JSON.stringify({ over: ms.legend.over, n: ms.overSamples, links: st.loadLinks.slice(0, 2), stopRgb }));
+  check('monitor: the info panel flags load past the cap', /peak load/.test(await $text('#rp-info')) && await page.eval(`!!document.querySelector('#rp-info .bad')`));
+  await shot('replay-monitor');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }); await sleep(400);
+  check('monitor: on a phone it stacks its legends, takes the info panel\'s place, and nothing scrolls sideways',
+        (await visible('#rp-mon')) && (await page.eval(`document.getElementById('rp-mon').classList.contains('stack')`)) && !(await visible('#rp-info'))
+        && (await page.eval(`document.documentElement.scrollWidth <= innerWidth`)));
+  await shot('replay-monitor-phone');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+  await page.eval(`window.sortbotsReplay.monitor(false); window.sortbotsReplay.load(false)`);
+  await click('#rp-x');
+  await page.eval(`localStorage.clear()`);
 
   // -- fleet sim scenario editor (operator_fleetedit.js) ----------------------------------------
   // The real serve.py and fleetsim/preview.py build every floor; saves land in scnDir.

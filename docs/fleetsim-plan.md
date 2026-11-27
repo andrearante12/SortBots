@@ -45,7 +45,7 @@ its map — checked against Isaac with a 2-robot task list after this groundwork
 | B9 | Event-driven map/intent updates | todo |
 | B10 | Keep right in aisles | todo |
 | B11 | Single-lane passage reservation | todo |
-| C13 | Comms traffic monitor in the replay | todo |
+| C13 | Comms traffic monitor in the replay | done (replay's Traffic panel, Load on the floor, `record.net_nodes`; bench runs listed in the replay; docs/fleetsim.md "Comms traffic monitor") |
 | A6 | Per-robot service times and capabilities | todo |
 | A7 | Swappable local-avoidance layer (for ORCA) | todo |
 

@@ -29,6 +29,10 @@
     --float: rgba(255,255,255,.94); --scrim: rgba(242,243,244,.92); --veil: rgba(21,25,30,.35); --shadow: rgba(20,25,30,.12);
     --warnbg: #fff4e5; --warnline: #f3d3a0; --warnink: #8a5200;
     --map-bg: #f2f3f4; --map-unknown: #fbfbfc; --map-free: #e7eaed; --map-occ: #7a828f; --map-ink: #15191e; --map-robot-ink: #fff;
+    /* Chart series (the replay's comms monitor), in a fixed order that passes the
+       colour-blind and normal-vision separation checks on each theme's surface;
+       slot N always means the same thing, never "the Nth line drawn". */
+    --series-1: #257de0; --series-2: #f47230; --series-3: #00b894; --series-4: #f2a600; --series-5: #ee7fac; --series-6: #008a17; --series-7: #6a4ce2;
   }
   /* Dark follows the system unless the toggle has pinned a theme (data-theme). The same
      values appear twice because CSS cannot share a block between a media query and an
@@ -42,6 +46,7 @@
       --float: rgba(23,27,32,.94); --scrim: rgba(15,18,21,.9); --veil: rgba(0,0,0,.55); --shadow: rgba(0,0,0,.4);
       --warnbg: #2b2415; --warnline: #5a4a22; --warnink: #f0c36a;
       --map-bg: #0f1215; --map-unknown: #13171b; --map-free: #242b33; --map-occ: #7d8896; --map-ink: #e8ecf0; --map-robot-ink: #12161a;
+      --series-1: #338ced; --series-2: #e76624; --series-3: #00a888; --series-4: #d28e05; --series-5: #e24d8b; --series-6: #0aac23; --series-7: #9887ef;
     }
   }
   :root[data-theme="dark"] {
@@ -52,6 +57,7 @@
     --float: rgba(23,27,32,.94); --scrim: rgba(15,18,21,.9); --veil: rgba(0,0,0,.55); --shadow: rgba(0,0,0,.4);
     --warnbg: #2b2415; --warnline: #5a4a22; --warnink: #f0c36a;
     --map-bg: #0f1215; --map-unknown: #13171b; --map-free: #242b33; --map-occ: #7d8896; --map-ink: #e8ecf0; --map-robot-ink: #12161a;
+    --series-1: #338ced; --series-2: #e76624; --series-3: #00a888; --series-4: #d28e05; --series-5: #e24d8b; --series-6: #0aac23; --series-7: #9887ef;
   }
   [hidden] { display: none !important; }
   * { box-sizing: border-box; }
@@ -457,6 +463,45 @@
   #rp-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; background: var(--c); }
   #rp-msg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); padding: 24px; text-align: center; pointer-events: none; }
   #rp-msg.err { color: var(--stop); }
+  #rp-mon-toggle[aria-pressed="true"] { background: var(--segbg); }
+  #rp-load-leg { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: .78rem; }
+  #rp-load-leg .ramp { display: inline-block; width: 36px; height: 6px; border-radius: 3px; background: linear-gradient(90deg, var(--map-free), var(--info)); }
+  #rp-load-leg .over { display: inline-block; width: 8px; height: 6px; border-radius: 3px; background: var(--stop); margin-left: 2px; }
+  /* Comms monitor (operator_replay.js): load and traffic over the whole run, its
+     time axis lined up with the scrubber below, so the cursor sits over the thumb. */
+  #rp-mon { left: 12px; right: 12px; bottom: 64px; padding: 6px 10px 8px; font-size: .78rem; }
+  #rp-mon .rm-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-bottom: 2px; }
+  #rp-mon .rm-head b { font-size: .84rem; }
+  #rm-model { color: var(--muted); min-width: 0; flex: 1 1 auto; }
+  #rp-mon .seg button { padding: 2px 9px; font-size: .76rem; }
+  #rp-mon .x { background: none; border: none; color: var(--muted); font-size: 1.2rem; line-height: 1; padding: 0 2px; cursor: pointer; }
+  #rp-mon .rm-chart { display: grid; grid-template-columns: var(--rm-legend, 190px) minmax(0, 1fr); gap: 8px; margin-top: 4px; }
+  #rp-mon canvas { width: 100%; height: 86px; display: block; cursor: crosshair; touch-action: none; }
+  #rp-mon #rm-kind { height: 104px; }
+  .rm-leg { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .rm-leg .rm-k { font-size: .68rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rm-li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto auto; align-items: center; gap: 6px; padding: 0 2px; background: none; border: none;
+           border-radius: 4px; text-align: left; color: var(--ink); font-size: .76rem; line-height: 1.35; }
+  button.rm-li:hover { background: var(--hover2); }
+  .rm-li[aria-pressed="false"] { opacity: .45; }
+  .rm-li > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rm-li b { font-weight: 600; text-align: right; } .rm-li .muted { font-size: .72rem; text-align: right; min-width: 3.6em; }
+  .rm-li .bad { color: var(--stop); }
+  .rm-li i, #rm-tip i, .rp-tr i { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--c); vertical-align: middle; }
+  .rm-li i.dash, #rm-tip i.dash { border-top-style: dashed; }
+  #rm-tip { position: absolute; z-index: 1; pointer-events: none; padding: 5px 8px; border-radius: 6px; background: var(--surface); border: 1px solid var(--border);
+            box-shadow: 0 2px 8px var(--shadow); font-size: .74rem; white-space: nowrap; }
+  #rm-tip .tm { color: var(--muted); margin-bottom: 2px; }
+  #rm-tip div > b { display: inline-block; min-width: 4.2em; text-align: right; margin: 0 6px 0 4px; }
+  #rp-mon.stack .rm-chart { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  #rp-mon.stack .rm-leg { flex-direction: row; flex-wrap: wrap; gap: 0 8px; }
+  #rp-mon.stack .rm-leg .rm-k { flex-basis: 100%; }
+  #rp-mon.stack .rm-li { grid-template-columns: 14px auto auto; } #rp-mon.stack .rm-li .muted { display: none; }
+  #rp-mon.stack canvas { height: 64px; } #rp-mon.stack #rm-kind { height: 76px; }
+  #rp-info .rp-tr { border-collapse: collapse; width: 100%; font-size: .76rem; }
+  #rp-info .rp-tr th { font-weight: 500; color: var(--muted); text-align: right; padding: 0 0 1px 6px; }
+  #rp-info .rp-tr td { text-align: right; padding: 0 0 0 6px; } #rp-info .rp-tr td:first-child, #rp-info .rp-tr th:first-child { text-align: left; padding-left: 0; }
+  #rp-info .rp-tr i { width: 10px; margin-right: 4px; }
   /* The Tests tab's list of recorded fleet runs. */
   .fs-run { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 8px 4px; border-top: 1px solid var(--line); }
   .fs-run:last-child { border-bottom: 1px solid var(--line); }
@@ -465,6 +510,18 @@
   .fs-run .fe-btns { display: flex; gap: 6px; }
   .fs-run.invalid .fs-t b { color: var(--muted); }
   .fs-run .err { color: var(--warnink); }
+  /* fleetsim bench output (data/fleetsim/bench/<bench>/<run>/): a group per bench,
+     closed until opened, its runs fetched then: a suite can be hundreds. */
+  .fs-bh { margin: 14px 0 2px; font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .fs-bench { border-top: 1px solid var(--line); }
+  .fs-bench:last-child { border-bottom: 1px solid var(--line); }
+  .fs-bench > summary { cursor: pointer; padding: 8px 4px; list-style: none; display: grid; grid-template-columns: 1.1em 1fr; align-items: baseline; }
+  .fs-bench > summary::-webkit-details-marker { display: none; }
+  .fs-bench > summary::before { content: "+"; color: var(--muted); }
+  .fs-bench[open] > summary::before { content: "\2212"; }
+  .fs-bench .fs-run { padding-left: 1.4em; }
+  .fs-bench .fs-run:last-child { border-bottom: none; }
+  .fs-bench .tp-empty { padding-left: 1.4em; }
   /* Fleet sim scenario editor (operator_fleetedit.js): one scenario's floor and its
      form. It covers everything below the header, not just the stage like the replay:
      the floor needs the width, and the robot and task lists are about the live fleet. */
@@ -833,7 +890,8 @@
     #rp-time .rp-jump { display: none; }
     #rp-time .rp-scrub { grid-column: 1 / -1; }
     #rp-info { top: auto; bottom: 96px; left: 8px; right: 8px; width: auto; max-height: 40%; }
-    #rp-legend { display: none; }
+    #rp-legend, #rp-load-leg { display: none; }
+    #rp-mon { left: 8px; right: 8px; bottom: 96px; padding: 4px 8px 6px; }
     #comms-bar .cm-range input { width: 70px; }
     #comms-feed { left: 8px; right: 8px; bottom: 56px; max-width: none; }
     #hint { display: none; }
@@ -1058,13 +1116,25 @@
       <select id="rp-sel" title="Follow one robot: its path, its task, its events and (if recorded) its own map"></select>
       <label class="lf-check" title="Every robot's planned path; the selected one's dashed"><input type="checkbox" id="rp-paths" checked> Paths</label>
       <label class="lf-check"><input type="checkbox" id="rp-links" checked> Links</label>
+      <label class="lf-check" title="Colour the radio links and ring the robots by how loaded their channel is (the Traffic monitor's load). Radio runs recorded with record.net_nodes"><input type="checkbox" id="rp-load"> Load</label>
       <label class="lf-check" title="Draw the selected robot's OWN map instead of the true floor (record.belief_maps). Red cells: where it is wrong"><input type="checkbox" id="rp-own" checked> Own map</label>
       <span id="rp-legend"><span style="--c: var(--info)"><i></i>to pickup</span><span style="--c: var(--go)"><i></i>carrying</span><span style="--c: var(--muted)"><i></i>idle</span><span style="--c: var(--stop)"><i></i>off</span></span>
+      <span id="rp-load-leg" hidden title="Link: the busier of its two ends. Ring: the robot's own channel">load 0 <span class="ramp"></span> 95 % <span class="over"></span> over</span>
+      <button type="button" class="btn small" id="rp-mon-toggle" aria-pressed="false" title="Comms traffic: channel load and traffic by kind over the run (T)">Traffic</button>
       <button type="button" class="btn small" id="rp-info-toggle" aria-pressed="true" title="Task board, network, the selected robot and its events at this moment">Info</button>
       <button type="button" class="btn small" id="rp-fit" title="Fit the floor (or double-click it)">Fit</button>
       <button type="button" class="x" id="rp-x" title="Close the replay (Esc)" aria-label="Close the replay">&times;</button>
     </div>
     <div class="float" id="rp-info" aria-live="off"></div>
+    <div class="float" id="rp-mon" hidden role="group" aria-label="Comms traffic monitor">
+      <div class="rm-head"><b>Comms traffic</b><span id="rm-model"></span>
+        <span class="seg" id="rm-measure" role="group" aria-label="Traffic measure">
+          <button type="button" data-m="sent" title="Copies sent per second: one per recipient (every copy is unicast)">Sent</button><button type="button" data-m="lost" title="Copies lost per second">Lost</button><button type="button" data-m="kbs" title="Bytes offered per second, every copy counted">kB/s</button><button type="button" data-m="air" title="Airtime offered, as a share of one channel: every hop and retransmission counted (radio only)">Airtime</button></span>
+        <button type="button" class="x" id="rm-x" title="Close the monitor (T)" aria-label="Close the comms monitor">&times;</button></div>
+      <div class="rm-chart" id="rm-load-row"><div class="rm-leg" id="rm-load-leg"></div><canvas id="rm-load" aria-label="Channel load over the run"></canvas></div>
+      <div class="rm-chart"><div class="rm-leg" id="rm-kind-leg"></div><canvas id="rm-kind" aria-label="Traffic by kind over the run"></canvas></div>
+      <div id="rm-tip" hidden></div>
+    </div>
     <div class="float" id="rp-time" role="group" aria-label="Timeline">
       <button type="button" class="btn small" id="rp-play" aria-pressed="false" title="Play / pause (Space)">Play</button>
       <select id="rp-speed" title="Playback speed, sim seconds per second"></select>
