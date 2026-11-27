@@ -9,8 +9,13 @@
     robots: 8                      # shorthand for config.robots.count
     config:                        # layered over fleetsim/configs/base.yaml
       network: {model: radio}
+      robots:                      # robot types (base.yaml robots.types); null = one type
+        types:
+          - {name: standard}                                   # the rest
+          - {name: heavy, share: 0.2, capabilities: [heavy], pick_s: 6}
     tasks:                         # fixed deliveries (waypoint names)
       - {at_s: 5, pickup: shelf_0_0, dropoff: dock_0}
+      - {at_s: 9, pickup: shelf_1_0, dropoff: dock_1, requires: heavy}  # or a list
     task_arrival:                  # and/or a Poisson stream
       rate_hz: 0.1                 # or rate_per_robot_hz: x robots (one of the two)
       pickups: "shelf_*"           # fnmatch over the world's waypoint names
@@ -18,6 +23,7 @@
       start_s: 0
       until_s: 300                 # default: duration_s
       count: 20                    # optional cap; or count_per_robot: x robots
+      requires: {heavy: 0.2}       # share of arrivals needing each capability (one each)
     disturbances:
       - {at_s: 60, duration_s: 30, partition: [[robot_0, robot_1], rest]}
       - {at_s: 60, duration_s: 30, partition: [{first: 0.4}, rest]}  # 40 % of any fleet
@@ -39,6 +45,7 @@ value), and `--robots`, `--seed`, `--duration` the top-level shorthands.
 from __future__ import annotations
 
 import copy
+import math
 import os
 import re
 from pathlib import Path
@@ -66,6 +73,10 @@ INFO_CHOICES = {"map": ("shared", "truth"), "peers": ("heard", "truth"),
 # kill: {select: ...} picks its robot when it fires, lowest index first.
 KILL_SELECT = ("carrying", "fetching", "busy", "any")
 ROBOT_RX = re.compile(r"^robot_(\d+)$")
+# Robot types (A6; docs/fleetsim.md "Robot types and capabilities").
+TYPE_KEYS = {"name", "share", "count", "max_speed_mps", "accel_mps2", "yaw_rate_rps",
+             "pick_s", "place_s", "battery_drain_pct_per_s", "capabilities"}
+CAP_RX = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 
 class ScenarioError(ValueError):
@@ -204,9 +215,13 @@ def _validate(s: dict) -> None:
     for key, ok in INFO_CHOICES.items():
         if cfg["info"][key] not in ok:
             raise ScenarioError(f"config.info.{key}: {' | '.join(ok)}")
+    caps = _check_types(cfg)
     for i, t in enumerate(s["tasks"]):
         if not isinstance(t, dict) or {"at_s", "pickup", "dropoff"} - set(t):
             raise ScenarioError(f"tasks[{i}]: need at_s, pickup, dropoff")
+        if "requires" in t:
+            _check_known(requirement(t["requires"], f"tasks[{i}].requires"), caps,
+                         f"tasks[{i}].requires")
     arr = s["task_arrival"]
     if arr is not None:
         # rate_per_robot_hz keeps one load regime when a benchmark sweeps
@@ -216,6 +231,8 @@ def _validate(s: dict) -> None:
             raise ScenarioError("task_arrival: needs exactly one of rate_hz, rate_per_robot_hz, > 0")
         if "count" in arr and "count_per_robot" in arr:
             raise ScenarioError("task_arrival: count or count_per_robot, not both")
+        if "requires" in arr:
+            arrival_requires(arr["requires"], caps)
     for i, d in enumerate(s["disturbances"]):
         if not isinstance(d, dict) or "at_s" not in d or len(DISTURBANCE_KINDS & set(d)) != 1:
             raise ScenarioError(f"disturbances[{i}]: need at_s and exactly one of "
@@ -239,6 +256,157 @@ def _validate(s: dict) -> None:
 
 def _num(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+# ---- robot types and capabilities (A6) ----------------------------------------
+
+def requirement(v, where: str = "requires") -> tuple:
+    """A task's `requires`: one capability name or a list of them, as a
+    sorted tuple (empty = any robot)."""
+    if v is None:
+        return ()
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, list) or not all(isinstance(c, str) and CAP_RX.match(c) for c in v):
+        raise ScenarioError(f"{where}: a capability name or a list of them "
+                            f"(each matching {CAP_RX.pattern})")
+    return tuple(sorted(set(v)))
+
+
+def arrival_requires(v, caps: set | None = None) -> list[tuple[str, float]]:
+    """task_arrival.requires: {capability: share of arrivals that need it}.
+    One capability per task, so the shares add up to at most 1 and the rest
+    need nothing; in the order given (each arrival draws once, sim.py)."""
+    where = "task_arrival.requires"
+    if not isinstance(v, dict) or not v:
+        raise ScenarioError(f"{where}: {{capability: share, ...}}, e.g. {{heavy: 0.2}}")
+    out = []
+    for c, f in v.items():
+        if not isinstance(c, str) or not CAP_RX.match(c):
+            raise ScenarioError(f"{where}: {c!r} is not a capability name ({CAP_RX.pattern})")
+        if not _num(f) or not 0 < f <= 1:
+            raise ScenarioError(f"{where}.{c}: a share in (0, 1], got {f!r}")
+        out.append((c, float(f)))
+    if sum(f for _, f in out) > 1 + 1e-9:
+        raise ScenarioError(f"{where}: the shares add up to more than 1 (one capability per task)")
+    if caps is not None:
+        _check_known(tuple(c for c, _ in out), caps, where)
+    return out
+
+
+def _check_known(req: tuple, caps: set, where: str) -> None:
+    """A capability no robot type lists is a typo far more often than a test:
+    fail it here. A type with no robots at this fleet size (`count: 0`, or
+    the rest when the others take them all) passes, and its tasks are
+    reported at run time instead (sim.py, `unservable`)."""
+    missing = sorted(set(req) - caps)
+    if missing:
+        have = f"the types list {sorted(caps)}" if caps else "config.robots.types is not set"
+        raise ScenarioError(f"{where}: no robot type has {missing} ({have})")
+
+
+def _type_counts(types: list, n: int) -> list[int]:
+    """Robots per type at fleet size n: `count` is fixed, `share` is
+    round(share x n) and at least 1 (so a capability a 20-robot fleet has, a
+    2-robot one has too), and the one type with neither takes the rest. With
+    no such type the counts must come to n exactly."""
+    counts, rest = [], None
+    for j, t in enumerate(types):
+        if "count" in t:
+            counts.append(int(t["count"]))
+        elif "share" in t:
+            counts.append(max(1, int(math.floor(float(t["share"]) * n + 0.5))))
+        else:
+            counts.append(0)
+            rest = j
+    taken = sum(counts)
+    names = [t["name"] for j, t in enumerate(types) if j != rest]
+    if rest is not None:
+        if taken > n:
+            raise ScenarioError(f"config.robots.types: {', '.join(names)} take {taken} robots, "
+                                f"the fleet has {n}")
+        counts[rest] = n - taken
+    elif taken != n:
+        raise ScenarioError(f"config.robots.types: the types make {taken} robots at a fleet of "
+                            f"{n}; leave one type without share or count to take the rest")
+    return counts
+
+
+def _check_types(cfg: dict) -> set:
+    """Validate config.robots.types; the set of capabilities they list."""
+    types = cfg["robots"]["types"]
+    if types is None:
+        return set()
+    where = "config.robots.types"
+    if not isinstance(types, list) or not types:
+        raise ScenarioError(f"{where}: null, or a list of types ({{name: ..., share: ...}})")
+    seen, caps, rest = set(), set(), 0
+    for j, t in enumerate(types):
+        w = f"{where}[{j}]"
+        if not isinstance(t, dict):
+            raise ScenarioError(f"{w}: a mapping")
+        unknown = set(t) - TYPE_KEYS
+        if unknown:
+            raise ScenarioError(f"{w}: unknown key(s) {sorted(unknown)} (have: {sorted(TYPE_KEYS)})")
+        name = t.get("name")
+        if not isinstance(name, str) or not NAME_RX.match(name) or name in seen:
+            raise ScenarioError(f"{w}.name: a unique name matching {NAME_RX.pattern}")
+        seen.add(name)
+        if "share" in t and "count" in t:
+            raise ScenarioError(f"{w}: share or count, not both")
+        if "share" in t and (not _num(t["share"]) or not 0 < t["share"] <= 1):
+            raise ScenarioError(f"{w}.share: in (0, 1]")
+        if "count" in t and (not isinstance(t["count"], int) or isinstance(t["count"], bool)
+                             or t["count"] < 0):
+            raise ScenarioError(f"{w}.count: an integer >= 0")
+        rest += "share" not in t and "count" not in t
+        for k, lo, hi in (("max_speed_mps", 0.0, 5.0), ("accel_mps2", 0.0, 10.0),
+                          ("yaw_rate_rps", 0.0, 10.0)):
+            if k in t and (not _num(t[k]) or not lo < t[k] <= hi):
+                raise ScenarioError(f"{w}.{k}: in ({lo:g}, {hi:g}]")
+        for k in ("pick_s", "place_s", "battery_drain_pct_per_s"):
+            if k in t and (not _num(t[k]) or not 0 <= t[k] <= 3600):
+                raise ScenarioError(f"{w}.{k}: in [0, 3600]")
+        caps |= set(requirement(t.get("capabilities"), f"{w}.capabilities"))
+    if rest > 1:
+        raise ScenarioError(f"{where}: at most one type without share or count (it takes the rest)")
+    _type_counts(types, cfg["robots"]["count"])
+    return caps
+
+
+def robot_profiles(cfg: dict) -> list[dict]:
+    """What each robot of the fleet is, by index: its type's name, speed,
+    acceleration, yaw rate, pick and place times, battery drain (None: the
+    protocol's fleet-wide value) and capabilities. With robots.types null,
+    every robot is the base robots.* values with tasks.dwell_s for both
+    service times, exactly what fleetsim had before types.
+
+    Types are spread through the fleet, not given in blocks: robot_k parks
+    at the k-th home and wins exact auction ties by its index, so a block
+    would park every heavy robot at one end of the apron and hand one type
+    the tie-breaks. Each type's robots take evenly spaced slots ((i + 1/2) x
+    n / count), and the slots in order are robot_0, robot_1, ... No RNG."""
+    rc = cfg["robots"]
+    n = int(rc["count"])
+    dwell = float(cfg["tasks"]["dwell_s"])
+    base = {"type": "default", "max_speed_mps": float(rc["max_speed_mps"]),
+            "accel_mps2": float(rc["accel_mps2"]), "yaw_rate_rps": float(rc["yaw_rate_rps"]),
+            "pick_s": dwell, "place_s": dwell, "battery_drain_pct_per_s": None,
+            "capabilities": ()}
+    types = rc.get("types")
+    if types is None:
+        return [dict(base) for _ in range(n)]
+    profiles = []
+    for t in types:
+        p = dict(base, type=t["name"], capabilities=requirement(t.get("capabilities")))
+        for k in ("max_speed_mps", "accel_mps2", "yaw_rate_rps", "pick_s", "place_s",
+                  "battery_drain_pct_per_s"):
+            if t.get(k) is not None:
+                p[k] = float(t[k])
+        profiles.append(p)
+    counts = _type_counts(types, n)
+    slots = sorted(((i + 0.5) * n / c, j) for j, c in enumerate(counts) for i in range(c))
+    return [dict(profiles[j]) for _, j in slots]
 
 
 def _check_node(name, n: int, where: str) -> None:

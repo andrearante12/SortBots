@@ -60,6 +60,17 @@ the pick.
 Drive times come from the true static map at robots.max_speed_mps
 (costs.py); a blockage is known only through the failed legs it causes,
 unless `info.map: truth`.
+
+Robot types (`robots.types`): a task that requires capabilities goes only to
+robots whose type has them all (both methods), and every robot is priced at
+its own max speed, pick and place times. In a fleet whose robots differ in
+those, a pair also costs the rest of the task after the pickup is reached
+(pick, carry at that robot's speed, place), so the choice is who would
+DELIVER soonest, as the auction's bids then are. For the Hungarian solve
+that term is taken relative to the task's best eligible robot: a constant
+per task would change which tasks win the robots when there are more tasks
+than robots, and only the difference between robots should count. With
+identical robots the term is zero and the costs are exactly the old ones.
 """
 from __future__ import annotations
 
@@ -111,7 +122,8 @@ class CentralClient:
         self.num = robot.node
         bat = sim.ft_cfg["battery"].get("sim_start_pct")
         self.battery_pct = None if bat is None else float(bat)
-        self.drain_pct_s = float(sim.params.battery_drain_pct_per_s)
+        drain = robot.profile["battery_drain_pct_per_s"]  # robot type; None = fleet-wide
+        self.drain_pct_s = float(sim.params.battery_drain_pct_per_s if drain is None else drain)
         self.seen_seq = 0
         self.cur: int | None = None
         self.state = "IDLE"
@@ -239,6 +251,7 @@ class CTask:
     seq: int = 0               # the Dispatch that gave it to `robot`
     sent_at: float = -math.inf
     retry_at: float | None = None  # a failed dropoff with the item on board: re-dispatch then
+    requires: tuple = ()           # capabilities a robot needs to be given it (robot types)
 
 
 @dataclass
@@ -269,8 +282,16 @@ class CentralDispatcher:
         self.truth = sim.cfg["info"]["dispatch"] == "truth"
         self.timeout = float(sim.params.status_timeout_s)
         self.backoff = float(sim.ft_cfg["failed_backoff_s"])
-        self.dwell = float(sim.cfg["tasks"]["dwell_s"])
         self.lease = float(sim.cfg["network"]["transport_lease_s"])
+        # Robot types: a central planner knows its fleet's specs. Speeds go
+        # to the drive-time lookups only when some robot differs from
+        # robots.max_speed_mps, and the rest-of-task term only when robots
+        # differ at all, so an untyped run computes exactly what it did.
+        self.prof = sim.profiles
+        self.caps = [frozenset(p["capabilities"]) for p in self.prof]
+        base_v = float(sim.cfg["robots"]["max_speed_mps"])
+        self.own_speed = any(p["max_speed_mps"] != base_v for p in self.prof)
+        self.mixed = len({(p["max_speed_mps"], p["pick_s"], p["place_s"]) for p in self.prof}) > 1
         self.costs = DriveTimes(sim, live=sim.cfg["info"]["map"] == "truth")
         self.tasks: dict[int, CTask] = {}
         self.active: dict[int, CTask] = {}  # not done: what every per-robot lookup scans
@@ -286,7 +307,7 @@ class CentralDispatcher:
 
     # ---- the gateway API --------------------------------------------------
 
-    def request(self, pickup: str, dropoff: str, now: float) -> int | None:
+    def request(self, pickup: str, dropoff: str, now: float, requires=()) -> int | None:
         self.now = now
         wps = self.sim.waypoints
         if pickup not in wps or dropoff not in wps:
@@ -294,7 +315,8 @@ class CentralDispatcher:
             return None
         self._next_id += 1
         tid = self._next_id
-        self.tasks[tid] = self.active[tid] = CTask(tid, pickup, dropoff, now)
+        self.tasks[tid] = self.active[tid] = CTask(tid, pickup, dropoff, now,
+                                                   requires=tuple(requires or ()))
         self._dirty = True
         self._log(f"announced task {tid}: {pickup} -> {dropoff}")
         return tid
@@ -572,9 +594,32 @@ class CentralDispatcher:
     def _available(self) -> list:
         return [rv for rv in self.robots if rv.heard and not rv.lost and rv.xy is not None]
 
-    def _allowed(self, k: int, tid: int, now: float) -> bool:
-        until = self.failed.get((k, tid))
+    def _allowed(self, k: int, t: CTask, now: float) -> bool:
+        """robot_k may be given t: its type has what t requires, and it did
+        not just fail t."""
+        if t.requires and not self.caps[k].issuperset(t.requires):
+            return False
+        until = self.failed.get((k, t.tid))
         return until is None or now >= until
+
+    def _speed(self, k: int) -> float | None:
+        return self.prof[k]["max_speed_mps"] if self.own_speed else None
+
+    def _speeds(self, rvs) -> list | None:
+        return [self.prof[rv.k]["max_speed_mps"] for rv in rvs] if self.own_speed else None
+
+    def _rest(self, rvs, t: CTask) -> np.ndarray:
+        """Per robot: pick, the carry pickup -> dropoff at its own speed, and
+        place. Only called for a fleet whose robots differ (self.mixed)."""
+        legs: dict = {}
+        out = []
+        for rv in rvs:
+            p = self.prof[rv.k]
+            v = p["max_speed_mps"]
+            if v not in legs:
+                legs[v] = self.costs.between(t.pickup, t.dropoff, v)
+            out.append(p["pick_s"] + legs[v] + p["place_s"])
+        return np.array(out, dtype=float)
 
     def _assign(self, plan: dict, now: float) -> None:
         """plan: task -> robot index or None. Cancels go out before the
@@ -614,9 +659,11 @@ class Greedy(CentralDispatcher):
         for t in tasks:
             if not free:
                 break
-            s = self.costs.seconds(t.pickup, cells)
+            s = self.costs.seconds(t.pickup, cells, self._speeds(free))
+            if self.mixed:
+                s = s + self._rest(free, t)  # who delivers soonest, not who arrives
             for i, rv in enumerate(free):
-                if not self._allowed(rv.k, t.tid, now):
+                if not self._allowed(rv.k, t, now):
                     s[i] = np.inf
             i = int(np.argmin(s))
             if not np.isfinite(s[i]):
@@ -628,18 +675,21 @@ class Greedy(CentralDispatcher):
 
 class RollingHungarian(CentralDispatcher):
     def _row(self, rv: RView):
-        """(cell the robot is free at, seconds until then)."""
+        """(cell the robot is free at, seconds until then), at its own
+        speed and service times."""
         here = self.costs.snap(rv.xy)
+        p, v = self.prof[rv.k], self._speed(rv.k)
         for t in self._mine(rv.k):
             if not self._locked(t):
                 continue
             drop = self.costs.snap(self.sim.waypoint_xy(t.dropoff))
             if t.sub == "PICKING":
-                off = self.dwell + self.costs.between(t.pickup, t.dropoff) + self.dwell
+                off = p["pick_s"] + self.costs.between(t.pickup, t.dropoff, v) + p["place_s"]
             elif t.sub == "PLACING":
-                off = self.dwell
+                off = p["place_s"]
             else:
-                off = float(self.costs.seconds(t.dropoff, [here])[0]) + self.dwell
+                off = float(self.costs.seconds(t.dropoff, [here],
+                                               None if v is None else [v])[0]) + p["place_s"]
                 if t.retry_at is not None:
                     off += max(0.0, t.retry_at - self.now)
             return drop, off
@@ -656,14 +706,23 @@ class RollingHungarian(CentralDispatcher):
         rinfo = [self._row(rv) for rv in rows]
         cells = [c for c, _ in rinfo]
         off = np.array([o for _, o in rinfo])
+        sp = self._speeds(rows)
         cost = np.empty((len(rows), len(cols)))
         for j, t in enumerate(cols):
-            cost[:, j] = off + self.costs.seconds(t.pickup, cells)
+            cost[:, j] = off + self.costs.seconds(t.pickup, cells, sp)
         ok = np.isfinite(cost)
         for i, rv in enumerate(rows):
             for j, t in enumerate(cols):
-                if not self._allowed(rv.k, t.tid, now):
+                if not self._allowed(rv.k, t, now):
                     ok[i, j] = False
+        if self.mixed:
+            # The rest of the task, relative to its best eligible robot (the
+            # module docstring): only how much longer this robot would take.
+            for j, t in enumerate(cols):
+                rest = self._rest(rows, t)
+                ok[:, j] &= np.isfinite(rest)
+                if ok[:, j].any():
+                    cost[:, j] += np.where(ok[:, j], rest - rest[ok[:, j]].min(), 0.0)
         c = np.where(ok, cost, BIG)
         row_of = {rv.k: i for i, rv in enumerate(rows)}
         for j, t in enumerate(cols):

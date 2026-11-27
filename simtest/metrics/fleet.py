@@ -559,23 +559,33 @@ class Utilisation(Metric):
 @register
 class Bounds(Metric):
     name = "bounds"
-    version = 1
+    # 2: robot types (2026-11-26). A task's bound is the best robot type that
+    #    can do it, ub_per_hour also caps each capability's share of the work
+    #    by the robots that have it, and `unservable` counts what no robot
+    #    can do. A run without types or requirements scores as in v1.
+    version = 2
     streams = {"announce", "task_bound", "task"}
     summary = "Per-task lower bounds, and how loaded the scenario is: could any method keep up?"
     params = {}
     values = {
         "lb_mean_s": "mean over announced tasks of the lower bound on its delivery time: the "
                      "shortest drive pickup -> dropoff on the true layout at "
-                     "robots.max_speed_mps, plus both dwells (the sim's task_bound event)",
+                     "robots.max_speed_mps, plus both dwells (the sim's task_bound event); "
+                     "with robot types, the best type that can do the task: min of drive / "
+                     "its speed + its pick + place",
         "stretch": "mean over delivered tasks of delivery time (announce -> DONE) / its lower "
                    "bound; 1.0 only if a robot were already at the shelf and nothing slowed it",
         "ub_per_hour": "fleet capacity if every robot did nothing but back-to-back "
-                       "lower-bound tasks: robots x 3600 / lb_mean_s. It ignores the empty "
-                       "drive from a dropoff to the next pickup, so it is optimistic",
+                       "lower-bound tasks: robots x 3600 / lb_mean_s, and for each capability "
+                       "tasks need, (robots that have it) x 3600 x tasks / (the bounds of the "
+                       "tasks that need it), whichever is lowest. It ignores the empty drive "
+                       "from a dropoff to the next pickup, so it is optimistic",
         "arrival_per_hour": "requests per sim hour over the announce window: (announced - 1) "
                             "x 3600 / (last announce - first announce)",
         "offered_load": "arrival_per_hour / ub_per_hour: > 1 means no method can keep up; "
                         "since ub_per_hour is optimistic, a fleet can be overloaded below 1",
+        "unservable": "announced tasks that need a capability no robot in the fleet has "
+                      "(task_bound able: 0); they have no bound and take no capacity",
     }
 
     def __init__(self, ctx, **params):
@@ -583,16 +593,37 @@ class Bounds(Metric):
         self.announced: dict[str, float] = {}
         self.lb: dict[str, float] = {}
         self.done_at: dict[str, float] = {}
+        self.need: dict[str, tuple] = {}  # task -> (requires, robots able to do it)
+        self.unservable: set[str] = set()
 
     def on_event(self, ev):
         s = ev["s"]
         if s == "announce":
             self.announced[ev["task_id"]] = ev["t"]
         elif s == "task_bound":
-            if ev.get("lb_s") is not None:  # None: no path on the true map
+            if ev.get("lb_s") is not None:  # None: no path on the true map, or no robot able
                 self.lb[ev["task_id"]] = float(ev["lb_s"])
+            if ev.get("requires"):
+                self.need[ev["task_id"]] = (frozenset(ev["requires"]), int(ev.get("able", 0)))
+                if not ev.get("able"):
+                    self.unservable.add(ev["task_id"])
         elif s == "task" and ev["state"] == "DONE":
             self.done_at.setdefault(ev["task_id"], ev["t"])
+
+    def _capability_ub(self, tasks: list) -> float | None:
+        """The tightest per-capability cap on deliveries per hour: robots
+        that have requirement R must do every task needing R or more (its
+        able set is no larger), so at rate x tasks/h, x x (their share of
+        the summed bounds) <= able x 3600. Requirement sets come from the
+        events; `able` is the count for exactly that set."""
+        total = sum(self.lb[t] for t in tasks)
+        best = None
+        for req, able in {v for t, v in self.need.items() if t in self.lb}:
+            work = sum(self.lb[t] for t in tasks if t in self.need and self.need[t][0] >= req)
+            if work > 0 and able > 0:
+                cap = able * 3600 * len(tasks) / work
+                best = cap if best is None else min(best, cap)
+        return None if best is None or total <= 0 else best
 
     def result(self):
         lbs = [self.lb[t] for t in self.announced if t in self.lb]
@@ -601,6 +632,9 @@ class Bounds(Metric):
                    if t in self.done_at and self.lb.get(t, 0) > 0]
         n = len(self.ctx.robots)
         ub = n * 3600 / lb_mean if lb_mean and n else None
+        if ub is not None and self.need:
+            cap = self._capability_ub([t for t in self.announced if t in self.lb])
+            ub = ub if cap is None else min(ub, cap)
         ts = sorted(self.announced.values())
         arr = (len(ts) - 1) * 3600 / (ts[-1] - ts[0]) if len(ts) >= 2 and ts[-1] > ts[0] else None
         return {
@@ -609,4 +643,5 @@ class Bounds(Metric):
             "ub_per_hour": round(ub, 1) if ub is not None else None,
             "arrival_per_hour": round(arr, 1) if arr is not None else None,
             "offered_load": round(arr / ub, 3) if arr is not None and ub else None,
+            "unservable": len(self.unservable & set(self.announced)),
         }
