@@ -82,6 +82,10 @@ class Sim:
                                 cfg=self.ft_cfg, now=0.0)
         self.gw._wall = lambda: 0.0
         self.gw._next_id = 0
+        # kill: gateway. While it is down, operator requests wait for it (the
+        # gateway is where they enter the fleet) and it hears and says nothing.
+        self.gw_alive = True
+        self._held: list[tuple] = []
 
         homes = self._homes(n)
         prior = self.static.copy() if cfg["map_share"]["prior"] == "truth" else None
@@ -116,7 +120,10 @@ class Sim:
         self.gateway_xy = None
         homes = []
         if w["source"] == "synthetic":
-            occ, grid, wps, homes, gw = G.synthetic_warehouse(w.get("synthetic") or {}, cell)
+            occ, grid, wps, homes, gw = G.synthetic_checked(
+                w.get("synthetic") or {}, cell,
+                clearance_m=float(self.cfg["robots"]["footprint_radius_m"]) + 0.5 * cell,
+                tol_m=float(self.cfg["nav"]["goal_tolerance_m"]))
             self.gateway_xy = gw
             self.free_lost = 0.0
         elif w["source"] == "map":
@@ -284,8 +291,12 @@ class Sim:
             t, k = float(arr.get("start_s", 0.0)), 0
             until = float(arr.get("until_s", self.duration))
             count = arr.get("count")
+            if arr.get("count_per_robot") is not None:
+                count = int(round(float(arr["count_per_robot"]) * self.n))
+            rate = (float(arr["rate_hz"]) if "rate_hz" in arr
+                    else float(arr["rate_per_robot_hz"]) * self.n)
             while True:
-                t += float(rng.exponential(1.0 / float(arr["rate_hz"])))
+                t += float(rng.exponential(1.0 / rate))
                 if t >= until or (count is not None and k >= int(count)):
                     break
                 p = picks[int(rng.integers(len(picks)))]
@@ -293,18 +304,30 @@ class Sim:
                 self.at(t, self._announce, p, d)
                 self._pending_announces += 1
                 k += 1
-        for d in self.scn.get("disturbances") or []:
-            self.at(float(d["at_s"]), self._disturb, d, True)
-            if d.get("duration_s") is not None:
-                self.at(float(d["at_s"]) + float(d["duration_s"]), self._disturb, d, False)
+        self._targets: dict[int, tuple] = {}          # kill {select}: (robot, what matched)
+        self._blockages: dict[int, tuple] = {}        # blockages up now: index -> cell slices
+        self._waiting_since: dict[int, float] = {}    # waiting for its spot to clear, since
+        self._blockage_wait: dict[int, float] = {}    # how long it waited, once it is up
+        self._blockage_gone: set[int] = set()         # cleared before it ever appeared
+        for i, d in enumerate(self.scn.get("disturbances") or []):
+            self.at(float(d["at_s"]), self._disturb, i, d, True)
+            # A kill {select} schedules its own revival when it fires: with
+            # within_s it may fire late, and the outage is still duration_s.
+            if d.get("duration_s") is not None and not isinstance(d.get("kill"), dict):
+                self.at(float(d["at_s"]) + float(d["duration_s"]), self._disturb, i, d, False)
 
-    def _announce(self, pickup: str, dropoff: str) -> None:
+    def _announce(self, pickup: str, dropoff: str, requested: float | None = None) -> None:
+        if not self.gw_alive:
+            self._held.append((pickup, dropoff, self.now))
+            return
         self._pending_announces -= 1
         tid = self.gw.request(pickup, dropoff, self.now)
         if tid is not None:
             self.counts["announced"] += 1
             rec = {"task_id": f"{ft.TASK_PREFIX}{tid}", "pickup": pickup, "dropoff": dropoff,
                    "at_s": round(self.now, 3)}
+            if requested is not None:  # held while the gateway was down
+                rec["requested_s"] = round(requested, 3)
             self.announced.append(rec)
             self.record({"s": "announce", **rec})
         self.handle_actions(None, self.gw.drain())
@@ -314,52 +337,170 @@ class Sim:
             return GW
         return ft.robot_num(name)
 
+    def _members(self, m) -> set:
+        """One partition member: a node name, or {first: F} / {last: F}, the
+        first or last F of the robots by index (rounded, at least one), so
+        one scenario splits a fleet of 2 and of 20 alike."""
+        if isinstance(m, dict):
+            (side, f), = m.items()
+            k = min(self.n, max(1, int(math.floor(float(f) * self.n + 0.5))))
+            ks = range(k) if side == "first" else range(self.n - k, self.n)
+            return {j + 1 for j in ks}
+        return {self._node(m)}
+
     def _group(self, spec, groups) -> set:
         if spec == "rest":
             named = set().union(*(self._group(g, []) for g in groups if g != "rest"))
             return set(range(self.n + 1)) - named
-        return {self._node(x) for x in spec}
+        return set().union(*(self._members(m) for m in (spec if isinstance(spec, list) else [spec])))
 
-    def _disturb(self, d: dict, on: bool) -> None:
+    def _select(self, how: str) -> tuple[Robot | None, str | None]:
+        """kill: {select: how}: the lowest-index live robot doing that now,
+        falling back to any busy robot, then to any live one."""
+        live = [r for r in self.robots if r.alive]
+        busy = [r for r in live if r.task is not None]
+        pools = {"carrying": [r for r in busy if self.item_at(r.task["task_id"]) == r.rid],
+                 "fetching": [r for r in busy if r.state in ("NAV_TO_PICKUP", "AWAIT_PICK",
+                                                             "PICKING")],
+                 "busy": busy, "any": live}
+        for name in dict.fromkeys((how, "busy", "any")):
+            if pools[name]:
+                return pools[name][0], name
+        return None, None
+
+    def _name(self, node: int) -> str:
+        return "gateway" if node == GW else f"robot_{node - 1}"
+
+    def _disturb(self, i: int, d: dict, on: bool) -> None:
         now = self.now
+        rec = {k: v for k, v in d.items() if k != "at_s"}
         if "kill" in d:
-            r = self.robots[self._node(d["kill"]) - 1]
-            if on:
-                r.alive, r.v = False, 0.0
-                self.net.kill(r.node, now)
+            if isinstance(d["kill"], dict):
+                if on:
+                    # within_s: wait up to that long for a robot that is doing
+                    # it. A fleet of 2 at half load often has nobody carrying
+                    # at the scheduled moment, and the kill fell back to an
+                    # idle robot, which tests nothing (2026-11-26).
+                    sel = d["kill"]["select"]
+                    r, matched = self._select(sel)
+                    until = float(d["at_s"]) + float(d["kill"].get("within_s", 0))
+                    if matched != sel and now < until:
+                        self.at(now + self.step_s, self._disturb, i, d, True)
+                        return
+                    self._targets[i] = (r, matched)
+                    if r is None:
+                        self.notes.append(f"disturbances[{i}]: no live robot to kill at {now:.0f} s")
+                    if d.get("duration_s") is not None:
+                        self.at(now + float(d["duration_s"]), self._disturb, i, d, False)
+                r, matched = self._targets.get(i, (None, None))
+                # On and off alike: the replay pairs the two by their whole body.
+                rec.update(kill=r.rid if r else None, select=d["kill"]["select"], matched=matched)
+                node = None if r is None else r.node
             else:
-                self._revive(r, bool(d.get("fresh", False)))
+                node = self._node(d["kill"])
+            if node == GW:
+                if on:
+                    self.gw_alive = False
+                    self.net.kill(GW, now)
+                else:
+                    self._revive_gateway()
+            elif node is not None:
+                r = self.robots[node - 1]
+                if on:
+                    r.alive, r.v = False, 0.0
+                    self.net.kill(r.node, now)
+                else:
+                    self._revive(r, bool(d.get("fresh", False)))
         elif "revive" in d and on:
-            self._revive(self.robots[self._node(d["revive"]) - 1], bool(d.get("fresh", False)))
+            if d["revive"] == "gateway":
+                self._revive_gateway()
+            else:
+                self._revive(self.robots[self._node(d["revive"]) - 1], bool(d.get("fresh", False)))
         elif "partition" in d:
             groups = d["partition"]
             sets = [self._group(g, groups) for g in groups]
-            for i, a in enumerate(sets):
-                for b in sets[i + 1:]:
+            for j, a in enumerate(sets):
+                for b in sets[j + 1:]:
                     for x in a:
                         for y in b:
                             (self.net.block if on else self.net.unblock)(x, y, now)
-        elif "block_link" in d:
-            a, b = (self._node(x) for x in d["block_link"])
-            (self.net.block if on else self.net.unblock)(a, b, now)
+            if any(isinstance(m, dict) for g in groups if g != "rest"
+                   for m in (g if isinstance(g, list) else [g])):
+                # The replay reads robot names: record whom a fraction meant.
+                rec["partition"] = [g if g == "rest" else [self._name(x) for x in sorted(s)]
+                                    for g, s in zip(groups, sets)]
+                rec["spec"] = groups
         elif "blockage" in d:
-            x0, y0, x1, y1 = d["blockage"]["rect"]
-            g = self.grid
-            c0, c1 = g.cell(min(x0, x1), min(y0, y1)), g.cell(max(x0, x1), max(y0, y1))
-            if c0 is None or c1 is None:
-                raise ValueError(f"blockage {d['blockage']} is off the map")
-            sl = (slice(c0[1], c1[1] + 1), slice(c0[0], c1[0] + 1))
-            self.static[sl] = True if on else self.base_static[sl]
-        self.record({"s": "disturb", "on": on, **{k: v for k, v in d.items() if k != "at_s"}})
+            if not self._blockage(i, d, on):
+                return
+            if i in self._blockage_wait:  # on and off alike, as for kill above
+                rec["waited_s"] = round(self._blockage_wait[i], 2)
+        self.record({"s": "disturb", "on": on, **rec})
+
+    def _blockage(self, i: int, d: dict, on: bool) -> bool:
+        """Put blockage i up or take it down; False if nothing changed (yet).
+
+        The true floor is the static map plus every blockage up now, rebuilt
+        on each change: a cleared blockage used to restore the static map
+        under its whole rect, deleting any other blockage overlapping it, so
+        one obstacle "moving" by half its length left a hole (2026-11-26).
+        A blockage waits for its spot to be clear of robots and movers (a
+        pallet is set down beside a robot, not on it); one that appeared on
+        top of a robot trapped it, since every move from inside a wall is
+        refused."""
+        x0, y0, x1, y1 = d["blockage"]["rect"]
+        g = self.grid
+        c0, c1 = g.cell(min(x0, x1), min(y0, y1)), g.cell(max(x0, x1), max(y0, y1))
+        if c0 is None or c1 is None:
+            raise ValueError(f"blockage {d['blockage']} is off the map")
+        sl = (slice(c0[1], c1[1] + 1), slice(c0[0], c1[0] + 1))
+        if on:
+            if i in self._blockage_gone:  # its time ran out while it waited
+                return False
+            near = (slice(max(0, c0[1] - 1), c1[1] + 2), slice(max(0, c0[0] - 1), c1[0] + 2))
+            if self.robot_owner[near].any() or self.actor_owner[near].any():
+                self._waiting_since.setdefault(i, self.now)
+                self.at(self.now + self.step_s, self._disturb, i, d, True)
+                return False
+            self._blockages[i] = sl
+            if i in self._waiting_since:
+                self._blockage_wait[i] = self.now - self._waiting_since.pop(i)
+        else:
+            if self._blockages.pop(i, None) is None:
+                self._blockage_gone.add(i)
+                self.notes.append(f"disturbances[{i}]: blockage never appeared (its spot "
+                                  "was never clear of robots)")
+                return False
+        np.copyto(self.static, self.base_static)
+        for s in self._blockages.values():
+            self.static[s] = True
+        return True
 
     def _revive(self, r: Robot, fresh: bool) -> None:
         r.alive = True
         self.net.revive(r.node, self.now)
+        # Its Status and map timers stood still while it was dead; without
+        # this it sent one of each per step until they caught up (a 120 s
+        # outage: a minute of Status at twice the rate).
+        r.next_status = max(r.next_status, self.now)
+        r.next_map_pub = max(r.next_map_pub, self.now)
         if fresh:  # a reboot: empty task state, re-learned from the fleet
             r.queue.clear()
             r.task, r.state = None, "IDLE"
             r._clear_goal()
             r._new_core()
+
+    def _revive_gateway(self) -> None:
+        """Back with the state it had (a power cut, not a reinstall), then
+        the requests that waited for it, in order. Their announce carries
+        `requested_s`, when the operator asked."""
+        if self.gw_alive:
+            return
+        self.gw_alive = True
+        self.net.revive(GW, self.now)
+        held, self._held = self._held, []
+        for pickup, dropoff, t in held:
+            self._announce(pickup, dropoff, requested=t)
 
     # ---- traffic --------------------------------------------------------------
 
@@ -407,6 +548,8 @@ class Sim:
     def _deliver_task(self, node: int, payload) -> None:
         sender, m = payload
         if node == GW:
+            if not self.gw_alive:  # in flight when it went down
+                return
             self.gw.on_message(sender, m, self.now)
             self.handle_actions(None, self.gw.drain())
             return
@@ -472,6 +615,8 @@ class Sim:
             rid = f"robot_{src}"
             for node in stale.tolist():
                 if node == GW:
+                    if not self.gw_alive:
+                        continue
                     self.gw.on_peer_status(rid, now, battery_pct=bat, mode=mode)
                     self.handle_actions(None, self.gw.drain())
                 else:
@@ -709,8 +854,9 @@ class Sim:
             if cfg["status"]["session_liveness"] and t >= nxt["session"]:
                 nxt["session"] += float(cfg["status"]["liveness_poll_s"])
                 self._session_liveness()
-            self.gw.tick(t)
-            self.handle_actions(None, self.gw.drain())
+            if self.gw_alive:
+                self.gw.tick(t)
+                self.handle_actions(None, self.gw.drain())
             for r in self.robots:
                 r.step(dt, t)
             for r in self.robots:

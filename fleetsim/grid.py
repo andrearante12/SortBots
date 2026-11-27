@@ -172,6 +172,23 @@ SYNTHETIC_DEFAULTS = {
     "cross_m": 2.4,
     "shelf_spacing_m": 5.0, # pickup waypoints along each aisle
     "docks": 12,            # dropoff waypoints along the apron
+    # Traffic structure (C12 benchmark, 2026-11-26). All off by default.
+    # Single-lane aisles: these aisles' free width is cut to narrow_m beside
+    # every rack segment (the racks are deeper there); the crossings with the
+    # cross-aisles keep their full width. Aisle 0 runs along the open apron
+    # and has no rack to its south, so it can't be narrowed.
+    "narrow_aisles": [],
+    # 1.0 m: a robot is planned as a 0.7 m disc at 0.2 m cells, so 3 cell
+    # centres across stay drivable, and two 0.5 m bodies can't be side by
+    # side (passing needs ~1.3 m: two lethal bands + the local layer's 0.6 m
+    # body-to-body). Rounded to whole cells.
+    "narrow_m": 1.0,
+    # [[aisle, segment, west|east], ...]: a wall across that aisle at that end
+    # of that rack segment, so the segment is entered from its other end only.
+    "dead_ends": [],
+    # [[x0, y0, x1, y1], ...]: extra walls anywhere (closing a cross-aisle,
+    # walling off a corner). A wall that cuts a waypoint off fails the scenario.
+    "walls": [],
 }
 
 
@@ -183,7 +200,19 @@ def synthetic_warehouse(cfg: dict, cell_m: float) -> tuple[np.ndarray, Grid, dic
     `shelf_<aisle>_<k>` (pickups, in the aisles beside the racks) and
     `dock_<k>` (dropoffs, on the apron). Homes are a lattice of free apron
     spots, as many as fit, where idle robots park.
+
+    Aisle `a` is the corridor at y = aisle_ys[a]; aisle 0 borders the apron.
+    Rack segment `s` is the s-th run of rack from the west, between the
+    cross-aisles; it is the same x span in every row. On the default floor
+    there are aisles 0-8 (y 9.6 + 3.6 a) and segments 0-3 (x 3.4-14.9,
+    17.3-28.8, 31.2-42.7, 45.1-56.6).
     """
+    unknown = set(cfg or {}) - set(SYNTHETIC_DEFAULTS)
+    if unknown:
+        # The block is free-form in base.yaml, so a typo'd option would
+        # otherwise build the plain floor without a word.
+        raise ValueError(f"world.synthetic: unknown key(s) {sorted(unknown)} "
+                         f"(have: {sorted(SYNTHETIC_DEFAULTS)})")
     c = {**SYNTHETIC_DEFAULTS, **(cfg or {})}
     W, H = float(c["width_m"]), float(c["height_m"])
     grid = Grid(int(math.ceil(W / cell_m)), int(math.ceil(H / cell_m)), cell_m, 0.0, 0.0)
@@ -221,6 +250,7 @@ def synthetic_warehouse(cfg: dict, cell_m: float) -> tuple[np.ndarray, Grid, dic
         aisle_ys.append(y + aisle / 2)
         y += aisle
         row += 1
+    _traffic_structure(c, occ, grid, aisle_ys, segments, fill)
     spacing = float(c["shelf_spacing_m"])
     for ai, ay in enumerate(aisle_ys):
         k = 0
@@ -252,6 +282,126 @@ def synthetic_warehouse(cfg: dict, cell_m: float) -> tuple[np.ndarray, Grid, dic
         hy += 1.6
     gateway = (W / 2, staging_top)
     return occ, grid, waypoints, homes, gateway
+
+
+def _aisle_index(a, aisle_ys: list, what: str) -> int:
+    if isinstance(a, bool) or not isinstance(a, int) or not 1 <= a < len(aisle_ys):
+        raise ValueError(f"world.synthetic.{what}: aisle {a!r} must be 1..{len(aisle_ys) - 1} "
+                         "(aisle 0 borders the open apron)")
+    return a
+
+
+def _traffic_structure(c: dict, occ: np.ndarray, grid: Grid, aisle_ys: list, segments: list,
+                       fill) -> None:
+    """narrow_aisles, dead_ends and walls, on top of the plain floor."""
+    cell, aisle, wall = grid.res, float(c["aisle_m"]), float(c["wall_m"])
+    narrow = c["narrow_aisles"] or []
+    if not isinstance(narrow, list):
+        raise ValueError("world.synthetic.narrow_aisles: a list of aisle numbers")
+    if narrow:
+        k = int(round(float(c["narrow_m"]) / cell))
+        if not 1 <= k < int(round(aisle / cell)):
+            raise ValueError(f"world.synthetic.narrow_m: {c['narrow_m']} m must be at least a "
+                             f"cell and less than aisle_m ({aisle} m)")
+        for a in narrow:
+            ay = aisle_ys[_aisle_index(a, aisle_ys, "narrow_aisles")]
+            # Whole cells, centred on the aisle: placed in metres, a 1.0 m
+            # opening on a 0.2 m grid came out 0.8 m, since fill() takes every
+            # cell it touches. The epsilon stops 13.2 / 0.2 = 65.999... from
+            # shifting the opening a cell south.
+            lo = int(math.floor(ay / cell - k / 2.0 + 0.5 + 1e-6))
+            y_lo, y_hi = lo * cell, (lo + k) * cell
+            for sx0, sx1 in segments:
+                fill(sx0, ay - aisle / 2 - cell, sx1, y_lo - 1e-6)
+                fill(sx0, y_hi + 1e-6, sx1, ay + aisle / 2 + cell)
+    for i, de in enumerate(c["dead_ends"] or []):
+        if not (isinstance(de, (list, tuple)) and len(de) == 3 and de[2] in ("west", "east")):
+            raise ValueError(f"world.synthetic.dead_ends[{i}]: expected [aisle, segment, west|east]")
+        ay = aisle_ys[_aisle_index(de[0], aisle_ys, f"dead_ends[{i}]")]
+        s = de[1]
+        if isinstance(s, bool) or not isinstance(s, int) or not 0 <= s < len(segments):
+            raise ValueError(f"world.synthetic.dead_ends[{i}]: segment {s!r} must be "
+                             f"0..{len(segments) - 1}")
+        sx0, sx1 = segments[s]
+        x0 = sx0 if de[2] == "west" else sx1 - wall
+        # Rack face to rack face, a cell into each, so no diagonal gap is left.
+        fill(x0, ay - aisle / 2 - cell, x0 + wall, ay + aisle / 2 + cell)
+    for i, r in enumerate(c["walls"] or []):
+        if not (isinstance(r, (list, tuple)) and len(r) == 4
+                and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in r)):
+            raise ValueError(f"world.synthetic.walls[{i}]: expected [x0, y0, x1, y1]")
+        x0, y0, x1, y1 = (float(v) for v in r)
+        fill(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+
+
+def reach_mask(free: np.ndarray, seed: tuple[int, int]) -> np.ndarray:
+    """Cells 4-connected to `seed` (cx, cy) through `free`. A* never steps
+    diagonally past a lethal cell, so on a lethal-free mask this is exactly
+    what it can reach. Spreads along whole row and column runs per pass, so
+    a warehouse converges in about as many passes as a path has turns."""
+    h, w = free.shape
+    reached = np.zeros_like(free)
+    if not free[seed[1], seed[0]]:
+        return reached
+    reached[seed[1], seed[0]] = True
+
+    def spread(f: np.ndarray, r: np.ndarray) -> np.ndarray:
+        # Runs of free cells along each row: a run is reached if any cell is.
+        start = f & ~np.concatenate([np.zeros((f.shape[0], 1), bool), f[:, :-1]], axis=1)
+        run = np.cumsum(start.ravel()).reshape(f.shape) * f
+        hit = np.zeros(int(run.max()) + 1, dtype=bool)
+        hit[run[r]] = True
+        hit[0] = False
+        return hit[run]
+
+    while True:
+        nxt = spread(free, reached)
+        nxt = spread(free.T, nxt.T).T
+        if (nxt == reached).all():
+            return reached
+        reached = nxt
+
+
+def unreachable(occ: np.ndarray, grid: Grid, points: dict, start_xy, *, clearance_m: float,
+                tol_m: float) -> list:
+    """Keys of `points` ({key: (x, y)}) a robot planned as a disc of
+    clearance_m can't drive to from start_xy: no drivable cell connected to
+    the start within tol_m (nav.goal_tolerance_m, how far a goal snaps)."""
+    free = ~inflate_bool(occ, grid, clearance_m)
+    c = grid.cell(*start_xy)
+    if c is None:
+        return list(points)
+    reached = reach_mask(free, c)
+    near = grid.disc_offsets(tol_m)
+    out = []
+    for key, (x, y) in points.items():
+        p = grid.cell(x, y)
+        if p is None or not any(0 <= p[0] + dx < grid.width and 0 <= p[1] + dy < grid.height
+                                and reached[p[1] + dy, p[0] + dx] for dx, dy, _d in near):
+            out.append(key)
+    return out
+
+
+def synthetic_checked(cfg: dict, cell_m: float, *, clearance_m: float, tol_m: float):
+    """synthetic_warehouse, then every waypoint must be drivable from the
+    apron (ValueError naming the ones that aren't), and homes that a wall
+    took are dropped. The options above can close passages; a run that only
+    found out when a task to a sealed shelf failed 45 s later would read as a
+    nav result, not a broken floor."""
+    occ, grid, wps, homes, gw = synthetic_warehouse(cfg, cell_m)
+    c = {**SYNTHETIC_DEFAULTS, **(cfg or {})}
+    apron = (float(c["width_m"]) / 2, float(c["wall_m"]) + float(c["staging_m"]) / 2)
+    if unreachable(occ, grid, {"apron": apron}, apron, clearance_m=clearance_m, tol_m=0.0):
+        raise ValueError(f"world.synthetic: the apron centre {apron} is walled in; reachability "
+                         "is checked from there (walls)")
+    bad = unreachable(occ, grid, wps, apron, clearance_m=clearance_m, tol_m=tol_m)
+    if bad:
+        raise ValueError(f"world.synthetic: {len(bad)} waypoint(s) can't be reached from the "
+                         f"apron at {cell_m} m cells: {', '.join(sorted(bad)[:8])}"
+                         f"{' ...' if len(bad) > 8 else ''} (narrow_m, dead_ends or walls)")
+    lost = set(unreachable(occ, grid, dict(enumerate(homes)), apron, clearance_m=clearance_m,
+                           tol_m=0.0))
+    return occ, grid, wps, [h for i, h in enumerate(homes) if i not in lost], gw
 
 
 def free_spots(occ: np.ndarray, grid: Grid, n: int, rng, *, clearance_m: float,

@@ -12,17 +12,22 @@
     tasks:                         # fixed deliveries (waypoint names)
       - {at_s: 5, pickup: shelf_0_0, dropoff: dock_0}
     task_arrival:                  # and/or a Poisson stream
-      rate_hz: 0.1
+      rate_hz: 0.1                 # or rate_per_robot_hz: x robots (one of the two)
       pickups: "shelf_*"           # fnmatch over the world's waypoint names
       dropoffs: "dock_*"
       start_s: 0
       until_s: 300                 # default: duration_s
-      count: 20                    # optional cap
+      count: 20                    # optional cap; or count_per_robot: x robots
     disturbances:
       - {at_s: 60, duration_s: 30, partition: [[robot_0, robot_1], rest]}
+      - {at_s: 60, duration_s: 30, partition: [{first: 0.4}, rest]}  # 40 % of any fleet
       - {at_s: 90, kill: robot_3}             # duration_s: revive after; fresh: true = reboot
+      - {at_s: 90, kill: {select: carrying}}  # whoever holds an item then (fetching, busy, any;
+                                    # within_s: 300 = wait up to 300 s for one)
+      - {at_s: 90, duration_s: 60, kill: gateway}  # requests wait for it (never fresh)
       - {at_s: 30, duration_s: 60, block_link: [robot_2, gateway]}
       - {at_s: 40, blockage: {rect: [x0, y0, x1, y1]}}  # a static obstacle appears
+                                    # (once no robot is under it; duration_s: it clears)
     stop: {until: tasks_done, settle_s: 5}  # default: run for duration_s
     metrics:                       # simtest metrics (simtest/metrics) with pass criteria
       - metric: fleet_tasks
@@ -55,6 +60,9 @@ TOP_KEYS = {"name", "title", "description", "seed", "duration_s", "robots", "con
 # Blocks whose keys are not fixed by base.yaml.
 FREE_FORM = {("world", "synthetic"), ("fleet_tasks",), ("network", "radio", "radio_model")}
 DISTURBANCE_KINDS = {"kill", "revive", "partition", "block_link", "blockage"}
+# kill: {select: ...} picks its robot when it fires, lowest index first.
+KILL_SELECT = ("carrying", "fetching", "busy", "any")
+ROBOT_RX = re.compile(r"^robot_(\d+)$")
 
 
 class ScenarioError(ValueError):
@@ -187,13 +195,21 @@ def _validate(s: dict) -> None:
         if not isinstance(t, dict) or {"at_s", "pickup", "dropoff"} - set(t):
             raise ScenarioError(f"tasks[{i}]: need at_s, pickup, dropoff")
     arr = s["task_arrival"]
-    if arr is not None and (not isinstance(arr, dict) or not arr.get("rate_hz")
-                            or float(arr["rate_hz"]) <= 0):
-        raise ScenarioError("task_arrival: needs rate_hz > 0")
+    if arr is not None:
+        # rate_per_robot_hz keeps one load regime when a benchmark sweeps
+        # --robots; rate_hz is a fixed stream whatever the fleet size.
+        rates = [k for k in ("rate_hz", "rate_per_robot_hz") if isinstance(arr, dict) and k in arr]
+        if len(rates) != 1 or not _num(arr[rates[0]]) or float(arr[rates[0]]) <= 0:
+            raise ScenarioError("task_arrival: needs exactly one of rate_hz, rate_per_robot_hz, > 0")
+        if "count" in arr and "count_per_robot" in arr:
+            raise ScenarioError("task_arrival: count or count_per_robot, not both")
     for i, d in enumerate(s["disturbances"]):
         if not isinstance(d, dict) or "at_s" not in d or len(DISTURBANCE_KINDS & set(d)) != 1:
             raise ScenarioError(f"disturbances[{i}]: need at_s and exactly one of "
                                 f"{sorted(DISTURBANCE_KINDS)}")
+        _check_disturbance(d, n, f"disturbances[{i}]")
+    if cfg["world"]["source"] == "synthetic":
+        _check_floor(cfg)
     bm = cfg["record"]["belief_maps"]
     names = {f"robot_{k}" for k in range(n)}
     if bm != "all" and (not isinstance(bm, list) or set(bm) - names):
@@ -206,6 +222,95 @@ def _validate(s: dict) -> None:
             s["metrics_resolved"] = metrics_lib.validate_list(s["metrics"])
         except metrics_lib.MetricError as e:
             raise ScenarioError(f"metrics: {e}") from None
+
+
+def _num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _check_node(name, n: int, where: str) -> None:
+    """A node name that exists in a fleet of n. A scenario run with --robots 2
+    that names robot_3 used to die mid-run on an IndexError, and `kill:
+    gateway` silently killed the last robot (node 0 - 1 = robots[-1])."""
+    if name == "gateway":
+        return
+    m = ROBOT_RX.match(name) if isinstance(name, str) else None
+    if m is None:
+        raise ScenarioError(f"{where}: {name!r} is not a node (robot_<k> or gateway)")
+    if int(m.group(1)) >= n:
+        raise ScenarioError(f"{where}: no {name} in a fleet of {n} (robot_0..robot_{n - 1}); "
+                            "a group like {first: 0.4} or kill: {select: busy} scales with "
+                            "--robots")
+
+
+def _check_group(g, n: int, where: str) -> None:
+    if g == "rest":
+        return
+    for m in (g if isinstance(g, list) else [g]):
+        if isinstance(m, dict):
+            if len(m) != 1 or next(iter(m)) not in ("first", "last") \
+                    or not _num(next(iter(m.values()))) or not 0 < next(iter(m.values())) < 1:
+                raise ScenarioError(f"{where}: a fraction group is {{first: F}} or {{last: F}}, "
+                                    f"0 < F < 1, got {m!r}")
+        else:
+            _check_node(m, n, where)
+
+
+def _check_disturbance(d: dict, n: int, where: str) -> None:
+    if "kill" in d:
+        k = d["kill"]
+        if isinstance(k, dict):
+            if "select" not in k or set(k) - {"select", "within_s"} or k["select"] not in KILL_SELECT \
+                    or not (_num(k.get("within_s", 0)) and k.get("within_s", 0) >= 0):
+                raise ScenarioError(f"{where}: kill: {{select: {' | '.join(KILL_SELECT)}, "
+                                    "within_s: S (optional, >= 0)}}")
+        else:
+            _check_node(k, n, f"{where}.kill")
+            if k == "gateway" and d.get("fresh"):
+                # A rebooted gateway would forget its board and restart task
+                # ids at 0 (fleetsim's fixed clock), which robots would take
+                # for tasks they already know.
+                raise ScenarioError(f"{where}: a fresh gateway restart is not modelled")
+    elif "revive" in d:
+        _check_node(d["revive"], n, f"{where}.revive")
+        if d["revive"] == "gateway" and d.get("fresh"):
+            raise ScenarioError(f"{where}: a fresh gateway restart is not modelled")
+    elif "block_link" in d:
+        bl = d["block_link"]
+        if not isinstance(bl, list) or len(bl) != 2:
+            raise ScenarioError(f"{where}: block_link: [node, node]")
+        for x in bl:
+            _check_node(x, n, f"{where}.block_link")
+    elif "partition" in d:
+        groups = d["partition"]
+        if not isinstance(groups, list) or len(groups) < 2 or groups.count("rest") > 1:
+            raise ScenarioError(f"{where}: partition: two or more groups, at most one `rest`")
+        for g in groups:
+            _check_group(g, n, f"{where}.partition")
+    elif "blockage" in d:
+        b = d["blockage"]
+        rect = b.get("rect") if isinstance(b, dict) else None
+        if not isinstance(rect, list) or len(rect) != 4 or not all(_num(v) for v in rect):
+            raise ScenarioError(f"{where}: blockage: {{rect: [x0, y0, x1, y1]}}")
+
+
+def _check_floor(cfg: dict) -> None:
+    """Build the synthetic floor and check every waypoint can be driven to,
+    so a closed-off shelf fails `fleetsim list` and the scenario editor's
+    save, not a run."""
+    try:
+        from . import grid as G  # numpy: serve.py's python may not have it
+    except ImportError:
+        return
+    w = cfg["world"]
+    cell = float(w["cell_m"])
+    try:
+        G.synthetic_checked(w.get("synthetic") or {}, cell,
+                            clearance_m=float(cfg["robots"]["footprint_radius_m"]) + 0.5 * cell,
+                            tol_m=float(cfg["nav"]["goal_tolerance_m"]))
+    except (ValueError, TypeError, KeyError) as e:
+        raise ScenarioError(f"config.{e}" if str(e).startswith("world.") else
+                            f"config.world.synthetic: {e}") from None
 
 
 def path_for(name: str) -> Path:
