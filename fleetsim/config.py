@@ -197,6 +197,8 @@ def _validate(s: dict) -> None:
         raise ScenarioError("config.map_share.sub_keepalive_s: a number > 0")
     if ms["sub_path_m"] is not None and (not _num(ms["sub_path_m"]) or ms["sub_path_m"] < 0):
         raise ScenarioError("config.map_share.sub_path_m: a number >= 0, or null (the whole path)")
+    if ms["sub_transport"] not in ("status", "message"):
+        raise ScenarioError("config.map_share.sub_transport: status | message")
     if ms["sub_flips_to"] not in ("all", "subscribers"):
         raise ScenarioError("config.map_share.sub_flips_to: all | subscribers")
     if not isinstance(ms["events"], bool):

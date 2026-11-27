@@ -65,12 +65,12 @@ def test_announcements_keep_each_robots_view_of_who_subscribes():
     s = built(config=SUBS)
     subs = s.subs
     a, b = s.robots[0], s.robots[1]
-    subs._deliver_announce(b.node, (a.node, 2, frozenset({4, 5})))
+    subs.deliver_announce(b.node, (a.node, 2, frozenset({4, 5})))
     assert subs.dsts(b, 4).tolist() == [a.node] and subs.dsts(b, 6).tolist() == []
-    subs._deliver_announce(b.node, (a.node, 1, frozenset({6})))  # older: ignored
+    subs.deliver_announce(b.node, (a.node, 1, frozenset({6})))  # older: ignored
     assert subs.dsts(b, 4).tolist() == [a.node] and subs.dsts(b, 6).tolist() == []
     s.now = 10.0
-    subs._deliver_announce(b.node, (a.node, 3, frozenset({5})))  # dropped 4
+    subs.deliver_announce(b.node, (a.node, 3, frozenset({5})))  # dropped 4
     m = subs.st[b.k]
     assert subs.dsts(b, 4).tolist() == [] and m.last_left[4] == (10.0, a.node)
     # A patch that carries a flip (the world moved) goes to every robot.
@@ -321,7 +321,29 @@ def test_map_spread_times_from_when_the_path_ran_into_it():
 
 @pytest.mark.parametrize("key,val", [("recipients", "near"), ("sub_flips_to", "some"),
                                      ("events", "yes"), ("sub_keepalive_s", 0),
-                                     ("sub_path_m", -1)])
+                                     ("sub_path_m", -1), ("sub_transport", "radio")])
 def test_bad_map_share_settings_fail_validation(key, val):
     with pytest.raises(config.ScenarioError, match=f"map_share.{key}"):
         scenario(config={"map_share": {key: val}})
+
+
+def test_on_status_a_subscription_rides_the_next_two_statuses_and_no_message_of_its_own():
+    s, _ = run(scenario(config=SUBS, disturbances=PALLET))
+    assert s.cfg["map_share"]["sub_transport"] == "status"
+    kinds = set().union(*(e["kinds"] for e in s.events if e["s"] == "net"))
+    assert "mapsub" not in kinds and "mappull" in kinds
+    # Every robot's view of every other robot came off a Status.
+    assert all(set(s.subs.st[r.k].view) == {o.node for o in s.robots if o is not r}
+               for r in s.robots)
+    m = s.subs.st[0]
+    m.carry = 2
+    assert s.subs.for_status(s.robots[0]) == (s.robots[0].node, m.ver, m.tiles)
+    assert s.subs.for_status(s.robots[0]) is not None and s.subs.for_status(s.robots[0]) is None
+
+
+def test_as_a_message_a_subscription_goes_to_every_robot():
+    s, summary = run(scenario(config=sim.deep_merge(SUBS, {"map_share": {
+        "sub_transport": "message"}}), disturbances=PALLET))
+    assert summary["reason"] == "tasks_done"
+    sent = sum(e["kinds"].get("mapsub", {"sent": 0})["sent"] for e in s.events if e["s"] == "net")
+    assert sent == s.subs.counts["announces"] * (len(s.robots) - 1)

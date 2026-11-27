@@ -6,11 +6,15 @@ event-driven updates"):
 
   * Each robot subscribes to the tiles within `sub_radius_m` of it and to the
     tiles along the next `sub_path_m` of its planned path (`wanted`). It works
-    the set out at every map tick and announces it, whole, to every robot
-    (`mapsub`, reliable) when it changed, at most every `sub_min_interval_s`,
-    and unchanged every `sub_keepalive_s`. The whole set, not the change: a
-    lost announcement is healed by the next one, and a version number drops
-    one that arrives late.
+    the set out at every map tick and on every new path, and announces it,
+    whole, when it changed, at most every `sub_min_interval_s`, and unchanged
+    every `sub_keepalive_s`. The whole set, not the change: a lost
+    announcement is healed by the next one, and a version number drops one
+    that arrives late. `sub_transport: status` (default) carries it on the
+    robot's next two /fleet/status, to the Status recipients, as intents ride;
+    `message` sends it as its own reliable `mapsub` message to every robot.
+    As a message to 49 peers it took the 50-robot radio past the cliff
+    (base.yaml, sub_transport).
   * A robot sends its patches and refresh snapshots of a tile to the tile's
     subscribers as it has heard them. Its own map of who subscribes is never
     ground truth.
@@ -64,8 +68,10 @@ import numpy as np
 
 from .belief import PRIOR_STAMP
 
-SUB_HEADER_B = 16   # robot id, version, count
+SUB_HEADER_B = 16   # robot id, version, count: an announcement of its own
+SUB_STATUS_B = 4    # version, count: riding on a Status, which names the robot already
 SUB_TILE_B = 2      # tile id
+STATUS_CARRIES = 2  # Statuses that carry a changed set: one lost Status doesn't lose it
 PULL_HEADER_B = 16
 PULL_TILE_B = 6     # tile id + since (float32)
 VV_ENTRY_B = 3      # origin id + sequence number, per origin in an answer
@@ -87,6 +93,7 @@ class _Robot:
         self.subs_of: dict[int, dict] = defaultdict(dict)  # tile -> {peer node: since}
         self.last_left: dict[int, tuple] = {}  # tile -> (when, peer node) it heard leave
         self.answers: OrderedDict = OrderedDict()  # (asker node, tile) -> since
+        self.carry = 0                        # sub_transport status: Statuses still to carry it
         self.alive_until = 0.0
         self.path = None                      # the path the set was last worked out for
 
@@ -102,6 +109,7 @@ class Subscriptions:
         self.expire = 2.5 * self.keep
         self.margin = 2.0 * float(c["publish_s"])
         self.flips_all = c["sub_flips_to"] == "all"
+        self.on_status = c["sub_transport"] == "status"
         # An answer can wait a publish period for budget, then travels like
         # any reliable message (up to the transport lease).
         self.pull_wait = float(sim.net.lease_s) + 2.0 * float(c["publish_s"])
@@ -203,13 +211,24 @@ class Subscriptions:
         m.tiles, m.ver = want, m.ver + 1
         m.next_ok, m.next_keep = now + self.min_iv, now + self.keep
         self.counts["announces"] += 1
-        dsts = self.robot_nodes[self.robot_nodes != r.node]
-        self.sim._send("mapsub", r.node, dsts, SUB_HEADER_B + SUB_TILE_B * len(want), True,
-                       self._deliver_announce, (r.node, m.ver, want))
+        if self.on_status:
+            m.carry = STATUS_CARRIES  # on its next Statuses (Sim._status_tick)
+        else:
+            dsts = self.robot_nodes[self.robot_nodes != r.node]
+            self.sim._send("mapsub", r.node, dsts, SUB_HEADER_B + SUB_TILE_B * len(want), True,
+                           self.deliver_announce, (r.node, m.ver, want))
         if added:
             self._pull(r, m, added, now)
 
-    def _deliver_announce(self, node: int, payload) -> None:
+    def for_status(self, r) -> tuple | None:
+        """sub_transport status: what r's next Status carries, if anything."""
+        m = self.st[r.k]
+        if not self.on_status or m.carry <= 0:
+            return None
+        m.carry -= 1
+        return (r.node, m.ver, m.tiles)
+
+    def deliver_announce(self, node: int, payload) -> None:
         peer, ver, tiles = payload
         o = self.sim.robots[node - 1]
         if not o.alive:
@@ -356,6 +375,7 @@ class Subscriptions:
         m.next_ok = m.next_keep = self.sim.now
         m.answers.clear()
         m.pulling.clear()
+        m.carry = 0
 
     def summary(self) -> dict:
         return dict(self.counts)

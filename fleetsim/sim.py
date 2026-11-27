@@ -687,11 +687,16 @@ class Sim:
             dsts = np.r_[GW, self._robots_near((r.x, r.y), float(cfg["radius_m"]))]
         it = r.intent_for_status(self.now)
         extra = 0 if it is None else 4 + 12 * len(it["pts"])  # fleetsim/intent.py points
+        # map_share.sub_transport: status — a tile subscription rides along
+        # once per change, as intents do (fleetsim/mapshare.py).
+        sub = None if self.subs is None else self.subs.for_status(r)
+        if sub is not None:
+            extra += MS.SUB_STATUS_B + MS.SUB_TILE_B * len(sub[2])
         d, arr, _, _ = self.net.send("status", r.node, dsts, len(raw) + 8 + extra, False,
                                      self.now, udp=True)
         if len(d):
             self._pending_status.append((r.k, d, arr,
-                                         (r.x, r.y, r.mode(), r.core.battery_pct, it)))
+                                         (r.x, r.y, r.mode(), r.core.battery_pct, it, sub)))
 
     def _session_liveness(self) -> None:
         """status.session_liveness: a live zenoh session to a peer counts as
@@ -713,10 +718,10 @@ class Sim:
             return
         now, poll = self.now, float(self.cfg["status"]["liveness_poll_s"])
         keep = []
-        for src, d, arr, (x, y, mode, bat, it) in self._pending_status:
+        for src, d, arr, (x, y, mode, bat, it, sub) in self._pending_status:
             due = arr <= now
             if not due.all():
-                keep.append((src, d[~due], arr[~due], (x, y, mode, bat, it)))
+                keep.append((src, d[~due], arr[~due], (x, y, mode, bat, it, sub)))
             dd = d[due]
             if not len(dd):
                 continue
@@ -727,6 +732,9 @@ class Sim:
                 for k in rob.tolist():
                     if self.robots[k].alive:
                         self.robots[k].on_intent(it, now)
+            if sub is not None:
+                for k in rob.tolist():
+                    self.subs.deliver_announce(k + 1, sub)
             stale = dd[now - self.live_t[dd, src] >= poll]
             if not len(stale):
                 continue

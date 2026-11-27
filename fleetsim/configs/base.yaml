@@ -149,6 +149,13 @@ map_share:                    # commsim/docs/brief.md@6501799 "Obstacles and map
   sub_radius_m: 6.0
   sub_path_m: 30.0
   sub_min_interval_s: 2.0     # announce a changed set at most this often
+  # How the set travels. status: on the robot's next two /fleet/status, to
+  # the Status recipients (no frames of its own). message: its own reliable
+  # message to every robot. As a message to 49 peers it took fleet_scale (50
+  # robots, radio) past the cliff: Status delivery 62 %, /fleet/tasks 27 %,
+  # obstacle notices 717 -> 218 k copies, deliveries 122 -> 68 (2026-11-26);
+  # airtime is per frame far more than per byte, as for intents.
+  sub_transport: status
   sub_keepalive_s: 30.0       # re-announce an unchanged set this often; a peer not heard for
                               # 2.5x this is dropped (a dead robot stops costing patches)
   # Where a patch goes that carries a cell the sender's own sensing flipped
