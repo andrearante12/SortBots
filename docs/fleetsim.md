@@ -135,8 +135,9 @@ Keys: Space plays or pauses. ←/→ steps 1 s (with Shift, 10 s). `[`/`]` jumps
 to the previous or next event (only the selected robot's, if one is
 selected). Esc closes. Drag to pan, scroll to zoom, double-click to fit.
 
-**What is recorded for it.** These go in `record:` in `fleetsim/configs/base.yaml`,
-and no metric reads them. The run's floor, waypoints, homes and gateway are
+**What is recorded for it.** These go in `record:` in `fleetsim/configs/base.yaml`.
+Only the paths feed a metric (`utilisation`, see [Benchmark metrics](#benchmark-metrics)).
+The run's floor, waypoints, homes and gateway are
 recorded once (`world`). Paths are recorded on every plan and replan. Radio
 links are recorded every `links_s`. `belief_map` snapshots are taken every
 `belief_map_s` for the robots in `belief_maps` (default `[robot_0]`; `all`
@@ -266,6 +267,124 @@ Next steps that would address what the stops actually are: lane discipline
 so head-on meetings pass without stopping), and detours that treat a
 higher-priority peer's intent as a temporary cost on the costmap (another
 aisle, rather than waiting).
+
+## Benchmark metrics
+
+The metrics the benchmark compares methods by ([plan](fleetsim-plan.md),
+item A4). Throughput comes first, delivery time
+second, and both are measured from the operator's request (the `announce`).
+Throughput only separates methods when the fleet can't keep up, so `bounds`
+says how loaded a scenario is. Every scenario lists `fleet_tasks`, `bounds`
+and `utilisation`, with no pass criteria on the new values yet.
+
+**`fleet_tasks` v3.** The v2 values keep their meaning. New values:
+
+- `wait_assign_s`: announce to the task's first dispatch.
+- `wait_pickup_s`: first dispatch to the item leaving the shelf (the first
+  `NAV_TO_DROPOFF`). This includes time in a busy robot's queue and the empty
+  drive to the shelf.
+- `backlog_end`: announced tasks not delivered when the run stopped.
+
+Both waits are means over delivered tasks, so `wait_assign_s +
+wait_pickup_s` + the carry leg = `mean_s`.
+
+`per_hour` divides by the time from the first announce to the end of the work.
+The end of the work is the last DONE if every announced task was delivered,
+else the end of the run. v2 divided by the whole run, so the idle tail after
+the last delivery counted as time the fleet failed to deliver. The same
+`delivery_smoke` fleet scored 112/h when stopped at `tasks_done`, and would
+score 48/h if left to run its 900 s. v3 gives 113/h either way. Work left
+undone still costs until the run stops, so a fleet that deadlocks early gets no
+reward for it.
+
+**`bounds` v1**, fed by one new event per announced task. The sim emits
+`task_bound {task_id, lb_s, drive_m}` straight after the `announce`. `lb_s` is
+the shortest drive pickup → dropoff at `robots.max_speed_mps`, plus both
+`tasks.dwell_s`. The drive is A* on the base layout (`Sim._task_bound`) with
+the robots' planning radius, by length only (no inflation cost), then pulled
+taut, because the robots drive a smoothed path. Blockages are ignored: they
+only make a drive longer. Lengths are cached per (pickup, dropoff). A new pair
+costs 7 to 13 ms, and `fleet_scale` took 108.4 s of wall time instead of 108.3 s.
+The values:
+
+- `lb_mean_s`: the mean bound over announced tasks.
+- `stretch`: the mean over delivered tasks of delivery time / its bound.
+- `ub_per_hour`: robots × 3600 / `lb_mean_s`, what the fleet could deliver if
+  every robot did nothing but back-to-back bound-length tasks. It ignores the
+  empty drive between tasks, so it is optimistic.
+- `arrival_per_hour`: (announced − 1) × 3600 / (last announce − first
+  announce).
+- `offered_load`: `arrival_per_hour / ub_per_hour`. Above 1, no method can keep
+  up. Because `ub_per_hour` is optimistic, a fleet can also be overloaded below
+  1.
+
+For a fixed task list, `arrival_per_hour` is the rate of the burst, not a
+steady rate.
+
+**`utilisation` v1** books every robot-second to one phase: idle, to pickup,
+at pickup (`AWAIT_PICK` + `PICKING`), carrying, placing, going home, or off
+(killed). It reads the `task` states, and the `path` events with purpose
+`home`. It also gives time lost by cause, in robot-seconds and as a share of
+robot-time: stopped for a peer robot, a mover, a notice or a bump (the
+`blocked` event's `by`), yielding to an intent, awaiting the pick ack, and no
+path. No path runs from `plan_failed` to the next recorded path, a `gave_up`,
+or the task's next state. The rules:
+
+- Lost time counts only while a robot works a task. A robot stopped on its way
+  home delays no delivery. For this reason `lost_robot_s` is below
+  `nav.blocked_robot_s` (`fleet_scale`: 3189 vs 3956 s).
+- One cause at a time. Yielding wins over a stop, because a held robot isn't
+  checked for blockers. A stop wins over no path, because a replan around a
+  blocker that finds no way out is the blocker's doing.
+- A stop is booked to what stopped the robot first.
+- A change of task state closes an open stop and a planning failure. The
+  robot's `_clear_goal` records no `unblocked`.
+- With `record.paths: false`, going home and recovered plans can't be seen.
+  `home_frac` and `lost_no_path_*` then come out None, and the time spent going
+  home is in `idle_frac`.
+- Recovery pauses (`nav.hiccup_rate_hz`, 0 until calibrated) aren't booked,
+  because their length isn't in the event.
+
+Runs recorded before 2026-11-26 rescore. They have no `task_bound`, so every
+`bounds` value except `arrival_per_hour` comes out None. The new
+`fleet_tasks` and `utilisation` values are computed from streams those runs
+already have. Only the new event changes the event stream: every other event
+of `delivery_smoke`, `walkers` and `fleet_scale` is unchanged, and
+`test_task_bounds_are_the_only_change_to_a_run` checks this.
+
+Seed 1, 2026-11-26:
+
+| | `delivery_smoke` | `walkers` | `fleet_scale` |
+|---|---|---|---|
+| `per_hour` / `arrival_per_hour` | 113 / 1165 (a burst) | 150 / 277 | 498.5 / 675 |
+| `mean_s` = assign + pickup + carry | 217 = 2.9 + 136 + 78 | 161 = 2.3 + 85 + 74 | 203 = 3.1 + 83 + 116 |
+| `backlog_end` | 0 | 11 | 18 |
+| `lb_mean_s` / `stretch` | 74 s / 3.0 | 73 s / 2.65 | 90 s / 2.4 |
+| `ub_per_hour` / `offered_load` | 390 / **3.0** | 595 / 0.47 | 2008 / **0.34** |
+| busy / idle / home | 61 / 29 / 11 % | 59 / 38 / 3 % | 60 / 28 / 12 % |
+| lost: all / peers / movers | 0.6 / 0.6 / 0 % | 3.4 / 2.4 / 0.8 % | 7.2 / 7.1 / 0 % |
+
+What these say:
+
+- **`fleet_scale` is not overloaded.** Its offered load is 0.34. The bound is
+  optimistic, so that number alone proves nothing, but the robots are also idle
+  or driving home 40 % of the time, and a task waits only 6 s on average in a
+  busy robot's queue. The 18-task backlog is mostly tasks still in flight: 17
+  of them were announced after t = 500 s, against a 203 s mean delivery. To
+  make throughput separate methods there, the arrival rate has to go up (C12).
+- **Peers cost the most lost time.** At 50 robots, stops for peers are 7.1 %
+  of all robot-time and 12 % of the time spent on tasks. Notices, pick acks,
+  yields and missing paths together are under 0.1 %.
+- **The wait is after assignment, not before it.** Every scenario assigns a
+  task within about 3 s, but the item leaves the shelf 83 to 136 s later. In
+  `delivery_smoke`, the auction queues 4 of the 12 tasks behind a busy robot,
+  for 174 s on average, while robots that finished early stand idle. For
+  example, robot_0 is free from t = 65 s, but the task queued on robot_7 at
+  t = 9 s starts only at t = 114 s.
+- **The bound is close.** The time from reaching the shelf to DONE was at
+  least 1.016 × `lb_s` for every delivered task in the three runs, so
+  `stretch` is mostly the drive to the shelf and the queueing, not slack in
+  the bound.
 
 ## Known issues
 

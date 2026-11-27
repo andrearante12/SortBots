@@ -36,5 +36,7 @@ metrics:
     # local layer is judged on `driven` only.
     pass: {driven: {lte: 2}}
   - metric: fleet_tasks
+  - metric: bounds
+  - metric: utilisation
   - metric: nav
   - metric: comms

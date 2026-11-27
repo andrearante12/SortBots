@@ -30,6 +30,8 @@ stop: {until: tasks_done, settle_s: 3}
 metrics:
   - metric: fleet_tasks
     pass: {done_frac: {gte: 1.0}, duplicates: {eq: 0}}
+  - metric: bounds
+  - metric: utilisation
   - metric: contacts
     pass: {contacts: {eq: 0}}
   - metric: nav

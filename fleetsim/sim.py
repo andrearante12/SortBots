@@ -27,7 +27,7 @@ import numpy as np
 
 from . import grid as G
 from . import network as N
-from .planner import FREE, OCC
+from .planner import FREE, OCC, Costmap, path_length
 from .robot import Robot
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -307,7 +307,67 @@ class Sim:
                    "at_s": round(self.now, 3)}
             self.announced.append(rec)
             self.record({"s": "announce", **rec})
+            self._task_bound(rec)
         self.handle_actions(None, self.gw.drain())
+
+    def _task_bound(self, rec: dict) -> None:
+        """The task's lower bound on its delivery time, for the `bounds`
+        metric (docs/fleetsim.md "Benchmark metrics"): the shortest drive
+        pickup -> dropoff on the true layout at max speed, plus the pick and
+        place dwells. No method can beat it, whatever robot it sends.
+
+        Shortest LENGTH, not the robots' inflation-weighted cost (cost_weight
+        0, lethal band only, so the same planning radius the robots plan
+        with), then pulled taut: the robots drive a smoothed path, and a raw
+        8-connected path is up to 8 % longer than that. The base layout, not
+        the floor at announce time: a blockage only lengthens a drive, and
+        one that clears later would leave a bound above a real delivery.
+        Reads no RNG and touches nothing the robots read, so a run's other
+        events are exactly what they were without it."""
+        if not hasattr(self, "_bound_cm"):  # built on the first announce
+            truth = np.where(self.base_static, OCC, FREE).astype(np.int8)
+            nav = {**self.cfg["nav"], "inflation_m": 0.0, "cost_weight": 0.0, "unknown_cost": 0.0}
+            self._bound_cm = Costmap(self.grid, truth, nav,
+                                     float(self.cfg["robots"]["footprint_radius_m"]))
+            self._bound_m: dict = {}  # (pickup, dropoff) -> metres | None
+        key = (rec["pickup"], rec["dropoff"])
+        if key not in self._bound_m:
+            self._bound_m[key] = self._shortest_drive_m(*map(self.waypoint_xy, key))
+        d = self._bound_m[key]
+        if d is None:
+            self.notes.append(f"{rec['task_id']}: no path {key[0]} -> {key[1]} on the true map")
+        lb = None if d is None else (d / float(self.cfg["robots"]["max_speed_mps"])
+                                     + 2 * float(self.cfg["tasks"]["dwell_s"]))
+        self.record({"s": "task_bound", "task_id": rec["task_id"],
+                     "lb_s": None if lb is None else round(lb, 2),
+                     "drive_m": None if d is None else round(d, 2)})
+
+    def _shortest_drive_m(self, a, b) -> float | None:
+        cm, g = self._bound_cm, self.grid
+        pts = cm.plan(a, b, goal_tol_m=float(self.cfg["nav"]["goal_tolerance_m"]),
+                      max_expansions=g.size)
+        if pts is None:
+            return None
+        if cm.lethal_xy(*a):
+            # plan() prefixes the pickup's own cell when it is lethal (a shelf
+            # spot inside the rack's band); a robot sent there stopped at the
+            # nearest free cell instead, and never drives that hop.
+            pts = pts[1:]
+        step = 0.5 * g.res
+
+        def clear(p, q):
+            n = max(1, int(math.dist(p, q) / step))
+            return all(not cm.lethal_xy(p[0] + i / n * (q[0] - p[0]), p[1] + i / n * (q[1] - p[1]))
+                       for i in range(1, n))
+
+        taut, i = [pts[0]], 0
+        while i < len(pts) - 1:
+            j = i + 1
+            while j + 1 < len(pts) and clear(pts[i], pts[j + 1]):
+                j += 1
+            taut.append(pts[j])
+            i = j
+        return path_length(taut)
 
     def _node(self, name: str) -> int:
         if name == "gateway":

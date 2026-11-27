@@ -38,7 +38,7 @@ its map — checked against Isaac with a 2-robot task list after this groundwork
 | A1 | Swappable task-assignment layer (dispatcher), central greedy + rolling Hungarian | todo |
 | A2 | Perfect-information mode | todo |
 | A3 | Benchmark command (suites, seeds, sizes 2/5/10/20, one table) | todo |
-| A4 | Metrics: throughput, delivery time, time lost by cause, utilisation, lower bound | todo |
+| A4 | Metrics: throughput, delivery time, time lost by cause, utilisation, lower bound | done |
 | A5 | Crash-tolerant parallel runs + local compute logging | todo |
 | C12 | Scenario set (for review) + scenario editor in the operator view | todo |
 | B8 | Map-tile subscriptions | todo |
@@ -111,7 +111,7 @@ re-running (`bench --rescore DIR`), as runs already can be.
   actor, notice; yielding; no path; awaiting the pick ack).
 - new `bounds`: the sim emits one event per announced task with its lower bound
   (shortest true-map drive pickup -> dropoff at max speed + both dwells), and the
-  metric reports `lb_mean_s`, `stretch` (mean delivery / mean lower bound) and
+  metric reports `lb_mean_s`, `stretch` (mean of each delivery / its lower bound),
   `ub_per_hour` (fleet capacity if every robot did only lower-bound cycles) and
   `offered_load` (arrival rate / capacity: > 1 means overloaded).
 

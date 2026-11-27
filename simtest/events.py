@@ -53,9 +53,14 @@ STREAMS = {
     # fleetsim only (docs/fleetsim.md): the headless fleet sim records these
     # alongside start/end/gt/dispatch/task, which keep the schema above.
     "announce": "fleetsim: a task the gateway announced: {task_id, pickup, dropoff}",
+    "task_bound": "fleetsim, right after each announce (since 2026-11-26): {task_id, lb_s, "
+                  "drive_m} — the task's lower bound on its delivery time (the shortest "
+                  "drive pickup -> dropoff on the true layout at max speed, plus both "
+                  "dwells); both null when the true layout has no path",
     "contact": "fleetsim: a body contact: {rid, kind: robot|static|actor, other, x, y}",
     "nav": "fleetsim: local-layer / planner event: {rid, event: replan|blocked|unblocked|"
-           "gave_up|plan_failed|recovery, cause?, by?, after_s?}",
+           "gave_up|plan_failed|recovery|empty_shelf|yield|yield_end|yield_timeout, cause?, "
+           "by?: robot|actor|notice|bump, after_s?, to?}",
     "net": "fleetsim, 1 Hz: {model, kinds: {kind: {sent, delivered, lost, bytes, p50_ms, "
            "p95_ms}}, load_max, load_mean, over_cap, reach_frac, hops_max}",
     "belief": "fleetsim: each robot's map vs the truth: {free_cells, cell_m, robots: {rid: "
@@ -63,12 +68,13 @@ STREAMS = {
     "board": "fleetsim: the gateway's task board, counted: {tasks: {state: n}, alarms, "
              "robots_alive}",
     "disturb": "fleetsim: an injected failure starting (on: true) or ending",
+    "path": "fleetsim (record.paths): a robot's planned path, on every plan; pts [] when it "
+            "has none: {rid, purpose: task|home, pts: [[x, y], ...]}. The replay draws it; "
+            "`utilisation` reads it for going home and for when a failed plan recovers",
     # fleetsim, for the operator view's replay (fleetsim/replay.py); no metric reads them.
     "world": "fleetsim, once after start: {grid: MapGrid JSON (0 free / 100 occupied), "
              "waypoints: {name: [x, y]}, homes: {rid: [x, y]}, gateway: [x, y], body_r, "
              "actors: {id: radius}}",
-    "path": "fleetsim: a robot's planned path, on every plan; pts [] when it has none: "
-            "{rid, purpose: task|home, pts: [[x, y], ...]}",
     "links": "fleetsim, radio network only: usable one-hop links: {links: [[node_a, node_b, "
              "snr_db], ...]}; node 0 is the gateway, robot_N is node N+1",
     "belief_map": "fleetsim: one robot's own map (record.belief_maps): {rid, grid: MapGrid "

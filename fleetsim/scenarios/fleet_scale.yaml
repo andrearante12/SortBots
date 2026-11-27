@@ -25,6 +25,8 @@ task_arrival: {rate_hz: 0.2, pickups: "shelf_*", dropoffs: "dock_*", until_s: 78
 metrics:
   - metric: fleet_tasks
     pass: {duplicates: {eq: 0}}
+  - metric: bounds
+  - metric: utilisation
   - metric: comms
     pass: {load_max: {lt: 1.0}}
   - metric: contacts

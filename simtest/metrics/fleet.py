@@ -1,4 +1,5 @@
-"""Fleet-scale metrics: deliveries, contacts, comms, map divergence, nav.
+"""Fleet-scale metrics: deliveries, contacts, comms, map divergence, nav,
+utilisation and per-task lower bounds.
 
 Written for fleetsim (docs/fleetsim.md), which emits these streams on top
 of the ones Isaac runs share (gt, dispatch, task). They are ordinary simtest
@@ -26,7 +27,12 @@ def _pct(xs, q):
 class FleetTasks(Metric):
     name = "fleet_tasks"
     # 2: AWAIT_PICK (confirmed picks, 2026-11-17) counts as working the task.
-    version = 2
+    # 3: wait_assign_s, wait_pickup_s, backlog_end; per_hour's window starts
+    #    at the first request and ends at the last delivery once everything
+    #    is delivered (2026-11-26). Dividing by the whole run made the same
+    #    delivery_smoke fleet 112/h stopped at tasks_done and 48/h left to
+    #    run its 900 s: the idle tail counted as time it failed to deliver.
+    version = 3
     streams = {"announce", "task", "dispatch", "end"}
     summary = "Auctioned deliveries: completion, throughput, latency, duplicate work."
     params = {}
@@ -39,9 +45,20 @@ class FleetTasks(Metric):
         "redispatched": "dispatches beyond the first per task (it moved robot)",
         "duplicates": "episodes of two or more robots working the same task at once "
                       "(the later one drives to a shelf the item has left)",
-        "mean_s": "mean sim seconds from announce to DONE",
+        "mean_s": "mean sim seconds from announce (the operator's request) to DONE",
         "p95_s": "95th percentile announce-to-DONE, sim seconds",
-        "per_hour": "deliveries per sim hour over the whole run",
+        "per_hour": "deliveries per sim hour: done x 3600 / (end - first announce), where end "
+                    "is the last DONE if every announced task was delivered, else the end of "
+                    "the run. Neither the lead-in before the first request nor an idle tail "
+                    "after the last delivery counts, and work left undone keeps costing until "
+                    "the run stops",
+        "wait_assign_s": "mean sim seconds from announce to the task's first dispatch, over "
+                         "delivered tasks",
+        "wait_pickup_s": "mean sim seconds from the first dispatch to the item leaving the "
+                         "shelf (the first NAV_TO_DROPOFF), over delivered tasks; with "
+                         "wait_assign_s and the carry leg it adds up to mean_s",
+        "backlog_end": "announced tasks not delivered when the run ended (unassigned, queued "
+                       "or in progress)",
     }
 
     def __init__(self, ctx, **params):
@@ -50,6 +67,8 @@ class FleetTasks(Metric):
         self.done_at: dict[str, float] = {}
         self.active: dict[str, set] = {}
         self.dispatches: dict[str, int] = {}
+        self.first_dispatch: dict[str, float] = {}
+        self.picked_at: dict[str, float] = {}
         self.failed = self.cancelled = self.duplicates = 0
         self.end_t = None
 
@@ -59,11 +78,16 @@ class FleetTasks(Metric):
             self.announced[ev["task_id"]] = ev["t"]
         elif s == "dispatch":
             self.dispatches[ev["task_id"]] = self.dispatches.get(ev["task_id"], 0) + 1
+            self.first_dispatch.setdefault(ev["task_id"], ev["t"])
         elif s == "end":
             self.end_t = ev["t"]
         elif s == "task":
             tid, st, rid = ev["task_id"], ev["state"], ev["rid"]
             act = self.active.setdefault(tid, set())
+            if st == "NAV_TO_DROPOFF":
+                # One physical item per task (sim.take_item): the first carry
+                # leg is the pick, whichever robot made it.
+                self.picked_at.setdefault(tid, ev["t"])
             if st in ACTIVE:
                 if rid not in act:
                     act.add(rid)
@@ -79,8 +103,18 @@ class FleetTasks(Metric):
                     self.cancelled += 1
 
     def result(self):
-        lat = [self.done_at[t] - a for t, a in self.announced.items() if t in self.done_at]
+        done = [t for t in self.announced if t in self.done_at]
+        lat = [self.done_at[t] - self.announced[t] for t in done]
         n = len(self.announced)
+        assign = [self.first_dispatch[t] - self.announced[t] for t in done
+                  if t in self.first_dispatch]
+        pickup = [self.picked_at[t] - self.first_dispatch[t] for t in done
+                  if t in self.first_dispatch and t in self.picked_at]
+        per_hour = None
+        if n and self.end_t is not None:
+            t0 = min(self.announced.values())
+            t1 = max(self.done_at[t] for t in done) if len(done) == n else self.end_t
+            per_hour = round(len(done) / (t1 - t0) * 3600, 1) if t1 > t0 else None
         return {
             "announced": n,
             "done": len(lat),
@@ -91,7 +125,10 @@ class FleetTasks(Metric):
             "duplicates": self.duplicates,
             "mean_s": round(statistics.fmean(lat), 1) if lat else None,
             "p95_s": round(_pct(lat, 95), 1) if lat else None,
-            "per_hour": round(len(lat) / self.end_t * 3600, 1) if self.end_t else None,
+            "per_hour": per_hour,
+            "wait_assign_s": round(statistics.fmean(assign), 1) if assign else None,
+            "wait_pickup_s": round(statistics.fmean(pickup), 1) if pickup else None,
+            "backlog_end": n - len(done),
         }
 
 
@@ -311,3 +348,265 @@ class Nav(Metric):
     def result(self):
         return {**self.c, **{k: round(self.c[k], 1)
                              for k in ("blocked_s", "blocked_robot_s", "yield_s")}}
+
+
+# The task FSM's states (fleetsim/robot.py, task_manager's) as shares of a
+# robot's time. A FINAL state ends the task and the robot is idle until its
+# next one: nothing records IDLE itself, since a robot with no task sends a
+# status with no task in it.
+PHASE = {"NAV_TO_PICKUP": "to_pickup", "AWAIT_PICK": "at_pickup", "PICKING": "at_pickup",
+         "NAV_TO_DROPOFF": "carrying", "PLACING": "placing"}
+BUSY = ("to_pickup", "at_pickup", "carrying", "placing")
+DRIVING = {"to_pickup", "carrying"}
+CAUSES = ("robot", "actor", "notice", "bump", "yield", "await_pick", "no_path")
+
+
+class _Bot:
+    """One robot's state as the event stream tells it."""
+
+    __slots__ = ("last", "phase", "task", "state", "home", "off", "block", "yielding",
+                 "no_path")
+
+    def __init__(self):
+        self.last = 0.0
+        self.phase = "idle"
+        self.task = self.state = None  # the last task status: (task_id, FSM state)
+        self.home = False      # no task, driving home (a `path` with purpose home)
+        self.off = False       # killed by a disturbance
+        self.block = None      # what the open local-layer stop is for
+        self.yielding = False  # holding for a peer's path intent
+        self.no_path = False   # plan_failed, no plan since
+
+    def copy(self) -> "_Bot":
+        b = _Bot()
+        for k in self.__slots__:
+            setattr(b, k, getattr(self, k))
+        return b
+
+
+@register
+class Utilisation(Metric):
+    name = "utilisation"
+    version = 1
+    streams = {"task", "nav", "path", "disturb", "end"}
+    summary = "Where the fleet's robot-time goes: task phases, and time lost by cause."
+    params = {}
+    values = {
+        "robot_s": "robot-seconds in the run: robots x its sim length",
+        "idle_frac": "share of robot-time with no task, parked or waiting (going home apart)",
+        "to_pickup_frac": "share of robot-time driving to a pickup (NAV_TO_PICKUP)",
+        "at_pickup_frac": "share of robot-time at the shelf: awaiting the pick ack "
+                          "(AWAIT_PICK) and picking (PICKING)",
+        "carrying_frac": "share of robot-time driving an item to its dropoff (NAV_TO_DROPOFF)",
+        "placing_frac": "share of robot-time placing (PLACING)",
+        "home_frac": "share of robot-time with no task, driving back to its home spot "
+                     "(nav.return_home_s); None when the run recorded no `path` events "
+                     "(record.paths: false), and that time is then in idle_frac",
+        "off_frac": "share of robot-time killed by a disturbance",
+        "busy_frac": "share of robot-time working a task (to_pickup + at_pickup + carrying "
+                     "+ placing)",
+        "lost_s": "robot-seconds lost while working a task, every cause below (and any stop "
+                  "cause not listed; no-path time only when it is known)",
+        "lost_frac": "lost_s as a share of robot-time",
+        "lost_robot_s": "robot-seconds driving a task but stopped by the local layer for a peer "
+                        "robot",
+        "lost_robot_frac": "lost_robot_s as a share of robot-time",
+        "lost_actor_s": "robot-seconds stopped for a mover (a scripted actor)",
+        "lost_actor_frac": "lost_actor_s as a share of robot-time",
+        "lost_notice_s": "robot-seconds stopped for a peer's obstacle notice",
+        "lost_notice_frac": "lost_notice_s as a share of robot-time",
+        "lost_bump_s": "robot-seconds stopped for something it physically bumped",
+        "lost_bump_frac": "lost_bump_s as a share of robot-time",
+        "lost_yield_s": "robot-seconds holding for a peer's path intent (fleetsim/intent.py)",
+        "lost_yield_frac": "lost_yield_s as a share of robot-time",
+        "lost_await_pick_s": "robot-seconds at the shelf waiting for the majority's pick "
+                             "acks (AWAIT_PICK)",
+        "lost_await_pick_frac": "lost_await_pick_s as a share of robot-time",
+        "lost_no_path_s": "robot-seconds driving a task with no path on its own map "
+                          "(plan_failed until the next plan, gave_up or the task's next "
+                          "state); None without `path` events",
+        "lost_no_path_frac": "lost_no_path_s as a share of robot-time",
+    }
+
+    def __init__(self, ctx, **params):
+        super().__init__(ctx, **params)
+        self.bots: dict[str, _Bot] = {rid: _Bot() for rid in ctx.robots}
+        self.phase_s = dict.fromkeys(("idle", "home", "off", *BUSY), 0.0)
+        self.lost_s: dict[str, float] = dict.fromkeys(CAUSES, 0.0)
+        self.paths = False
+        self.end_t = None
+        self.t_max = 0.0
+
+    @staticmethod
+    def _advance(b: _Bot, t: float, phase_s: dict, lost_s: dict) -> None:
+        """Book the time since b.last to what the robot was doing. One cause
+        at a time: yielding over a stop (a held robot isn't checked for
+        blockers, so a stop open across a hold is the hold's), and a stop over
+        no path (a replan around a blocker that finds no way out is the
+        blocker's doing). Lost time is counted only while working a task: a
+        robot stopped on its way home costs no delivery."""
+        dt = t - b.last
+        if dt <= 0:
+            return
+        b.last = t
+        if b.off:
+            phase_s["off"] += dt
+            return
+        phase_s["home" if b.phase == "idle" and b.home else b.phase] += dt
+        if b.state == "AWAIT_PICK":
+            cause = "await_pick"
+        elif b.phase not in DRIVING:
+            return
+        elif b.yielding:
+            cause = "yield"
+        elif b.block is not None:
+            cause = b.block
+        elif b.no_path:
+            cause = "no_path"
+        else:
+            return
+        lost_s[cause] = lost_s.get(cause, 0.0) + dt
+
+    def on_event(self, ev):
+        s, t = ev["s"], ev["t"]
+        self.t_max = max(self.t_max, t)
+        if s == "end":
+            self.end_t = t
+            return
+        if s == "disturb":
+            rid = ev.get("kill") or ev.get("revive")
+            if not isinstance(rid, str):
+                return
+            b = self.bots.setdefault(rid, _Bot())
+            self._advance(b, t, self.phase_s, self.lost_s)
+            if "kill" in ev and ev["on"]:
+                b.off = True
+            elif "kill" in ev or ev["on"]:  # the kill's end, or a revive
+                b.off = False
+                if ev.get("fresh"):  # a reboot drops its task without a status (sim._revive)
+                    b.phase, b.task, b.state = "idle", None, None
+                    b.block, b.no_path, b.home = None, False, False
+            return
+        rid = ev.get("rid")
+        if rid is None:
+            return
+        b = self.bots.setdefault(rid, _Bot())
+        self._advance(b, t, self.phase_s, self.lost_s)
+        if s == "task":
+            st = ev["state"]
+            if (ev["task_id"], st) == (b.task, b.state):
+                return  # the same status again: a dispatch or cancel of a queued task
+            # Every change of state set a new goal or cleared it
+            # (robot._clear_goal), which ends a stop or a planning failure
+            # without an `unblocked`.
+            b.block, b.no_path, b.home = None, False, False
+            b.phase = PHASE.get(st, "idle")
+            b.task, b.state = (None, None) if st in FINAL else (ev["task_id"], st)
+        elif s == "nav":
+            e = ev["event"]
+            if e == "blocked":
+                b.block = ev.get("by") or "other"
+            elif e == "unblocked":
+                b.block = None
+            elif e == "gave_up":
+                b.block, b.no_path, b.home = None, False, False
+            elif e == "plan_failed":
+                b.no_path = True
+            elif e == "yield":
+                b.yielding = True
+            elif e == "yield_end":
+                b.yielding = False
+        elif s == "path":
+            # The one place a recovered plan shows: robot._replan records the
+            # new path, and a failed one records none (or an empty one).
+            self.paths = True
+            if ev.get("pts"):
+                b.no_path = False
+                if ev.get("purpose") == "home":
+                    b.home = True
+            elif ev.get("purpose") == "home":
+                b.home = False  # arrived, re-tasked, or lost its path home
+
+    def result(self):
+        end = self.end_t if self.end_t is not None else self.t_max
+        phase_s, lost_s = dict(self.phase_s), dict(self.lost_s)
+        for b in self.bots.values():
+            self._advance(b.copy(), end, phase_s, lost_s)
+        robot_s = end * len(self.bots)
+        if robot_s <= 0:
+            return {k: None for k in self.values}
+        frac = lambda v: round(v / robot_s, 4)  # noqa: E731
+        idle = phase_s["idle"] + (0.0 if self.paths else phase_s["home"])
+        out = {
+            "robot_s": round(robot_s, 1),
+            "idle_frac": frac(idle),
+            **{f"{p}_frac": frac(phase_s[p]) for p in BUSY},
+            "home_frac": frac(phase_s["home"]) if self.paths else None,
+            "off_frac": frac(phase_s["off"]),
+            "busy_frac": frac(sum(phase_s[p] for p in BUSY)),
+        }
+        # Without `path` events a failed plan never shows its recovery, so
+        # no-path time is unknown, and left out of the total too.
+        total = sum(v for c, v in lost_s.items() if c != "no_path" or self.paths)
+        out["lost_s"], out["lost_frac"] = round(total, 1), frac(total)
+        for c in CAUSES:
+            known = c != "no_path" or self.paths
+            out[f"lost_{c}_s"] = round(lost_s[c], 1) if known else None
+            out[f"lost_{c}_frac"] = frac(lost_s[c]) if known else None
+        return out
+
+
+@register
+class Bounds(Metric):
+    name = "bounds"
+    version = 1
+    streams = {"announce", "task_bound", "task"}
+    summary = "Per-task lower bounds, and how loaded the scenario is: could any method keep up?"
+    params = {}
+    values = {
+        "lb_mean_s": "mean over announced tasks of the lower bound on its delivery time: the "
+                     "shortest drive pickup -> dropoff on the true layout at "
+                     "robots.max_speed_mps, plus both dwells (the sim's task_bound event)",
+        "stretch": "mean over delivered tasks of delivery time (announce -> DONE) / its lower "
+                   "bound; 1.0 only if a robot were already at the shelf and nothing slowed it",
+        "ub_per_hour": "fleet capacity if every robot did nothing but back-to-back "
+                       "lower-bound tasks: robots x 3600 / lb_mean_s. It ignores the empty "
+                       "drive from a dropoff to the next pickup, so it is optimistic",
+        "arrival_per_hour": "requests per sim hour over the announce window: (announced - 1) "
+                            "x 3600 / (last announce - first announce)",
+        "offered_load": "arrival_per_hour / ub_per_hour: > 1 means no method can keep up; "
+                        "since ub_per_hour is optimistic, a fleet can be overloaded below 1",
+    }
+
+    def __init__(self, ctx, **params):
+        super().__init__(ctx, **params)
+        self.announced: dict[str, float] = {}
+        self.lb: dict[str, float] = {}
+        self.done_at: dict[str, float] = {}
+
+    def on_event(self, ev):
+        s = ev["s"]
+        if s == "announce":
+            self.announced[ev["task_id"]] = ev["t"]
+        elif s == "task_bound":
+            if ev.get("lb_s") is not None:  # None: no path on the true map
+                self.lb[ev["task_id"]] = float(ev["lb_s"])
+        elif s == "task" and ev["state"] == "DONE":
+            self.done_at.setdefault(ev["task_id"], ev["t"])
+
+    def result(self):
+        lbs = [self.lb[t] for t in self.announced if t in self.lb]
+        lb_mean = statistics.fmean(lbs) if lbs else None
+        stretch = [(self.done_at[t] - a) / self.lb[t] for t, a in self.announced.items()
+                   if t in self.done_at and self.lb.get(t, 0) > 0]
+        n = len(self.ctx.robots)
+        ub = n * 3600 / lb_mean if lb_mean and n else None
+        ts = sorted(self.announced.values())
+        arr = (len(ts) - 1) * 3600 / (ts[-1] - ts[0]) if len(ts) >= 2 and ts[-1] > ts[0] else None
+        return {
+            "lb_mean_s": round(lb_mean, 1) if lb_mean is not None else None,
+            "stretch": round(statistics.fmean(stretch), 2) if stretch else None,
+            "ub_per_hour": round(ub, 1) if ub is not None else None,
+            "arrival_per_hour": round(arr, 1) if arr is not None else None,
+            "offered_load": round(arr / ub, 3) if arr is not None and ub else None,
+        }
