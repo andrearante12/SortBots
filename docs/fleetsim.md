@@ -2244,6 +2244,73 @@ more than by method. Wall time on the final code, side by side, seed 1:
 - The operator view's run form doesn't offer `nav.local`
   (`webui/fleetsim_runner.py`, `SETTABLE`). It is terminal-only for now.
 
+## First benchmark (2026-11-27)
+
+`fleetsim bench bench` on the finished groundwork (commit after `212b839`):
+11 `bench_*` scenarios x 2/5/10/20 robots x seeds 1-3 x 7 variants, 924 runs
+in about 45 min at 12 at a time. Every run passed its criteria (no empty
+shelf anywhere), and none crashed. Each cell is the seed mean of the method
+divided by the auction's, minus one, at 20 robots (`auction` = the robots'
+own auction, stop-and-replan local layer, the scenario's network).
+
+Deliveries per hour (higher is better):
+
+| Scenario | +traffic | +orca | greedy | hungarian | auction perfect | hungarian perfect |
+|---|---|---|---|---|---|---|
+| bench_burst | -20 % | +15 % | +13 % | +20 % | -16 % | +18 % |
+| bench_dead_end | +19 % | +9 % | +14 % | -2 % | +9 % | -5 % |
+| bench_dead_gateway | -3 % | +5 % | +1 % | +7 % | +8 % | +1 % |
+| bench_dead_robot | +2 % | +7 % | -4 % | +3 % | -3 % | +1 % |
+| bench_mixed | 0 % | +1 % | -1 % | +4 % | -3 % | +4 % |
+| bench_moved | 0 % | -1 % | 0 % | +4 % | +7 % | +5 % |
+| bench_narrow | +1 % | +3 % | -2 % | 0 % | -1 % | -1 % |
+| bench_partition | +5 % | +10 % | +12 % | +9 % | +2 % | +12 % |
+| bench_rush | +3 % | +14 % | -8 % | +23 % | -3 % | +23 % |
+| bench_steady | +7 % | +10 % | 0 % | +7 % | +1 % | +10 % |
+| bench_walkers | -5 % | +2 % | -4 % | -6 % | -1 % | -3 % |
+
+Mean delivery time from the request (lower is better):
+
+| Scenario | +traffic | +orca | greedy | hungarian | auction perfect | hungarian perfect |
+|---|---|---|---|---|---|---|
+| bench_burst | +2 % | -12 % | +5 % | -8 % | +4 % | -10 % |
+| bench_dead_end | -23 % | -22 % | -19 % | -17 % | -8 % | -19 % |
+| bench_dead_gateway | +1 % | -9 % | -3 % | -5 % | -5 % | -14 % |
+| bench_dead_robot | +1 % | -9 % | -6 % | -6 % | +2 % | -7 % |
+| bench_mixed | -4 % | -17 % | -8 % | -8 % | -5 % | -11 % |
+| bench_moved | -7 % | -12 % | -11 % | -13 % | -9 % | -13 % |
+| bench_narrow | -5 % | -16 % | -5 % | -10 % | -2 % | -10 % |
+| bench_partition | -5 % | -13 % | -14 % | -14 % | -10 % | -19 % |
+| bench_rush | -5 % | -14 % | +3 % | -48 % | -2 % | -48 % |
+| bench_steady | 0 % | -12 % | -7 % | -8 % | +2 % | -8 % |
+| bench_walkers | +1 % | -11 % | -5 % | -7 % | +2 % | -7 % |
+
+What it says, with the usual caveat that one-seed differences of 10-20 % are
+noise and throughput only separates methods when the fleet can't keep up
+(`bench_rush`, `bench_burst`):
+- **The coordination gap is the big one.** The rolling-Hungarian dispatcher
+  beats the auction where it is overloaded (`bench_rush` +23 % deliveries,
+  -48 % delivery time) and delivers 5-17 % faster almost everywhere else.
+  The auction parks tasks in busy robots' queues while others idle
+  ("Benchmark metrics"). Closing this gap is the first optimisation target.
+- **The information gap is small on an ideal network** (auction vs auction
+  perfect: within noise in the ideal-network scenarios) and real on the
+  radio: over all four sizes, perfect information cuts the auction's mean
+  delivery 17 % in `bench_moved` and 20 % in `bench_dead_gateway`, both
+  radio scenarios. The radio costs the auction more than it costs a central
+  dispatcher on the same radio.
+- **ORCA local avoidance** is the most consistent single gain: 9-22 % faster
+  deliveries at 20 robots in every scenario but one, +14-15 % throughput in
+  the overloaded ones.
+- **The traffic layer** pays in dead-end bays (+19 % deliveries, -23 % time)
+  and steady traffic (+7 %), and loses in `bench_burst` to the parked-row
+  trap (Open decisions in docs/fleetsim-plan.md), which isn't the lanes'
+  doing.
+
+The raw results (`results.csv`, `table.md`, every run's events) are local,
+under `data/fleetsim/bench/20261127T045005Z_bench/` on the machine that ran it;
+re-run with the command above to reproduce them exactly.
+
 ## Known issues
 
 - **Intermittent interpreter faults on the development machine — cause not
