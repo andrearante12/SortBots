@@ -131,11 +131,12 @@ def problems(scn: dict, s, homes_err: str | None) -> list[dict]:
             if k in arr and arr[k] is not None and _num(arr[k]) is None:
                 bad(f"task_arrival.{k}", "expected a number of seconds")
 
-    # The gateway is a node a partition or a cut link can name. `kill: gateway`
-    # is accepted too: a dead gateway is being added (docs/fleetsim-plan.md C12),
-    # and a check stricter than the sim would refuse those scenarios here.
+    # The gateway is a node a partition, a kill or a cut link can name.
+    # config.resolve already refuses a robot the fleet doesn't have and checks
+    # the forms that scale with --robots ({select: ...} kills, {first: F}
+    # groups), so those pass here; this only adds the floor-side checks.
     def node_ok(where, name):
-        if name == "gateway":
+        if name == "gateway" or isinstance(name, dict):
             return
         m = ROBOT_RX.match(name) if isinstance(name, str) else None
         if not m or int(m.group(1)) >= n:
@@ -166,13 +167,15 @@ def problems(scn: dict, s, homes_err: str | None) -> list[dict]:
             else:
                 seen: set = set()
                 for j, grp in enumerate(groups):
-                    if grp == "rest":
+                    if grp == "rest" or isinstance(grp, dict):  # {first: F}: config's
                         continue
                     if not isinstance(grp, list) or not grp:
                         bad(f"{w}.partition[{j}]", "a group is a list of nodes, or rest")
                         continue
                     for x in grp:
                         node_ok(f"{w}.partition[{j}]", x)
+                        if isinstance(x, dict):  # [gateway, {last: 0.3}]: config's
+                            continue
                         if x in seen:
                             bad(f"{w}.partition[{j}]", f"{x!r} is in two groups")
                         seen.add(x)

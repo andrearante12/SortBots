@@ -64,7 +64,11 @@ def test_a_saved_map_without_waypoints_gets_the_runs_random_spots(tmp_path, monk
 
 
 def test_check_reports_problems_and_never_raises():
+    out = preview.check({"name": "t", "robots": 2,
+                         "tasks": [{"at_s": 1, "pickup": "shelf_99_0", "dropoff": "dock_0"}]})
+    assert [p["where"] for p in out["problems"]] == ["tasks[0].pickup"]
+    # a robot the fleet lacks is config.resolve's to refuse, as an error
     out = preview.check({"name": "t", "robots": 2, "disturbances": [{"at_s": 1, "revive": "robot_5"}]})
-    assert [p["where"] for p in out["problems"]] == ["disturbances[0].revive"]
+    assert "disturbances[0].revive" in out["error"]
     assert preview.check({"name": "Bad"}) == {"error": f"name: must match {config.NAME_RX.pattern}"}
     json.dumps(preview.check({"name": "t"}))  # all of it is JSON

@@ -274,12 +274,32 @@ def test_resolve_errors_come_back_with_where_they_are(scn_dir):
 
 
 @pytest.mark.parametrize("over,where", [
+    ({"disturbances": [{"at_s": 5, "kill": "robot_3"}]}, "disturbances[0].kill"),
+    ({"disturbances": [{"at_s": 5, "duration_s": 9, "partition": [["robot_0", "robot_7"], "rest"]}]},
+     "disturbances[0].partition"),
+])
+def test_a_robot_the_fleet_lacks_is_a_resolve_error(scn_dir, over, where):
+    # config.resolve refuses these since the scenario drafts (2026-11-26): at
+    # 2 robots a fixed robot_7 used to crash the run mid-way.
+    res = fe.check(minimal(**over))
+    assert not res["ok"] and res["where"] == where, res
+    with pytest.raises(fe.EditorError) as e:
+        save(minimal(**over))
+    assert e.value.code == 400 and e.value.where == where
+
+
+def test_scaling_disturbances_pass_the_floor_check(scn_dir):
+    res = fe.check(minimal(disturbances=[
+        {"at_s": 5, "kill": {"select": "carrying", "within_s": 60}},
+        {"at_s": 9, "duration_s": 9, "partition": [{"first": 0.5}, "rest"]},
+        {"at_s": 30, "duration_s": 9, "partition": [["gateway", {"last": 0.3}], "rest"]}]))
+    assert res["ok"], res
+
+
+@pytest.mark.parametrize("over,where", [
     ({"tasks": [{"at_s": 1, "pickup": "shelf_99_0", "dropoff": "dock_0"}]}, "tasks[0].pickup"),
     ({"task_arrival": {"rate_hz": 0.1, "pickups": "rack_*", "dropoffs": "dock_*"}}, "task_arrival.pickups"),
-    ({"disturbances": [{"at_s": 5, "kill": "robot_3"}]}, "disturbances[0].kill"),
     ({"disturbances": [{"at_s": 5, "blockage": {"rect": [58, 1, 70, 3]}}]}, "disturbances[0].blockage"),
-    ({"disturbances": [{"at_s": 5, "duration_s": 9, "partition": [["robot_0", "robot_7"], "rest"]}]},
-     "disturbances[0].partition[0]"),
     # more robots than the apron and the free floor have room for
     ({"robots": 900, "config": {"world": {"synthetic": {"width_m": 30, "height_m": 22}}}}, "robots"),
 ])
