@@ -251,6 +251,13 @@ class Lanes:
             return -math.inf
         return (self.oxf[j] * -my + self.oyf[j] * mx) / along
 
+    def prune(self, pts: list, clear, v: float, yaw_rate: float, accel: float) -> list:
+        """robot._smooth's pruning with lanes: from both ends only when lane
+        changes are slants (lane_change_m > 0). Alone it changed nothing the
+        follower noticed (84.8 s a solo leg either way), so with slants off
+        the pruning is the one lanes were first measured with."""
+        return prune(pts, clear, v, yaw_rate, accel, both_ends=self.lane_change > 0)
+
     def direction(self, a, b):
         """The smoother's shortcut a -> b: (mx, my, limit). limit is None
         for a long shortcut (follows() holds it to the A* path point by
@@ -277,16 +284,17 @@ class Lanes:
         middle and the lanes A* chose were gone. With the half cell also
         allowed past the lane's edge, lanes drifted 0.2 m toward the centre.
 
-        A short one (lane_change_m): bounded by its ends. Held to A* point
-        by point, every lane change was A*'s own 45-degree diagonal, and
-        the follower stops and turns in place at a heading change over 30
-        degrees: lanes cost 3.6 s on a 73 s leg on the open floor, 1.2 more
-        such turns, which a burst of short legs and small fleets with few
-        meetings paid for in full (bench_burst, 2026-11-27). A short
-        shortcut between two cells of a straight corridor can't run left of
-        both ends; at a corner its ends hold it to the right of both
-        corridors, so it can't cut across the oncoming lane before a left
-        turn."""
+        A short one (lane_change_m, off by default): bounded by its ends.
+        Held to A* point by point, every lane change is A*'s own 45-degree
+        diagonal, and the follower stops and turns in place at a heading
+        change over 30 degrees: over 300 open-floor legs, lanes added 1.2
+        such turns and 3.6 s to a 73 s leg. A short shortcut between two
+        cells of a straight corridor can't run left of both ends; at a
+        corner its ends hold it to the right of both corridors, so it can't
+        cut across the oncoming lane before a left turn. It is still a
+        trade-off (2026-11-27): a robot alone drives a leg 1 % faster, but
+        20 robots stop for each other 18-26 % more, slanting off their lanes
+        where they meet."""
         s = self.sigma(j, m[0], m[1])
         if s == -math.inf:
             return True
@@ -312,7 +320,8 @@ def drive_s(pts: list, idx: list, v: float, yaw_rate: float, accel: float) -> fl
     return t
 
 
-def prune(pts: list, clear, v: float, yaw_rate: float, accel: float) -> list:
+def prune(pts: list, clear, v: float, yaw_rate: float, accel: float,
+          both_ends: bool = True) -> list:
     """robot._smooth's line-of-sight pruning with lanes on: indices of the
     cells of pts to keep, given clear(i, j) (the straight line pts[i] ->
     pts[j] is allowed). Greedy from the start, as without lanes: from each
@@ -321,7 +330,8 @@ def prune(pts: list, clear, v: float, yaw_rate: float, accel: float) -> list:
     hop from the lane onto the next shelf, a heading change of ~55 degrees
     the follower stops for. So the second half is also pruned greedily from
     the goal backwards, and the version the follower drives faster is kept
-    (2026-11-27)."""
+    (2026-11-27). both_ends False: the forward pass alone, exactly as
+    without lanes."""
     n = len(pts)
     fwd, i = [0], 0
     while i < n - 1:
@@ -331,6 +341,8 @@ def prune(pts: list, clear, v: float, yaw_rate: float, accel: float) -> list:
         fwd.append(j)
         i = j
     if len(fwd) <= 2:
+        return fwd
+    if not both_ends:
         return fwd
     # A cell the forward pass kept, at or before the middle: with fwd[len // 2]
     # a four-cell path (shelf, lane, lane, shelf) left the backward pass
