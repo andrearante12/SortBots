@@ -127,7 +127,10 @@ map_share:                    # commsim/docs/brief.md@6501799 "Obstacles and map
                               # true map (a localize-on-saved-map run), so only CHANGES need sharing
   tile_m: 6.4                 # region size: sequence numbers and refresh are per tile
   publish_s: 2.0              # brief: every 2-5 s
-  refresh_s: 60.0             # PLACEHOLDER: a full pass of snapshots over a robot's observed tiles
+  refresh_s: 60.0             # PLACEHOLDER: a full pass of snapshots over a robot's observed tiles.
+                              # It spends what patches leave of rate_cap_bps, and stalls on a tile
+                              # whose snapshot x recipients outgrows the bucket (all at 20 robots:
+                              # never sent; docs/fleetsim.md "Map sharing: subscriptions ...")
   rate_cap_bps: 100000        # brief: PLACEHOLDER 100 kbps per robot, every copy counted
   bytes_per_m2: 100.0         # PLACEHOLDER: compressed patch size (0.25 B per 0.05 m cell)
   chunk_bytes: 8192           # brief: up to ~8 KB per chunk
@@ -152,8 +155,8 @@ map_share:                    # commsim/docs/brief.md@6501799 "Obstacles and map
   # How the set travels. status: on the robot's next two /fleet/status, to
   # the Status recipients (no frames of its own). message: its own reliable
   # message to every robot. As a message to 49 peers it took fleet_scale (50
-  # robots, radio) past the cliff: Status delivery 62 %, /fleet/tasks 27 %,
-  # obstacle notices 717 -> 218 k copies, deliveries 122 -> 68 (2026-11-26);
+  # robots, radio) past the cliff: seed 1, Status delivery 62 %, /fleet/tasks
+  # 27 %, obstacle notices 717 -> 218 k copies, deliveries 122 -> 68 (2026-11-26);
   # airtime is per frame far more than per byte, as for intents.
   sub_transport: status
   sub_keepalive_s: 30.0       # re-announce an unchanged set this often; a peer not heard for
