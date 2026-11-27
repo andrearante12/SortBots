@@ -1,8 +1,9 @@
 """Drive times for a central planner: distance fields on the TRUE map.
 
 A warehouse's layout is known to its operator, so a central planner prices
-a robot -> pickup leg on the true static floor at `robots.max_speed_mps`,
-not on any robot's belief. What it does NOT know is a blockage that
+a robot -> pickup leg on the true static floor at `robots.max_speed_mps`
+(with robot types, at each robot's own max speed), not on any robot's
+belief. What it does NOT know is a blockage that
 appeared since: that reaches it only through what robots report (a leg that
 fails), unless perfect map information is on (`info.map: truth`), in which
 case the fields follow the live true grid and are rebuilt when it changes.
@@ -96,18 +97,21 @@ class DriveTimes:
             self.build_wall_s += time.perf_counter() - t0
         return f
 
-    def seconds(self, name: str, cells) -> np.ndarray:
+    def seconds(self, name: str, cells, speed=None) -> np.ndarray:
         """Drive time from each of `cells` (snapped flat indices, None =
-        off the floor) to waypoint `name`, inf where unreachable."""
+        off the floor) to waypoint `name`, inf where unreachable. `speed`:
+        one per cell (robot types), else robots.max_speed_mps for all."""
         f = self.field(name)
         idx = np.array([-1 if c is None else c for c in cells], dtype=np.int64)
         d = np.where(idx >= 0, f[np.maximum(idx, 0)], UNREACHED)
-        scale = self.grid.res / 1000.0 / self.speed
+        scale = self.grid.res / 1000.0 / (self.speed if speed is None
+                                          else np.asarray(speed, dtype=float))
         return np.where(d >= 0, d * scale, np.inf)
 
-    def between(self, a: str, b: str) -> float:
+    def between(self, a: str, b: str, speed: float | None = None) -> float:
         """Drive time waypoint a -> waypoint b."""
-        return float(self.seconds(b, [self.snap(self.sim.waypoint_xy(a))])[0])
+        return float(self.seconds(b, [self.snap(self.sim.waypoint_xy(a))],
+                                  None if speed is None else [speed])[0])
 
     # ---- the field ------------------------------------------------------------
 

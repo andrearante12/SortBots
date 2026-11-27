@@ -47,6 +47,22 @@ robots:
   max_speed_mps: 0.5          # Nav2 max_velocity x
   accel_mps2: 0.5             # PLACEHOLDER
   yaw_rate_rps: 1.0           # PLACEHOLDER
+  # Robot types (docs/fleetsim.md "Robot types and capabilities"). null = one
+  # type: every robot as above, with tasks.dwell_s to pick and to place. Else
+  # a list; each type:
+  #   name: heavy                      required, unique
+  #   share: 0.2 | count: 2            its robots: round(share x count), at least 1,
+  #                                    or a fixed count. One type may give neither:
+  #                                    it takes the rest (and may get none).
+  #   max_speed_mps, accel_mps2, yaw_rate_rps   override the values above
+  #   pick_s, place_s                  service times at the shelf and the dock
+  #                                    (default tasks.dwell_s)
+  #   battery_drain_pct_per_s          with a battery (fleet_tasks.battery.sim_start_pct)
+  #   capabilities: [heavy]            a task that `requires: heavy` goes only to these
+  # The footprint stays fleet-wide (every costmap and the floor check use it).
+  # With types set, bids and central costs price the whole delivery at each
+  # robot's own speed and service times, not just the drive to the pickup.
+  types: null
 
 sensing:
   hz: 5.0                     # PLACEHOLDER: how often a scan reaches the map (the camera is 30 Hz;
@@ -79,7 +95,7 @@ nav:
   return_home_s: 10.0         # idle this long -> drive back to the home spot (null = stay put)
 
 tasks:
-  dwell_s: 2.0                # task_manager DWELL_SEC
+  dwell_s: 2.0                # task_manager DWELL_SEC; per type: robots.types[].pick_s, place_s
   bid_cost: path              # path = A* on the bidder's own belief; straight = straight line
 
 # Who assigns tasks (fleetsim/dispatch/; docs/fleetsim.md "Dispatchers and

@@ -5,9 +5,14 @@ and the gateway runs one more that announces and keeps the board. This is
 exactly the code path fleetsim had before the dispatch layer: the same
 objects, built in the same order with the same settings, so a run stays
 bit-identical (docs/fleetsim.md, "Dispatchers and perfect information").
+
+With robot types (`robots.types`), each robot's FleetTasks gets its own
+type's speed, capabilities and service times (so it bids the whole delivery
+at its own pace and skips what it can't do), and its own battery drain.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -45,7 +50,17 @@ class Auction(Method):
 
     def robot_agent(self, robot):
         sim = self.sim
-        core = AuctionAgent(robot.rid, sim.params, sim.waypoints, cfg=sim.ft_cfg, now=sim.now)
+        prof = robot.profile
+        cfg, params = sim.ft_cfg, sim.params
+        if sim.typed:
+            cfg = {**sim.ft_cfg, "speed_mps": prof["max_speed_mps"],
+                   "capabilities": list(prof["capabilities"]),
+                   "service_s": {"pick": prof["pick_s"], "place": prof["place_s"]}}
+        if prof["battery_drain_pct_per_s"] is not None:
+            # The allocator's battery gate and FleetTasks.drive both read it here.
+            params = dataclasses.replace(params,
+                                         battery_drain_pct_per_s=prof["battery_drain_pct_per_s"])
+        core = AuctionAgent(robot.rid, params, sim.waypoints, cfg=cfg, now=sim.now)
         core._wall = lambda: 0.0
         core._next_id = 0
         core.grid = PathOracle(robot, float(sim.params.bid_radius_m),

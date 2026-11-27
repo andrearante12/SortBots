@@ -46,7 +46,7 @@ its map — checked against Isaac with a 2-robot task list after this groundwork
 | B10 | Keep right in aisles | todo |
 | B11 | Single-lane passage reservation | todo |
 | C13 | Comms traffic monitor in the replay | done (replay's Traffic panel, Load on the floor, `record.net_nodes`; bench runs listed in the replay; docs/fleetsim.md "Comms traffic monitor") |
-| A6 | Per-robot service times and capabilities | todo |
+| A6 | Per-robot service times and capabilities | done (`robots.types`, tasks' `requires`; `fleetsim/scenarios/bench_mixed.yaml`, `fleetsim/suites/mixed.yaml`; docs/fleetsim.md "Robot types and capabilities") |
 | A7 | Swappable local-avoidance layer (for ORCA) | todo |
 
 
@@ -178,6 +178,10 @@ how busy they are. Record per-node load in the `net` stream (one more field).
 Per-robot overrides (speed, dwell, battery) and capabilities; a task may require
 one. Robots without it don't bid (auction) or aren't assigned (central). Needs
 the capability carried with the task announce.
+Built as robot types (`robots.types`: a share or count each, so they scale with
+`--robots`). TaskAnnounce carries `requires` only when a task has one; FleetTasks'
+cost function refuses it, protocol.py is unchanged. With types, bids and central
+costs price the whole delivery at each robot's own speed and service times.
 
 ### A7 — swappable local avoidance
 Move the local layer (stop for what's ahead, replan around after

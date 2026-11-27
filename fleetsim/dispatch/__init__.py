@@ -42,9 +42,11 @@ FleetTasks provides all of it already (auction.AuctionAgent only adds
 method gives robots a thin client instead (central.CentralClient).
 
 What runs at the gateway, `Method.gateway` (Sim.gw): request(pickup,
-dropoff, now) -> task id, on_message, tick, drain and board(), FleetTasks'
-gateway API. A robot's Status reaching the gateway goes to
-`Method.gateway_status` (a central planner needs the pose, the auction only
+dropoff, now, requires=()) -> task id, on_message, tick, drain and board(),
+FleetTasks' gateway API. `requires` (robot types, A6) is a tuple of
+capability names; a method gives the task only to robots whose type has
+them all (robot.profile, config.robot_profiles). A robot's Status reaching
+the gateway goes to `Method.gateway_status` (a central planner needs the pose, the auction only
 the liveness), and the run's stop condition asks `Method.task_done`.
 
 Later decentralised methods (sequential single-item auctions, CBBA, the

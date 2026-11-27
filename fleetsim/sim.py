@@ -16,6 +16,8 @@ simtest's metrics score fleetsim runs and Isaac runs alike.
 Who assigns tasks is `dispatch.method` (fleetsim/dispatch/: the real
 auction, or a central dispatcher at the gateway node), and what robots may
 know beyond their own sensing and the network is `info.*` (fleetsim/info.py).
+What each robot is (speed, service times, capabilities) is its robot type
+(`robots.types`, config.robot_profiles), and a task may require a capability.
 """
 from __future__ import annotations
 
@@ -29,6 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import config as C
 from . import dispatch as D
 from . import grid as G
 from . import info as PI
@@ -84,6 +87,12 @@ class Sim:
             proto["quorum_nodes"] = n + 1  # every node, gateway included (DES does the same)
         self.ft_cfg["speed_mps"] = float(cfg["robots"]["max_speed_mps"])
         self.params = Params.from_config(self.ft_cfg)
+        # Robot types (A6): one profile per robot index. Untyped, every
+        # profile is the base robots.* values and nothing reads them
+        # differently from before types existed.
+        self.profiles = C.robot_profiles(cfg)
+        self.typed = cfg["robots"]["types"] is not None
+        self.unservable: set[str] = set()  # announced tasks no robot in this fleet can do
         # The gateway's task side and every robot's (Robot._new_core) come
         # from the dispatch method; with `auction` these are the FleetTasks
         # objects this file built itself before the layer existed.
@@ -304,7 +313,8 @@ class Sim:
 
     def _schedule_inputs(self) -> None:
         for t in self.scn.get("tasks") or []:
-            self.at(float(t["at_s"]), self._announce, t["pickup"], t["dropoff"])
+            self.at(float(t["at_s"]), self._announce, t["pickup"], t["dropoff"], None,
+                    C.requirement(t.get("requires")))
             self._pending_announces += 1
         arr = self.scn.get("task_arrival")
         if arr:
@@ -322,13 +332,27 @@ class Sim:
                 count = int(round(float(arr["count_per_robot"]) * self.n))
             rate = (float(arr["rate_hz"]) if "rate_hz" in arr
                     else float(arr["rate_per_robot_hz"]) * self.n)
+            # Which arrivals need a capability: one draw per arrival from a
+            # generator of their own, so the stream itself (times, pickups,
+            # dropoffs) is the same with and without `requires`, and a mixed
+            # fleet is compared with a plain one on the very same tasks.
+            shares = C.arrival_requires(arr["requires"]) if arr.get("requires") else None
+            req_rng = np.random.default_rng([self.seed, 0xA6]) if shares else None
             while True:
                 t += float(rng.exponential(1.0 / rate))
                 if t >= until or (count is not None and k >= int(count)):
                     break
                 p = picks[int(rng.integers(len(picks)))]
                 d = drops[int(rng.integers(len(drops)))]
-                self.at(t, self._announce, p, d)
+                req = ()
+                if shares:
+                    u = float(req_rng.random())
+                    for cap, f in shares:
+                        if u < f:
+                            req = (cap,)
+                            break
+                        u -= f
+                self.at(t, self._announce, p, d, None, req)
                 self._pending_announces += 1
                 k += 1
         self._targets: dict[int, tuple] = {}          # kill {select}: (robot, what matched)
@@ -343,28 +367,43 @@ class Sim:
             if d.get("duration_s") is not None and not isinstance(d.get("kill"), dict):
                 self.at(float(d["at_s"]) + float(d["duration_s"]), self._disturb, i, d, False)
 
-    def _announce(self, pickup: str, dropoff: str, requested: float | None = None) -> None:
+    def _announce(self, pickup: str, dropoff: str, requested: float | None = None,
+                  requires: tuple = ()) -> None:
         if not self.gw_alive:
-            self._held.append((pickup, dropoff, self.now))
+            self._held.append((pickup, dropoff, self.now, requires))
             return
         self._pending_announces -= 1
-        tid = self.gw.request(pickup, dropoff, self.now)
+        tid = self.gw.request(pickup, dropoff, self.now, requires=requires)
         if tid is not None:
             self.counts["announced"] += 1
             rec = {"task_id": f"{ft.TASK_PREFIX}{tid}", "pickup": pickup, "dropoff": dropoff,
                    "at_s": round(self.now, 3)}
             if requested is not None:  # held while the gateway was down
                 rec["requested_s"] = round(requested, 3)
+            if requires:
+                rec["requires"] = list(requires)
             self.announced.append(rec)
             self.record({"s": "announce", **rec})
             self._task_bound(rec)
         self.handle_actions(None, self.gw.drain())
+
+    def able(self, requires) -> list[int]:
+        """Indices of the robots whose type has every capability in `requires`."""
+        need = set(requires)
+        return [k for k, p in enumerate(self.profiles) if need <= set(p["capabilities"])]
 
     def _task_bound(self, rec: dict) -> None:
         """The task's lower bound on its delivery time, for the `bounds`
         metric (docs/fleetsim.md "Benchmark metrics"): the shortest drive
         pickup -> dropoff on the true layout at max speed, plus the pick and
         place dwells. No method can beat it, whatever robot it sends.
+
+        With robot types, the best robot this fleet could send: the minimum
+        over the types that have the task's capabilities and at least one
+        robot of drive / their max speed + their pick + place times. A task
+        no robot can do (none of the types that can has a robot) gets no
+        bound; it is noted, and left out of the stop condition so the run
+        can still end at tasks_done.
 
         Shortest LENGTH, not the robots' inflation-weighted cost (cost_weight
         0, lethal band only, so the same planning radius the robots plan
@@ -386,11 +425,29 @@ class Sim:
         d = self._bound_m[key]
         if d is None:
             self.notes.append(f"{rec['task_id']}: no path {key[0]} -> {key[1]} on the true map")
-        lb = None if d is None else (d / float(self.cfg["robots"]["max_speed_mps"])
-                                     + 2 * float(self.cfg["tasks"]["dwell_s"]))
+        extra = {}
+        if not self.typed:
+            lb = None if d is None else (d / float(self.cfg["robots"]["max_speed_mps"])
+                                         + 2 * float(self.cfg["tasks"]["dwell_s"]))
+        else:
+            req = tuple(rec.get("requires") or ())
+            able = self.able(req)
+            # One profile per distinct type: the bound is per type, not per robot.
+            kinds = {(p["max_speed_mps"], p["pick_s"], p["place_s"])
+                     for p in (self.profiles[k] for k in able)}
+            lb = None if d is None or not kinds else min(d / v + (pick + place)
+                                                         for v, pick, place in kinds)
+            if req:
+                # `able` feeds the bounds metric's capacity per capability.
+                extra = {"requires": list(req), "able": len(able)}
+            if not able:
+                self.unservable.add(rec["task_id"])
+                self.notes.append(f"{rec['task_id']} requires {list(req)}: no robot in this "
+                                  f"fleet of {self.n} has it; it stays unassigned, and the run "
+                                  "does not wait for it")
         self.record({"s": "task_bound", "task_id": rec["task_id"],
                      "lb_s": None if lb is None else round(lb, 2),
-                     "drive_m": None if d is None else round(d, 2)})
+                     "drive_m": None if d is None else round(d, 2), **extra})
 
     def _shortest_drive_m(self, a, b) -> float | None:
         cm, g = self._bound_cm, self.grid
@@ -591,8 +648,8 @@ class Sim:
         self.gw_alive = True
         self.net.revive(GW, self.now)
         held, self._held = self._held, []
-        for pickup, dropoff, t in held:
-            self._announce(pickup, dropoff, requested=t)
+        for pickup, dropoff, t, requires in held:
+            self._announce(pickup, dropoff, requested=t, requires=requires)
 
     # ---- traffic --------------------------------------------------------------
 
@@ -883,7 +940,11 @@ class Sim:
                      "homes": {r.rid: [round(r.home[0], 3), round(r.home[1], 3)] for r in self.robots},
                      "gateway": [round(float(v), 3) for v in self.gateway_xy],
                      "body_r": float(self.cfg["robots"]["footprint_radius_m"]),
-                     "actors": {a["id"]: round(float(world_lib.half_extent(a)), 3) for a in self.actors}})
+                     "actors": {a["id"]: round(float(world_lib.half_extent(a)), 3) for a in self.actors},
+                     # Robot types (A6), only when set: an untyped run's
+                     # world event is what it was before types existed.
+                     **({"types": {r.rid: r.profile["type"] for r in self.robots}}
+                        if self.typed else {})})
 
     def _belief_maps(self) -> None:
         sel = self.cfg["record"]["belief_maps"]
@@ -918,7 +979,10 @@ class Sim:
     def _tasks_done(self) -> bool:
         if not self.announced or self._pending_announces > 0:
             return False
-        return all(self.dispatch.task_done(rec["task_id"]) for rec in self.announced)
+        # A task no robot can do would hold the run to its full duration;
+        # it is reported (notes, task_bound's able: 0) and not waited for.
+        return all(self.dispatch.task_done(rec["task_id"]) for rec in self.announced
+                   if rec["task_id"] not in self.unservable)
 
     def run(self) -> dict:
         cfg = self.cfg

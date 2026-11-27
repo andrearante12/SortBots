@@ -609,3 +609,121 @@ def test_a_completion_lost_to_a_cut_off_owner_reaches_the_gateway():
     bus.run(3.0)
     assert bus.board(tid)["state"] == "done"
     assert bus.dispatched["robot_1"] == []  # nobody was sent to the empty shelf
+
+
+# ---- robot types: capabilities and service times (fleetsim A6, 2026-11-26)
+
+def _typed(bus, rid, caps=(), service=None, speed=None):
+    n = bus.nodes[rid]
+    n.capabilities = frozenset(caps)
+    n.service = service
+    if speed is not None:
+        n.speed = speed
+    return n
+
+
+def _bidders(bus, tid):
+    """Who bid on tid, as the winner's window saw it (the gateway keeps no bids)."""
+    owner = bus.board(tid)["owner"]
+    return {ft.robot_name(k) for k in bus.nodes[owner].alloc.tasks[tid].bids}
+
+
+def test_a_task_that_needs_a_capability_goes_to_the_robot_that_has_it():
+    bus = Bus({"robot_0": near(0.5), "robot_1": near(6.0)})
+    _typed(bus, "robot_1", caps=("heavy",))
+    bus.run(1.0)
+    tid = bus.gw.request("shelf_a", "zone_a", bus.t, requires="heavy")
+    bus._pump()
+    bus.run(3.0)
+    assert bus.board(tid)["owner"] == "robot_1"
+    assert bus.board(tid)["requires"] == ["heavy"]
+    assert _bidders(bus, tid) == {"robot_1"}  # robot_0, beside the shelf, never bid
+    assert bus.dispatched["robot_0"] == []
+    assert bus.nodes["robot_0"].alloc.tasks[tid].owner == ft.robot_num("robot_1")
+
+
+def test_nobody_without_the_capability_bids_in_a_rebid_round_either():
+    # The heavy robot fails the task: it is released and re-auctioned while
+    # that robot backs off. Every rebid round passes robot_0 by.
+    bus = Bus({"robot_0": near(0.5), "robot_1": near(6.0)}, failed_backoff_s=10.0)
+    _typed(bus, "robot_1", caps=("heavy",))
+    bus.run(1.0)
+    tid = bus.gw.request("shelf_a", "zone_a", bus.t, requires=["heavy"])
+    bus._pump()
+    bus.run(3.0)
+    bus.report("robot_1", tid, "FAILED")
+    bus.run(5.0)
+    assert bus.board(tid)["owner"] is None and bus.dispatched["robot_0"] == []
+    bus.run(10.0)
+    assert bus.board(tid)["owner"] == "robot_1" and len(bus.dispatched["robot_1"]) == 2
+
+
+def test_a_task_open_to_anyone_is_announced_exactly_as_before():
+    # No `requires` key on the wire unless the task has one, so a node that
+    # predates the field and one that knows it see the same messages.
+    bus = Bus({"robot_0": near(0.5)})
+    bus.run(1.0)
+    bus.gw.request("shelf_a", "zone_a", bus.t)
+    sent = [ft.decode(v)[1] for k, v in bus.gw.drain() if k == "publish"]
+    ann = next(m for m in sent if m["type"] == "TaskAnnounce")
+    assert set(ann) == {"type", "task_id", "pickup", "dropoff", "pickup_station",
+                        "dropoff_station"}
+    bus.gw.request("shelf_b", "zone_b", bus.t, requires="heavy")
+    sent = [ft.decode(v)[1] for k, v in bus.gw.drain() if k == "publish"]
+    assert next(m for m in sent if m["type"] == "TaskAnnounce")["requires"] == ["heavy"]
+
+
+def test_a_node_that_predates_requires_still_takes_the_announce():
+    # commsim's allocator (the DES, and any robot without this change) reads
+    # only the fields it knows; the extra one is ignored, not an error.
+    from commsim.core.protocol import Allocator, deliver
+    a = Allocator(1, Params(), cost_fn=lambda pk, dp=None, st=None: (1.0, 1.0, 2.0))
+    assert deliver(a, 0, {"type": "TaskAnnounce", "task_id": 7, "pickup": (0.0, 0.0),
+                          "dropoff": (1.0, 0.0), "requires": ["heavy"]}, 0.0)
+    assert a.tasks[7].bids == {1: 1.0}
+
+
+def test_a_malformed_requirement_gets_no_bid_and_a_request_with_one_is_refused():
+    bus = Bus({"robot_0": near(0.5)})
+    bus.run(1.0)
+    assert bus.gw.request("shelf_a", "zone_a", bus.t, requires=[3]) is None
+    n = bus.nodes["robot_0"]
+    n.on_message(0, {"type": "TaskAnnounce", "task_id": 99, "pickup": shelf_a(),
+                     "dropoff": shelf_a(), "pickup_station": "shelf_a",
+                     "dropoff_station": "zone_a", "requires": {"x": 1}}, bus.t)
+    assert n.alloc.tasks[99].bids == {}
+    assert any("malformed requires" in text for kind, text in n.drain() if kind == "log")
+
+
+def test_with_service_times_a_bid_is_the_whole_delivery_at_the_robots_own_pace():
+    zone = (WAYPOINTS["zone_a"].x, WAYPOINTS["zone_a"].y)
+    n = ft.FleetTasks("robot_0", Params(), WAYPOINTS,
+                      cfg={**CFG, "speed_mps": 0.8, "capabilities": ["heavy"],
+                           "service_s": {"pick": 6.0, "place": 4.0}})
+    assert n.capabilities == {"heavy"} and n.service == (6.0, 4.0)
+    n.set_pose(near(4.0), 0.0)
+    d, leg = 4.0, math.dist(shelf_a(), zone)
+    whole = (d + leg) / 0.8 + 10.0
+    assert all(math.isclose(a, b) for a, b in zip(n._cost(shelf_a(), zone), (whole, 4.0, whole)))
+    plain = ft.FleetTasks("robot_1", Params(), WAYPOINTS, cfg=CFG)
+    plain.set_pose(near(4.0), 0.0)
+    assert all(math.isclose(a, b) for a, b in zip(plain._cost(shelf_a(), zone),
+                                                  (d / 0.5, 4.0, (d + leg) / 0.5)))
+
+
+def test_a_faster_robot_a_little_further_away_wins_when_bids_price_the_delivery():
+    bus = Bus({"robot_0": near(1.0), "robot_1": near(1.6)})
+    _typed(bus, "robot_0", service=(2.0, 2.0), speed=0.5)
+    _typed(bus, "robot_1", service=(2.0, 2.0), speed=1.0)
+    bus.run(1.0)
+    tid = bus.request()
+    bus.run(3.0)
+    assert bus.board(tid)["owner"] == "robot_1"
+    # The same two robots with slow hands on the fast one: it loses again.
+    bus = Bus({"robot_0": near(1.0), "robot_1": near(1.6)})
+    _typed(bus, "robot_0", service=(2.0, 2.0), speed=0.5)
+    _typed(bus, "robot_1", service=(9.0, 9.0), speed=1.0)
+    bus.run(1.0)
+    tid = bus.request()
+    bus.run(3.0)
+    assert bus.board(tid)["owner"] == "robot_0"

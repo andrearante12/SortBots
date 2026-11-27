@@ -21,7 +21,7 @@
 # `bounds.offered_load` and `fleet_tasks.backlog_end` to see which regime a
 # row is in.
 #
-# 10 scenarios x 4 sizes x 3 seeds x 5 variants = 600 runs. At most 12 at once
+# 11 scenarios x 4 sizes x 3 seeds x 5 variants = 660 runs. At most 12 at once
 # (fleetsim/bench.py MAX_DEFAULT_JOBS), roughly 40-60 min on the 30-CPU laptop.
 #   /usr/bin/python3 -m fleetsim bench bench --dry-run
 #   /usr/bin/python3 -m fleetsim bench bench --only 'bench_steady_*'
@@ -41,6 +41,7 @@ scenarios:
   - {scenario: bench_dead_robot, robots: [2, 5, 10, 20]}
   - {scenario: bench_dead_gateway, robots: [2, 5, 10, 20]}
   - {scenario: bench_walkers, robots: [2, 5, 10, 20]}
+  - {scenario: bench_mixed, robots: [2, 5, 10, 20]}
 seeds: [1, 2, 3]
 variants:
   auction: {}

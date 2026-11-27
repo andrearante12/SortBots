@@ -9,7 +9,8 @@ What is real and what stands in:
             FleetTasks + commsim/core/protocol.py, imported, not copied.
   STAND-IN  task_manager.py: same states (IDLE -> NAV_TO_PICKUP [-> AWAIT_PICK] -> PICKING ->
             NAV_TO_DROPOFF -> PLACING -> DONE / FAILED / CANCELLED), same
-            fixed dwell, same status JSON fields FleetTasks reads.
+            fixed dwell (per robot type: pick_s, place_s), same status JSON
+            fields FleetTasks reads.
   STAND-IN  Nav2: global A* on the robot's own belief (planner.py), a path
             follower that drives the smoothed path exactly (rotating in
             place at sharp turns), and a local layer that stops for what the
@@ -99,9 +100,15 @@ class Robot:
         self.nav = cfg["nav"]
         self.rcfg = cfg["robots"]
         self.body_r = float(self.rcfg["footprint_radius_m"])
-        self.vmax = float(self.rcfg["max_speed_mps"])
-        self.accel = float(self.rcfg["accel_mps2"])
-        self.yaw_rate = float(self.rcfg["yaw_rate_rps"])
+        # Its robot type (config.robot_profiles): untyped, the base robots.*
+        # values and tasks.dwell_s, exactly what was read here before types.
+        self.profile = sim.profiles[k]
+        self.vmax = self.profile["max_speed_mps"]
+        self.accel = self.profile["accel_mps2"]
+        self.yaw_rate = self.profile["yaw_rate_rps"]
+        self.pick_s = self.profile["pick_s"]
+        self.place_s = self.profile["place_s"]
+        self.caps = frozenset(self.profile["capabilities"])
         self.home = tuple(home)
         self.x, self.y, self.yaw, self.v = float(home[0]), float(home[1]), 0.0, 0.0
         self.alive = True
@@ -207,7 +214,7 @@ class Robot:
     def permit_pick(self, task_id: str) -> None:
         """/<robot>/pick_permit: the majority acked, task_manager may pick."""
         if self.task is not None and self.task["task_id"] == task_id and self.state == "AWAIT_PICK":
-            self.dwell_until = self.sim.now + float(self.sim.cfg["tasks"]["dwell_s"])
+            self.dwell_until = self.sim.now + self.pick_s
             self._set_state("PICKING")
 
     def _set_state(self, state: str, **extra) -> None:
@@ -278,10 +285,10 @@ class Robot:
             if self.task.get("await_pick"):
                 self._set_state("AWAIT_PICK")  # FleetTasks sends ("pick", id) when it may
             else:
-                self.dwell_until = self.sim.now + float(self.sim.cfg["tasks"]["dwell_s"])
+                self.dwell_until = self.sim.now + self.pick_s
                 self._set_state("PICKING")
         elif self.state == "NAV_TO_DROPOFF":
-            self.dwell_until = self.sim.now + float(self.sim.cfg["tasks"]["dwell_s"])
+            self.dwell_until = self.sim.now + self.place_s
             self._set_state("PLACING")
 
     # ---- navigation ---------------------------------------------------------

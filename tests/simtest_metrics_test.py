@@ -683,7 +683,32 @@ def test_bounds_stretch_capacity_and_offered_load():
 def test_bounds_on_a_run_recorded_before_task_bound():
     v = _score("bounds", _bound_stream(bounds=False), robots=("robot_0", "robot_1"))
     assert v == {"lb_mean_s": None, "stretch": None, "ub_per_hour": None,
-                 "arrival_per_hour": 36.0, "offered_load": None}
+                 "arrival_per_hour": 36.0, "offered_load": None, "unservable": 0}
+
+
+def test_bounds_cap_capacity_by_the_robots_that_have_a_capability():
+    # Four robots, one of them heavy. T2 and T3 need it, T4 needs a
+    # capability nobody has (able 0: no bound, no capacity, unservable).
+    ev = [{"s": "announce", "t": 0.0, "task_id": "T1"},
+          {"s": "task_bound", "t": 0.0, "task_id": "T1", "lb_s": 40.0, "drive_m": 10.0},
+          {"s": "announce", "t": 10.0, "task_id": "T2"},
+          {"s": "task_bound", "t": 10.0, "task_id": "T2", "lb_s": 60.0, "drive_m": 10.0,
+           "requires": ["heavy"], "able": 1},
+          {"s": "announce", "t": 20.0, "task_id": "T3"},
+          {"s": "task_bound", "t": 20.0, "task_id": "T3", "lb_s": 80.0, "drive_m": 20.0,
+           "requires": ["heavy"], "able": 1},
+          {"s": "announce", "t": 30.0, "task_id": "T4"},
+          {"s": "task_bound", "t": 30.0, "task_id": "T4", "lb_s": None, "drive_m": 12.0,
+           "requires": ["cold"], "able": 0}]
+    v = _score("bounds", ev, robots=tuple(f"robot_{k}" for k in range(4)))
+    assert v["lb_mean_s"] == 60.0 and v["unservable"] == 1
+    # The whole fleet: 4 x 3600 / 60 = 240/h. The one heavy robot does T2 and
+    # T3, 140 s of every 3 tasks' 180 s: 1 x 3600 x 3 / 140 = 77.1/h, lower.
+    assert v["ub_per_hour"] == 77.1
+    # Without the requirement the same bounds give the v1 capacity.
+    plain = [{k: x for k, x in e.items() if k not in ("requires", "able")} for e in ev[:6]]
+    assert _score("bounds", plain, robots=tuple(f"robot_{k}" for k in range(4)))[
+        "ub_per_hour"] == 240.0
 
 
 # -- record -> replay ----------------------------------------------------------------

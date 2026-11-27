@@ -49,6 +49,15 @@ failed_backoff_s: 60.0
 # until TF is back.
 pose_stale_s: 5.0
 
+# Robot types (docs/fleetsim.md "Robot types and capabilities"). What this
+# robot can do: a request with "requires": ["heavy"] gets no bid from a robot
+# whose list lacks it. Robots that differ need their own file (--config).
+capabilities: []
+# {pick: s, place: s}: bid the whole delivery (drive, pick, carry, place) at
+# this robot's speed and handling times instead of the drive to the pickup.
+# Bids are compared across the fleet: set it on every robot or on none.
+service_s: null
+
 # Gateway: repeat unowned announces this often (late joiners), and heartbeat
 # so a robot with no peer in range is not "isolated".
 reannounce_s: 5.0
