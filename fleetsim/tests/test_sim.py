@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import sys
 from pathlib import Path
 
@@ -9,7 +10,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from fleetsim import __main__ as cli  # noqa: E402
 from fleetsim import config, sim  # noqa: E402
+from simtest import events as ev_lib  # noqa: E402
 from simtest import metrics as metrics_lib  # noqa: E402
 
 SMALL = {"width_m": 30.0, "height_m": 22.0, "docks": 4, "cross_every_m": 12.0}
@@ -54,12 +57,74 @@ def test_small_fleet_delivers_everything_without_contact():
     assert v["tasks"]["done"] == 3  # the existing simtest metric reads the same streams
 
 
+def _strip(evs):
+    return [{k: v for k, v in e.items() if k not in ("wall", "wall_s", "summary")} for e in evs]
+
+
 def test_a_seed_reproduces_a_run_exactly():
     a, _ = run(scenario())
     b, _ = run(scenario())
-    strip = lambda evs: [{k: v for k, v in e.items() if k not in ("wall", "wall_s", "summary")}
-                         for e in evs]
-    assert strip(a.events) == strip(b.events)
+    assert _strip(a.events) == _strip(b.events)
+
+
+def test_task_bounds_are_the_only_change_to_a_run(monkeypatch):
+    # The bounds' A* reads no RNG and touches nothing the robots use, so a
+    # run without it is the same run minus its task_bound events.
+    a, _ = run(scenario())
+    monkeypatch.setattr(sim.Sim, "_task_bound", lambda self, rec: None)
+    b, _ = run(scenario())
+    with_bounds = _strip(a.events)
+    assert [e for e in with_bounds if e["s"] != "task_bound"] == _strip(b.events)
+    after = [with_bounds[i - 1] for i, e in enumerate(with_bounds) if e["s"] == "task_bound"]
+    assert [e["s"] for e in after] == ["announce"] * 3  # each right after its announce
+
+
+def test_the_lower_bound_is_never_above_a_real_delivery():
+    s, _ = run(scenario())
+    ev = s.events
+    lb = {e["task_id"]: e["lb_s"] for e in ev if e["s"] == "task_bound"}
+    ann = {e["task_id"]: e["t"] for e in ev if e["s"] == "announce"}
+    shelf, done = {}, {}
+    for e in ev:
+        if e["s"] == "task" and e["state"] in ("AWAIT_PICK", "PICKING"):
+            shelf.setdefault(e["task_id"], e["t"])
+        elif e["s"] == "task" and e["state"] == "DONE":
+            done.setdefault(e["task_id"], e["t"])
+    assert set(lb) == set(ann) == set(done)
+    dwell = s.cfg["tasks"]["dwell_s"]
+    for t in done:
+        assert lb[t] > 2 * dwell
+        assert done[t] - ann[t] >= lb[t]
+        # Holds even leaving out the drive to the shelf: the bound is close
+        # (seed 1 of delivery_smoke, walkers and fleet_scale: >= 1.016x, 2026-11-26).
+        assert done[t] - shelf[t] >= lb[t]
+    v = score(s, [{"metric": "bounds"}, {"metric": "utilisation"}, {"metric": "nav"}])
+    assert v["bounds"]["stretch"] > 1.0 and v["bounds"]["offered_load"] > 0
+    u = v["utilisation"]
+    shares = [u[f"{k}_frac"] for k in ("idle", "to_pickup", "at_pickup", "carrying", "placing",
+                                       "home", "off")]
+    assert sum(shares) == pytest.approx(1.0, abs=1e-3)
+    assert u["busy_frac"] > 0 and u["lost_robot_s"] <= v["nav"]["blocked_robot_s"]
+
+
+def test_a_run_recorded_before_task_bound_still_rescores(tmp_path):
+    # An old run: the same events without task_bound, scored by the CLI.
+    scn = scenario(metrics=[{"metric": "fleet_tasks"}, {"metric": "bounds"},
+                            {"metric": "utilisation"}])
+    s, _ = run(scn)
+    rec = ev_lib.Recorder(tmp_path / "events.jsonl.gz")
+    for e in s.events:
+        if e["s"] != "task_bound":
+            rec.write(e)
+    rec.close()
+    (tmp_path / "scenario.json").write_text(json.dumps(scn, default=str))
+    assert cli.main(["rescore", str(tmp_path)]) == 0
+    v = {m["id"]: m["values"]
+         for m in json.loads((tmp_path / "score.json").read_text())["metrics"]}
+    assert v["bounds"]["lb_mean_s"] is None and v["bounds"]["offered_load"] is None
+    assert v["bounds"]["arrival_per_hour"] is not None
+    assert v["fleet_tasks"]["wait_assign_s"] is not None and v["fleet_tasks"]["backlog_end"] == 0
+    assert v["utilisation"]["busy_frac"] > 0
 
 
 def test_robots_start_blind_and_learn_the_floor():

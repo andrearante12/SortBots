@@ -24,5 +24,7 @@ stop: {until: tasks_done, settle_s: 5}
 metrics:
   - metric: fleet_tasks
     pass: {duplicates: {eq: 0}, done_frac: {gte: 0.9}}
+  - metric: bounds
+  - metric: utilisation
   - metric: contacts
     pass: {contacts: {eq: 0}}
