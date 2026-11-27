@@ -32,7 +32,9 @@ world:
   gateway: null               # [x, y]; default: the synthetic apron's centre, else the map centre
   actors: null                # a simtest world (configs/worlds/<name>) whose scripted movers to play
   synthetic: {}               # FREE-FORM: fleetsim/grid.py SYNTHETIC_DEFAULTS (width_m, height_m,
-                              # aisle_m, rack_depth_m, cross_every_m, docks, ...)
+                              # aisle_m, rack_depth_m, cross_every_m, docks, ...; and for traffic:
+                              # narrow_aisles + narrow_m, dead_ends, walls). Unknown keys fail, and
+                              # so does a floor where some waypoint can't be driven to.
 
 robots:
   count: 8

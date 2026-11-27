@@ -1,0 +1,32 @@
+# DRAFT for review (C12, 2026-11-26). Benchmark: a backlog all at once.
+# The fleet is parked and idle, then three tasks per robot arrive within a
+# few seconds (a wave released by the warehouse system). Who takes which
+# task, and in what order, decides how long the backlog takes to clear, so
+# this is where assignment quality shows most plainly: a central planner
+# sees the whole backlog at once, a per-robot auction bids task by task.
+#
+# Regime: a transient, not a steady state. 3 tasks per robot at ~0.6 per
+# robot per second (count_per_robot caps it at exactly 3n), from t=30.
+# Read the makespan (the run stops when every task is done: summary
+# sim_s), mean_s and p95_s. per_hour here is the backlog's clearing rate.
+# Network: ideal. The question is assignment, not comms.
+name: bench_burst
+title: "DRAFT bench: idle fleet, then 3 tasks per robot at once"
+description: >
+  The default synthetic warehouse, true map, robots parked on the apron.
+  At t=30 a burst of exactly 3 tasks per robot arrives within ~5 s, any
+  shelf to any dock, and nothing after. The run ends when all are done
+  (or at 1500 s).
+seed: 1
+duration_s: 1500
+robots: 10
+config:
+  map_share: {prior: truth}
+task_arrival: {rate_per_robot_hz: 0.6, count_per_robot: 3, start_s: 30,
+               pickups: "shelf_*", dropoffs: "dock_*"}
+stop: {until: tasks_done, settle_s: 2}
+metrics:
+  - metric: fleet_tasks
+  - metric: contacts
+  - metric: nav
+    pass: {empty_shelf: {eq: 0}}

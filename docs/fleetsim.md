@@ -718,6 +718,127 @@ still bound what a launch can cost.
 From a terminal, `/usr/bin/python3 -m fleetsim.preview NAME` prints a
 scenario's floor and the same problems.
 
+## Benchmark scenarios (draft, for review)
+
+`fleetsim/scenarios/bench_*.yaml` (C12 in `docs/fleetsim-plan.md`, 2026-11-26).
+Ten drafts for the benchmark suite. Each one runs unchanged at
+`--robots 2`, 5, 10 and 20, and each file's header says what it tests, which
+load regime it targets and why it uses the network it does. They are drafts:
+the edge cases are for the owner to review.
+
+**Load regimes.** One robot on the default floor delivers about 22 tasks an
+hour at most: 0.0062 tasks per robot per second. That is the second half of
+900 s runs at twice that load, seed 1, at 5 and at 20 robots alike. So
+`rate_per_robot_hz` 0.003 is about half the capacity (underloaded: every
+method keeps up and only delivery time differs), 0.004 is about 0.65, and
+0.012 is about 1.9 (overloaded: the backlog grows all run and throughput is
+what differs). The underloaded drafts stop arrivals at 1200 s and run to
+1500 s, so late tasks still finish. These ratios are measured, not
+`offered_load`. Recalibrate them once A4's lower bound exists.
+
+| Scenario | What it tests | Regime | Network | Duration | 5 robots, done / mean s (seed 1; seed 2) | 20 robots, done / mean s (seed 1; seed 2) |
+|---|---|---|---|---|---|---|
+| `bench_steady` | delivery time on the open floor | 0.003 /robot/s (~0.5) | ideal | 1500 s | 10/10, 165; 18/18, 185 | 65/65, 177; 73/73, 155 |
+| `bench_rush` | throughput on the same floor | 0.012 /robot/s (~1.9) | ideal | 1200 s | 32/65, 96 /h; 37/73, 111 /h | 128/283, 384 /h; 131/290, 393 /h |
+| `bench_burst` | assignment of a backlog: 3 tasks per robot at t=30, then nothing | burst | ideal | until done (≤1500 s) | 15/15, 297, makespan 601 s; 15/15, 304, 728 s | 60/60, 341, 1021 s; 60/60, 316, 791 s |
+| `bench_narrow` | aisles 2, 4 and 6 one robot wide, every pickup in one | 0.004 (~0.65) | ideal | 1500 s | 15/15, 192; 23/23, 178 (plain floor 182; 177) | 84/84, 190; 94/94, 189 (plain 173; 166) |
+| `bench_dead_end` | the same, with their end segments sealed into six one-lane bays | 0.004 (~0.65) | ideal | 1500 s | 15/15, 194; 23/23, 190 | **70/84**, 266, 91 legs given up; 92/94, 212, 20 given up |
+| `bench_moved` | a full-width pallet that moves between aisles every 6 min, and a half-width one | 0.004 (~0.65) | radio, spatial | 1500 s | 12/15, 194; 19/23, 257 | 83/84, 162; 93/94, 174 |
+| `bench_partition` | 40 % of the fleet cut off for 2 min; later the gateway and 30 % | 0.003 (~0.5) | ideal | 1500 s | 10/10, 165; 17/18, 213 | 64/65, 193; 72/73, 181 |
+| `bench_dead_robot` | a robot carrying an item dead for 90 s, later a robot fetching dead for 120 s | 0.003 (~0.5) | ideal | 1500 s | 10/10, 172; 18/18, 191 | 65/65, 165; 72/73, 155 |
+| `bench_dead_gateway` | the gateway down for 3 min; requests wait for it | 0.003 (~0.5) | radio, spatial | 1500 s | 8/10, 154; 15/18, 248 (from the request: 154; 254) | 64/65, 168; 73/73, 194 (from the request: 180; 207) |
+| `bench_walkers` | the four walkers of `walkers` | 0.003 (~0.5) | ideal | 1500 s | 10/10, 168; 18/18, 188 | 65/65, 176; 73/73, 156 |
+
+Read `bench_rush`'s cells as deliveries per hour, not done/announced: the
+undone tasks are the point. Up to 16 runs went in parallel. Even so, a
+20-robot run took 40–105 s of wall time, and `bench_dead_end` took 170 s,
+because its replans are expensive. A one-seed difference of 10–20 % is
+noise: `bench_dead_robot` at 20 robots, seed 1, beat `bench_steady`. At 2
+robots, seed 1 draws only 2–6 tasks per run, too few to read.
+
+**New inputs.** Every default reproduces today's runs exactly. The event
+streams of `delivery_smoke`, `map_sharing`, `partition_heal`, `walkers`
+and 150 s of `fleet_scale` are identical before and after.
+- `world.synthetic`:
+  - `narrow_aisles: [a, ...]` and `narrow_m` (1.0) make single-lane aisles
+    beside every rack segment. The crossings keep full width. Aisle 0 borders
+    the apron and can't be narrowed.
+  - `dead_ends: [[aisle, segment, west|east], ...]` walls off one end of a
+    rack segment's aisle.
+  - `walls: [[x0, y0, x1, y1], ...]` adds walls anywhere.
+  - An unknown key in the block now fails validation, and so does a floor
+    where some waypoint can't be driven to. Homes a wall covers are dropped.
+- `task_arrival`:
+  - `rate_per_robot_hz` is the alternative to `rate_hz`. Give exactly one.
+  - `count_per_robot` is the alternative to `count`.
+- `disturbances`:
+  - A name that doesn't exist at the run's robot count fails validation.
+    Before, `robot_3` at `--robots 2` crashed mid-run, and `kill: gateway`
+    silently killed the last robot.
+  - Partition groups can be fractions, `{first: 0.4}` and `{last: 0.3}`,
+    mixed with names (`[gateway, {last: 0.3}]`).
+  - `kill: {select: carrying | fetching | busy | any, within_s: S}` takes the
+    lowest-index robot doing that when it fires. It waits up to `within_s`
+    for one, then falls back to a busy robot, then to any robot. Its revival
+    counts from the kill.
+  - `kill: gateway` (`fresh` is rejected): while the gateway is down it hears
+    and sends nothing. Requests wait for it and are announced when it is
+    back, with `requested_s`.
+  - The true floor is now the static map plus every blockage up now. Before,
+    clearing a blockage deleted any other blockage that overlapped it.
+  - A blockage waits until no robot or mover is under it. Before, one that
+    appeared on top of a robot trapped it. The event records `waited_s`.
+  - A revived robot no longer sends one Status and one map tick per step
+    until its timers catch up.
+
+**Findings from drafting them (2026-11-26).**
+1. **Today's comms on the radio have a cliff at 20 robots.** With fleet-wide
+   5 Hz Status and global contention (the defaults), 20 robots run at ~0.7
+   load. A disturbance tips them past it for good. When the gateway came
+   back, or a pallet moved, `/fleet/tasks` delivery went to 0 %, and 29 of
+   65 and 18 of 84 tasks were done. With `network.capacity=unlimited` the
+   same runs did 64/65 and 83/84. Spatial contention, or neighbour-only
+   Status with session liveness, also holds (64/65 and 62/65 for the
+   gateway run). The radio drafts use spatial contention for this reason.
+2. **A 2-robot fleet on the radio can't hold a quorum in the far aisles.**
+   A robot at `shelf_7_7` is out of range of both the gateway and the other
+   robot. It loses its claim, the other robot gets the task, drives there,
+   and loses it in turn, for the whole run. On the ideal network the same
+   tasks are delivered first time. For this reason `bench_partition` uses
+   the ideal network.
+3. **A robot rebooted (`fresh: true`) with an item aboard** comes back
+   IDLE. Its committed task is reclaimed, and robot after robot finds the
+   shelf empty (`empty_shelf`, every one to two minutes, to the end of the run).
+4. **A robot that never comes back is never mapped.** Robots see it as a
+   mover, so each one sent past it stops. When it stands at a pickup, every
+   leg there is given up after `block_fail_s`, again and again.
+5. **`fleet_tasks.duplicates` counts what isn't duplicate work.** It counts
+   two robots dispatched in the same step, where the loser cancels 3 ms
+   later. It also counts a dead robot as still working its task. The
+   drafts' pass criterion is `nav.empty_shelf == 0` instead (0 in every run).
+6. **Narrow aisles cost nothing while robots can avoid them.** With any
+   shelf as a pickup, mean delivery at 20 robots matched the plain floor to
+   0.1 s, so `bench_narrow` picks only in the narrow aisles.
+
+**For the owner to decide.**
+- Which comms the radio scenarios assume: today's robots with global
+  contention (cliff at 20 robots), spatial contention (the drafts), or the
+  neighbour-only design `fleet_scale` uses. Variants can override it with
+  `--set`; the scenario default is the baseline.
+- Whether the floor gets fixed relays or access points (not modelled), or a
+  2-robot radio run stays a coverage test (finding 2).
+- How many seeds or how long a run at 2 robots: ~7 tasks per 1200 s at
+  0.003 per robot per second.
+- Whether to spread homes across the apron for small fleets. Today robots
+  park on the first n spots of the lattice, so 2 robots start at the west
+  end.
+- Whether held requests during a gateway outage should wait (the drafts)
+  or be refused. Delivery time from the request needs A4's metric to read
+  `requested_s`.
+- Whether `bench_dead_end` at 20 robots (91 legs given up) is the right
+  strength, and whether findings 3 and 4 should become scenarios once they
+  are fixed.
+
 ## Known issues
 
 - **Intermittent interpreter faults on the development machine — cause not

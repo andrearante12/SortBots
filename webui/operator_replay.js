@@ -209,6 +209,8 @@
   function cutOff(spans) {
     const n = idx.n + 1, deadNodes = new Set();
     run.robots.forEach((rid, i) => { if (deadAt(rid)) deadNodes.add(i + 1); });
+    // kill: gateway (fleetsim, 2026-11-26): no live robot can reach it.
+    if (deadAt("gateway")) return new Set(run.robots.map((_, i) => i).filter((i) => !deadNodes.has(i + 1)));
     const nodeOf = (name) => (name === "gateway" ? 0 : idx.rix.has(name) ? idx.rix.get(name) + 1 : -1);
     let adj = null;
     if (run.links.length) {
