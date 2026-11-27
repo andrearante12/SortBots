@@ -123,6 +123,19 @@ Traffic (B10, B11)
 - Direction-aware passage claims, or a temporary cost on held passages.
 - On the robots, claims would ride in `/fleet/status` and need clocks that
   agree well under a second.
+- Keeping right costs ~3 % of each leg's drive time where robots rarely meet
+  (small fleets: +8-14 s per delivery at 2 robots): lane changes are 45-degree
+  steps the follower stops at, left turns cross back, corners are stepped.
+  Easing lane changes into slants (`traffic.keep_right.lane_change_m`) takes a
+  third off but costs 20 robots 18-26 % more stops, so it is off. Lanes on
+  for every fleet size, or only past some density? (2026-11-27)
+- Parked robots wall off docks 0-6 at 20 robots, and that, not the lanes,
+  decides `bench_burst` (its throughput is the clearing rate, so one stuck
+  task decides a run). The local layer marks a blocker for its replan with
+  the body radius only, from the camera's nearest-point detection, so the
+  plan goes back through the same 1.1 m gap. A wider mark ends the give-ups
+  but one robot still livelocked behind the row. For A7 (the local layer)
+  and #51 (where idle robots park).
 
 Machine
 - All 10 python segfaults in the kernel log (2026-10-21 to 11-17) were on one

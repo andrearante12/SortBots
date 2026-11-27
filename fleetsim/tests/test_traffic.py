@@ -115,7 +115,9 @@ def test_window_update_matches_a_fresh_build():
 
 def _smoothed(cm, a, b):
     raw = cm.plan(a, b)
-    fake = SimpleNamespace(cost=cm, sim=SimpleNamespace(grid=cm.grid))
+    r = BASE["robots"]
+    fake = SimpleNamespace(cost=cm, sim=SimpleNamespace(grid=cm.grid), vmax=r["max_speed_mps"],
+                           yaw_rate=r["yaw_rate_rps"], accel=r["accel_mps2"])
     return Robot._smooth(fake, raw)
 
 
@@ -131,6 +133,31 @@ def test_a_planned_path_down_an_aisle_keeps_to_its_right_half():
     plain = Costmap(g, np.where(occ, OCC, FREE).astype(np.int8), NAV, 0.25)
     pts = _smoothed(plain, (5.0, 5.0), (15.0, 5.0))
     assert any(abs(y - 5.0) < 0.2 for x, y in _sample(pts) if 7.0 <= x <= 13.0)  # without: the middle
+
+
+def test_with_slants_a_lane_change_is_driven_without_stopping_to_turn():
+    # lane_change_m: the leg eases into its lane and out onto the far shelf
+    # in slants under the follower's 30 degrees (it turns in place past
+    # them), and is in the right lane in between.
+    g, occ = corridor()
+    cm = Costmap(g, np.where(occ, OCC, FREE).astype(np.int8), NAV, 0.25)
+    TR.attach_lanes(cm, {**KR, "lane_change_m": 3.0}, SINGLE)
+    for a, b, right in (((5.0, 5.0), (15.0, 5.0), -1), ((15.0, 5.0), (5.0, 5.0), +1)):
+        pts = _smoothed(cm, a, b)
+        mids = [y for x, y in _sample(pts) if 8.0 <= x <= 12.0]
+        assert mids and all((y - 5.0) * right >= 0.4 for y in mids), (a, b, pts)
+        assert max(_turns(pts)) < math.radians(30), pts
+    # The default keeps A*'s steps, which the follower stops at.
+    strict = _smoothed(lanes_on(g, occ)[0], (5.0, 5.0), (15.0, 5.0))
+    assert max(_turns(strict)) >= math.radians(30)
+
+
+def _turns(pts):
+    out = []
+    for p, q, r in zip(pts[:-2], pts[1:-1], pts[2:]):
+        h1, h2 = math.atan2(q[1] - p[1], q[0] - p[0]), math.atan2(r[1] - q[1], r[0] - q[0])
+        out.append(abs((h2 - h1 + math.pi) % (2 * math.pi) - math.pi))
+    return out
 
 
 def _sample(pts, step=0.1):
@@ -162,11 +189,14 @@ def _meet(keep_right: bool, predict_s=None):
 
 
 def test_two_robots_meeting_head_on_pass_without_a_stop():
-    # The camera reports a peer at the nearest point it saw, with a velocity
-    # from consecutive such points; as the peer slides past, that point
-    # swings sideways and predict_s throws it toward our lane. Without that
-    # prediction the meeting costs no stop at all...
-    assert _meet(True, predict_s=0.0)[0] == 0
+    # The camera reports a peer at the nearest point it saw (up to 0.4 m off
+    # its centre: body radius plus a cell's corner), with a velocity from
+    # consecutive such points; as the peer slides past, that point swings
+    # sideways and predict_s throws it toward our lane. Without that
+    # prediction the lanes' 1.0 m less 0.4 m is the local layer's 0.6 m
+    # exactly, so at most a step...
+    n, secs, _ = _meet(True, predict_s=0.0)
+    assert n <= 1 and secs <= 0.15
     assert _meet(False, predict_s=0.0)[0] >= 3
     # ...and with it, one blip of a step or two, against 7-12 stops today.
     n, secs, arrived = _meet(True)

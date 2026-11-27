@@ -1626,7 +1626,10 @@ it stays inside the zero-cost lane (`Lanes.follows`). The first rule tried
 bounded a shortcut by its two ends, and that was not enough. Shelves sit on
 the aisle's centre line, so a leg from shelf to shelf pulled taut ran straight
 down the middle, and the lanes A* had chosen were gone. With half a cell also
-allowed past the lane's edge, lanes drifted 0.2 m toward the centre.
+allowed past the lane's edge, lanes drifted 0.2 m toward the centre. So a
+lane change is A*'s own 45-degree step, where the follower stops and turns
+in place. `lane_change_m` (off by default) eases it into a slant, at a cost
+in dense traffic ([What lanes cost](#what-lanes-cost-2026-11-27)).
 
 **The clearance check (`_blocking`'s `need`).** The local layer stops for an
 obstacle whose centre comes within body + its radius + `clearance_margin_m`
@@ -1762,7 +1765,8 @@ per-call costs below are the measure.
   searches flood the floor and fail. There is no measurable cost with the
   switch off (4.50 → 4.50-4.52 ms).
 - **Smoother:** 0.8-1.0 → 1.3-1.4 ms per path, 0.2-0.7 s more per 600 s at
-  20 robots.
+  20 robots. With `lane_change_m` it prunes from both ends: 1.13 → 1.37 ms
+  on `bench_rush` at 20 robots.
 - **Upkeep with a true map** (every bench scenario): nothing after the
   first build, which takes ~22 ms per robot for the lanes and ~1.5 ms for
   the passages.
@@ -1870,6 +1874,120 @@ event-identical to `keep_right`.
 - The operator view's run form doesn't offer the two switches
   (`webui/fleetsim_runner.py`, `SETTABLE`), and the replay doesn't mark
   passage holds. Both are terminal-only for now.
+- **What keeping right costs a fleet that rarely meets:** ~3 % of each leg's
+  drive time (below). Whether lanes should be on for small fleets, or a
+  robot about to turn left may leave its lane earlier, is a trade-off, not a
+  bug. Easing lane changes into slants (`lane_change_m`) takes a third of it
+  off but costs 20 robots 18-26 % more stops, so it is off.
+- **Parked robots wall off the docks at 20 robots** (below). That decides
+  `bench_burst` with or without lanes, and belongs to the local layer (A7)
+  and parking (#51).
+
+### What lanes cost (2026-11-27)
+
+The full benchmark (`fleetsim bench bench`, 792 runs) showed the traffic
+layer (keep right and passages) costing where robots rarely meet.
+`bench_burst` at 20 robots fell from 285 to 229 deliveries an hour. Mean
+delivery rose 4-7 % at 2 and 5 robots in every open-floor scenario, in every
+seed (`bench_steady` at 2: +10, +8, +10 s). Passages play no part there: the
+open floor has none. There were two causes, and neither is a flaw in the
+lanes to fix.
+
+**Lanes are slower to drive.** One robot alone on the floor, driving 30
+fixed legs, took 82.1 s a leg off and 84.8 s with lanes (+3.3 %). Over 300
+fixed shelf and dock legs, smoothed as the robots smooth them, lanes added
+0.9 m and 1.2 heading changes over 30 degrees per leg. At each such change
+the follower stops and turns in place. Where the time goes:
+- **Lane changes are A*'s 45-degree steps.** The smoother holds every
+  shortcut to A*'s lane point by point. Greedy pruning from the start also
+  ends a leg with a hop from the lane onto the shelf.
+- **Left turns cross twice.** A robot that turns left at the next junction
+  first moves to its right lane, then crosses back.
+- **Corners are stepped.** Lanes go round corners where the taut line used
+  to cross an aisle diagonally.
+
+The first can be eased, as an option that is off by default
+(`keep_right.lane_change_m`). A shortcut up to that length is bounded by
+its two ends instead, and a path with lanes is pruned from both ends
+(`Lanes.prune`): the second half is also pruned from the goal backwards, and
+the version the follower drives faster is kept. At 3 m a lane change is an
+11-degree slant. In a straight corridor, a short straight line between two A*
+cells can't run left of both. At a corner its ends keep it right of both
+corridors, so it can't cut across the oncoming lane before a left turn.
+Two-ended pruning on its own changed nothing (84.8 s a leg either way).
+
+The slants make a leg cheaper to drive, but they cost dense traffic:
+- One robot alone: +2.7 s (3.3 %) → +1.9 s (2.3 %) a leg. The 300-leg
+  estimate: +3.6 → +1.4 s.
+- The small fleets' increase shrinks by about a quarter (`bench_steady` at
+  2: +10, +8, +10 → +6, +5, +9 s).
+- At 20 robots (seeds 1-3), robots slanting off their lane by shelves and at
+  junction mouths meet more. `bench_rush`: stops 1303 → 1542 and throughput
+  405 → 390 per hour. `bench_dead_end`: stops 1174 → 1478, mean delivery
+  184 → 202 s, and legs given up 0.3 → 4. With 1.5 m instead of 3 m it is
+  much the same (1462 and 1503 stops).
+
+Keep right exists for dense traffic, so the default stays strict. What lanes
+cost a fleet that rarely meets is ~3 % of each leg, and that is the trade:
+the same lanes save 9-37 % of robot stops at 10-20 robots.
+
+**Bursts are decided by stuck tasks, in either variant.** `per_hour` on
+`bench_burst` is the backlog's clearing rate, so one task that never
+reaches its dock decides a run. At 20 robots every home is in the first row
+of the apron, 1.6 m apart, between the docks and the aisles: x 3.4-33.8, in
+front of docks 0-6. A loaded robot that must pass between two parked robots
+meets the camera stand-in's nearest-point detection (up to 0.4 m off the
+body's centre), so the 1.1 m gap reads closer than the local layer's 0.6 m.
+Its replan around them marks them with the body radius only, and the
+cell-rounded plan goes back through the same gap. It gives up after 45 s,
+the task is auctioned to it again, and it tries the same gap. At 20 robots
+in seeds 1-6, this decided 1 run off and 2 with the traffic layer (2 with
+slants, plus one run where two robots were sent to the same dock and each
+stopped for the other). On the seeds where no variant got a task stuck (4
+and 6), the layer is no loss: 303 deliveries an hour off, 310 with it, 307
+with slants.
+
+A scratch probe widened the replan's mark by `clearance_margin_m` plus half
+a cell's diagonal. It is not committed: the code is the local layer's.
+Seeds 1-6 at 20 robots then had no give-ups at all, in either variant. But
+in one traffic run a robot livelocked behind the row (stopped and released
+135 times, never for 45 s at once, never through), and one off run took
+1189 s to clear. This is Finding 5 ("Parked robots wall off docks") at 20
+robots. The apron has no lanes, so lanes add to it in one way only: the
+retry takes the same lane down the same cross-aisle, where without lanes it
+sometimes found another gap.
+
+Off / traffic / traffic with slants (`lane_change_m: 3`), seeds 1-3
+(`bench_burst` at 10 and 20: seeds 1-6). "Traffic" is the full benchmark's
+`auction_traffic` and the default today, reproduced event for event. The
+slants are `data/fleetsim/bench/20261127T041615Z_*`; `fleetsim bench
+traffic_cost` runs all three.
+
+| Scenario | Robots | per hour | mean s | makespan s | stops | gave up |
+|---|---|---|---|---|---|---|
+| `bench_burst` | 10 | 168.9 / 166.6 / 168.8 | 314 / 320 / 317 | 678 / 686 / 678 | 231 / 192 / 198 | 0.2 / 0.2 / 0.2 |
+| `bench_burst` | 20 | 294.3 / 270.0 / 265.0 | 332 / 332 / 334 | 782 / 892 / 904 | 979 / 848 / 892 | 0.2 / 1.0 / 1.3 |
+| `bench_burst` | 20, seeds 4 and 6 | 303.1 / 310.1 / 307.4 | 330 / 334 / 335 | 745 / 730 / 735 | 941 / 796 / 862 | 0 / 0 / 0 |
+| `bench_steady` | 10 | 87.0 / 86.7 / 87.3 | 172 / 176 / 173 | | 166 / 150 / 149 | 0.7 / 0.3 / 0.3 |
+| `bench_steady` | 20 | 172.5 / 185.3 / 184.4 | 161 / 162 / 156 | | 844 / 742 / 743 | 2.7 / 1.3 / 1.0 |
+| `bench_rush` | 20 | 391.9 / 405.0 / 390.0 | 377 / 359 / 364 | | 2011 / 1303 / 1542 | 0 / 0.3 / 0.3 |
+| `bench_dead_end` | 20 | 194.6 / 231.4 / 234.2 | 239 / 184 / 202 | | 1837 / 1174 / 1478 | 66 / 0.3 / 4.0 |
+
+Mean delivery of the small fleets, off / traffic / slants (seconds, seeds
+1-3):
+
+| | 2 robots | 5 robots |
+|---|---|---|
+| `bench_steady` | 207 / 217 / 214 | 171 / 180 / 175 |
+| `bench_burst` | 297 / 309 / 304 | 310 / 309 / 304 |
+| `bench_partition` | 217 / 228 / 223 | 192 / 212 / 209 |
+| `bench_dead_robot` | 255 / 265 / 262 | 177 / 191 / 184 |
+| `bench_mixed` | 209 / 225 / 223 | 219 / 234 / 227 |
+| `bench_moved` | 230 / 255 / 211 | 251 / 286 / 244 |
+
+At 2 robots the increase is consistent in every seed. At 5 robots the moved
+pallet and the partition decide more than the lanes (`bench_moved` seeds
+differ by up to 90 s).
 
 ## Local avoidance
 

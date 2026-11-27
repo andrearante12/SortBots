@@ -262,6 +262,14 @@ traffic:
     lane_offset_m: 0.4        # no cost from this far right of the centre line outwards, the full
                               # weight from this far left; 2 x 0.4 m > the local layer's 0.6 m
     refresh_s: 1.0            # re-cut the lanes after a wall changes at most this often
+    # A smoother shortcut this short may run as far left as either of its ends,
+    # and lane paths are pruned from both ends: a lane change becomes a slant
+    # (11 degrees at 3 m) instead of A*'s 45-degree step, where the follower
+    # stops and turns in place. 0: point by point, as first built. A trade-off,
+    # so off: at 3 m one robot alone drives a leg 1 % faster (84.8 -> 84.0 s),
+    # but 20 robots stop for each other 18-26 % more, since robots slanting off
+    # their lane meet more (bench_rush, bench_dead_end, 2026-11-27).
+    lane_change_m: 0.0
   passages:                   # B11: single-lane passage reservation
     enabled: false
     claim_m: 5.0              # claim a passage when the path enters it within this far (> standoff_m
