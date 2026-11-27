@@ -33,7 +33,7 @@ so a new metric or knob needs no change here.
 
 Each run is `<python> -u -m fleetsim run SCENARIO --robots N --seed S
 [--duration D] [--set k=v ...] --out RUN_DIR --quiet`, its own process (a crash
-takes down one run, not the bench), N at a time (default: CPUs - 2). Output,
+takes down one run, not the bench), N at a time (default: CPUs - 2, at most 12). Output,
 gitignored:
 
     data/fleetsim/bench/<UTC>_<suite>/
@@ -343,12 +343,19 @@ def child_env(faulthandler: bool = True) -> dict:
     return env
 
 
+# Capped, not "every core": 24-28 runs at once took this laptop's i9-14900HX
+# package to 98 degC (2026-11-26), at its limit, and heat and voltage are what
+# speed up the Raptor Lake degradation that its one-core segfault cluster points
+# at (docs/fleetsim.md, Known issues). --jobs overrides it.
+MAX_DEFAULT_JOBS = 12
+
+
 def default_jobs() -> int:
     try:
         n = len(os.sched_getaffinity(0))
     except AttributeError:
         n = os.cpu_count() or 1
-    return max(1, n - 2)
+    return max(1, min(n - 2, MAX_DEFAULT_JOBS))
 
 
 # ---- one run ------------------------------------------------------------------------
@@ -1020,7 +1027,7 @@ def add_parser(sub) -> None:
     b.add_argument("suite", nargs="?", help="fleetsim/suites/<name>.yaml, or a path")
     b.add_argument("--list", action="store_true", help="list the suites")
     b.add_argument("--rescore", metavar="DIR", help="re-score a bench dir, rebuild its tables")
-    b.add_argument("--jobs", type=int, help=f"runs at once (default CPUs - 2 = {default_jobs()})")
+    b.add_argument("--jobs", type=int, help=f"runs at once (default min(CPUs - 2, {MAX_DEFAULT_JOBS}) = {default_jobs()})")
     b.add_argument("--out", help="bench dir (default data/fleetsim/bench/<UTC>_<suite>/)")
     b.add_argument("--retries", type=int, default=2, help="re-runs after a crash (default 2)")
     b.add_argument("--only", metavar="PATTERN",

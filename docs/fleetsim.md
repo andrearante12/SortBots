@@ -272,6 +272,9 @@ aisle, rather than waiting).
 
 `fleetsim bench` runs a suite: scenarios x robot counts x seeds x variants,
 each run in its own process, many at once, and prints one table per metric.
+"Many" is at most 12 by default (`--jobs` overrides it): 24-28 at once took
+this laptop's CPU package to 98 degC, and heat is what speeds up the CPU fault
+the crashes point at (Known issues).
 
 ```bash
 /usr/bin/python3 -m fleetsim bench --list
