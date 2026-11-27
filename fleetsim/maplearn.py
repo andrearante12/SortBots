@@ -13,7 +13,10 @@ past the pallet ten minutes after it appeared needs it then, not before
 (2026-11-26). For every
 blockage that clears, the same for the robots whose map had it then: how
 long until none of its cells is occupied in their map, since until then they
-detour round a pallet that has left.
+detour round a pallet that has left. A robot whose map did NOT have it then
+can still take it in afterwards, from a peer that hasn't seen it go (a
+refresh, a pull answer): a ghost. That is recorded too, as a clear event
+with `ghost_s`, when (from the clear) its map took the ghost in.
 
 A pair that never lands is recorded with `after_s: null` when the blockage
 changes again or the run ends. This reads the robots' maps and paths and
@@ -40,7 +43,9 @@ class LearnTracker:
         self.cells: dict[tuple, np.ndarray] = {}  # (blockage, on) -> flat cells it changed
         self.near: dict[int, np.ndarray] = {}     # blockage -> cells a path must avoid
         self.t0: dict[tuple, float] = {}
-        self.pending: dict[int, dict] = {}        # robot k -> {(blockage, on): path_s}
+        # robot k -> {(blockage, on): path_s for an appearance, ghost_s for a clear}
+        self.pending: dict[int, dict] = {}
+        self.watch: dict[int, set] = {}           # robot k -> cleared blockages it lacks
 
     def blockage(self, i: int, sl: tuple, on: bool) -> None:
         """Blockage i just came (on) or went; the true grid already shows it."""
@@ -65,15 +70,17 @@ class LearnTracker:
         if not len(cells):
             return
         for r in sim.robots:
-            if not r.alive:
-                continue
             knows = bool((r.belief.s[cells] == OCC).any())
             if on:
+                if not r.alive:
+                    continue
                 self.pending.setdefault(r.k, {})[key] = 0.0 if self._crosses(r, i) else None
                 if knows:
                     self._done(r, key, "already")
-            elif knows:
+            elif knows:  # a dead robot too: it comes back with the pallet in its map
                 self.pending.setdefault(r.k, {})[key] = None
+            else:
+                self.watch.setdefault(r.k, set()).add(i)
 
     def _crosses(self, r, i: int) -> bool:
         """Does what is left of r's planned path run into blockage i?"""
@@ -98,6 +105,18 @@ class LearnTracker:
                 pend[key] = round(self.sim.now - self.t0[key], 3)
 
     def on_belief(self, r, changed: np.ndarray, cause: str) -> None:
+        watch = self.watch.get(r.k)
+        if watch:
+            for i in sorted(watch):
+                cells = self.cells[(i, False)]
+                if not np.isin(changed, cells).any():
+                    continue
+                # Occupied in its map where the floor is now free (a later
+                # blockage on the same spot is not a ghost of this one).
+                if ((r.belief.s[cells] == OCC) & ~self.sim.static_flat[cells]).any():
+                    watch.discard(i)
+                    self.pending.setdefault(r.k, {})[(i, False)] = \
+                        round(self.sim.now - self.t0[(i, False)], 3)
         pend = self.pending.get(r.k)
         if not pend:
             return
@@ -109,10 +128,11 @@ class LearnTracker:
                 self._done(r, key, cause)
 
     def _done(self, r, key: tuple, how: str | None) -> None:
-        path_s = self.pending[r.k].pop(key)
+        when = self.pending[r.k].pop(key)
         after = None if how is None else round(self.sim.now - self.t0[key], 3)
         self.sim.record({"s": "map_learn", "rid": r.rid, "blockage": key[0], "on": key[1],
-                         "after_s": after, "how": how, "path_s": path_s})
+                         "after_s": after, "how": how,
+                         **({"path_s": when} if key[1] else {"ghost_s": when})})
 
     def _close(self, i: int, on: bool) -> None:
         """Blockage i changed again: whoever never got its last change, didn't."""

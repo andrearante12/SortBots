@@ -34,7 +34,9 @@ event-driven updates"):
     otherwise cost a full MapResync snapshot). While a pull is open, gaps on
     that tile ask for no resync.
   * Answers come out of the answerer's own rate budget (`rate_cap_bps`), at
-    once if it has room, else at its next map tick before the refresh.
+    once if it has room, else at its next map tick before the refresh. Pulls
+    and answers are reliable (a request and its reply); patches stay
+    best-effort as in the brief.
   * A patch that carries a cell the sender's own sensing flipped (free <->
     occupied: a pallet came or went) goes to EVERY robot (`sub_flips_to:
     all`), the rest to the tile's subscribers. Subscriptions keep news local,
@@ -43,7 +45,8 @@ event-driven updates"):
     path subscribed (map_sharing, seed 1, 2026-11-26: 91 s for a delivery
     the fleet-wide run made in 81 s). Flips are rare and small, so telling
     everyone costs little. A robot not subscribed to the tile asks no resync
-    for gaps there: it is not owed the tile's whole stream.
+    for gaps there and records no sequence number: it is not owed the tile's
+    whole stream, and a recorded number would hide a real gap once it is.
   * Sequence numbers, MapResync and the round-robin refresh are unchanged; a
     patch of a tile nobody subscribes to is not sent at all (and takes no
     sequence number), since no one is owed it.
@@ -307,7 +310,11 @@ class Subscriptions:
         seq = o.belief.out_seq.get(tile, 0)
         for n, (s, size) in enumerate(zip(chunks, sizes)):
             last = n == len(chunks) - 1
-            sim._send("mapans", o.node, np.array([asker]), size, False, self._deliver_answer,
+            # Reliable, like the pull: a lost answer was never asked for again
+            # while the robot stayed subscribed (review, 2026-11-26). In order
+            # per pair, so the last chunk (with the sequence numbers) comes
+            # after the cells it vouches for.
+            sim._send("mapans", o.node, np.array([asker]), size, True, self._deliver_answer,
                       (o.node, tile, seq, (idx[s], st[s], ts[s]), vv if last else None))
         self.counts["answers"] += 1
         self.counts["answer_cells"] += len(idx)
@@ -326,16 +333,18 @@ class Subscriptions:
             r.belief.adopt_seq(tile, vv, r.node)
             self.st[r.k].pulling.pop(tile, None)
 
-    def owed(self, r, tile: int) -> bool:
-        """Does a gap in a tile's deltas call for a MapResync? Only while
-        subscribed (news of a tile it doesn't subscribe to comes fleet-wide,
-        so gaps are the norm there), and not while a pull of it is open (the
-        answer is about to fill it)."""
-        m = self.st[r.k]
-        if tile not in m.tiles:
-            return False
-        until = m.pulling.get(tile)
-        return until is None or self.sim.now >= until
+    def subscribed(self, r, tile: int) -> bool:
+        """Is r owed this tile's whole stream of deltas? Not for a tile it
+        doesn't subscribe to (its news comes fleet-wide, gaps are the norm):
+        _deliver_map then neither asks a resync nor records the sequence
+        number, which would hide a real gap once it subscribes."""
+        return tile in self.st[r.k].tiles
+
+    def pulling(self, r, tile: int) -> bool:
+        """A pull of this tile is open: a gap is what its answer is about
+        to fill, so no MapResync for it."""
+        until = self.st[r.k].pulling.get(tile)
+        return until is not None and self.sim.now < until
 
     def on_revive(self, r) -> None:
         """Back from the dead: deaf since its last tick, so it has left every

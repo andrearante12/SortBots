@@ -130,6 +130,24 @@ def test_an_answer_hands_over_sequence_numbers_so_the_next_delta_is_no_gap():
     assert b.check_seq(5, 3, 10, snapshot=False)     # a real gap still asks
 
 
+def test_news_of_a_tile_it_does_not_subscribe_to_records_no_sequence_number():
+    # Recorded, it would hide the gap the robot is owed a resync for once it
+    # subscribes (review, 2026-11-26).
+    s = built(config=SUBS)
+    a, b = s.robots[0], s.robots[1]
+    tile, none = 7, (np.zeros(0, dtype=np.int64),) * 3
+    s._deliver_map(b.node, (a.node, tile, 5, False, none))
+    assert (a.node, tile) not in b.belief.in_seq and not b.resync_wait
+    s.subs.st[b.k].tiles = frozenset({tile})
+    s._deliver_map(b.node, (a.node, tile, 6, False, none))
+    assert (a.node, tile) in b.resync_wait  # subscribed now: the gap asks a MapResync
+    # ...but not while a pull of that tile is open.
+    s.subs.st[b.k].pulling[tile + 1] = s.now + 5.0
+    s.subs.st[b.k].tiles = frozenset({tile, tile + 1})
+    s._deliver_map(b.node, (a.node, tile + 1, 9, False, none))
+    assert (a.node, tile + 1) not in b.resync_wait
+
+
 # ---- end to end ------------------------------------------------------------------
 
 def _drive_in(**over):
@@ -286,8 +304,10 @@ def test_map_spread_times_from_when_the_path_ran_into_it():
         dict(rid="robot_0", blockage=0, on=True, after_s=20.0, how="sensed", path_s=4.0),
         dict(rid="robot_1", blockage=0, on=True, after_s=102.0, how="shared", path_s=100.0),
         dict(rid="robot_2", blockage=0, on=True, after_s=None, how=None, path_s=None),
-        dict(rid="robot_1", blockage=0, on=False, after_s=5.0, how="sensed", path_s=None),
-        dict(rid="robot_0", blockage=0, on=False, after_s=None, how=None, path_s=None),
+        dict(rid="robot_1", blockage=0, on=False, after_s=5.0, how="sensed", ghost_s=None),
+        dict(rid="robot_0", blockage=0, on=False, after_s=None, how=None, ghost_s=None),
+        # robot_2 took the gone pallet in from a stale peer 30 s on, and held it 10 s.
+        dict(rid="robot_2", blockage=0, on=False, after_s=40.0, how="sensed", ghost_s=30.0),
     ]
     for i, r in enumerate(rows):
         ms.feed({"s": "map_learn", "t": float(i), **r})
@@ -296,6 +316,7 @@ def test_map_spread_times_from_when_the_path_ran_into_it():
     assert v["spread_mean_s"] == pytest.approx(2.0) and v["missed"] == 0
     assert v["from_peer_frac"] == 0.5 and v["never"] == 0 and v["all_never"] == 1
     assert v["cleared"] == 2 and v["clear_mean_s"] == 5.0 and v["clear_never"] == 1
+    assert v["ghosts"] == 1 and v["ghost_held_s"] == 10.0 and v["ghost_never"] == 0
 
 
 @pytest.mark.parametrize("key,val", [("recipients", "near"), ("sub_flips_to", "some"),

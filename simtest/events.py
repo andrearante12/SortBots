@@ -70,9 +70,10 @@ STREAMS = {
     "disturb": "fleetsim: an injected failure starting (on: true) or ending",
     "map_learn": "fleetsim (since 2026-11-26): a blockage reached one robot's own map: {rid, "
                  "blockage (disturbance index), on (it appeared / it cleared), after_s (null: "
-                 "never, while it stood), how: sensed|shared|truth|already, path_s (when its path "
-                 "first ran into it while it didn't know; null if never, and for a clear)}. "
-                 "fleetsim/maplearn.py",
+                 "never, while it stood), how: sensed|shared|truth|already, and for an appearance "
+                 "path_s (when its path first ran into it while it didn't know; null if never), "
+                 "for a clear ghost_s (null: its map had it at the clear; else when its map took "
+                 "the gone pallet in from a stale peer)}. fleetsim/maplearn.py",
     "map_pub": "fleetsim (map_share.events): an event-driven map publish: {rid, tiles, cells}",
     "path": "fleetsim (record.paths): a robot's planned path, on every plan; pts [] when it "
             "has none: {rid, purpose: task|home, pts: [[x, y], ...]}. The replay draws it; "

@@ -340,6 +340,12 @@ class MapSpread(Metric):
                         "robot's map (until then it detours round a pallet that has left)",
         "clear_p95_s": "the same, 95th percentile",
         "clear_never": "of those, how many still had it when the run ended",
+        "ghosts": "(blockage clear, robot) pairs where the robot's map did not have the "
+                  "blockage when it went, but took it in later from a peer that hadn't seen it "
+                  "go (a refresh, a resync, a pull answer)",
+        "ghost_held_s": "of those, mean sim seconds the ghost stayed in its map, over the ones "
+                        "it dropped",
+        "ghost_never": "of those, how many still had the ghost when the run ended",
     }
 
     def __init__(self, ctx, **params):
@@ -362,8 +368,10 @@ class MapSpread(Metric):
         later = [e for e in got if e["after_s"] > first.get(e["blockage"], math.inf)]
         spread = [e["after_s"] - max(first[e["blockage"]], e["path_s"]) for e in later]
         all_got = [e["after_s"] for e in on if e["after_s"] is not None]
-        off = [e for e in self.rows if not e["on"]]
+        off = [e for e in self.rows if not e["on"] and e.get("ghost_s") is None]
         off_got = [e["after_s"] for e in off if e["after_s"] is not None]
+        ghost = [e for e in self.rows if not e["on"] and e.get("ghost_s") is not None]
+        held = [e["after_s"] - e["ghost_s"] for e in ghost if e["after_s"] is not None]
 
         def mean(xs):
             return round(statistics.fmean(xs), 2) if xs else None
@@ -384,6 +392,9 @@ class MapSpread(Metric):
             "clear_mean_s": mean(off_got),
             "clear_p95_s": round(_pct(off_got, 95), 2) if off_got else None,
             "clear_never": len(off) - len(off_got),
+            "ghosts": len(ghost),
+            "ghost_held_s": mean(held),
+            "ghost_never": len(ghost) - len(held),
         }
 
 

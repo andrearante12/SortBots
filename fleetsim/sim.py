@@ -814,9 +814,12 @@ class Sim:
         r = self.robots[node - 1]
         if not r.alive:
             return
-        gap = r.belief.check_seq(origin, tile, seq, snapshot)
-        if gap and self.subs is not None and not self.subs.owed(r, tile):
-            gap = False  # not subscribed (fleet-wide news), or its pull's answer fills it
+        if self.subs is not None and not snapshot and not self.subs.subscribed(r, tile):
+            gap = False  # fleet-wide news of a tile it doesn't subscribe to (mapshare.py)
+        else:
+            gap = r.belief.check_seq(origin, tile, seq, snapshot)
+            if gap and self.subs is not None and self.subs.pulling(r, tile):
+                gap = False  # its pull's answer fills it
         changed = r.belief.merge(*cells)
         r.counters["shared_changed"] += len(changed)
         r.on_belief_change(changed, "shared")
