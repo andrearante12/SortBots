@@ -1,0 +1,19 @@
+# Does the bench work end to end? Small fleets, short runs, knobs that already
+# exist: about 20 s on the 30-CPU laptop. Not a benchmark; the real suite comes
+# with the scenario set (docs/fleetsim-plan.md, C12).
+#   /usr/bin/python3 -m fleetsim bench smoke
+name: smoke
+description: >
+  delivery_smoke at 2 and 4 robots, walkers at 5 for 240 s, partition_heal at
+  6, three seeds each, as configured, with path intents, and on the radio model.
+scenarios:
+  - {scenario: delivery_smoke, robots: [2, 4]}
+  - {scenario: walkers, robots: [5], duration_s: 240}
+  - {scenario: partition_heal, robots: [6]}    # has no nav metric: "-" in that table
+seeds: [1, 2, 3]
+variants:
+  default: {}
+  intents: {intent.enabled: true}
+  radio: {network.model: radio}
+headline: fleet_tasks.per_hour
+also: [fleet_tasks.mean_s, nav.blocked_robot_s]

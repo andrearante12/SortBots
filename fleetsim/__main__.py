@@ -6,6 +6,7 @@
     /usr/bin/python3 -m fleetsim run NAME [--robots N] [--seed S] [--duration S]
                                          [--set k=v ...] [--out DIR] [--quiet]
     /usr/bin/python3 -m fleetsim rescore DIR                # re-score recorded events
+    /usr/bin/python3 -m fleetsim bench SUITE | --list | --rescore DIR   # fleetsim/bench.py
 
 A run writes data/fleetsim/<UTC>_<name>/ (gitignored):
 
@@ -13,6 +14,8 @@ A run writes data/fleetsim/<UTC>_<name>/ (gitignored):
     events.jsonl.gz    every event (simtest/events.py format)
     summary.json       run summary: sim/wall seconds, speed-up, counters
     score.json         metric values and pass/fail per criterion
+    system.jsonl       compute log every 2 s: core, frequency, temperatures (sysmon.py)
+    crash.txt          only after a crash: every thread's stack, or the traceback
 
 Exit codes: 0 every criterion passed (or none given), 1 a criterion failed,
 2 invalid scenario or arguments, 130 stopped by SIGINT. A crash is also non-zero
@@ -32,7 +35,9 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from fleetsim import bench as bench_lib  # noqa: E402
 from fleetsim import config  # noqa: E402
+from fleetsim import sysmon  # noqa: E402
 from simtest import events as ev_lib  # noqa: E402
 from simtest import metrics as metrics_lib  # noqa: E402
 from simtest import robots as robots_lib  # noqa: E402
@@ -90,8 +95,6 @@ def print_score(sc: dict | None) -> None:
 
 
 def cmd_run(args) -> int:
-    from fleetsim import sim as sim_lib
-
     # The console's Stop button sends SIGINT. A process started in the background
     # of a non-interactive shell has SIGINT ignored, so Stop would do nothing
     # unless we put the normal handler back.
@@ -114,6 +117,21 @@ def cmd_run(args) -> int:
             except FileExistsError:
                 continue
     (out / "scenario.json").write_text(json.dumps(scn, indent=2, default=str))
+    # The compute log and crash dump (sysmon.py), so a segfault on this laptop
+    # leaves a record of which core it ran on and how hot (2026-11-26).
+    mon = sysmon.Monitor(out)
+    try:
+        return _run(args, scn, out, mon)
+    except BaseException as e:
+        mon.stop(e)
+        raise
+    finally:
+        mon.stop()
+
+
+def _run(args, scn: dict, out: Path, mon: sysmon.Monitor) -> int:
+    from fleetsim import sim as sim_lib
+
     rec = ev_lib.Recorder(out / "events.jsonl.gz")
     n, net = scn["config"]["robots"]["count"], scn["config"]["network"]["model"]
     if not args.quiet:
@@ -121,6 +139,7 @@ def cmd_run(args) -> int:
               f"{scn['duration_s']:.0f} sim-s, seed {scn['seed']} -> {out}")
     try:
         s = sim_lib.Sim(scn, recorder=rec)
+        mon.clock, mon.phase = (lambda: s.now), "sim"
         summary = s.run()
     finally:
         rec.close()
@@ -130,6 +149,7 @@ def cmd_run(args) -> int:
     if not args.quiet:
         print(f"ran {summary['sim_s']} sim-s in {summary['wall_s']} s "
               f"({summary['speedup']}x real time), stopped: {summary['reason']}")
+    mon.phase = "score"
     sc = score(scn, out / "events.jsonl.gz")
     if sc is not None:
         (out / "score.json").write_text(json.dumps(sc, indent=2))
@@ -167,6 +187,7 @@ def main(argv=None) -> int:
             p.add_argument("--quiet", action="store_true")
     r = sub.add_parser("rescore")
     r.add_argument("dir")
+    bench_lib.add_parser(sub)
     args = ap.parse_args(argv)
     try:
         if args.cmd == "list":
@@ -196,6 +217,8 @@ def main(argv=None) -> int:
             return cmd_run(args)
         if args.cmd == "rescore":
             return cmd_rescore(args)
+        if args.cmd == "bench":
+            return bench_lib.main(args)
     except (config.ScenarioError, metrics_lib.MetricError, world_lib.WorldError,
             FileNotFoundError) as e:
         print(f"error: {e}", file=sys.stderr)

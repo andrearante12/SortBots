@@ -14,13 +14,14 @@ to verify, calibrate and demo.
 /usr/bin/python3 -m fleetsim run fleet_scale --robots 30 --seed 2
 /usr/bin/python3 -m fleetsim show walkers               # the fully resolved config
 /usr/bin/python3 -m fleetsim rescore data/fleetsim/<dir>   # re-score with current metric code
+/usr/bin/python3 -m fleetsim bench smoke                # a suite in parallel, one table (see Benchmarks)
 /usr/bin/python3 -m pytest fleetsim/tests               # ~10 s
 ```
 
 System python3 with numpy and PyYAML (`requirements-dev.txt`), from the repo
 root. Results land in `data/fleetsim/<UTC>_<name>/` (gitignored):
 `scenario.json` (exactly what ran), `events.jsonl.gz`, `summary.json`,
-`score.json`. To watch a run, see [Watching a run](#watching-a-run). Exit code 0 = every pass criterion held, 1 = one failed,
+`score.json`, `system.jsonl` (the compute log; `crash.txt` after a crash). To watch a run, see [Watching a run](#watching-a-run). Exit code 0 = every pass criterion held, 1 = one failed,
 2 = invalid scenario.
 
 To run one without a terminal, use the operator view: Session panel, **Tests**
@@ -267,6 +268,100 @@ so head-on meetings pass without stopping), and detours that treat a
 higher-priority peer's intent as a temporary cost on the costmap (another
 aisle, rather than waiting).
 
+## Benchmarks and crash logs
+
+`fleetsim bench` runs a suite: scenarios x robot counts x seeds x variants,
+each run in its own process, many at once, and prints one table per metric.
+
+```bash
+/usr/bin/python3 -m fleetsim bench --list
+/usr/bin/python3 -m fleetsim bench smoke                  # 36 runs, ~30 s on the 30-CPU laptop
+/usr/bin/python3 -m fleetsim bench smoke --dry-run        # the runs and their commands
+/usr/bin/python3 -m fleetsim bench smoke --only 'walkers_*' --jobs 8
+/usr/bin/python3 -m fleetsim bench --rescore data/fleetsim/bench/<dir>   # current metric code
+```
+
+**Suites** are `fleetsim/suites/<name>.yaml`. The full schema is in the
+docstring of `fleetsim/bench.py`:
+
+```yaml
+name: smoke
+scenarios:                       # each entry at each of its robot counts
+  - {scenario: delivery_smoke, robots: [2, 4]}
+  - {scenario: walkers, robots: [5], duration_s: 240}
+seeds: [1, 2, 3]
+variants:                        # name -> overrides, the same syntax as --set
+  default: {}
+  intents: {intent.enabled: true}
+headline: fleet_tasks.per_hour   # <metric id>.<value>
+also: [fleet_tasks.mean_s, nav.blocked_robot_s]
+```
+
+An entry can also take `set:` (its own overrides, applied before the
+variant's) and `id:` (the row label, needed when a scenario appears twice).
+The bench resolves every scenario x count x variant before it starts, so a
+bad knob or a misspelt metric fails at once. Metric values are read from
+each run's `score.json` without a list of known names, so a new metric or
+knob needs no change in the bench. The headline's metric must be in every
+scenario's `metrics:`. A scenario without an `also` metric shows `-`.
+
+**Output** goes to `data/fleetsim/bench/<UTC>_<suite>/` (gitignored):
+
+| File | What |
+|---|---|
+| `table.md` | the printed tables: rows scenario x robots, columns variant, cells mean ± sd over seeds; `(2/3)` = a value from 2 of 3 seeds |
+| `results.csv` | one row per run: scenario, robots, seed, variant, status, attempts, crashes and their cores, wall_s, sim_s, then every metric value as `<metric id>.<value>` |
+| `summary.json` | the suite, the host (CPU, microcode, kernel, python, numpy, offline CPUs), every run with each attempt, the tables, crash counts. Rewritten as runs finish, so a bench cut short keeps what it finished |
+| `<id>_r<N>_s<seed>_<variant>/` | one run: what `fleetsim run` writes, plus `log.txt`; a crashed attempt is moved into `attempt_<k>/` before the re-run |
+
+Bench runs are not in the operator view's replay list. To replay one, copy
+its dir into `data/fleetsim/`.
+
+**What counts as done.** A run is complete when it exits 0 (every criterion
+held) or 1 (one failed) and wrote `score.json`. Exit 2 is an invalid
+scenario: it is reported and not retried. Anything else is a crash: a
+signal, exit 1 without `score.json` (a Python exception), or `--timeout`. A
+crash is re-run up to `--retries` times (default 2). Runs are seeded and
+deterministic, so a re-run is the same run. Ctrl-C stops the bench, lets the
+running runs close their recordings, and writes the tables for what finished
+(exit 130). The bench exits 0 when every run completed, 1 otherwise.
+
+**The compute log.** Every `fleetsim run` writes two more files into its
+own dir (`fleetsim/sysmon.py`):
+
+- `system.jsonl`: a sampler thread writes one JSON line every 2 s, and
+  flushes and fsyncs each line, so the log survives a segfault or a hard
+  lock-up. The first line holds the pid, the sampler's thread id, python and
+  numpy versions, kernel, CPU model, microcode and the offline CPUs. Each
+  sample holds wall and sim time, the run's phase, the CPU the main thread
+  is on and its physical core, that CPU's frequency, the package, own-core
+  and hottest-core temperatures (hwmon `coretemp`, else thermal zones), the
+  load average, RSS and CPU time. An `end` line is written on a clean exit
+  or a Python exception, so a run killed by a signal has none. Any probe
+  that can't be read is `null`. The cost is too small to measure (6-robot
+  radio run: 8.4-8.8 s without, 8.5-8.6 s with). The event stream is
+  bit-identical with and without it.
+- `crash.txt`: `faulthandler`'s stack of every thread on a fatal signal, or
+  the traceback of an uncaught exception. It exists only after a crash.
+
+**Which core a crash died on.** For a death by signal, the bench saves the
+kernel's log lines for that pid in the run's time window to
+`attempt_<k>/kernel.txt` (`journalctl -k`, else `dmesg`). Machine-check
+lines are saved too. On this kernel a segfault line names the CPU: "likely
+on CPU 10 (core 20, socket 0)". **But the kernel logs only faults that no
+handler caught, and `faulthandler` catches them** (checked 2026-11-26), so
+with it on there is no segfault line. The bench therefore reads the dead
+process's `/proc/<pid>/stat` before it reaps it. Field 39 there is the CPU
+the process died on, and it matched the kernel's line in 4 of 4 deliberate
+faults. The last sample in `system.jsonl` is the fallback, but it can be up
+to 2 s old (one test run moved from CPU 18 to CPU 8 in 0.4 s). In
+`results.csv` such a CPU is marked `?`. `bench --no-faulthandler` gives up
+the Python stack to get the kernel's line back, with the faulting
+instruction's address. The printed summary and `summary.json` (`crashes`)
+count crashed attempts by kind and by CPU and core, and how many runs
+recovered on which attempt. Crashes that cluster on one core point at the
+CPU.
+
 ## Known issues
 
 - **Intermittent interpreter faults on the development machine — cause not
@@ -305,6 +400,18 @@ aisle, rather than waiting).
   (`Costmap.wint`), which made the TypeError disappear in 15 runs. That may
   only have moved the fault elsewhere, and the segfaults since suggest it
   did.
+  **2026-11-26: the kernel log points at one core.** Every python segfault
+  the kernel logged on this laptop names core 20 (CPU 10 or 11): 10 of 10,
+  2026-10-21 to 11-17 (`journalctl _TRANSPORT=kernel -g segfault`). Other
+  programs' segfaults spread out: the 7 from `ros2` hit five other cores,
+  which is what a software bug looks like. The other 6 (Firefox, libavcodec,
+  apparmor_parser) put 3 on core 20. CPUs 10 and 11 have been offline since
+  2026-11-26 03:32 (`/sys/devices/system/cpu/offline`). Since then a
+  36-run and a 96-run bench crashed 0 times. The `fs-fake-segv*` lines of
+  2026-11-26 are deliberate test faults, not crashes. Each run now records
+  the core it is on and how hot it is, and `fleetsim bench` records the core
+  every crashed run died on ([Benchmarks and crash logs](#benchmarks-and-crash-logs)).
+  Check those against new crashes before reading the cause from the code.
 - **Walkers never yield** (simtest's rule), so most walker contacts are a
   walker walking into a robot that stopped for it. `contacts.driven` counts
   only the ones where the robot moved into something ahead of it.
