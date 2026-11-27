@@ -41,8 +41,9 @@
 
   let cat = null;                   // GET /api/fleetsim/editor
   let st = null;                    // the scenario as the form holds it (fromDoc)
-  let file = null;                  // {name, sha, doc, comments} of the file opened; null for a new one
+  let file = null;                  // {name, sha} of the file opened; null for a new one
   let source = null;                // "New from": the scenario this one started as
+  let orig = null;                  // {doc, comments}: what a save copies untouched sections from
   let world = null, worldKey = "", floorCv = null;
   let result = null;                // the last check
   let unsaved = false, checking = false, checkTimer = 0, checkSeq = 0;
@@ -327,7 +328,7 @@
   async function open(name, { asNew = false } = {}) {
     if (st && unsaved && !confirm(`Discard the unsaved changes to ${st.name}?`)) return false;
     closeOthers();
-    st = null; file = null; unsaved = false; checkSeq++;
+    st = null; file = null; orig = null; unsaved = false; checkSeq++;
     reset();
     root.hidden = false;
     placeRoot();
@@ -337,8 +338,10 @@
       const f = await api(`/api/fleetsim/editor/scenario?name=${encodeURIComponent(name)}`);
       st = fromDoc(f.scenario);
       st.header = f.header || "";
-      file = asNew ? null : { name: f.name, sha: f.sha, doc: f.scenario, comments: f.comments || [] };
+      file = asNew ? null : { name: f.name, sha: f.sha };
       source = asNew ? f.name : null;
+      // "New from" saves with `source`, so its untouched sections keep their comments too.
+      orig = { doc: f.scenario, comments: f.comments || [] };
       if (asNew) { st.name = freeName(f.name); st.title = st.title ? `${st.title} (copy)` : ""; }
       reset();
       setMsg(null);
@@ -643,9 +646,9 @@
   function paintComments() {
     const list = form.querySelector("#fe-cmts"), note = form.querySelector("#fe-cmt-note");
     if (!list || !note) return;
-    const cs = file?.comments || [];
-    if (!cs.length) { note.textContent = file ? "No comments below the header." : "A new file: only the header comment is written."; list.innerHTML = ""; return; }
-    const doc = toDoc(), old = file.doc;
+    const cs = orig?.comments || [];
+    if (!cs.length) { note.textContent = "No comments below the header."; list.innerHTML = ""; return; }
+    const doc = toDoc(), old = orig.doc;
     const lost = (k) => canon(doc[k]) !== canon(old[k]);
     note.textContent = "Comments below the header are kept only in sections you leave unchanged; a changed section is rewritten without its comments. Move what matters into the header or the description.";
     list.innerHTML = cs.map((c) => `<li class="${lost(c.section) ? "lost" : ""}">${esc(c.section)}: ${esc(c.text)}${lost(c.section) ? " · <b>dropped on save</b>" : ""}</li>`).join("");
@@ -1278,7 +1281,8 @@
     try {
       const res = await api("/api/fleetsim/editor/save", body);
       st.name = doc.name;
-      file = { name: res.name, sha: res.sha, doc: clone(doc), comments: (file?.comments || []).filter((c) => !(res.dropped || []).some((d) => d.section === c.section && d.text === c.text)) };
+      file = { name: res.name, sha: res.sha };
+      orig = { doc: clone(doc), comments: (orig?.comments || []).filter((c) => !(res.dropped || []).some((d) => d.section === c.section && d.text === c.text)) };
       source = null;
       unsaved = false;
       const nm = form.querySelector('[data-bind="name"]'); if (nm) nm.value = st.name;

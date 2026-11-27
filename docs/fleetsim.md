@@ -319,8 +319,9 @@ a `world.gateway` the floor doesn't use) don't block a save.
 
 **Saving** writes `fleetsim/scenarios/<name>.yaml` and nothing else, and
 only from the sim console (`--control`), like launching a run. **Save as**
-writes a new file and leaves the original as it is. A file that changed on
-disk after it was opened isn't overwritten. The leading comment block is
+writes a new file and leaves the original as it is; it and **New from** copy
+the original's untouched sections, as below. A file that changed on disk
+after it was opened isn't overwritten. The leading comment block is
 kept (edit it under **File**), and so is every top-level section that wasn't
 changed, line for line, comments included. A changed section is rewritten in
 the hand-written files' style and **loses its comments**. **File** lists the

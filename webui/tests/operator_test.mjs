@@ -1636,6 +1636,7 @@ async function main() {
   await waitFor(async () => (await page.eval(`document.querySelectorAll('#fe-list .fs-run').length`)) === scnFiles, { what: 'the scenario list', tries: 40 });
   check('editor: the Tests tab lists every scenario with its title and description',
     /Eight robots, a dozen deliveries/.test(await $text('#fe-list')) && /Twelve fixed/.test(await page.eval(`document.querySelector('#fe-list [data-name="delivery_smoke"]').title`)), (await $text('#fe-list')).slice(0, 120));
+  await page.eval(`document.getElementById('fe-list').scrollIntoView()`); await shot('editor-list');
   check('editor: each scenario can be edited, or a new one started from it', (await page.eval(`document.querySelectorAll('#fe-list [data-fe-edit]').length`)) === scnFiles && (await page.eval(`document.querySelectorAll('#fe-list [data-fe-new]').length`)) === scnFiles);
 
   // Without --control: the editor reads and checks, but can't save.
@@ -1688,6 +1689,16 @@ async function main() {
   const blk = st0.doc.disturbances[1];
   check('editor: dragging with the Blockage tool adds a blockage at the timeline\'s time', blk && blk.at_s === 30 && blk.blockage.rect.every((v, k) => Math.abs(v - [10, 20, 12, 22][k]) < 0.2), JSON.stringify(blk));
   check('editor: ... listed under Disturbances and selected', (await page.eval(`document.querySelectorAll('#fe-form [data-sec="dist"] .fe-item').length`)) === 2 && JSON.stringify(st0.sel) === '{"kind":"dist","i":1}');
+
+  // Its bar on the timeline: dragged 60 s later, the form follows.
+  const [bx, by, bw] = await page.eval(`(() => { const r = document.getElementById('fe-ticks').getBoundingClientRect(); return [r.left + r.width * 30 / 1200 + 12, r.top + 12 + 9 + 3.5, r.width]; })()`);
+  await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: bx, y: by, button: 'left', buttons: 1, clickCount: 1 });
+  for (let k = 1; k <= 4; k++) await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: bx + bw * 60 / 1200 * k / 4, y: by, button: 'left', buttons: 1 });
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: bx + bw * 60 / 1200, y: by, button: 'left', clickCount: 1 });
+  await sleep(100);
+  const dragged = (await fe()).doc.disturbances[1].at_s;
+  check('editor: dragging a disturbance\'s bar on the timeline moves it, and its field', Math.abs(dragged - 90) <= 2 && (await page.eval(`document.querySelector('#fe-form [data-bind="dist.1.at_s"]').value`)) === String(dragged), String(dragged));
+  await feType('dist.1.at_s', '30');
 
   // A partition added from the form, then turned into another kind.
   await page.eval(`(() => { const k = document.querySelector('#fe-form [data-bind="_newkind"]'); k.value = 'partition'; })()`);
@@ -1764,6 +1775,7 @@ async function main() {
   await feSettled('new from walkers', (s) => s.floor && s.name === 'walkers_2');
   st0 = await fe();
   check('editor: New from starts unsaved, under a free name, with the original\'s movers', st0.name === 'walkers_2' && st0.unsaved && st0.doc.actors.length === 4 && /^New walkers_2/.test(await $text('#fe-heading')), st0.name);
+  check('editor: ... and keeps the original\'s comments where nothing changed', /metrics: First cut/.test(await $text('#fe-cmts')) && !(await feHas('#fe-cmts li.lost')), await $text('#fe-cmts'));
   await click('#fe-tools [data-tool="mover"]');
   for (const [x, y] of [[40, 16], [46, 16], [46, 22]]) await feClick(x, y);
   check('editor: the Mover tool counts the points clicked', /3 so far/.test(await $text('#fe-hint')), await $text('#fe-hint'));
