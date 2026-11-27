@@ -35,6 +35,8 @@ from . import config as C
 from . import dispatch as D
 from . import grid as G
 from . import info as PI
+from . import maplearn as ML
+from . import mapshare as MS
 from . import network as N
 from .planner import FREE, OCC, Costmap, path_length
 from .robot import Robot
@@ -105,6 +107,14 @@ class Sim:
         # gateway is where they enter the fleet) and it hears and says nothing.
         self.gw_alive = True
         self._held: list[tuple] = []
+        self.learn = None  # the map_learn recording; built once the robots exist
+        ms = cfg["map_share"]
+        self.map_events = bool(ms["enabled"] and ms["events"])
+        # Which tiles own sensing flipped: for event publishes, and for
+        # subscriptions' fleet-wide news (fleetsim/mapshare.py).
+        self.track_flips = self.map_events or (ms["enabled"] and ms["recipients"] == "subscribers"
+                                               and ms["sub_flips_to"] == "all")
+        self.map_event_n = 0
 
         homes = self._homes(n)
         prior = self.static.copy() if cfg["map_share"]["prior"] == "truth" \
@@ -120,6 +130,8 @@ class Sim:
             self._body[k] = cells
             self.robot_owner_flat[cells] = r.node
         self.net = N.build(cfg["network"], n + 1, self.np_rng, self.static, self.grid, GW)
+        self.subs = MS.build(self)  # map_share.recipients: subscribers, else None
+        self.learn = ML.LearnTracker(self)
         self.seen_t = np.full((n, n), -np.inf)
         self.seen_xy = np.zeros((n, n, 2))
         self.live_t = np.full((n + 1, n), -np.inf)
@@ -621,6 +633,10 @@ class Sim:
         # The central planners' drive-time fields and info.map: truth both key
         # off these (fleetsim/dispatch/costs.py, fleetsim/info.py).
         self.static_version += 1
+        # Before info.map_changed: with info.map truth every robot learns it
+        # in that call, and the recording should see that happen.
+        if self.learn is not None:
+            self.learn.blockage(i, sl, on)
         if self.info is not None:
             self.info.map_changed(sl)
         return True
@@ -633,6 +649,8 @@ class Sim:
         # outage: a minute of Status at twice the rate).
         r.next_status = max(r.next_status, self.now)
         r.next_map_pub = max(r.next_map_pub, self.now)
+        if self.subs is not None:
+            self.subs.on_revive(r)
         if fresh:  # a reboot: empty task state, re-learned from the fleet
             r.queue.clear()
             r.task, r.state = None, "IDLE"
@@ -726,11 +744,16 @@ class Sim:
             dsts = np.r_[GW, self._robots_near((r.x, r.y), float(cfg["radius_m"]))]
         it = r.intent_for_status(self.now)
         extra = 0 if it is None else 4 + 12 * len(it["pts"])  # fleetsim/intent.py points
+        # map_share.sub_transport: status — a tile subscription rides along
+        # once per change, as intents do (fleetsim/mapshare.py).
+        sub = None if self.subs is None else self.subs.for_status(r)
+        if sub is not None:
+            extra += MS.SUB_STATUS_B + MS.SUB_TILE_B * len(sub[2])
         d, arr, _, _ = self.net.send("status", r.node, dsts, len(raw) + 8 + extra, False,
                                      self.now, udp=True)
         if len(d):
             self._pending_status.append((r.k, d, arr,
-                                         (r.x, r.y, r.mode(), r.core.battery_pct, it)))
+                                         (r.x, r.y, r.mode(), r.core.battery_pct, it, sub)))
 
     def _session_liveness(self) -> None:
         """status.session_liveness: a live zenoh session to a peer counts as
@@ -752,10 +775,10 @@ class Sim:
             return
         now, poll = self.now, float(self.cfg["status"]["liveness_poll_s"])
         keep = []
-        for src, d, arr, (x, y, mode, bat, it) in self._pending_status:
+        for src, d, arr, (x, y, mode, bat, it, sub) in self._pending_status:
             due = arr <= now
             if not due.all():
-                keep.append((src, d[~due], arr[~due], (x, y, mode, bat, it)))
+                keep.append((src, d[~due], arr[~due], (x, y, mode, bat, it, sub)))
             dd = d[due]
             if not len(dd):
                 continue
@@ -766,6 +789,9 @@ class Sim:
                 for k in rob.tolist():
                     if self.robots[k].alive:
                         self.robots[k].on_intent(it, now)
+            if sub is not None:
+                for k in rob.tolist():
+                    self.subs.deliver_announce(k + 1, sub)
             stale = dd[now - self.live_t[dd, src] >= poll]
             if not len(stale):
                 continue
@@ -789,11 +815,15 @@ class Sim:
         c = self.cfg["map_share"]
         return MAP_HEADER_B + int(math.ceil(n_cells * self.grid.res ** 2 * float(c["bytes_per_m2"])))
 
-    def _map_dsts(self, r: Robot, tile: int) -> np.ndarray:
+    def _map_dsts(self, r: Robot, tile: int, flip: bool = False) -> np.ndarray:
+        """Who gets r's patch of a tile; `flip`: it carries a cell r's own
+        sensing flipped (the world moved there)."""
         c = self.cfg["map_share"]
         if c["recipients"] == "all":
             d = np.arange(1, self.n + 1)
             return d[d != r.node]
+        if c["recipients"] == "subscribers":
+            return self.subs.dsts(r, tile, flip)  # as r has heard them (fleetsim/mapshare.py)
         return self._robots_near(r.belief.tile_centre(tile), float(c["radius_m"]), exclude=r.node)
 
     def _send_cells(self, r: Robot, tile: int, payload: tuple, snapshot: bool,
@@ -801,6 +831,12 @@ class Sim:
         """Chunk and send one tile's cells; False (nothing sent) if the rate
         cap has no room for it."""
         c = self.cfg["map_share"]
+        if self.subs is not None and not len(dsts):
+            # Nobody subscribes: nobody is owed it, so it costs no budget and
+            # takes no sequence number (a subscriber's next delta would show a
+            # gap for it and cost a resync snapshot). The cells stay in this
+            # robot's map for whoever pulls the tile later.
+            return True
         idx, st, ts = payload
         per_chunk = max(1, int((float(c["chunk_bytes"]) - MAP_HEADER_B)
                                / max(self.grid.res ** 2 * float(c["bytes_per_m2"]), 1e-9)))
@@ -819,10 +855,18 @@ class Sim:
         c = self.cfg["map_share"]
         rate = float(c["rate_cap_bps"]) / 8.0
         r.tokens = min(r.tokens + rate * float(c["publish_s"]), 2 * rate * float(c["publish_s"]))
+        if self.subs is not None:
+            self.subs.tick(r)  # announce a changed subscription (and pull its new tiles)
+        flips, waiting = r.flip_tiles, set()
         for tile, idx in r.belief.take_dirty().items():
             if not self._send_cells(r, tile, r.belief.cells_payload(idx), False,
-                                    self._map_dsts(r, tile)):
+                                    self._map_dsts(r, tile, tile in flips)):
                 r.belief.dirty[idx] = True  # over the cap: try again next tick
+                if tile in flips:
+                    waiting.add(tile)
+        r.flip_tiles = waiting
+        if self.subs is not None:
+            self.subs.flush(r)  # pull answers: after own news, before the refresh
         if self.now >= r.next_refresh and r.belief.observed_tiles:
             tiles = r.belief.observed_tiles
             tile = tiles[r.refresh_ptr % len(tiles)]
@@ -835,7 +879,12 @@ class Sim:
         r = self.robots[node - 1]
         if not r.alive:
             return
-        gap = r.belief.check_seq(origin, tile, seq, snapshot)
+        if self.subs is not None and not snapshot and not self.subs.subscribed(r, tile):
+            gap = False  # fleet-wide news of a tile it doesn't subscribe to (mapshare.py)
+        else:
+            gap = r.belief.check_seq(origin, tile, seq, snapshot)
+            if gap and self.subs is not None and self.subs.pulling(r, tile):
+                gap = False  # its pull's answer fills it
         changed = r.belief.merge(*cells)
         r.counters["shared_changed"] += len(changed)
         r.on_belief_change(changed, "shared")
@@ -850,6 +899,38 @@ class Sim:
         o = self.robots[node - 1]
         if o.alive:
             self._send_cells(o, tile, o.belief.snapshot(tile), True, np.array([asker]), budget=False)
+
+    def _map_event(self, r: Robot) -> None:
+        """map_share.events (B9): r's own camera flipped a known cell (a
+        blockage came or went), so that tile goes out now instead of at the
+        next publish_s tick: the same recipients, out of the same budget, and
+        over the cap it waits for the tick like any patch. Bytes are those the
+        tick would have sent anyway; what it adds is a message header, and
+        only when a tick's patch is split in two (docs/fleetsim.md, "Map
+        sharing: subscriptions and event-driven updates"). With intents on, a
+        robot whose path changed with it re-announces the intent on an extra
+        Status, not on the next one in its schedule."""
+        now = self.now
+        r.next_event = now + float(self.cfg["map_share"]["event_gap_s"])
+        sent, cells, waiting = [], 0, set()
+        for tile, idx in r.belief.take_dirty_tiles(sorted(r.flip_tiles)).items():
+            if self._send_cells(r, tile, r.belief.cells_payload(idx), False,
+                                self._map_dsts(r, tile, True)):
+                sent.append(tile)
+                cells += len(idx)
+            else:
+                r.belief.dirty[idx] = True
+                waiting.add(tile)
+        r.flip_tiles = waiting
+        if not sent:
+            return
+        self.map_event_n += 1
+        self.record({"s": "map_pub", "rid": r.rid, "tiles": sent, "cells": cells})
+        ic = self.cfg["intent"]
+        if ic["enabled"] and r._intent_dirty:
+            r._announce(now)
+            if ic["transport"] == "status":
+                self._status_tick(r)
 
     def share_intent(self, r: Robot, m: dict) -> None:
         """A path intent (fleetsim/intent.py): best-effort, like Status, to
@@ -1024,6 +1105,14 @@ class Sim:
                 self.handle_actions(None, self.gw.drain())
             for r in self.robots:
                 r.step(dt, t)
+            if self.subs is not None and cfg["map_share"]["enabled"]:
+                for r in self.robots:
+                    if r.alive:
+                        self.subs.step(r)  # a new path subscribes now (fleetsim/mapshare.py)
+            if self.map_events:
+                for r in self.robots:
+                    if r.alive and r.flip_tiles and t >= r.next_event:
+                        self._map_event(r)
             for r in self.robots:
                 if r.alive and t >= r.next_status:
                     r.next_status += 1.0 / float(cfg["status"]["hz"])
@@ -1055,6 +1144,8 @@ class Sim:
             if settle_until is not None and t >= settle_until:
                 reason = "tasks_done"
                 break
+        if self.learn is not None:
+            self.learn.flush()
         self._gt()
         if rec["belief_s"]:
             self._belief_sample()
@@ -1073,6 +1164,9 @@ class Sim:
         extra = self.dispatch.summary()
         if extra is not None:
             summary["dispatch"] = extra
+        if self.subs is not None or self.map_events:
+            summary["map_share"] = {**(self.subs.summary() if self.subs is not None else {}),
+                                    **({"event_pubs": self.map_event_n} if self.map_events else {})}
         self.record({"s": "end", "reason": reason, "sim_s": round(t, 3), "wall_s": round(wall, 3),
                      "summary": summary})
         return summary

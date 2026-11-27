@@ -58,7 +58,7 @@ or heard from peers, and every byte of that travels the network model.
 | Local layer | stop for what's ahead within `stop_distance_m`, replan around after `block_replan_s` (lower priority first), give up after `block_fail_s` (`robot.py`) | Nav2 controller + costmaps |
 | Perception | ray-cast cone, movers occlude and come back as detections with velocity, never mapped (`sensing.py`) | D435 + RTAB-Map + obstacle_detector + dynamic_obstacle_filter |
 | Peer awareness | camera, `/fleet/status` over the network, obstacle notices; never ground truth | the same |
-| Map sharing | tiles, deltas, sequence numbers, MapResync, round-robin refresh (`belief.py`, `sim.py`) | not implemented on the robots yet; this is the commsim brief's design |
+| Map sharing | tiles, deltas, sequence numbers, MapResync, round-robin refresh (`belief.py`, `sim.py`); optional tile subscriptions and event-driven publishes (`mapshare.py`, [below](#map-sharing-subscriptions-and-event-driven-updates)) | not implemented on the robots yet; this is the commsim brief's design |
 | Network | ideal, or radio (`network.py`) | mesh + zenoh |
 | Movers | simtest actors (inline in a scenario, or a `configs/worlds/` world) | scripted actors in Isaac |
 
@@ -1145,6 +1145,317 @@ What this shows:
   That is most of the ± on `bench_mixed`, and at 5 robots one seed had only 2
   heavy tasks.
 
+## Map sharing: subscriptions and event-driven updates
+
+Two switches (2026-11-26, plan items B8 and B9), both off by default. A
+default run is the run from before them plus one recording-only event kind,
+`map_learn` (below).
+
+```bash
+/usr/bin/python3 -m fleetsim run bench_moved --set map_share.recipients=subscribers
+/usr/bin/python3 -m fleetsim run bench_moved --set map_share.events=true
+/usr/bin/python3 -m fleetsim bench map_sharing --jobs 6    # the comparison below, ~35 min
+```
+
+| `map_share.recipients` | A tile's patches and refresh snapshots go to |
+|---|---|
+| `all` | every robot |
+| `radius` (default) | the robots within `radius_m` (20 m) of the tile when it is sent. A robot that drives in later has missed what came before, until a refresh or a resync reaches it |
+| `subscribers` | the robots that subscribe to the tile, as the sender has heard them (`fleetsim/mapshare.py`) |
+
+### Subscriptions (B8)
+
+- **What a robot subscribes to.** The tiles that meet a disc of
+  `sub_radius_m` (6 m, a little more than the camera's 4.5 m) around it. Also
+  the tiles that the next `sub_path_m` (30 m; `null` is the whole path) of
+  its planned path passes through or comes within a body of. It works the set
+  out at every map tick, and at once when it gets a new path. Waiting for the
+  tick, a robot given a task drove 1.5 s along a path through a pallet that
+  the fleet had known about for 160 s.
+- **Announcements.** The whole set with a version number: when it changes,
+  at most every `sub_min_interval_s` (2 s), and unchanged every
+  `sub_keepalive_s` (30 s). A lost announcement is healed by the next one,
+  and a late one is dropped by its version. A robot not heard for 2.5
+  keepalives drops out of the others' views, so a dead robot stops costing
+  patches. Each robot routes by its own view, never by the true
+  subscriptions.
+- **How announcements travel** (`sub_transport`). `status` (default): on the
+  robot's next two `/fleet/status`, to the Status recipients, the way intents
+  ride. `message`: its own reliable message to every robot, as the plan said.
+  As a message it took `fleet_scale` (50 robots, radio) past the cliff in all
+  three seeds. Its `mapsub` copies (297 k in 900 s, seed 1) cut Status delivery to
+  57–71 %. Every peer whose Status was lost then counted as an unknown mover,
+  so obstacle notices went from 717 to 218 k copies (seed 1). `/fleet/tasks` delivery
+  fell to 11–27 %, and deliveries to 35–68, against 96–122 with `radius`. This
+  is the lesson of path intents again: on the radio, each frame costs
+  airtime, whatever its size.
+- **A new tile is pulled from one peer.** The plan said that every robot that
+  has observed the tile sends its snapshot. That is k copies of nearly the
+  same tile. On `bench_moved`, nearly every robot has seen nearly every tile,
+  so it would be 9 snapshots of 4 kB for each new subscription at 10 robots.
+  Every current subscriber of a tile has been getting all its patches, so one
+  of them is enough. The new subscriber asks one (`mappull`, reliable): the
+  one nearest itself, which is the cheapest answer on the radio. It prefers
+  one subscribed for longer than a pull takes, so it doesn't ask a robot
+  that is still waiting for its own answer. If nobody subscribes, it asks the
+  peer that it last heard leave the tile.
+- **The answer** (`mapans`, reliable) is paid for from the answerer's own
+  `rate_cap_bps` budget. It goes at once if there is room, else at the
+  answerer's next tick, before its refresh. What it carries:
+  - With a shared prior (`prior: truth`, robots that localize on a saved
+    map): only the cells that have ever differed from the prior in the
+    answerer's map, with their current state. A pallet that has gone comes
+    back as free. The first version sent the cells observed since the asker
+    last knew the tile. Sensing re-stamps every cell it sees, so that was most
+    of a busy tile: 34,064 cells in 149 answers on `map_sharing`, against 91
+    cells now.
+  - Without a prior: the known cells observed after the asker last left the
+    tile, less two publish periods. If it never had the tile, every known
+    cell.
+  - The answerer's sequence numbers for the tile, so that the asker's next
+    delta from each origin does not count as a gap. Each false gap costs a
+    full MapResync snapshot.
+- **World changes go to every robot** (`sub_flips_to: all`, default). A
+  patch that carries a cell the sender's own sensing flipped (free ↔
+  occupied) goes to every robot. The rest goes to the tile's subscribers. The
+  first version kept flips with the subscribers. A robot far from a new
+  pallet then bid on its stale map, won a task past the pallet, and learned
+  of it only when its path subscribed (`map_sharing`: 91 s for a delivery
+  that `all` made in 81 s). Subscriptions keep news local, but the auction
+  prices tasks anywhere. Flips are rare and small. `sub_flips_to:
+  subscribers` keeps the first version, for comparison.
+- **Sequence numbers, MapResync and refresh** work as before, with three
+  rules:
+  - A patch of a tile that nobody subscribes to is not sent and takes no
+    sequence number.
+  - A gap on a tile with an open pull asks for no resync.
+  - A delta of a tile that the robot doesn't subscribe to (fleet-wide news)
+    asks for no resync and records no sequence number. A recorded number
+    would hide a real gap once the robot subscribes.
+
+  A revived robot has left every tile at the time it died, so it subscribes
+  and pulls again.
+
+### Event-driven publishes (B9)
+
+With `map_share.events: true`, a tile goes out at once when the robot's own
+sensing flips a known cell in it, not at the next `publish_s` tick. It goes
+to the same recipients, from the same budget, at most every `event_gap_s`
+(0.5 s). Over the cap it waits for the tick. With intents on, a robot whose
+path changed with the flip rebuilds its intent. An extra Status carries it,
+so the intent does not wait for the next scheduled Status. Each event
+publish is recorded (`map_pub`).
+
+The trigger is any free ↔ occupied flip, not only a flip on a known path:
+- An event moves a publish earlier. It sends the cells that the tick would
+  have sent, so the bytes are the same. The only extra is a message header,
+  when an event splits a tick's patch in two.
+- fleetsim's sensing is exact on the static world, so every flip is a real
+  change: a pallet came or went. Unknown → known is discovery, and is not a
+  trigger.
+- Paths are only partly known: a robot knows its own, and its peers' only
+  with intents on.
+
+A real robot's sensor noise flips cells, so a filter to paths would earn its
+place there.
+
+### What measures it
+
+- **`map_learn`** (`fleetsim/maplearn.py`), recording only. For every
+  blockage that appears, one event per robot when its own map first has the
+  blockage. The event gives the time since the appearance, how the map got
+  it (`sensed`, `shared`, `truth`, `already`), and `path_s`: when the robot's
+  path first ran into it while the robot didn't know. A blockage that clears
+  gets the same for every robot whose map had it then. A robot that took a
+  gone pallet in later from a stale peer is a ghost (`ghost_s`).
+- **`map_spread`** (new metric), from those events. `on_path` counts the
+  (blockage, robot) pairs that mattered. The values, all in sim seconds:
+  - `late_mean_s`: how long a robot drove a path through a blockage it didn't
+    know of.
+  - `spread_mean_s`: from "some robot knows and it's on my path" until my map
+    has it. This is propagation alone.
+  - `missed`: robots whose own camera found a blockage that another robot
+    already knew of.
+  - `never`: robots on whose path the blockage stood but whose map never
+    had it.
+  - `clear_mean_s` and `clear_never`: for a cleared blockage, how long robots
+    kept the phantom, and how many still had it at the end.
+  - `ghosts`: robots that took a gone pallet in from a stale peer.
+
+  From the appearance is the wrong clock: a robot given a task past the
+  pallet ten minutes later needs the news then, not before.
+- **`comms` v3** adds `map_bytes_per_robot_s` (all map kinds),
+  `sub_bytes_per_robot_s` (announcements and pulls) and
+  `map_copies_per_robot_s`. New `net` kinds: `mapsub`, `mappull` and
+  `mapans`. On Status, an announcement costs bytes on the Status (4 B plus
+  2 B per tile) and no frames.
+
+### Measured (seeds 1–3, 2026-11-26)
+
+`fleetsim bench map_sharing`, mean ± sd over seeds 1, 2 and 3.
+- `subs`: subscriptions with the defaults above (on Status, flips to every
+  robot).
+- `subs_local`: flips to subscribers only.
+- `subs_msg`: announcements as their own message.
+- `_ev`: with `events: true`.
+- `truth`: `info.map: truth` with the scenario's own recipients, so every map
+  is perfect.
+
+Map B/s and sub B/s are bytes per robot per second, from `comms` v3. A
+missing value is a seed where nothing happened, for example no robot's path
+ran into a pallet. `map_sharing`'s tasks and homes are fixed and its network
+is ideal, so its three seeds gave the same numbers; its map bytes are from
+seed 1, rescored with `comms`. The `subs`, `subs_ev` and `subs_local` rows
+ran on 8cb8f6e, the others on 2bdae84. Between the two commits only the
+Status transport for subscriptions was added, and the other rows don't use
+it.
+
+`map_sharing`, 10 robots, ideal network: a pallet in front of every pickup.
+
+| variant | per h | mean s | stale cells | replans shared | late s | map B/s | sub B/s |
+|---|---|---|---|---|---|---|---|
+| `all` | 56.0 | 97.8 | 0 | 0 | 19.6 | 2421 | 0 |
+| `all_ev` | 56.0 | 97.8 | 0 | 0 | 19.6 | 2422 | 0 |
+| `radius` | 56.0 | 97.8 | 3 | 0 | 19.6 | 1941 | 0 |
+| `radius_ev` | 56.0 | 97.8 | 3 | 0 | 19.6 | 1941 | 0 |
+| `subs` | 56.0 | 97.8 | 0 | 0 | 19.6 | 1056 | 0.6 |
+| `subs_ev` | 56.0 | 97.8 | 0 | 0 | 19.6 | 1057 | 0.6 |
+| `subs_local` | 56.0 | 101.1 | 13 | 3 | 9.8 | 1146 | 0.6 |
+| `subs_msg` | 56.0 | 97.8 | 0 | 0 | 19.6 | 1056 | 18.3 |
+| `truth` | 55.5 | 93.0 | 0 | 0 | - | 2147 | 0 |
+
+`bench_moved`, radio with spatial contention: a pallet that moves between
+aisles.
+
+| variant | robots | per h | mean s | stale | late s | missed | phantoms at end | ghosts | map B/s | sub B/s | map copies/s | load |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `all` | 10 | 115.2 ± 10.8 | 195.1 ± 9.0 | 1 | 14.4 (2/3) | 0 | 6.7 | 0 | 8892 | 0 | 2.25 | 0.139 |
+| `radius` | 10 | 116.0 ± 10.4 | 197.8 ± 12.1 | 2 | 19.0 (2/3) | 0 | 6.0 | 1.3 | 4670 | 0 | 1.14 | 0.128 |
+| `subs` | 10 | 116.0 ± 10.4 | 199.4 ± 14.4 | 2 | 14.2 (2/3) | 0 | 4.7 | 1.0 | 1987 | 2 | 0.67 | 0.121 |
+| `subs_msg` | 10 | 116.0 ± 10.4 | 199.4 ± 14.4 | 2 | 14.2 (2/3) | 0 | 4.7 | 1.0 | 2035 | 51 | 2.12 | 0.123 |
+| `truth` | 10 | 110.0 ± 16.6 | 192.2 ± 6.5 | 0 | - | 0 | 0 | 0 | 4778 | 0 | 1.17 | 0.126 |
+| `all` | 20 | 219.1 ± 11.6 | 172.4 ± 7.6 | 1 | 32.0 ± 4.9 | 0.3 | 45.0 | 0 | 1 | 0 | 0.01 | 0.453 |
+| `all_ev` | 20 | 218.3 ± 11.2 | 173.6 ± 8.0 | 1 | 31.8 ± 4.8 | 0.3 | 33.3 | 0 | 2 | 0 | 0.01 | 0.452 |
+| `radius` | 20 | 218.3 ± 11.2 | 173.5 ± 10.9 | 10 | 32.0 ± 35.2 | 0.7 | 27.3 | 13.3 | 2208 | 0 | 0.54 | 0.459 |
+| `subs` | 20 | 218.3 ± 11.2 | 172.6 ± 7.6 | 2 | 28.6 ± 5.8 | 0 | 38.7 | 0 | 4001 | 2 | 1.15 | 0.474 |
+| `subs_ev` | 20 | 217.5 ± 10.8 | 173.1 ± 7.8 | 1 | 28.4 ± 6.0 | 0 | 33.7 | 0 | 4059 | 2 | 1.18 | 0.474 |
+| `subs_local` | 20 | 218.3 ± 11.2 | 172.0 ± 7.6 | 15 | 31.2 ± 14.5 | 0 | 24.7 | 8.7 | 4012 | 2 | 1.15 | 0.476 |
+| `subs_msg` | 20 | 217.4 ± 10.2 | 172.5 ± 7.4 | 2 | 28.6 ± 5.8 | 0 | 33.3 | 0 | 4098 | 93 | 3.92 | 0.482 |
+| `truth` | 20 | 222.9 ± 15.5 | 167.3 ± 4.4 | 0 | 0 (2/3) | 0 | 0 | 0 | 2238 | 0 | 0.55 | 0.467 |
+
+At 10 robots, every `_ev` variant and `subs_local` matched its base row
+to within 1.5 % (`fleetsim/suites/map_sharing.yaml` reruns them).
+
+`fleet_scale`, 50 robots, radio, starting blind, no blockage.
+
+| variant | per h | mean s | `/fleet/tasks` delivery | stale | replans shared | map B/s | sub B/s | map copies/s | load |
+|---|---|---|---|---|---|---|---|---|---|
+| `all` | 395 ± 61 | 208 ± 8 | 0.52 ± 0.14 | 2910 | 105 | 564 | 0 | 2.94 | 0.84 |
+| `radius` | 443 ± 57 | 213 ± 10 | 0.66 ± 0.28 | 32517 | 276 | 1106 | 0 | 2.52 | 0.77 |
+| `subs` | 362 ± 143 | 226 ± 25 | 0.44 ± 0.22 | 41659 | 430 | 2929 | 2 | 1.40 | 0.93 |
+| `subs_msg` | 196 ± 72 | 193 ± 5 | 0.17 ± 0.09 | 44018 | 239 | 1811 | 214 | 7.12 | 1.25 |
+| `truth` | 378 ± 20 | 206 ± 7 | 0.45 ± 0.06 | 0 | 0 | 367 | 0 | 0.09 | 0.96 |
+
+`fleet_scale` has no blockage, so its `_ev` rows equal their base rows. It
+also sits at the radio's cliff. Per seed, `/fleet/tasks` delivery was
+either about 0.95 or about 0.3, so its means show which seeds tipped over.
+Three seeds can't separate the policies by throughput there; its bytes and
+load can. With `refresh_s: 600` (seeds 1–3), `subs` delivered 490, 307
+and 498 an hour on 425–526 map B/s, against 486, 311 and 337 an hour on
+666–818 map B/s for `radius`.
+
+What this says:
+1. **On these scenarios, who gets the patches doesn't change throughput or
+   delivery time beyond seed noise.** Few robots need the news: 1–3
+   (blockage, robot) pairs per run had a path into a pallet they didn't
+   know about. `bench_moved`'s pallets each lie between two shelves of a
+   segment, so only through-traffic runs into them. Perfect maps (`truth`)
+   are 3–5 % faster in delivery time (93.0 against 97.8 s; 167 against
+   172 s). Most of that gap is the first robot's discovery (`late` 14–32 s,
+   mostly that robot driving up to the pallet) and phantoms (below), and no
+   sharing policy removes either.
+2. **Subscriptions know what `all` knows where it matters.** With flips to
+   every robot, `missed` is 0, stale is 1–2 cells and there are 0 ghosts.
+   Where the refresh fits the budget, they do it for a fraction of the
+   bytes: 44 % of `all` on `map_sharing`, and on `bench_moved` at 10 robots
+   22 % of `all` and 43 % of `radius`, with the fewest copies and the lowest
+   load.
+3. **The refresh spends whatever the patches leave, up to `rate_cap_bps`.**
+   A full tile with a shared prior is 4.1 kB. To 19 robots that is 78 kB,
+   more than the token bucket holds (2 × 25 kB). So with `all` at 20 robots
+   the refresh never goes out: it stalls on its first tile, and `all` sends
+   only deltas (1 B/s). `radius` stalls the same way on crowded tiles.
+   Subscriptions send each refresh to fewer robots, so their refresh goes
+   out, and at 20 and 50 robots they send more map bytes than `radius`:
+   4001 against 2208, and 2929 against 1106. On `fleet_scale` that is
+   enough to tip more seeds over the cliff. "Map bytes" at these sizes
+   measures the budget more than the policy.
+4. **Announcements as messages break the 50-robot radio; on Status they
+   don't.** 7.1 copies per robot-second against 1.4, load 1.25 against 0.93,
+   and `/fleet/tasks` delivery 0.17 against 0.44.
+5. **Flips have to go to every robot.** `subs_local` has 13–15 stale cells
+   and 9 ghosts at 20 robots, and the stale-bid detour on `map_sharing`.
+6. **Event-driven publishes change nothing measurable here.** There were 0–28
+   event publishes per `bench_moved` run, 4–5 per `map_sharing` run and none
+   on `fleet_scale`. Peers learn 3 ms after the discoverer instead of up to
+   `publish_s` later (`test_an_event_publish_goes_out_when_the_camera_sees_the_blockage`).
+   That is too little time to change a plan made 20 m away.
+7. **Phantom pallets outlast every policy.** At 20 robots, 25–45 (pallet,
+   robot) pairs still had a gone pallet in their map at the end of the run.
+   Newest-observation-wins clears a pallet only when someone looks again,
+   and the robots that believe it route round the spot. Ghosts (a gone
+   pallet taken in from a stale peer's refresh) appear only where world
+   changes don't reach everyone: 13 under `radius` and 9 under `subs_local`.
+
+**How "identical" was checked.** `delivery_smoke`, `map_sharing` and
+`bench_moved` (10 robots, radio, 1500 s) were run before the change
+(c7bf064) and after every commit (da42b0b, 2bdae84, 8cb8f6e). Their
+`events.jsonl.gz` were compared line by line, ignoring `wall`, `wall_s` and
+`summary`, with the new `map_learn` events left out. All were identical:
+3198, 2813 and 13660 events. `map_learn` added 0, 10 and 57 events.
+`test_map_learn_only_adds_its_events` checks the same on the small test
+floor, and `test_defaults_never_enter_the_new_code` fails a default run that
+touches the subscription or event code. The dispatch layer's golden digest
+(`test_defaults_reproduce_the_event_stream_from_before_the_dispatch_layer`)
+still holds.
+
+**Open issues.**
+- A patch of a tile with no known subscriber is not sent and takes no
+  sequence number. A robot whose subscription the sender hasn't heard yet
+  misses it, and sees no gap, until a refresh. The window is usually
+  milliseconds; after a lost Status it can last up to the keepalive.
+- A revived robot keeps its old view of who subscribes, so it can pull
+  from a peer that left meanwhile. A resync heals it, at the cost of
+  traffic.
+- An answer that waits longer than the pull window for budget lets the
+  asker's gaps call for resyncs as well, so the tile is paid for twice.
+- On Status, an announcement reaches only the Status recipients.
+  `fleet_scale` has neighbour-only Status (12 m), so a far origin doesn't
+  learn of a subscription along someone's path. Flips still reach every
+  robot, and the pull covers the rest.
+- `clear_mean_s` covers the robots that had the pallet when it went. The
+  robots that took it in afterwards are counted as `ghosts`.
+
+**For the owner to decide.**
+- **The refresh.** It is a full snapshot that fills whatever budget is left,
+  and it stalls when one tile to many robots doesn't fit the bucket. It could
+  get a budget of its own, or become a digest: sequence numbers per tile, and
+  a resync only for the robots that are behind. With a shared prior it could
+  send only the cells that differ from the prior, as pull answers do. Until
+  then, map bytes at 20 or more robots compare budgets, not policies.
+- **Phantom pallets.** One option is an expiry for occupied cells that
+  differ from the prior. Another is a robot that replans round a pallet
+  nobody has seen for minutes and so goes to look. Either is a behaviour
+  change, beyond map sharing.
+- **The default.** Keep `radius` for now: subscriptions don't change
+  deliveries here, and they cost fewer bytes only where the refresh fits
+  the budget. Decide again after the refresh change.
+- **`map_share.events`.** Keep it off. It costs nothing and gains nothing
+  measurable with exact sensing. Revisit once sensing has noise.
+- **A scenario where map news decides deliveries.** No shipped scenario has
+  one. The candidate is `map_sharing`'s pattern (pallets in front of popular
+  pickups) on the radio at 20 or more robots, with pallets that move.
+
 ## Known issues
 
 - **Intermittent interpreter faults on the development machine — cause not
@@ -1198,12 +1509,13 @@ What this shows:
 - **Walkers never yield** (simtest's rule), so most walker contacts are a
   walker walking into a robot that stopped for it. `contacts.driven` counts
   only the ones where the robot moved into something ahead of it.
-- **`map_divergence.final_stale` and `recipients: radius`.** Stale counts
-  every cell where a robot differs from the fleet's newest knowledge. With
-  region-limited sharing a robot isn't *meant* to know distant tiles, so
-  stale is large by design (`fleet_scale`: ~32 k cells per robot). Read it
-  as "how far from one shared map", and use it as a pass criterion only
-  with `recipients: all`.
+- **`map_divergence.final_stale` and `recipients: radius` or `subscribers`.**
+  Stale counts every cell where a robot differs from the fleet's newest
+  knowledge. With region-limited sharing a robot isn't *meant* to know
+  distant tiles, so stale is large by design (`fleet_scale`: ~32 k cells per
+  robot). Read it as "how far from one shared map", and use it as a pass
+  criterion only with `recipients: all`. What region-limited sharing must get
+  right is the robots a change matters to: `map_spread` measures that.
 - **Notice extrapolation** is capped at 1 s. A full 3 s along a stale
   velocity planted phantom obstacles where a pacing walker never went.
 
@@ -1214,9 +1526,6 @@ What this shows:
   is a goal plus a straight corridor and `fleet_radio.should_yield`), and
   the explorer and exploration-from-scratch tasks (the explorer's logic still
   imports rclpy at module scope).
-- Region *subscriptions* for map tiles. `recipients: radius` picks receivers
-  by distance to the tile at send time, so a robot that later drives into a
-  tile has missed older updates until a refresh reaches it.
 - Dual band, zenoh keepalives, hidden terminals (spatial contention is a
   load factor, not a medium).
 - **Calibration against Isaac.** `nav.hiccup_rate_hz` (random recovery

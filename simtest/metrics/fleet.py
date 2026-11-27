@@ -1,5 +1,5 @@
-"""Fleet-scale metrics: deliveries, contacts, comms, map divergence, nav,
-utilisation and per-task lower bounds.
+"""Fleet-scale metrics: deliveries, contacts, comms, map divergence, how fast
+a blockage spreads, nav, utilisation and per-task lower bounds.
 
 Written for fleetsim (docs/fleetsim.md), which emits these streams on top
 of the ones Isaac runs share (gt, dispatch, task). They are ordinary simtest
@@ -8,11 +8,16 @@ re-scorable from a recorded run (`python3 -m fleetsim rescore DIR`).
 """
 from __future__ import annotations
 
+import math
 import statistics
 
 from . import Metric, register
 
 FINAL = {"DONE", "FAILED", "CANCELLED"}
+# Map-sharing traffic kinds (fleetsim/sim.py, fleetsim/mapshare.py): patches and
+# refresh, MapResync, and the subscription announcements, pulls and answers.
+MAP_KINDS = ("map", "resync", "mapsub", "mappull", "mapans")
+SUB_KINDS = ("mapsub", "mappull")
 ACTIVE = {"NAV_TO_PICKUP", "AWAIT_PICK", "PICKING", "NAV_TO_DROPOFF", "PLACING"}
 
 
@@ -202,7 +207,9 @@ class Contacts(Metric):
 @register
 class Comms(Metric):
     name = "comms"
-    version = 2
+    # 3: map_bytes_per_robot_s, sub_bytes_per_robot_s, map_copies_per_robot_s
+    #    (2026-11-26, map-tile subscriptions); the v2 values are unchanged.
+    version = 3
     streams = {"net"}
     summary = "Delivery ratio and latency per traffic kind, channel load, reachability."
     params = {}
@@ -220,10 +227,17 @@ class Comms(Metric):
                       "would have been saturated",
         "reach_min": "lowest share of node pairs with a route",
         "bytes_per_robot_s": "mean bytes offered per robot per second, all kinds",
+        "map_bytes_per_robot_s": "the same for map sharing alone: patches, refresh, MapResync "
+                                 "and tile subscriptions (announcements, pulls, answers)",
+        "sub_bytes_per_robot_s": "the same for tile-subscription control traffic alone "
+                                 "(announcements and pull requests; the answers are map data)",
+        "map_copies_per_robot_s": "map-sharing message copies sent per robot per second (on the "
+                                  "radio a frame costs airtime whatever its size)",
     }
 
     def __init__(self, ctx, **params):
         super().__init__(ctx, **params)
+        self.kind_bytes: dict[str, int] = {}
         self.tot: dict[str, list] = {}
         self.p95: dict[str, float] = {}
         self.loads, self.load_max, self.reach_min = [], 0.0, None
@@ -238,6 +252,7 @@ class Comms(Metric):
             t[0] += st["sent"]
             t[1] += st["delivered"]
             self.bytes += st["bytes"]
+            self.kind_bytes[kind] = self.kind_bytes.get(kind, 0) + st["bytes"]
             if st.get("p95_ms") is not None:
                 self.p95[kind] = max(self.p95.get(kind, 0.0), st["p95_ms"])
         self.loads.append(ev["load_mean"])
@@ -266,7 +281,16 @@ class Comms(Metric):
             "reach_min": self.reach_min,
             "over_cap_s": self.over_cap,
             "bytes_per_robot_s": round(self.bytes / span / robots, 1) if span else None,
+            "map_bytes_per_robot_s": self._per_robot_s(MAP_KINDS, span, robots),
+            "sub_bytes_per_robot_s": self._per_robot_s(SUB_KINDS, span, robots),
+            "map_copies_per_robot_s": round(sum(self.tot.get(k, [0])[0] for k in MAP_KINDS)
+                                            / span / robots, 2) if span else None,
         }
+
+    def _per_robot_s(self, kinds, span, robots):
+        if not span:
+            return None
+        return round(sum(self.kind_bytes.get(k, 0) for k in kinds) / span / robots, 1)
 
 
 @register
@@ -316,6 +340,99 @@ class MapDivergence(Metric):
             "final_wrong_occ": sum(r["wrong_occ"] for r in rows),
             "final_stale": sum(r.get("stale", 0) for r in rows),
             "mean_stale": round(statistics.fmean(self.stale), 1),
+        }
+
+
+@register
+class MapSpread(Metric):
+    name = "map_spread"
+    version = 1
+    streams = {"map_learn"}
+    summary = ("How fast a blockage that appears, or clears, reaches the own map of each "
+               "robot it matters to (fleetsim/maplearn.py).")
+    params = {}
+    values = {
+        "on_path": "(blockage appearance, robot) pairs where the robot's planned path ran into "
+                   "the blockage while its map didn't have it: the robots the news matters to",
+        "late_mean_s": "of those, mean sim seconds from when its path first ran into the "
+                       "blockage until its map had it (any cell occupied): how long it drove "
+                       "a path through a blockage it didn't know of",
+        "late_p95_s": "the same, 95th percentile",
+        "late_max_s": "the same, worst pair",
+        "never": "of those, how many never had it while it stood",
+        "from_peer_frac": "of those that had it, the share that got it from a peer (a patch, "
+                          "refresh, resync or pull answer) rather than their own camera",
+        "spread_mean_s": "of those that were not the first robot to know, mean sim seconds from "
+                         "when it was both known to some robot and on their path until their "
+                         "map had it: the propagation alone, without the wait for someone to "
+                         "see it",
+        "spread_max_s": "the same, worst pair",
+        "missed": "of those, how many found it with their own camera although another robot "
+                  "already knew: news that didn't reach them in time",
+        "all_learn_mean_s": "mean sim seconds from the appearance over every robot whose map "
+                            "had it, path or not",
+        "all_never": "(appearance, robot) pairs, path or not, never had while it stood",
+        "cleared": "(blockage clear, robot) pairs where the robot's map had the blockage when "
+                   "it went",
+        "clear_mean_s": "of those, mean sim seconds until no cell of it was occupied in the "
+                        "robot's map (until then it detours round a pallet that has left)",
+        "clear_p95_s": "the same, 95th percentile",
+        "clear_never": "of those, how many still had it when the run ended",
+        "ghosts": "(blockage clear, robot) pairs where the robot's map did not have the "
+                  "blockage when it went, but took it in later from a peer that hadn't seen it "
+                  "go (a refresh, a resync, a pull answer)",
+        "ghost_held_s": "of those, mean sim seconds the ghost stayed in its map, over the ones "
+                        "it dropped",
+        "ghost_never": "of those, how many still had the ghost when the run ended",
+    }
+
+    def __init__(self, ctx, **params):
+        super().__init__(ctx, **params)
+        self.rows: list[dict] = []
+
+    def on_event(self, ev):
+        self.rows.append(ev)
+
+    def result(self):
+        on = [e for e in self.rows if e["on"]]
+        first: dict = {}  # blockage -> when the first robot's map had it
+        for e in on:
+            if e["after_s"] is not None and e["how"] != "already":
+                first[e["blockage"]] = min(first.get(e["blockage"], math.inf), e["after_s"])
+        hit = [e for e in on if e.get("path_s") is not None]
+        got = [e for e in hit if e["after_s"] is not None]
+        late = [max(0.0, e["after_s"] - e["path_s"]) for e in got]
+        peer = [e for e in got if e["how"] in ("shared", "truth")]
+        later = [e for e in got if e["after_s"] > first.get(e["blockage"], math.inf)]
+        spread = [e["after_s"] - max(first[e["blockage"]], e["path_s"]) for e in later]
+        all_got = [e["after_s"] for e in on if e["after_s"] is not None]
+        off = [e for e in self.rows if not e["on"] and e.get("ghost_s") is None]
+        off_got = [e["after_s"] for e in off if e["after_s"] is not None]
+        ghost = [e for e in self.rows if not e["on"] and e.get("ghost_s") is not None]
+        held = [e["after_s"] - e["ghost_s"] for e in ghost if e["after_s"] is not None]
+
+        def mean(xs):
+            return round(statistics.fmean(xs), 2) if xs else None
+
+        return {
+            "on_path": len(hit),
+            "late_mean_s": mean(late),
+            "late_p95_s": round(_pct(late, 95), 2) if late else None,
+            "late_max_s": round(max(late), 2) if late else None,
+            "never": len(hit) - len(got),
+            "from_peer_frac": round(len(peer) / len(got), 3) if got else None,
+            "spread_mean_s": mean(spread),
+            "spread_max_s": round(max(spread), 2) if spread else None,
+            "missed": sum(1 for e in later if e["how"] == "sensed"),
+            "all_learn_mean_s": mean(all_got),
+            "all_never": len(on) - len(all_got),
+            "cleared": len(off),
+            "clear_mean_s": mean(off_got),
+            "clear_p95_s": round(_pct(off_got, 95), 2) if off_got else None,
+            "clear_never": len(off) - len(off_got),
+            "ghosts": len(ghost),
+            "ghost_held_s": mean(held),
+            "ghost_never": len(ghost) - len(held),
         }
 
 

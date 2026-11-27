@@ -41,8 +41,8 @@ its map — checked against Isaac with a 2-robot task list after this groundwork
 | A4 | Metrics: throughput, delivery time, time lost by cause, utilisation, lower bound | done |
 | A5 | Crash-tolerant parallel runs + local compute logging | done (`fleetsim/sysmon.py`; CPU of death from /proc, since faulthandler hides the kernel's segfault line) |
 | C12 | Scenario set (for review) + scenario editor in the operator view | done (scenarios drafted for review: `fleetsim/scenarios/bench_*.yaml`; editor in the operator view) |
-| B8 | Map-tile subscriptions | todo |
-| B9 | Event-driven map/intent updates | todo |
+| B8 | Map-tile subscriptions | done (`map_share.recipients: subscribers`, `fleetsim/mapshare.py`; measured in docs/fleetsim.md "Map sharing: subscriptions and event-driven updates": same deliveries, fewer bytes where the refresh fits its budget) |
+| B9 | Event-driven map/intent updates | done (`map_share.events`; no measurable effect with exact sensing, off by default) |
 | B10 | Keep right in aisles | todo |
 | B11 | Single-lane passage reservation | todo |
 | C13 | Comms traffic monitor in the replay | done (replay's Traffic panel, Load on the floor, `record.net_nodes`; bench runs listed in the replay; docs/fleetsim.md "Comms traffic monitor") |

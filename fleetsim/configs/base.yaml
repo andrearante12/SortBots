@@ -143,13 +143,52 @@ map_share:                    # commsim/docs/brief.md@6501799 "Obstacles and map
                               # true map (a localize-on-saved-map run), so only CHANGES need sharing
   tile_m: 6.4                 # region size: sequence numbers and refresh are per tile
   publish_s: 2.0              # brief: every 2-5 s
-  refresh_s: 60.0             # PLACEHOLDER: a full pass of snapshots over a robot's observed tiles
+  refresh_s: 60.0             # PLACEHOLDER: a full pass of snapshots over a robot's observed tiles.
+                              # It spends what patches leave of rate_cap_bps, and stalls on a tile
+                              # whose snapshot x recipients outgrows the bucket (all at 20 robots:
+                              # never sent; docs/fleetsim.md "Map sharing: subscriptions ...")
   rate_cap_bps: 100000        # brief: PLACEHOLDER 100 kbps per robot, every copy counted
   bytes_per_m2: 100.0         # PLACEHOLDER: compressed patch size (0.25 B per 0.05 m cell)
   chunk_bytes: 8192           # brief: up to ~8 KB per chunk
-  recipients: radius          # all | radius ("region subscribers": robots near the tile)
+  # Who gets a tile's patches and refresh snapshots:
+  #   all          every robot
+  #   radius       robots within radius_m of the tile at send time; one that
+  #                drives in later has missed what came before
+  #   subscribers  robots that subscribe to the tile (fleetsim/mapshare.py,
+  #                docs/fleetsim.md "Map sharing: subscriptions and
+  #                event-driven updates"): each robot subscribes to the tiles
+  #                near it and along its path, announces its set to the fleet,
+  #                and pulls a new tile's state from ONE peer that holds it
+  recipients: radius
   radius_m: 20.0
   resync_backoff_s: 2.0       # one MapResync per (origin, tile) per this long
+  # recipients: subscribers. sub_radius_m covers the camera's range_m (4.5 m),
+  # so a robot hears of whatever it could see next; sub_path_m is how far
+  # along its path it looks ahead (null: the whole path).
+  sub_radius_m: 6.0
+  sub_path_m: 30.0
+  sub_min_interval_s: 2.0     # announce a changed set at most this often
+  # How the set travels. status: on the robot's next two /fleet/status, to
+  # the Status recipients (no frames of its own). message: its own reliable
+  # message to every robot. As a message to 49 peers it took fleet_scale (50
+  # robots, radio) past the cliff: seed 1, Status delivery 62 %, /fleet/tasks
+  # 27 %, obstacle notices 717 -> 218 k copies, deliveries 122 -> 68 (2026-11-26);
+  # airtime is per frame far more than per byte, as for intents.
+  sub_transport: status
+  sub_keepalive_s: 30.0       # re-announce an unchanged set this often; a peer not heard for
+                              # 2.5x this is dropped (a dead robot stops costing patches)
+  # Where a patch goes that carries a cell the sender's own sensing flipped
+  # (free <-> occupied: the world moved). all: every robot, since the auction
+  # prices tasks anywhere and a robot bidding on a stale map wins tasks past a
+  # pallet it hasn't heard of. subscribers: like any other patch.
+  sub_flips_to: all
+  # Event-driven updates (B9): when the robot's OWN sensing flips a known cell
+  # (free <-> occupied: a blockage came or went), publish that tile at once
+  # instead of at the next publish_s tick. Same recipients and rate cap; at
+  # most one event publish per event_gap_s. With intent.enabled, a robot whose
+  # path changed with it re-announces its intent on an extra Status then.
+  events: false
+  event_gap_s: 0.5
 
 obstacle_share:               # #18: tell peers about movers they may not see
   enabled: true

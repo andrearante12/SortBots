@@ -147,6 +147,11 @@ class Robot:
         self.bumps: list[tuple] = []      # where it physically bumped into something
         self._last_share = -math.inf
         self.resync_wait: dict = {}       # (origin, tile) -> time a resync may go again
+        # Tiles where own sensing flipped a known cell (the world moved) and
+        # that flip is not published yet: map_share.events sends them at once,
+        # and subscriptions send them to every robot (fleetsim/mapshare.py).
+        self.flip_tiles: set = set()
+        self.next_event = 0.0             # when the next event publish may go
         # path intents (fleetsim/intent.py)
         self.icfg = cfg["intent"]
         self.intents: dict[int, dict] = {}  # peer k -> {"prio", "pts" (n, 3) abs, "at"}
@@ -406,6 +411,8 @@ class Robot:
 
     def _record_path(self) -> None:
         self._intent_dirty = True  # every new path is re-announced
+        if self.sim.learn is not None:
+            self.sim.learn.on_path(self)  # recording only (fleetsim/maplearn.py)
         if self.sim.cfg["record"]["paths"]:
             self.sim.record({"s": "path", "rid": self.rid, "purpose": self.purpose,
                              "pts": [[round(x, 2), round(y, 2)] for x, y in self.path]})
@@ -498,6 +505,8 @@ class Robot:
     def on_belief_change(self, changed: np.ndarray, cause: str) -> None:
         if not len(changed):
             return
+        if self.sim.learn is not None:
+            self.sim.learn.on_belief(self, changed, cause)  # recording only
         self.cost.update_cells(changed)
         if self.goal is not None and self.path and self.path_blocked_in_belief():
             self.replan_due = cause if self.replan_due is None else self.replan_due
@@ -751,6 +760,8 @@ class Robot:
         free, occ, dets = self.sensor.scan(self.x, self.y, self.yaw, sim.static_flat,
                                            sim.robot_owner_flat, sim.actor_owner_flat, self.node)
         changed = self.belief.observe(free, occ, now)
+        if sim.track_flips and len(self.belief.flipped):
+            self.flip_tiles.update(np.unique(self.belief.tile_of(self.belief.flipped)).tolist())
         self.on_belief_change(changed, "sensed")
         out = []
         for kind, ident, x, y in dets:
