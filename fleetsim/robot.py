@@ -1,5 +1,7 @@
-"""One simulated robot: its own map, planner, local layer, task FSM and the
-real fleet task auction (nodes/fleet_tasks.py FleetTasks, in-process).
+"""One simulated robot: its own map, planner, local layer, task FSM and its
+task side — by default the real fleet task auction (nodes/fleet_tasks.py
+FleetTasks, in-process), or whatever `dispatch.method` gives it
+(fleetsim/dispatch/: the seam is `self.core`, a RobotAgent).
 
 What is real and what stands in:
 
@@ -22,16 +24,15 @@ yet: /fleet/intent today carries a goal and a straight corridor.
 
 Peers are known three ways, as on the robots: seen in the camera cone,
 heard in their /fleet/status (pose, at the status rate, subject to the
-network), and as obstacle notices a peer shared. Never from ground truth.
+network), and as obstacle notices a peer shared. Never from ground truth,
+unless a perfect-information knob says so (fleetsim/info.py).
 """
 from __future__ import annotations
 
 import json
 import math
 import random
-import sys
 from collections import deque
-from pathlib import Path
 
 import numpy as np
 
@@ -39,10 +40,6 @@ from . import intent as I
 from .belief import Belief
 from .planner import INF, Costmap, path_length
 from .sensing import Sensor
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "nodes"))
-import fleet_tasks as ft  # noqa: E402
 
 ACTIVE = {"NAV_TO_PICKUP", "AWAIT_PICK", "PICKING", "NAV_TO_DROPOFF", "PLACING"}
 
@@ -166,25 +163,10 @@ class Robot:
                          "stuck": 0, "shared_changed": 0, "yields": 0, "yield_s": 0.0}
 
     def _new_core(self) -> None:
-        sim = self.sim
-        self.core = ft.FleetTasks(self.rid, sim.params, sim.waypoints, cfg=sim.ft_cfg, now=sim.now)
-        self.core._wall = lambda: 0.0
-        self.core._next_id = 0
-        self.core.grid = PathOracle(self, float(sim.params.bid_radius_m),
-                                    sim.cfg["tasks"]["bid_cost"] == "path")
-        self.core.set_pose((self.x, self.y), sim.now)
-        bat = sim.ft_cfg["battery"].get("sim_start_pct")
-        if bat is not None:
-            self.core.battery_pct = float(bat)
-        # task_manager's latched task_status reaches a starting fleet_tasks
-        # before any dispatch can; FleetTasks reads that first status for
-        # restart adoption, and would otherwise "adopt" our first real task
-        # by cancelling it.
-        self.core.on_task_status(json.dumps({"task_id": None, "state": "IDLE",
-                                             "queue_depth": 0, "queue": []}), sim.now)
-        self.core.drain()
+        """A fresh task side (start, or a reboot): fleetsim/dispatch picks it."""
+        self.core = self.sim.dispatch.robot_agent(self)
 
-    # ---- the FleetTasks seam ----------------------------------------------
+    # ---- the task-agent seam (fleetsim/dispatch) ----------------------------
 
     def core_call(self, fn, *a, **kw):
         fn(*a, **kw)
@@ -346,7 +328,9 @@ class Robot:
         age = now - m["built"]
         return {**m, "pts": [[x, y, round(dt - age, 2)] for x, y, dt in m["pts"]]}
 
-    def on_intent(self, m: dict, now: float) -> None:
+    def on_intent(self, m: dict, now: float, truth: bool = False) -> None:
+        if self.sim.peers_truth and not truth:
+            return  # info.peers: truth delivers every intent itself; the radio's copy is late
         p = np.array(m["pts"], dtype=float).reshape(-1, 3)
         p[:, 2] += now  # offsets from the send: re-based on OUR clock at arrival
         self.intents[int(m["k"])] = {"prio": tuple(m["prio"]), "pts": p, "at": now}

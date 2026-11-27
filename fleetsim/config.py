@@ -55,6 +55,9 @@ TOP_KEYS = {"name", "title", "description", "seed", "duration_s", "robots", "con
 # Blocks whose keys are not fixed by base.yaml.
 FREE_FORM = {("world", "synthetic"), ("fleet_tasks",), ("network", "radio", "radio_model")}
 DISTURBANCE_KINDS = {"kill", "revive", "partition", "block_link", "blockage"}
+DISPATCH_METHODS = ("auction", "central_greedy", "central_hungarian")  # fleetsim/dispatch
+INFO_CHOICES = {"map": ("shared", "truth"), "peers": ("heard", "truth"),
+                "dispatch": ("network", "truth")}
 
 
 class ScenarioError(ValueError):
@@ -183,6 +186,16 @@ def _validate(s: dict) -> None:
         raise ScenarioError("config.tasks.bid_cost: path | straight")
     if cfg["network"]["radio"]["contention"] not in ("global", "spatial"):
         raise ScenarioError("config.network.radio.contention: global | spatial")
+    dsp = cfg["dispatch"]
+    if dsp["method"] not in DISPATCH_METHODS:
+        raise ScenarioError(f"config.dispatch.method: {' | '.join(DISPATCH_METHODS)}")
+    if not isinstance(dsp["reassign_gain_s"], (int, float)) or dsp["reassign_gain_s"] < 0:
+        raise ScenarioError("config.dispatch.reassign_gain_s: a number >= 0")
+    if not isinstance(dsp["resolve_period_s"], (int, float)) or dsp["resolve_period_s"] <= 0:
+        raise ScenarioError("config.dispatch.resolve_period_s: a number > 0")
+    for key, ok in INFO_CHOICES.items():
+        if cfg["info"][key] not in ok:
+            raise ScenarioError(f"config.info.{key}: {' | '.join(ok)}")
     for i, t in enumerate(s["tasks"]):
         if not isinstance(t, dict) or {"at_s", "pickup", "dropoff"} - set(t):
             raise ScenarioError(f"tasks[{i}]: need at_s, pickup, dropoff")

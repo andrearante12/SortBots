@@ -35,8 +35,8 @@ its map — checked against Isaac with a 2-robot task list after this groundwork
 
 | # | Item | Status |
 |---|---|---|
-| A1 | Swappable task-assignment layer (dispatcher), central greedy + rolling Hungarian | todo |
-| A2 | Perfect-information mode | todo |
+| A1 | Swappable task-assignment layer (dispatcher), central greedy + rolling Hungarian | done |
+| A2 | Perfect-information mode | done |
 | A3 | Benchmark command (suites, seeds, sizes 2/5/10/20, one table) | done (`fleetsim bench`, `fleetsim/suites/smoke.yaml`; the real suite waits for C12) |
 | A4 | Metrics: throughput, delivery time, time lost by cause, utilisation, lower bound | done |
 | A5 | Crash-tolerant parallel runs + local compute logging | done (`fleetsim/sysmon.py`; CPU of death from /proc, since faulthandler hides the kernel's segfault line) |

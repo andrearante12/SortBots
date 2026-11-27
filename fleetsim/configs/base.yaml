@@ -80,6 +80,26 @@ tasks:
   dwell_s: 2.0                # task_manager DWELL_SEC
   bid_cost: path              # path = A* on the bidder's own belief; straight = straight line
 
+# Who assigns tasks (fleetsim/dispatch/; docs/fleetsim.md "Dispatchers and
+# perfect information").
+#   auction            every robot runs the real auction (nodes/fleet_tasks.py)
+#                      and the gateway only announces: the robots as they are.
+#   central_greedy     a dispatcher at the gateway gives the oldest open task to
+#                      the idle robot that reaches its pickup soonest.
+#   central_hungarian  the same dispatcher re-solves the whole assignment
+#                      (Kuhn-Munkres) on every event, carrying robots included.
+# The central ones send Dispatch/Cancel and hear robots back as reliable
+# /fleet/tasks messages over the network model, so they pay for their traffic
+# and stop assigning while the gateway is cut off. They price legs on the
+# true static map at robots.max_speed_mps; a blockage reaches them only as
+# the legs it makes fail (unless info.map: truth).
+dispatch:
+  method: auction
+  reassign_gain_s: 10.0       # central_hungarian: move an unpicked task to another robot only if
+                              # that saves this much drive time (hysteresis; without it the
+                              # assignment flips back and forth as robots move)
+  resolve_period_s: 5.0       # central: also re-solve this often (robots move between events)
+
 # configs/fleet_tasks.yaml is loaded first; this block overrides it (FREE-FORM).
 # protocol.quorum_nodes defaults to robots + 1 (every node, gateway included).
 fleet_tasks: {}
@@ -164,6 +184,19 @@ network:
     ref_frame_bytes: 300      # frame size the per-hop error rate is computed at
     radio_cell_m: 0.5         # walls are pooled to this before rack extraction
     radio_model: {}           # FREE-FORM: commsim/des/radio.py RadioParams overrides
+
+# Perfect information, one knob per channel of knowledge (fleetsim/info.py).
+# All default to the robots as they are. The full perfect-information
+# reference is all three at truth plus network.model: ideal with
+# network.ideal.delay_s: 0.
+info:
+  map: shared                 # shared | truth: every belief and costmap (and a central planner's
+                              # drive times) follow the true grid, blockages included, at once
+  peers: heard                # heard | truth: peer poses for the local layer and path intents come
+                              # from ground truth every step, not from /fleet/status
+  dispatch: network           # network | truth: /fleet/tasks is delivered instantly and never lost
+                              # (the auction's protocol, or a central dispatcher's messages), and a
+                              # central dispatcher reads robots' true pose and liveness
 
 record:
   gt_hz: 5.0                  # ground truth (Isaac publishes 10 Hz)

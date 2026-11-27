@@ -12,6 +12,10 @@ The true world is the only thing robots never read directly. They sense it
 through the network. The recording does read it, for ground truth: the
 `gt` stream has the same schema Isaac's /sim/ground_truth produces, so
 simtest's metrics score fleetsim runs and Isaac runs alike.
+
+Who assigns tasks is `dispatch.method` (fleetsim/dispatch/: the real
+auction, or a central dispatcher at the gateway node), and what robots may
+know beyond their own sensing and the network is `info.*` (fleetsim/info.py).
 """
 from __future__ import annotations
 
@@ -25,7 +29,9 @@ from pathlib import Path
 
 import numpy as np
 
+from . import dispatch as D
 from . import grid as G
+from . import info as PI
 from . import network as N
 from .planner import FREE, OCC, Costmap, path_length
 from .robot import Robot
@@ -78,13 +84,18 @@ class Sim:
             proto["quorum_nodes"] = n + 1  # every node, gateway included (DES does the same)
         self.ft_cfg["speed_mps"] = float(cfg["robots"]["max_speed_mps"])
         self.params = Params.from_config(self.ft_cfg)
-        self.gw = ft.FleetTasks(None, self.params, self.waypoints, gateway=True,
-                                cfg=self.ft_cfg, now=0.0)
-        self.gw._wall = lambda: 0.0
-        self.gw._next_id = 0
+        # The gateway's task side and every robot's (Robot._new_core) come
+        # from the dispatch method; with `auction` these are the FleetTasks
+        # objects this file built itself before the layer existed.
+        self.dispatch = D.build(self)
+        self.gw = self.dispatch.gateway
+        self.info = PI.build(self)
+        self.peers_truth = cfg["info"]["peers"] == "truth"
+        self.tasks_ideal = cfg["info"]["dispatch"] == "truth"
 
         homes = self._homes(n)
-        prior = self.static.copy() if cfg["map_share"]["prior"] == "truth" else None
+        prior = self.static.copy() if cfg["map_share"]["prior"] == "truth" \
+            or cfg["info"]["map"] == "truth" else None
         self.robot_owner = np.zeros((self.grid.height, self.grid.width), dtype=np.int32)
         self.robot_owner_flat = self.robot_owner.reshape(-1)
         self.robots: list[Robot] = []
@@ -132,6 +143,7 @@ class Sim:
         self.static = occ.astype(bool)
         self.static_flat = self.static.reshape(-1)
         self.base_static = self.static.copy()
+        self.static_version = 0  # bumped whenever the true grid changes (a blockage)
         self._map_homes = homes
         rng = np.random.default_rng(self.seed + 1)
         if not wps:
@@ -410,6 +422,9 @@ class Sim:
                 raise ValueError(f"blockage {d['blockage']} is off the map")
             sl = (slice(c0[1], c1[1] + 1), slice(c0[0], c1[0] + 1))
             self.static[sl] = True if on else self.base_static[sl]
+            self.static_version += 1
+            if self.info is not None:
+                self.info.map_changed(sl)
         self.record({"s": "disturb", "on": on, **{k: v for k, v in d.items() if k != "at_s"}})
 
     def _revive(self, r: Robot, fresh: bool) -> None:
@@ -444,6 +459,15 @@ class Sim:
                 to = m.get("to")
                 dsts = (self._all_nodes() if to is None
                         else np.array(to if isinstance(to, list) else [to], dtype=np.int64))
+                if self.tasks_ideal:
+                    # info.dispatch: truth — instantly, always, through any
+                    # partition, and off the radio. Through the heap at the
+                    # current time, so a reply is never handled inside the
+                    # call that caused it.
+                    for node in dsts.tolist():
+                        if node != src:
+                            self.at(self.now, self._deliver_task, node, (sender, m))
+                    continue
                 self._send("tasks", src, dsts, len(val) + 8, True,
                            self._deliver_task, (sender, m))
             elif kind == "dispatch" and owner is not None:
@@ -476,7 +500,7 @@ class Sim:
 
     def _status_tick(self, r: Robot) -> None:
         cfg = self.cfg["status"]
-        owned = r.core.alloc.owned()
+        owned = r.core.owned()
         raw = fleet_radio.encode_status(r.rid, r.x, r.y, r.yaw, r.v, 0.0, r.mode(), self.now,
                                         owned=owned, battery_pct=r.core.battery_pct)
         if cfg["recipients"] == "all":
@@ -504,7 +528,7 @@ class Sim:
                 continue
             for node in np.flatnonzero(reach[r.node]).tolist():
                 if node != r.node:
-                    r.core.alloc.heard_network(now, peer=node)
+                    r.core.heard_network(now, node)
 
     def _apply_status(self) -> None:
         if not self._pending_status:
@@ -532,7 +556,7 @@ class Sim:
             rid = f"robot_{src}"
             for node in stale.tolist():
                 if node == GW:
-                    self.gw.on_peer_status(rid, now, battery_pct=bat, mode=mode)
+                    self.dispatch.gateway_status(src, now, bat, mode, (x, y))
                     self.handle_actions(None, self.gw.drain())
                 else:
                     rr = self.robots[node - 1]
@@ -729,12 +753,7 @@ class Sim:
     def _tasks_done(self) -> bool:
         if not self.announced or self._pending_announces > 0:
             return False
-        a = self.gw.alloc
-        for rec in self.announced:
-            t = a.tasks.get(int(rec["task_id"][len(ft.TASK_PREFIX):]))
-            if t is not None and t.state != "done":
-                return False
-        return True
+        return all(self.dispatch.task_done(rec["task_id"]) for rec in self.announced)
 
     def run(self) -> dict:
         cfg = self.cfg
@@ -769,6 +788,8 @@ class Sim:
             if cfg["status"]["session_liveness"] and t >= nxt["session"]:
                 nxt["session"] += float(cfg["status"]["liveness_poll_s"])
                 self._session_liveness()
+            if self.info is not None:
+                self.info.step(t)
             self.gw.tick(t)
             self.handle_actions(None, self.gw.drain())
             for r in self.robots:
@@ -819,6 +840,9 @@ class Sim:
                    "nav": {k: round(sum(r.counters[k] for r in self.robots), 2)
                            for k in self.robots[0].counters} if self.robots else {},
                    "notes": self.notes}
+        extra = self.dispatch.summary()
+        if extra is not None:
+            summary["dispatch"] = extra
         self.record({"s": "end", "reason": reason, "sim_s": round(t, 3), "wall_s": round(wall, 3),
                      "summary": summary})
         return summary

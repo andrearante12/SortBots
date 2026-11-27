@@ -39,6 +39,8 @@ SETTABLE = {
     "status.recipients": {"label": "Status sent to", "options": ["all", "radius"]},
     "status.session_liveness": {"label": "Session liveness", "options": ["true", "false"]},
     "record.belief_maps": {"label": "Own maps recorded", "options": ["all"]},
+    "dispatch.method": {"label": "Task assignment",
+                        "options": ["auction", "central_greedy", "central_hungarian"]},
 }
 
 
