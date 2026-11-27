@@ -542,21 +542,33 @@ message, and every task-status change travels back as a Report (one per
 step at most). Poses come from the robots' `/fleet/status`, which the
 gateway always receives. So under load its messages are late or lost, and
 while the gateway is cut off it assigns nothing. Robots keep running the
-same task FSM, without `AWAIT_PICK`: a central planner is its own single
-source of truth, so it needs no confirmed-pick handshake. The rules that
-keep it and the robots consistent, in brief (the `central.py` docstring
-has them in full):
+same task FSM. The rules that keep it and the robots consistent, in brief
+(the `central.py` docstring has them in full):
 
-- A robot not heard for `status_timeout_s` (6 s) is lost. Its tasks that
-  were not yet picked are re-planned. A task whose item is on board stays
-  with it, because nobody else can deliver it. A lost robot keeps working
-  what it has. When it is heard again, the dispatcher asks it (`Query`)
-  what it holds before planning again.
+- **The dispatcher decides every pick.** A robot at the shelf waits in
+  `AWAIT_PICK` until the dispatcher sends `Pick`. The dispatcher grants a
+  pick once, to the task's current robot, and never moves the task after
+  that. This is the auction's switch, `fleet_tasks.protocol.confirmed_picks`
+  (on by default). If nobody answers within `task_lease_s` (10 s), the robot
+  gives the task back and leaves the spot, as an isolated auction owner
+  does. With `info.dispatch: truth` robots pick on arrival, because the
+  dispatcher sees every pick as it happens.
+- A robot not heard for `status_timeout_s` (6 s) is lost. Its tasks without
+  a granted pick are re-planned. A task with a granted pick stays with it,
+  because nobody else can deliver it. A lost robot keeps working what it
+  has. When it is heard again, the dispatcher asks it (`Query`) what it
+  holds, and plans only after the answer.
+- A dispatcher that was itself down (a gateway outage) knows it from its
+  own clock. It takes the silence as its own: every robot gets the full
+  timeout again, and every robot is asked before anything is planned.
+- How a task ended is never left to one message. A robot repeats each
+  outcome (DONE, FAILED, CANCELLED, where and when) in its Reports until
+  the dispatcher Acks it. A Query names every task the dispatcher ever gave
+  that robot without hearing how it ended, and the answer gives the outcome
+  of each.
 - Whoever holds the item keeps the task. A robot refuses a Cancel for a
   task whose item is on board and reports instead. The dispatcher then
   takes that task back from whoever else it went to.
-- A task whose robot is at the shelf (`PICKING`) is never moved. A Cancel
-  sent then could arrive after the pick.
 - Reports echo the sequence number of the last gateway message. A Query
   answer settles anything still unexplained: a lost Dispatch, a lost
   Report, or a reboot.
@@ -640,7 +652,8 @@ What this shows so far:
   return** when there are more tasks than robots. The minimum total drive
   time prefers a nearer task, and the far one waits (`delivery_smoke`: task
   7 was dropped at 32 s and delivered at 318 s). That is the objective as
-  specified. If p95 delivery time matters, it needs an age term.
+  specified. The age term (`dispatch.age_weight`, below) addresses it, but
+  as measured it costs more than it gains.
 - On `fleet_scale` (radio, 50 robots) the central methods delivered as
   much as the auction (119 and 123 vs 122). They also recorded 6–10
   duplicate episodes: robots the dispatcher lost when their Status was
@@ -655,9 +668,106 @@ were run on the tree before the switches and after, and their
 keeps a digest of the small test floor's run from before, on the numpy
 version it was recorded with.
 
-Not covered: `kill: gateway` doesn't kill the gateway. `_disturb` indexes
-`robots[node - 1]`, so it kills the last robot. To take the gateway away,
-cut it off with `partition: [[gateway], rest]`.
+### Fixed 2026-11-26: two robots sent to one shelf after a gateway outage or a split
+
+The full benchmark found the central methods sending a robot to an empty
+shelf (`nav.empty_shelf` > 0) in `bench_dead_gateway` and
+`bench_partition`, in 8 of 12 runs per method. That is the central version
+of the auction's lost Complete (finding 2). There were three causes:
+
+1. **A delivery made while the gateway was down was redone.** When the
+   gateway came back, the dispatcher took every robot for lost, because it
+   had heard none for 180 s. It re-planned the tasks it still thought were
+   unpicked. It then asked each robot only about the tasks it still counted
+   as that robot's. A robot that had delivered one of the re-planned tasks
+   during the outage was never asked about it, so the task went out again.
+2. **The same with perfect information.** The dispatcher read robots' true
+   pose and liveness, but it learned how tasks ended only from Reports. The
+   Reports sent during the outage were lost, so it later reassigned a task
+   that had been delivered long before.
+3. **A split let two robots pick the same task.** The dispatcher re-planned
+   the task of a robot it could no longer hear. That robot kept going,
+   picked the item, and the new robot found the shelf empty. With
+   `fleet_tasks.protocol.confirmed_picks: false` this still happens (the
+   `central_hungarian_nopick` rows below). Radio loss alone does it too: the
+   dispatcher loses a robot whose Status stopped arriving, while the robot
+   is still working.
+
+What changed (the rules in the list above):
+
+- The dispatcher decides every pick (cause 3).
+- A robot repeats each outcome until the dispatcher acks it, and a Query
+  names every task the robot was ever given (cause 1).
+- The dispatcher recognises its own outage (cause 1).
+- With `info.dispatch: truth` it reads where each item is from the sim
+  (cause 2).
+
+Measured with `fleetsim/suites/central_faults.yaml`: 2, 5, 10 and 20 robots,
+seeds 1-3, 12 runs per row. "Before" is the full benchmark of 2026-11-27
+(`20261127T031709Z_bench`). "Empty" = runs with an empty-shelf visit (and
+the number of visits).
+
+| Scenario | Method | Empty before → after | Done before → after | per_hour | mean_s | p95_s |
+|---|---|---|---|---|---|---|
+| `bench_dead_gateway` | central_greedy | 8/12 (32) → 0/12 | 359 → 350 of 361 | 79.9 → 76.0 | 185 → 239 | 307 → 455 |
+| | central_hungarian | 8/12 (23) → 0/12 | 360 → 356 | 83.0 → 81.1 | 173 → 206 | 265 → 392 |
+| | central_hungarian_perfect | 8/12 (14) → 0/12 | 360 → 359 | 84.2 → 81.3 | 180 → 176 | 285 → 270 |
+| | central_hungarian_nopick | – → 1/12 (1) | – → 361 | – → 86.1 | – → 174 | – → 266 |
+| | auction (before, for reference) | 0/12 | 339 | 72.3 | 246 | 533 |
+| `bench_partition` | central_greedy | 8/12 (15) → 0/12 | 360 → 361 of 361 | 83.7 → 85.8 | 164 → 169 | 234 → 251 |
+| | central_hungarian | 6/12 (10) → 0/12 | 360 → 361 | 83.2 → 84.3 | 163 → 169 | 238 → 266 |
+| | central_hungarian_perfect | 0/12 → 0/12 | 360 → 360 | 85.0 → 85.0 | 162 → 162 | 232 → 232 |
+| | central_hungarian_nopick | – → 5/12 (9) | – → 360 | – → 83.2 | – → 163 | – → 237 |
+| | auction (before, for reference) | 0/12 | 357 | 77.7 | 196 | 328 |
+
+The price of deciding every pick centrally is waiting for that decision.
+A robot that reaches its shelf while the gateway is down, or while it is
+cut off from the gateway, waits in `AWAIT_PICK`. After `task_lease_s` it
+gives the task back. So in `bench_dead_gateway` the tasks caught by the
+outage are delivered later (mean +33 to +54 s, p95 +127 to +148 s), and
+deliveries per hour fall 2 % (Hungarian) and 5 % (greedy). At 10 and 20
+robots per_hour is within -5 % and +2 % of before. Most of the loss is at 2
+robots on the radio. There, some shelves are out of radio range of both the
+gateway and the other robot, so a pick there can never be confirmed: 10 to
+11 of 16 tasks were done, against 16 before. The auction has the same limit
+at those shelves, because it needs a majority to pick (10 of 16 at 2
+robots, before). Before the fix, the central methods picked there without
+telling anyone, and that same behaviour caused the empty shelves. Coverage
+at the shelves (relays) is already an open decision in the plan.
+`bench_partition` loses nothing: per_hour +1 to +2.5 %, mean +5 to +6 s.
+
+The no-grant variant keeps throughput in `bench_dead_gateway` (86.1 per
+hour, 361/361) and is clean there in all but 1 of 12 runs. That one run was
+radio loss, not the outage. It still sends robots to empty shelves in 5
+of 12 `bench_partition` runs. Choose it with
+`--set fleet_tasks.protocol.confirmed_picks=false`.
+
+In two 20-robot perfect-information runs, one task was still undone at the
+end (204 of 206, against 205). Both times its robot failed its dropoff leg
+in traffic near the docks after ~220 s, and the 60 s retry had not finished
+when the run ended. This is variance in traffic, not the dispatcher.
+
+**Age term.** `dispatch.age_weight` (default 0) makes a waiting task's cost
+fall by that many seconds for every second it has waited. It changes only
+which tasks get robots when there are more tasks than robots, not who does
+a task. Measured on the rolling Hungarian at 5, 10 and 20 robots, seeds
+1-3 (9 runs per row):
+
+| Scenario | age_weight | Done | per_hour | mean_s | p95_s |
+|---|---|---|---|---|---|
+| `bench_rush` (overloaded) | 0 | 870/1478 | 293.9 | 199 | 387 |
+| | 0.25 | 777/1478 | 262.5 | 304 | 592 |
+| | 1 | 754/1478 | 254.7 | 324 | 552 |
+| `bench_burst` | 0 | 315/315 | 213.8 | 275 | 513 |
+| | 0.25 | 315/315 | 220.1 | 272 | 507 |
+| | 1 | 315/315 | 221.7 | 273 | 511 |
+
+It does not pay on these, so the default stays 0. Under sustained overload
+(`bench_rush`), serving the oldest tasks first means longer drives: 11 to
+13 % fewer deliveries, and the delivered tasks are older, so p95 rises.
+Note that p95 counts delivered tasks only. With the weight at 0, the tasks
+it starves never count, so its p95 flatters it. In `bench_burst`, where
+every task is delivered, the effect is within 3 % either way.
 
 ## Scenario editor
 

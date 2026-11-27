@@ -63,12 +63,23 @@ section of `docs/fleetsim.md`. None blocks the benchmark.
 Comparisons and metrics
 - **Hungarian starvation (A1, A6).** When tasks outnumber robots, minimising
   total drive time can leave a far task waiting (one waited 286 s in
-  `delivery_smoke`; p95 up to 500 s when a capability is scarce). An age term
-  in the cost would fix it, at some cost in total drive time.
+  `delivery_smoke`; p95 up to 500 s when a capability is scarce). The age
+  term now exists (`dispatch.age_weight`, default 0). In `bench_rush` it cost
+  11-13 % of deliveries and raised p95, and in `bench_burst` it changed
+  nothing beyond 3 %. Keep it at 0, or measure p95 with undone tasks
+  counted (today's p95 ignores the tasks that starve)?
+- **Central dispatch decides every pick (A1, 2026-11-26).** Without that, a
+  split or a lost Status sent two robots to one shelf (`bench_partition`,
+  `bench_dead_gateway`). Now a robot waits at the shelf for the dispatcher's
+  word and gives up at `task_lease_s`. That costs `bench_dead_gateway`
+  2-5 % of per_hour and 33-54 s of mean delivery, and at 2 robots on the
+  radio shelves out of range can't be picked at all (the auction has the
+  same limit). `fleet_tasks.protocol.confirmed_picks: false` restores the
+  old behaviour for comparison. Agree with it as the reference?
 - **Central dispatch on a lossy radio (A1).** At 50 robots a lost Status makes
-  the dispatcher declare a robot lost and re-plan its task, which then gets
-  worked twice. A longer loss timeout, or asking before re-planning, are the
-  options.
+  the dispatcher declare a robot lost and re-plan its task, and both robots
+  drive to it until the Cancel arrives (pick grants now stop the second pick).
+  A longer loss timeout would cut the wasted driving.
 - **Why central methods cause about twice the robot-caused stops (A1)** —
   not yet explained.
 - **`per_hour` window (A4, done):** first request to last delivery, not the
@@ -131,8 +142,10 @@ more; `Sim._announce` calls `gw.request`. Make that one implementation of a
   reliable `tasks` message over the network model, robot status comes back on
   `/fleet/status` (so a central dispatcher on the radio pays for its traffic and
   loses the fleet when the gateway is cut off — part of what's measured). The
-  robots still run the same task FSM (`AWAIT_PICK` skipped: a central planner is
-  its own single source of truth).
+  robots still run the same task FSM. `AWAIT_PICK` was skipped at first (a
+  central planner as its own single source of truth). Since 2026-11-26 the
+  dispatcher grants every pick, because a planner that can't reach a robot
+  is not the source of truth for what that robot does.
 - Rolling Hungarian: re-solve on events (task announced, robot finished, robot
   lost) over robots that are idle or not yet holding an item x tasks not yet
   picked; a robot's cost is the drive time from where it will be free (after its
