@@ -267,6 +267,163 @@ so head-on meetings pass without stopping), and detours that treat a
 higher-priority peer's intent as a temporary cost on the costmap (another
 aisle, rather than waiting).
 
+## Dispatchers and perfect information
+
+Two switches (2026-11-26) for the benchmark's two gaps (docs/fleetsim-plan.md):
+**who assigns tasks** (`dispatch.method`, the coordination gap) and **what
+robots may know** (`info.*`, the information gap). Defaults are the robots
+as they are, and a default run is bit-identical to one from before the
+switches existed.
+
+```bash
+/usr/bin/python3 -m fleetsim run walkers --set dispatch.method=central_hungarian
+# the perfect-information reference, for any method:
+/usr/bin/python3 -m fleetsim run walkers --set dispatch.method=central_hungarian \
+    --set info.map=truth --set info.peers=truth --set info.dispatch=truth \
+    --set network.model=ideal --set network.ideal.delay_s=0
+```
+
+The operator view's run form offers the method as **Task assignment**.
+
+### `dispatch.method`
+
+| Method | Who decides | How |
+|---|---|---|
+| `auction` (default) | every robot | the real FleetTasks auction (`nodes/fleet_tasks.py`); the gateway only announces |
+| `central_greedy` | one dispatcher at the gateway | on every event and every `resolve_period_s`, the oldest open task goes to the **idle** robot that reaches its pickup soonest, repeated while both remain; never reassigns |
+| `central_hungarian` | one dispatcher at the gateway | on the same triggers, Kuhn-Munkres over robots × tasks not yet picked, minimising total drive time to pickup; a robot carrying an item counts as free at its dropoff after its remaining drive and dwell, so it can take one queued task |
+
+The code is `fleetsim/dispatch/`. A robot talks to its task side through
+one small interface (`RobotAgent` in `fleetsim/dispatch/__init__.py`:
+`set_pose`, `tick`, `on_task_status`, `on_message`, `on_peer_status`,
+`heard_network`, `owned`, `battery_pct`, `drive`, `drain`). FleetTasks is
+one already, a central method gives robots a thin client instead, and the
+decentralised methods still to come (SSI auctions, CBBA, the distributed
+Hungarian method, #50) plug in at the same seam as per-robot agents that
+exchange messages.
+
+**A central dispatcher pays for its radio.** It sits at network node 0. A
+Dispatch or Cancel travels gateway → robot as a reliable `/fleet/tasks`
+message, and every task-status change travels back as a Report (one per
+step at most). Poses come from the robots' `/fleet/status`, which the
+gateway always receives. So under load its messages are late or lost, and
+while the gateway is cut off it assigns nothing. Robots keep running the
+same task FSM, without `AWAIT_PICK`: a central planner is its own single
+source of truth, so it needs no confirmed-pick handshake. The rules that
+keep it and the robots consistent, in brief (the `central.py` docstring
+has them in full):
+
+- A robot not heard for `status_timeout_s` (6 s) is lost. Its tasks that
+  were not yet picked are re-planned. A task whose item is on board stays
+  with it, because nobody else can deliver it. A lost robot keeps working
+  what it has. When it is heard again, the dispatcher asks it (`Query`)
+  what it holds before planning again.
+- Whoever holds the item keeps the task. A robot refuses a Cancel for a
+  task whose item is on board and reports instead. The dispatcher then
+  takes that task back from whoever else it went to.
+- A task whose robot is at the shelf (`PICKING`) is never moved. A Cancel
+  sent then could arrive after the pick.
+- Reports echo the sequence number of the last gateway message. A Query
+  answer settles anything still unexplained: a lost Dispatch, a lost
+  Report, or a reboot.
+
+**Hysteresis.** The Hungarian dispatcher keeps a task with its current
+robot unless another assignment saves at least `reassign_gain_s` (10 s).
+Current pairs get that much off their cost, so a change must pay for
+itself. Without it the assignment flips as robots move.
+
+**Drive times** come from the true static map, because a warehouse's
+layout is known to its operator. A blockage is known only through the legs
+it makes fail, unless `info.map: truth`. One A* per robot-task pair per
+solve is too slow at 20 × 20, so `fleetsim/dispatch/costs.py` builds a
+Dijkstra distance field per waypoint on first use (~40 ms on the default
+floor) and looks robots up in it. The field builds are almost all of the
+dispatcher's cost: 0.5–1.6 s per run on `delivery_smoke` and `walkers`. The
+Hungarian solve itself is under 1 ms at 20 × 20.
+
+### `info.*`
+
+| Knob | Default | `truth` |
+|---|---|---|
+| `info.map` | `shared` | every robot's belief and costmap, and a central planner's drive times, follow the true grid the moment it changes, blockages included |
+| `info.peers` | `heard` | peer poses for the local layer, and path intents, come from ground truth every step, not from `/fleet/status` (a dead robot still counts: it is still in the way) |
+| `info.dispatch` | `network` | `/fleet/tasks` is delivered instantly and never lost, through partitions too, and off the radio. A central dispatcher also reads each robot's true pose and liveness |
+
+The full perfect-information reference is all three at `truth` plus
+`network.model: ideal` with `network.ideal.delay_s: 0`. Status, map
+patches and obstacle notices still go over the network and still cost
+airtime. Robots just don't depend on them. To take map traffic out as
+well, set `map_share.enabled: false`.
+
+For `auction`, `info.dispatch: truth` means the auction's own protocol
+runs on a perfect channel. Bids, claims, lease beacons, acks and completes
+arrive at once, so nobody is ever isolated by a partition. This is the
+auction's version of "the dispatcher's messages always arrive". It is the
+same algorithm with perfect communication, which is what the information
+gap compares against.
+
+### Measured (seeds 1 and 2, i9-14900HX)
+
+`robot stops` = the `nav` metric's `blocked_robot` (stops for a peer).
+"perfect" = the reference settings above. `delivery_smoke`'s tasks and
+homes are fixed and its network is ideal, so seeds 1 and 2 gave the same
+numbers (only sub-millisecond timings differ). `walkers` has a Poisson
+task stream and runs for its full 600 s, so its seeds differ (seed 1 / seed
+2 below). Duplicates were 0 in every run.
+
+| Scenario | Method | Info | Done | per_hour | mean_s | Robot stops |
+|---|---|---|---|---|---|---|
+| `delivery_smoke` | auction | network | 12/12 | 111.9 | 216.9 | 44 |
+| | | perfect | 12/12 | 111.6 | 216.9 | 44 |
+| | central_greedy | network | 12/12 | 116.3 | 195.8 | 92 |
+| | | perfect | 12/12 | 116.3 | 195.8 | 92 |
+| | central_hungarian | network | 12/12 | 127.5 | 183.5 | 80 |
+| | | perfect | 12/12 | 127.5 | 183.5 | 80 |
+| `walkers` | auction | network | 23/34 · 32/38 | 138 · 192 | 161 · 190 | 186 · 169 |
+| | | perfect | 24/34 · 32/38 | 144 · 192 | 171 · 190 | 236 · 208 |
+| | central_greedy | network | 25/34 · 35/38 | 150 · 210 | 138 · 171 | 236 · 293 |
+| | | perfect | 27/34 · 37/38 | 162 · 222 | 142 · 164 | 186 · 259 |
+| | central_hungarian | network | 27/34 · 37/38 | 162 · 222 | 142 · 151 | 199 · 260 |
+| | | perfect | 27/34 · 37/38 | 162 · 222 | 142 · 158 | 208 · 304 |
+
+Wall time per run, one at a time: `delivery_smoke` 5.7–6.7 s and `walkers`
+13–16 s for every method. The central methods are slightly faster, because
+nobody computes A* bids. On `fleet_scale` (50 robots, radio) it was
+auction 174 s, greedy 122 s, Hungarian 123 s.
+
+What this shows so far:
+- On these ideal-network scenarios the **coordination gap is the bigger
+  one**. Rolling Hungarian beats the auction by 14–17 % in deliveries per
+  hour, and its mean delivery is 12–21 % shorter. Greedy sits between the
+  two.
+- **Perfect information barely moves anything here.** The network is
+  already ideal, the maps start true, and nothing blocks an aisle. The
+  information gap needs the radio and blockage scenarios (C12).
+- **Central methods stop for peers more often** (`delivery_smoke`: 80–92
+  vs 44). Why is not measured yet.
+- **The rolling Hungarian can take a task off a robot with nothing in
+  return** when there are more tasks than robots. The minimum total drive
+  time prefers a nearer task, and the far one waits (`delivery_smoke`: task
+  7 was dropped at 32 s and delivered at 318 s). That is the objective as
+  specified. If p95 delivery time matters, it needs an age term.
+- On `fleet_scale` (radio, 50 robots) the central methods delivered as
+  much as the auction (119 and 123 vs 122). They also recorded 6–10
+  duplicate episodes: robots the dispatcher lost when their Status was
+  dropped kept driving to tasks that it had re-planned, until the Cancel
+  arrived. There were 0 empty-shelf visits.
+
+How "bit-identical" was checked: `delivery_smoke` and `partition_heal`
+were run on the tree before the switches and after, and their
+`events.jsonl.gz` compared line by line, ignoring `wall`, `wall_s` and
+`summary`. Both were identical (3186 and 3325 events).
+`test_defaults_reproduce_the_event_stream_from_before_the_dispatch_layer`
+keeps a digest of the small test floor's run from before, on the numpy
+version it was recorded with.
+
+Not covered: `kill: gateway` doesn't kill the gateway. `_disturb` indexes
+`robots[node - 1]`, so it kills the last robot. To take the gateway away,
+cut it off with `partition: [[gateway], rest]`.
+
 ## Known issues
 
 - **Intermittent interpreter faults on the development machine — cause not

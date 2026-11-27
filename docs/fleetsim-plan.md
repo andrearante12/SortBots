@@ -35,8 +35,8 @@ its map — checked against Isaac with a 2-robot task list after this groundwork
 
 | # | Item | Status |
 |---|---|---|
-| A1 | Swappable task-assignment layer (dispatcher), central greedy + rolling Hungarian | todo |
-| A2 | Perfect-information mode | todo |
+| A1 | Swappable task-assignment layer (dispatcher), central greedy + rolling Hungarian | done |
+| A2 | Perfect-information mode | done |
 | A3 | Benchmark command (suites, seeds, sizes 2/5/10/20, one table) | todo |
 | A4 | Metrics: throughput, delivery time, time lost by cause, utilisation, lower bound | todo |
 | A5 | Crash-tolerant parallel runs + local compute logging | todo |
