@@ -11,6 +11,9 @@ gateway only injects tasks and keeps a board of what it has heard.
                 -> TaskAnnounce on /fleet/tasks
     robots:   Bid -> (1 s window) -> Claim by the winner
     winner:   /<robot>/dispatch_task -> task_manager.py works it
+              /<robot>/task_status AWAIT_PICK -> (confirmed picks) ask the
+                                     majority; on their acks
+                                     /<robot>/pick_permit -> PICKING
               /<robot>/task_status NAV_TO_DROPOFF -> commit (item on board:
                                      the task can no longer move, protocol.py)
                                    DONE   -> Complete (fleet-wide)
@@ -26,6 +29,18 @@ else task_manager still holds is cancelled so the fleet re-auctions it.
 
 Bid cost is the path length on the fused /map when one has arrived
 (nodes/grid_dist.py), else the straight line.
+
+Robot types (fleetsim A6, docs/fleetsim.md "Robot types and capabilities"):
+a request may say what the task needs, {"pickup", "dropoff", "requires":
+["heavy"]}, and the TaskAnnounce carries it as `requires`. A robot whose
+`capabilities` (config) lack one of them does not bid; a TaskAnnounce
+without the field is open to every robot, and a node that predates it
+ignores the field, so both directions work as before. With `service_s`
+({pick, place} seconds) set, a bid is the time until this robot would have
+DELIVERED the task (drive to the pickup, pick, carry, place) instead of the
+drive to the pickup: in a fleet whose robots differ in speed or handling
+that is what ranks them, and with identical robots it ranks them the same.
+Set it on every robot or on none, since bids are compared across the fleet.
 
 Every task-protocol message travels on ONE reliable topic, `/fleet/tasks`.
 Leases are renewed by LeaseBeacons on that same topic, not by
@@ -115,7 +130,18 @@ DEFAULTS = {
     "stalled_after_s": 30.0,    # gateway: an unclaimed task this old raises an alarm
     "battery": {"sim_start_pct": None},
     "protocol": {},
+    # Robot types (module docstring). What this robot can do: a TaskAnnounce
+    # whose `requires` names something else gets no bid from it.
+    "capabilities": [],
+    # {"pick": s, "place": s}: bids price the whole delivery with these
+    # handling times. null = the drive to the pickup only (as before types).
+    "service_s": None,
 }
+
+# A `requires` that isn't a capability name or a list of them: no robot
+# can say it has what the task needs, so none bids (the gateway's
+# task_stalled alarm shows it) rather than every one guessing.
+MALFORMED = ("<malformed>",)
 
 
 def load_config(path: Path | None = None) -> dict:
@@ -147,6 +173,40 @@ def robot_name(num: int | None) -> str | None:
     return "gateway" if num == GATEWAY else f"robot_{num - 1}"
 
 
+def requirement(v) -> tuple | None:
+    """A task's `requires` as a sorted tuple of capability names (empty: any
+    robot), or None if it is malformed."""
+    if v is None:
+        return ()
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, (list, tuple)) or not all(isinstance(c, str) and c for c in v):
+        return None
+    return tuple(sorted(set(v)))
+
+
+class _Allocator(Allocator):
+    """commsim's Allocator, unchanged, except that it says which task it is
+    pricing. cost_fn only gets coordinates (protocol.py), and a capability
+    requirement is a property of the task, not of where it is: two tasks
+    from the same shelf to the same dock may need different robots. Every
+    bid, and the backlog sum that goes into it, is priced inside
+    _open_bidding, so for that call `pricing` is the task's id and FleetTasks'
+    cost function can refuse it ("None: this robot cannot take the task at
+    all", protocol.py). protocol.py, which the DES shares, needs no change;
+    tests/fleet_tasks_test.py fails if _open_bidding is ever renamed, which
+    would otherwise let every robot bid on everything without a word."""
+
+    pricing: int | None = None
+
+    def _open_bidding(self, t, now):
+        self.pricing = t.task_id
+        try:
+            super()._open_bidding(t, now)
+        finally:
+            self.pricing = None
+
+
 def encode(sender: int, m: dict) -> str:
     return json.dumps({**m, "from": sender})
 
@@ -169,6 +229,8 @@ class FleetTasks:
         ("dispatch", payload)    -> /<robot>/dispatch_task (JSON dict;
                                     "carrying": true = item already on board)
         ("cancel", task_id_str)  -> /<robot>/cancel_task
+        ("pick", task_id_str)    -> /<robot>/pick_permit (confirmed picks: the
+                                    majority acked, task_manager may pick)
         ("alloc", payload)       -> /<robot>/task_alloc, on change
         ("log", text)
     """
@@ -186,6 +248,11 @@ class FleetTasks:
         # every dispatch.
         self._waypoints = waypoints
         self.speed = float(cfg["speed_mps"])
+        self.capabilities = frozenset(cfg.get("capabilities") or ())
+        sv = cfg.get("service_s")
+        self.service = None if sv is None else (float(sv["pick"]), float(sv["place"]))
+        # task id -> what it requires (non-empty only), from the announce.
+        self.requires: dict[int, tuple] = {}
         self.pose: tuple[float, float] | None = None
         self._pose_at: float | None = None
         self.grid: GridDistance | None = None
@@ -198,6 +265,9 @@ class FleetTasks:
         # these is the echo of our own decision; a CANCELLED for anything else
         # we own came from a person (operator Stop all / Clear tasks / x).
         self._cancelling: set[int] = set()
+        # Fleet tasks task_manager is holding at the shelf (AWAIT_PICK) until
+        # the majority has acknowledged the pick (protocol.py, confirmed picks).
+        self._awaiting_pick: set[int] = set()
         self.names: dict[int, tuple[str, str]] = {}
         # (pickup, dropoff) -> steady time until which we do not bid on it
         # again. Without it a robot that cannot do a task (no arm, a pick it
@@ -205,7 +275,10 @@ class FleetTasks:
         # after every Release, and the task never reaches anyone else.
         self.failed: dict[tuple, float] = {}
         self.now = now
-        self._next_id = int(time.time() * 10)
+        # Task IDs are seeded from this clock (see request()). fleetsim swaps
+        # in a fixed one so a seeded run hands out the same IDs every time.
+        self._wall = time.time
+        self._next_id = int(self._wall() * 10)
         self._next_reannounce = now
         self._next_heartbeat = now
         self._last_alloc: str | None = None
@@ -217,8 +290,8 @@ class FleetTasks:
         self.alarms: list[dict] = []
         self._alarm_seq = 0
         bids = not gateway and can_bid
-        self.alloc = Allocator(self.num, params, self._cost if bids else None,
-                               is_gateway=gateway, battery_fn=lambda: self.battery_pct)
+        self.alloc = _Allocator(self.num, params, self._cost if bids else None,
+                                is_gateway=gateway, battery_fn=lambda: self.battery_pct)
 
     def waypoints(self) -> dict:
         return self._waypoints() if callable(self._waypoints) else self._waypoints
@@ -239,9 +312,16 @@ class FleetTasks:
                 return d
         return math.dist(a, b)
 
+    def can_do(self, tid: int | None) -> bool:
+        """This robot has every capability task `tid` requires."""
+        req = self.requires.get(tid) if tid is not None else None
+        return not req or self.capabilities.issuperset(req)
+
     def _cost(self, pickup, dropoff=None, start=None):
         if self.pose is None:
             return None  # no localization yet: we cannot say how far it is
+        if not self.can_do(self.alloc.pricing):
+            return None  # it needs a capability we lack: no bid (_Allocator)
         until = self.failed.get((tuple(pickup), tuple(dropoff or ())))
         if until is not None and self.now < until:
             return None
@@ -250,7 +330,14 @@ class FleetTasks:
         origin = start if start is not None else self.pose
         d = self._path_m(origin, pickup)
         leg = self._path_m(pickup, dropoff) if dropoff is not None else 0.0
-        return d / self.speed, math.dist(origin, pickup), (d + leg) / self.speed
+        if self.service is None:
+            return d / self.speed, math.dist(origin, pickup), (d + leg) / self.speed
+        # The whole delivery at our own speed and handling times: the bid,
+        # and (as the third value) both the backlog a later bid adds and the
+        # battery gate's task time. The gate is then a little cautious: the
+        # battery doesn't drain while picking or placing (drive()).
+        whole = (d + leg) / self.speed + self.service[0] + self.service[1]
+        return whole, math.dist(origin, pickup), whole
 
     def on_wire(self, raw: str, now: float) -> None:
         self.now = now
@@ -258,15 +345,32 @@ class FleetTasks:
         if got is None:
             self._log(f"dropped malformed message: {raw[:120]!r}")
             return
-        sender, m = got
+        self.on_message(*got, now)
+
+    def on_message(self, sender: int, m: dict, now: float) -> None:
+        """An already-decoded /fleet/tasks message. fleetsim delivers one
+        message to many robots and decodes it once; `m` is never mutated."""
+        self.now = now
         if sender == self.num:
             return  # DDS delivers our own publications back to us
         if m["type"] == "TaskAnnounce" and "pickup_station" in m:
             self.names[int(m["task_id"])] = (m["pickup_station"], m["dropoff_station"])
+        if m["type"] == "TaskAnnounce" and m.get("requires") is not None:
+            # Before deliver(): the announce opens bidding, which prices it.
+            req = requirement(m["requires"])
+            if req is None:
+                self._log(f"task {m.get('task_id')}: malformed requires "
+                          f"{m['requires']!r}; not bidding on it")
+                req = MALFORMED
+            if req:
+                self.requires[int(m["task_id"])] = req
         try:
             deliver(self.alloc, sender, m, now)
         except (KeyError, TypeError, ValueError) as exc:
             self._log(f"dropped {m.get('type')} from {robot_name(sender)}: {exc}")
+        if m["type"] == "Ack":
+            for tid in list(self._awaiting_pick):  # the ack that completes a majority
+                self._check_pick(tid, now)
         self._flush()
 
     def on_peer_status(self, robot_id: str, now: float, *, battery_pct: float | None = None,
@@ -333,6 +437,11 @@ class FleetTasks:
             self._actions = [a for a in self._actions
                              if a != ("cancel", f"{TASK_PREFIX}{tid}")]
             return
+        if state == "AWAIT_PICK":
+            self._awaiting_pick.add(tid)
+            self._check_pick(tid, now)
+        else:
+            self._awaiting_pick.discard(tid)
         if state in ("NAV_TO_DROPOFF", "PLACING") and not self.alloc.committed(tid):
             self.alloc.commit(tid, now)
             self._log(f"task {tid}: item picked up, committed")
@@ -359,6 +468,23 @@ class FleetTasks:
                 self._log(f"task {tid} failed here; released for another robot")
         self._flush()
 
+    def _check_pick(self, tid: int, now: float) -> None:
+        if tid in self._awaiting_pick and self.alloc.request_pick(tid, now):
+            self._awaiting_pick.discard(tid)
+            self._actions.append(("pick", f"{TASK_PREFIX}{tid}"))
+            self._log(f"task {tid}: the majority knows; picking")
+
+    def _dispatch(self, tid: int, pick: str, drop: str, **extra) -> None:
+        # await_pick: hold at the shelf until we say so (/<robot>/pick_permit).
+        # Only when the protocol would ever withhold it, so a fleet without a
+        # quorum, and the operator's own tasks, pick on arrival as before.
+        # A carrying re-dispatch skips the shelf, so it has no pick to gate.
+        gate = (self.alloc.p.confirmed_picks and self.alloc.p.quorum_nodes > 0
+                and not extra.get("carrying"))
+        self._actions.append(("dispatch", {"task_id": f"{TASK_PREFIX}{tid}",
+                                           "pickup": pick, "dropoff": drop,
+                                           **({"await_pick": True} if gate else {}), **extra}))
+
     def _adopt(self, st: dict, now: float) -> None:
         """First task_status after OUR start: task_manager may have kept
         working through a restart of this node. A task with the item on
@@ -374,7 +500,7 @@ class FleetTasks:
             pick, drop = cur.get("pickup"), cur.get("dropoff")
             wps = self.waypoints()
             t = TaskView(tid, state=CLAIMED, owner=self.num, owner_cost=COMMITTED_COST,
-                         last_renew=now, claimed_at=now)
+                         last_renew=now, claimed_at=now, on_board=True)
             if pick in wps and drop in wps:
                 self.names[tid] = (pick, drop)
                 t.pickup, t.dropoff = self._xy(pick, wps), self._xy(drop, wps)
@@ -403,21 +529,31 @@ class FleetTasks:
 
     # ---- gateway ------------------------------------------------------------
 
-    def request(self, pickup: str, dropoff: str, now: float) -> int | None:
+    def request(self, pickup: str, dropoff: str, now: float, requires=None) -> int | None:
+        """Announce a task; `requires` (a capability name or a list) limits
+        who may bid on it."""
         self.now = now
         wps = self.waypoints()
         if pickup not in wps or dropoff not in wps:
             self._log(f"rejected task: unknown waypoint in {pickup!r} -> {dropoff!r}")
             self._flush()
             return None
+        req = requirement(requires)
+        if req is None:
+            self._log(f"rejected task: malformed requires {requires!r}")
+            self._flush()
+            return None
         # Seeded from the wall clock so a restarted gateway never reuses an ID:
         # robots ignore a re-announce of a task they already know, so a reused
         # ID would make the new task invisible to them.
-        tid = self._next_id = max(self._next_id + 1, int(time.time() * 10))
+        tid = self._next_id = max(self._next_id + 1, int(self._wall() * 10))
         self.names[tid] = (pickup, dropoff)
+        if req:
+            self.requires[tid] = req
         self._announced[tid] = now
         self.alloc.announce(tid, self._xy(pickup, wps), self._xy(dropoff, wps), now)
-        self._log(f"announced task {tid}: {pickup} -> {dropoff}")
+        self._log(f"announced task {tid}: {pickup} -> {dropoff}"
+                  + (f", requires {list(req)}" if req else ""))
         self._flush()
         return tid
 
@@ -441,7 +577,9 @@ class FleetTasks:
                           "state": t.state, "owner": robot_name(t.owner),
                           "committed": a.committed(tid),
                           "age_s": round(now - self._announced[tid], 1)
-                          if tid in self._announced else None})
+                          if tid in self._announced else None,
+                          **({"requires": list(self.requires[tid])} if tid in self.requires
+                             else {})})
         for num in sorted(set(a.last_status) | set(self.peer_info)):
             info = self.peer_info.get(num, {})
             mine = [t for t in a.tasks.values() if t.state == CLAIMED and t.owner == num]
@@ -501,13 +639,19 @@ class FleetTasks:
             if now >= due and self.alloc.committed(tid) and tid in self.names:
                 del self._retry[tid]
                 pick, drop = self.names[tid]
-                self._actions.append(("dispatch", {"task_id": f"{TASK_PREFIX}{tid}",
-                                                   "pickup": pick, "dropoff": drop,
-                                                   "carrying": True}))
+                self._dispatch(tid, pick, drop, carrying=True)
                 self._log(f"retrying dropoff of task {tid}")
         self.alloc.tick(now)
+        for tid in list(self._awaiting_pick):
+            t = self.alloc.tasks.get(tid)
+            if t is None or t.state != CLAIMED or t.owner != self.num:
+                self._awaiting_pick.discard(tid)  # lost it; stop_task cancels the hold
+            else:
+                self._check_pick(tid, now)
         if len(self.names) > len(self.alloc.tasks):  # the allocator pruned finished tasks
             self.names = {k: v for k, v in self.names.items() if k in self.alloc.tasks}
+            if self.requires:
+                self.requires = {k: v for k, v in self.requires.items() if k in self.alloc.tasks}
         # An echo that never came (task_manager had already finished it) must
         # not pin the id forever.
         self._cancelling &= set(self.alloc.tasks)
@@ -557,6 +701,10 @@ class FleetTasks:
             if m["type"] == "TaskAnnounce" and m["task_id"] in self.names:
                 pick, drop = self.names[m["task_id"]]
                 m = {**m, "pickup_station": pick, "dropoff_station": drop}
+            if m["type"] == "TaskAnnounce" and m["task_id"] in self.requires:
+                # Only when there is one: a task open to any robot goes out
+                # exactly as before the field existed.
+                m = {**m, "requires": list(self.requires[m["task_id"]])}
             self._actions.append(("publish", encode(self.num, m)))
         for e in events:
             self._on_event(e)
@@ -578,10 +726,10 @@ class FleetTasks:
                 self._log(f"released task {tid}: no waypoint names")
                 return
             pick, drop = self.names[tid]
-            self._actions.append(("dispatch", {"task_id": f"{TASK_PREFIX}{tid}",
-                                               "pickup": pick, "dropoff": drop}))
+            self._dispatch(tid, pick, drop)
             self._log(f"won task {tid} ({pick} -> {drop}), cost {e.get('cost'):.1f}")
         elif kind in ("task_yielded", "stop_task"):
+            self._awaiting_pick.discard(tid)
             self._cancel_local(tid)
             self._retry.pop(tid, None)
             why = e.get("reason") or f"out-bid by {robot_name(e.get('to'))}"
@@ -590,7 +738,8 @@ class FleetTasks:
             self._log(f"stopped task {tid}: {why}")
         elif kind in ("isolated", "rejoined", "hold_safe", "lease_expired",
                       "robot_silent", "robot_back", "battery_gated", "declined",
-                      "committed", "owner_missing"):
+                      "committed", "owner_missing", "pick_requested", "pick_granted",
+                      "complete_confirmed"):
             detail = {k: v for k, v in e.items() if k not in ("event", "robot_id", "t")}
             self._log(f"{kind} {detail}" if detail else kind)
             peer = robot_name(e.get("peer"))
@@ -691,6 +840,7 @@ def main(argv=None):
                 self.dispatch_pub = self.create_publisher(
                     String, f"/{rid}/dispatch_task", 10)
                 self.cancel_pub = self.create_publisher(String, f"/{rid}/cancel_task", 10)
+                self.pick_pub = self.create_publisher(String, f"/{rid}/pick_permit", 10)
                 self.alloc_pub = self.create_publisher(String, f"/{rid}/task_alloc", LATCHED)
                 # LATCHED, matching task_manager's publisher: a volatile
                 # subscriber never gets the last status replayed, so restart
@@ -759,7 +909,8 @@ def main(argv=None):
         def _on_request(self, msg):
             try:
                 d = json.loads(msg.data)
-                self.core.request(str(d["pickup"]), str(d["dropoff"]), time.monotonic())
+                self.core.request(str(d["pickup"]), str(d["dropoff"]), time.monotonic(),
+                                  requires=d.get("requires"))
             except (json.JSONDecodeError, KeyError, TypeError) as exc:
                 self.get_logger().error(f"bad task request {msg.data!r}: {exc}")
             self._act()
@@ -801,6 +952,8 @@ def main(argv=None):
                     self.dispatch_pub.publish(String(data=json.dumps(val)))
                 elif kind == "cancel":
                     self.cancel_pub.publish(String(data=val))
+                elif kind == "pick":
+                    self.pick_pub.publish(String(data=val))
                 elif kind == "alloc":
                     self.alloc_pub.publish(String(data=json.dumps(val)))
                 elif kind == "log":

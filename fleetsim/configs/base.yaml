@@ -1,0 +1,345 @@
+# fleetsim base configuration. A scenario (fleetsim/scenarios/*.yaml) layers
+# its `config:` over this, and `--set a.b=v` layers over that. Keys a scenario
+# sets must exist here (typos fail validation), except inside the free-form
+# blocks marked FREE-FORM.
+#
+# Tags, as in commsim/configs/base.yaml: PLACEHOLDER = a guess awaiting a
+# measurement; MEASURED = taken from a live run or the emulation, with where.
+
+sim:
+  step_s: 0.1                 # motion / protocol tick. Messages are timed exactly
+                              # between steps; motion moves 5 cm per step at 0.5 m/s.
+
+world:
+  source: synthetic           # synthetic | map
+  map: null                   # with source: map — a maps/<name> library entry, or a dir path
+  # Cell size for EVERY grid in the run: the true world, each robot's belief,
+  # each costmap. 0.2 m is the compromise (docs/fleetsim.md, "Resolution"):
+  #   * the 0.5 x 0.4 m footprint is ~3 x 2 cells, so inflation and clearance
+  #     still mean something. A robot is planned as a disc of
+  #     footprint_radius_m + half a cell (0.35 m here), so a passage must be
+  #     ~0.7 m clear — and on a saved map, pooling can take up to one more
+  #     cell off each side. At 0.1 m that is 0.6 m + 0.1 m per side;
+  #   * memory and A* time grow as 1/cell^2: 0.1 m is 4x the cells of 0.2 m —
+  #     ~1.5 MB per robot at 0.2 m on the default 60 x 40 m floor, ~6 MB at 0.1 m;
+  #   * a saved 0.05 m map is max-pooled to this size, which thickens walls by
+  #     up to a cell; the run reports how much free floor that cost.
+  # Map-sharing bytes are priced per square metre (map_share.bytes_per_m2),
+  # not per cell, so changing this does not change the radio load.
+  cell_m: 0.2
+  random_waypoints: 40        # a saved map with no waypoints.json gets this many random spots
+  homes: null                 # [[x, y], ...] park spots; default: the synthetic apron, else random
+  gateway: null               # [x, y]; default: the synthetic apron's centre, else the map centre
+  actors: null                # a simtest world (configs/worlds/<name>) whose scripted movers to play
+  synthetic: {}               # FREE-FORM: fleetsim/grid.py SYNTHETIC_DEFAULTS (width_m, height_m,
+                              # aisle_m, rack_depth_m, cross_every_m, docks, ...; and for traffic:
+                              # narrow_aisles + narrow_m, dead_ends, walls). Unknown keys fail, and
+                              # so does a floor where some waypoint can't be driven to.
+
+robots:
+  count: 8
+  # The body is a disc. 0.25 m = half the length of Nav2's 0.5 x 0.4 m
+  # footprint (configs/nav2_params.yaml): exact head-on, 0.07 m short of the
+  # corners. The circumscribed 0.32 m made two robots 0.64 m wide side by
+  # side (real: 0.4 m), and on a 0.2 m grid they could no longer pass each
+  # other in a 2.4 m aisle — head-on meetings deadlocked (2026-11-02).
+  footprint_radius_m: 0.25
+  max_speed_mps: 0.5          # Nav2 max_velocity x
+  accel_mps2: 0.5             # PLACEHOLDER
+  yaw_rate_rps: 1.0           # PLACEHOLDER
+  # Robot types (docs/fleetsim.md "Robot types and capabilities"). null = one
+  # type: every robot as above, with tasks.dwell_s to pick and to place. Else
+  # a list; each type:
+  #   name: heavy                      required, unique
+  #   share: 0.2 | count: 2            its robots: round(share x count), at least 1,
+  #                                    or a fixed count. One type may give neither:
+  #                                    it takes the rest (and may get none).
+  #   max_speed_mps, accel_mps2, yaw_rate_rps   override the values above
+  #   pick_s, place_s                  service times at the shelf and the dock
+  #                                    (default tasks.dwell_s)
+  #   battery_drain_pct_per_s          with a battery (fleet_tasks.battery.sim_start_pct)
+  #   capabilities: [heavy]            a task that `requires: heavy` goes only to these
+  # The footprint stays fleet-wide (every costmap and the floor check use it).
+  # With types set, bids and central costs price the whole delivery at each
+  # robot's own speed and service times, not just the drive to the pickup.
+  types: null
+
+sensing:
+  hz: 5.0                     # PLACEHOLDER: how often a scan reaches the map (the camera is 30 Hz;
+                              # the grid updates far slower)
+  idle_hz: 1.0                # a robot that hasn't moved since its last scan scans this often
+  range_m: 4.5                # obstacle_detector max_range_m
+  fov_deg: 87.0               # D435 (configs/sensors/d435.json)
+
+nav:
+  inflation_m: 0.65           # Nav2 inflation_radius
+  cost_scaling: 2.5           # Nav2 cost_scaling_factor
+  cost_weight: 3.0            # step cost = length * (1 + cost_weight * inflation cost)
+  unknown_cost: 0.0           # 0 = optimistic (team decision 2026-11-02); > 0 penalises unknown cells
+  goal_tolerance_m: 0.5       # a goal in lethal space snaps to free space this close
+  max_expansions: 200000      # A* gives up past this many cells
+  stop_distance_m: 0.9        # local layer looks this far along the path for obstacles
+  clearance_margin_m: 0.1     # obstacle counts as in the way within body + its radius + this
+  detection_ttl_s: 0.5        # a camera detection is trusted this long
+  predict_s: 0.5              # also avoid where a moving detection will be this far ahead
+                              # (obstacle_detector tracks carry velocity; docs/obstacle_detection.md@6501799 v2)
+  bump_ttl_s: 5.0             # a physical bump stays an obstacle this long
+  block_replan_s: 2.0         # blocked this long -> replan around it (lower priority first)
+  block_fail_s: 45.0          # blocked this long -> the leg fails (Nav2 abort after recoveries)
+  plan_fail_s: 10.0           # no path for this long -> the leg fails
+  overlay_ttl_s: 6.0          # replanned-around obstacles stay lethal in the costmap this long
+  replan_period_s: 10.0       # backstop replan while driving (Nav2's BT replans at 1 Hz)
+  min_replan_s: 0.5           # never replan more often than this
+  hiccup_rate_hz: 0.0         # PLACEHOLDER: random recovery pauses per driving second; calibrate
+  hiccup_s: 4.0               #   against Isaac's task timings (docs/fleetsim.md, "Calibration")
+  return_home_s: 10.0         # idle this long -> drive back to the home spot (null = stay put)
+  # The local layer (fleetsim/local/; docs/fleetsim.md "Local avoidance"):
+  #   stop_replan  stop for what is ahead on the path, replan around it after
+  #                block_replan_s, give up after block_fail_s (the keys above).
+  #                The robots' Nav2 stand-in, and every run before the seam.
+  #   orca         Optimal Reciprocal Collision Avoidance (van den Berg et al.,
+  #                RVO2's formulation): each step the velocity closest to the
+  #                path follower's that keeps clear of peers and movers for
+  #                time_horizon_s. Stalled, it books a stop and replans around
+  #                and gives up as stop_replan does. The robots don't do this.
+  local: stop_replan
+  orca:
+    time_horizon_s: 4.0       # keep clear of peers and movers this far ahead (tau)
+    wall_horizon_s: 0.5       # and of walls: only a velocity off the path is held back
+    neighbor_m: 5.0           # what is closer than this counts as a neighbour
+    max_neighbors: 10         # the nearest this many
+    margin_m: 0.1             # centres keep body + its radius + this apart (clearance_margin_m)
+    wall_m: 1.0               # occupied cells (and overlays) this close are wall constraints
+    reciprocal_mps: 0.1       # a peer moving faster than this avoids too: each takes half
+    track_s: 1.0              # what the camera saw stays a neighbour this long after it left the cone
+    stall_mps: 0.05           # a chosen speed below this is a stop, booked as stop_replan's are
+    resume_mps: 0.1           # stopped, drive on once the chosen speed is above this
+
+tasks:
+  dwell_s: 2.0                # task_manager DWELL_SEC; per type: robots.types[].pick_s, place_s
+  bid_cost: path              # path = A* on the bidder's own belief; straight = straight line
+
+# Who assigns tasks (fleetsim/dispatch/; docs/fleetsim.md "Dispatchers and
+# perfect information").
+#   auction            every robot runs the real auction (nodes/fleet_tasks.py)
+#                      and the gateway only announces: the robots as they are.
+#   central_greedy     a dispatcher at the gateway gives the oldest open task to
+#                      the idle robot that reaches its pickup soonest.
+#   central_hungarian  the same dispatcher re-solves the whole assignment
+#                      (Kuhn-Munkres) on every event, carrying robots included.
+# The central ones send Dispatch/Cancel and hear robots back as reliable
+# /fleet/tasks messages over the network model, so they pay for their traffic
+# and stop assigning while the gateway is cut off. They price legs on the
+# true static map at robots.max_speed_mps; a blockage reaches them only as
+# the legs it makes fail (unless info.map: truth).
+dispatch:
+  method: auction
+  reassign_gain_s: 10.0       # central_hungarian: move an unpicked task to another robot only if
+                              # that saves this much drive time (hysteresis; without it the
+                              # assignment flips back and forth as robots move)
+  resolve_period_s: 5.0       # central: also re-solve this often (robots move between events)
+  # central_hungarian: a waiting task's cost falls by this many seconds per second
+  # since its announce. 0 = minimum total drive time alone, which with more tasks
+  # than robots can leave a far task waiting while nearer ones keep coming.
+  age_weight: 0.0
+
+# configs/fleet_tasks.yaml is loaded first; this block overrides it (FREE-FORM).
+# protocol.quorum_nodes defaults to robots + 1 (every node, gateway included).
+fleet_tasks: {}
+
+status:                       # nodes/fleet_radio.py /fleet/status
+  hz: 5.0                     # fleet_radio status_hz
+  ttl_s: 1.0                  # fleet_radio status_ttl_s: a peer pose older than this is ignored
+  recipients: all             # all | radius
+  radius_m: 15.0              # with recipients: radius (the gateway always gets every Status)
+  # FleetTasks hears a peer's Status as liveness at most this often per pair.
+  # The allocator's timeouts are seconds (status_timeout_s 6), so 1 s loses
+  # nothing and keeps fleet-wide liveness from costing n^2 * status_hz calls.
+  liveness_poll_s: 1.0
+  # Count a live zenoh session to a peer as hearing it (Allocator.heard_network),
+  # as the commsim DES does. Needed for the quorum once Status is neighbour-only
+  # (recipients: radius). nodes/fleet_tasks.py does NOT do this today — turning
+  # it on tests a design, not the robots as they are.
+  session_liveness: false
+
+map_share:                    # commsim/docs/brief.md@6501799 "Obstacles and maps"
+  enabled: true
+  prior: none                 # none = every robot starts blind; truth = every robot starts with the
+                              # true map (a localize-on-saved-map run), so only CHANGES need sharing
+  tile_m: 6.4                 # region size: sequence numbers and refresh are per tile
+  publish_s: 2.0              # brief: every 2-5 s
+  refresh_s: 60.0             # PLACEHOLDER: a full pass of snapshots over a robot's observed tiles.
+                              # It spends what patches leave of rate_cap_bps, and stalls on a tile
+                              # whose snapshot x recipients outgrows the bucket (all at 20 robots:
+                              # never sent; docs/fleetsim.md "Map sharing: subscriptions ...")
+  rate_cap_bps: 100000        # brief: PLACEHOLDER 100 kbps per robot, every copy counted
+  bytes_per_m2: 100.0         # PLACEHOLDER: compressed patch size (0.25 B per 0.05 m cell)
+  chunk_bytes: 8192           # brief: up to ~8 KB per chunk
+  # Who gets a tile's patches and refresh snapshots:
+  #   all          every robot
+  #   radius       robots within radius_m of the tile at send time; one that
+  #                drives in later has missed what came before
+  #   subscribers  robots that subscribe to the tile (fleetsim/mapshare.py,
+  #                docs/fleetsim.md "Map sharing: subscriptions and
+  #                event-driven updates"): each robot subscribes to the tiles
+  #                near it and along its path, announces its set to the fleet,
+  #                and pulls a new tile's state from ONE peer that holds it
+  recipients: radius
+  radius_m: 20.0
+  resync_backoff_s: 2.0       # one MapResync per (origin, tile) per this long
+  # recipients: subscribers. sub_radius_m covers the camera's range_m (4.5 m),
+  # so a robot hears of whatever it could see next; sub_path_m is how far
+  # along its path it looks ahead (null: the whole path).
+  sub_radius_m: 6.0
+  sub_path_m: 30.0
+  sub_min_interval_s: 2.0     # announce a changed set at most this often
+  # How the set travels. status: on the robot's next two /fleet/status, to
+  # the Status recipients (no frames of its own). message: its own reliable
+  # message to every robot. As a message to 49 peers it took fleet_scale (50
+  # robots, radio) past the cliff: seed 1, Status delivery 62 %, /fleet/tasks
+  # 27 %, obstacle notices 717 -> 218 k copies, deliveries 122 -> 68 (2026-11-26);
+  # airtime is per frame far more than per byte, as for intents.
+  sub_transport: status
+  sub_keepalive_s: 30.0       # re-announce an unchanged set this often; a peer not heard for
+                              # 2.5x this is dropped (a dead robot stops costing patches)
+  # Where a patch goes that carries a cell the sender's own sensing flipped
+  # (free <-> occupied: the world moved). all: every robot, since the auction
+  # prices tasks anywhere and a robot bidding on a stale map wins tasks past a
+  # pallet it hasn't heard of. subscribers: like any other patch.
+  sub_flips_to: all
+  # Event-driven updates (B9): when the robot's OWN sensing flips a known cell
+  # (free <-> occupied: a blockage came or went), publish that tile at once
+  # instead of at the next publish_s tick. Same recipients and rate cap; at
+  # most one event publish per event_gap_s. With intent.enabled, a robot whose
+  # path changed with it re-announces its intent on an extra Status then.
+  events: false
+  event_gap_s: 0.5
+
+obstacle_share:               # #18: tell peers about movers they may not see
+  enabled: true
+  radius_m: 10.0
+  expiry_s: 3.0
+  min_interval_s: 0.5
+
+intent:                       # path intents (fleetsim/intent.py; docs/fleetsim.md "Path intents")
+  enabled: false              # off: the local layer alone, as on the robots today
+  # status: the points ride on /fleet/status (no frames of their own, to the
+  # Status recipients). message: their own best-effort message to robots
+  # within radius_m. At 50 robots the separate message took the radio down
+  # (intents 194 MB, Status lost, every peer then reported as an unknown
+  # mover); airtime is per frame far more than per byte (2026-11-17).
+  transport: status
+  hz: 1.0                     # re-announce rate; also sent on every replan
+  horizon_s: 20.0             # how far ahead an intent reaches (10 m at 0.5 m/s)
+  radius_m: 20.0              # sent to robots this close
+  ttl_s: 3.0                  # a peer's intent is trusted this long after it arrived
+  check_hz: 4.0               # conflict check rate
+  sample_s: 0.25              # time step of the conflict check
+  speed_factor: 0.85          # predicted speed = max_speed_mps x this (turns, acceleration)
+  sep_m: 0.9                  # closer than this at the same moment is a conflict
+  clear_m: 1.1                # a hold point keeps this far from a peer's whole intent
+  max_wait_s: 8.0             # yield only if the conflict clears within this; else the local layer
+  yield_max_s: 20.0           # holding longer for one peer: stop yielding to it for as long
+  aging_s: 15.0               # every this long spent yielding on a leg climbs one rank in class
+  max_pts: 8                  # points per intent (~12 B each on the wire)
+
+# Traffic rules on each robot's own map (fleetsim/traffic.py; docs/fleetsim.md
+# "Traffic: keep right and single-lane passages"). Off: the local layer alone.
+traffic:
+  # Free width (wall face to wall face) at or below which two robots can't
+  # pass: the local layer wants 0.6 m between centres (body + body +
+  # clearance_margin_m) and each centre keeps a lethal band off the walls.
+  # The 1.0 m narrow aisles are single-lane, 1.4 m and up are not. Passages
+  # are made of these cells, and keep_right leaves them alone.
+  single_lane_m: 1.3
+  keep_right:                 # B10: a lane term on A*'s step cost in two-way corridors
+    enabled: false
+    # Extra step multiplier for a move on the far left of a corridor (1.0:
+    # the left lane costs double; the right lane costs nothing extra).
+    weight: 1.0
+    max_width_m: 3.2          # corridors up to this wide get lanes: 2.4 m aisles, 3.0 m end gaps;
+                              # wider, and junctions, are open floor
+    lane_offset_m: 0.4        # no cost from this far right of the centre line outwards, the full
+                              # weight from this far left; 2 x 0.4 m > the local layer's 0.6 m
+    refresh_s: 1.0            # re-cut the lanes after a wall changes at most this often
+    # A smoother shortcut this short may run as far left as either of its ends,
+    # and lane paths are pruned from both ends: a lane change becomes a slant
+    # (11 degrees at 3 m) instead of A*'s 45-degree step, where the follower
+    # stops and turns in place. 0: point by point, as first built. A trade-off,
+    # so off: at 3 m one robot alone drives a leg 1 % faster (84.8 -> 84.0 s),
+    # but 20 robots stop for each other 18-26 % more, since robots slanting off
+    # their lane meet more (bench_rush, bench_dead_end, 2026-11-27).
+    lane_change_m: 0.0
+  passages:                   # B11: single-lane passage reservation
+    enabled: false
+    claim_m: 5.0              # claim a passage when the path enters it within this far (> standoff_m
+                              # + settle_s of driving, so a claim has settled by the hold point)
+    # Hold this far along the path before the entry, and never inside a
+    # passage or in the gap just past one (it then waits before both). More
+    # than the 2.4 m crossings between narrow segments: at 1.2 m a robot
+    # waited in the crossing, in the mouth the holder had to come out of.
+    standoff_m: 2.5
+    settle_s: 1.0             # a new claim waits this long for earlier ones to be heard
+    ttl_s: 2.0                # a peer's claim lapses this long after its last Status (dead holder)
+    # Waiting longer on one holder: stop deferring to it for as long. A
+    # backstop for a robot parked inside, not a schedule: a bay in and out is
+    # ~46 s at full speed plus the pick, and at 60 s a waiter gave up 0.8 s
+    # before a holder that had been slowed by the other waiter came out.
+    hold_max_s: 120.0
+    refresh_s: 1.0            # re-cut the passage map after a wall changes at most this often
+
+network:
+  model: ideal                # ideal | radio (fleetsim/network.py)
+  # enforced: the channel carries at most 95 % airtime; the excess is lost
+  # (best-effort) or queued (reliable). unlimited: what the run would do if
+  # the radio could carry everything offered. Load is still measured and
+  # reported (comms load_max, over_cap_s) but never delays or drops a frame.
+  # Radio model only: the ideal network has no load.
+  capacity: enforced
+  rto_s: 0.2                  # reliable retransmit timer (Linux TCP minimum RTO), doubling
+  transport_lease_s: 4.0      # commsim base.yaml zenoh transport_lease_ms
+  ideal:
+    delay_s: 0.003            # MEASURED: emulation 1-hop p50 3.89 ms (commsim des/sim.py)
+    loss: 0.0                 # best-effort only
+  radio:
+    band: g24
+    topo_s: 1.0               # route recompute (commsim DES TOPO_DT)
+    reroute_delay_s: 2.0      # MEASURED: batman reroute ~1.95-3 s (commsim sim_log step 19)
+    ogm_interval_s: 0.25      # commsim base.yaml batman orig_interval_ms
+    contention: global        # global (the DES's single domain, calibrated) | spatial (per node)
+    background_load: 0.0      # airtime share used by other networks on the channel
+    ref_frame_bytes: 300      # frame size the per-hop error rate is computed at
+    radio_cell_m: 0.5         # walls are pooled to this before rack extraction
+    radio_model: {}           # FREE-FORM: commsim/des/radio.py RadioParams overrides
+
+# Perfect information, one knob per channel of knowledge (fleetsim/info.py).
+# All default to the robots as they are. The full perfect-information
+# reference is all three at truth plus network.model: ideal with
+# network.ideal.delay_s: 0.
+info:
+  map: shared                 # shared | truth: every belief and costmap (and a central planner's
+                              # drive times) follow the true grid, blockages included, at once
+  peers: heard                # heard | truth: peer poses for the local layer and path intents come
+                              # from ground truth every step, not from /fleet/status
+  dispatch: network           # network | truth: /fleet/tasks is delivered instantly and never lost
+                              # (the auction's protocol, or a central dispatcher's messages), and a
+                              # central dispatcher reads robots' true pose and liveness
+
+record:
+  gt_hz: 5.0                  # ground truth (Isaac publishes 10 Hz)
+  belief_s: 5.0               # map divergence sample (0 = off)
+  net_s: 1.0
+  net_nodes: true             # per node in each net sample: load, own airtime, traffic by kind
+                              # in and out (the replay's comms monitor). +3.3 kB a sample at 50 robots
+  board_s: 5.0
+  fleet_log: false            # every FleetTasks log line as an event (verbose)
+  # For the operator view's fleet replay (Tests tab -> Fleet sim runs); only
+  # `paths` feeds a metric. The floor itself (`world`) is always recorded, once.
+  paths: true                 # each robot's planned path, on every plan and replan. The
+                              # `utilisation` metric reads it too: off, its home_frac and
+                              # lost_no_path_s come out None
+  links_s: 2.0                # radio one-hop links + SNR this often (0 = off). An ideal
+                              # network has every link, so it never records them
+  belief_maps: [robot_0]      # robots whose OWN map is snapshotted: a list, or all. ~5 KB a
+                              # snapshot on the default floor; `all` at 50 robots is ~100 MB/h
+  belief_map_s: 10.0          # snapshot period (0 = off)

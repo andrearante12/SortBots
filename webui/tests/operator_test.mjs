@@ -14,7 +14,7 @@
  * It NEVER starts a sim. Zero npm dependencies, same as the other tests: node's
  * WebSocket and fetch drive the Chrome DevTools Protocol directly.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -54,6 +54,8 @@ window.ROSLIB = {
 window.__navWps = [];
 window.__testPosts = []; window.__testResults = []; window.__sessionPosts = [];
 window.__testRun = { running: false, name: null, exit: null, elapsed_s: null, log: '', offset: 0 };
+window.__editPosts = []; window.__editNoControl = false; window.__editSave503 = false;
+window.__fleetPosts = []; window.__fleetRun = { running: false, name: null, exit: null, verdict: null, dir: null, elapsed_s: null, log: '' };
 window.__fakeSession = null; window.__fakeRobots = null;
 const realFetch = window.fetch.bind(window);
 window.fetch = (url, opts) => {
@@ -84,6 +86,24 @@ window.fetch = (url, opts) => {
   if (u.startsWith('/api/tests/cancel')) { window.__testRun = { ...window.__testRun, running: false, exit: 130 }; return json(window.__testRun); }
   if (u.startsWith('/api/tests/results')) return json({ results: window.__testResults });
   if (u.startsWith('/api/tests/report')) return json({ markdown: '# crossing_yield\\nrecall 0.12' });
+  // Fleet sim launches: likewise never a real run. /api/fleetsim/scenarios is real.
+  if (u.startsWith('/api/fleetsim/launch')) {
+    if (opts && opts.method === 'POST') {
+      const body = JSON.parse(opts.body); window.__fleetPosts.push(body);
+      window.__fleetRun = { running: true, name: body.name, exit: null, verdict: null, dir: 'fixture_run', elapsed_s: 65, log: 'fleetsim started\\n' };
+    }
+    return json(window.__fleetRun);
+  }
+  if (u.startsWith('/api/fleetsim/cancel')) { window.__fleetRun = { ...window.__fleetRun, running: false, exit: 130, verdict: 'STOPPED' }; return json(window.__fleetRun); }
+  // The scenario editor's save: recorded, then the real serve.py writes it, into the temp
+  // copy of fleetsim/scenarios/ it was started with. __editNoControl plays a console
+  // without --control (the list says so, the save route answers 503 as serve.py does).
+  if (u.startsWith('/api/fleetsim/editor/save')) {
+    window.__editPosts.push(JSON.parse(opts.body));
+    if (window.__editNoControl || window.__editSave503) return Promise.resolve(new Response(JSON.stringify({ error: 'fleet sim runs need the sim dashboard console (scripts/run_console.sh) — or run them from a terminal: python3 -m fleetsim run NAME' }), { status: 503, headers: { 'Content-Type': 'application/json' } }));
+    return realFetch(url, opts);
+  }
+  if (u === '/api/fleetsim/editor' && window.__editNoControl) return realFetch(url, opts).then((r) => r.json()).then((b) => json({ ...b, control: false }));
   // The Drive view (operator_drive.js): a fake bridge, seeded from sessionStorage before
   // a load because the page asks /api/drive as it loads. Never the real serve.py --drive.
   if (u.startsWith('/api/drive')) {
@@ -197,9 +217,35 @@ const tf = (parent, child, x, y, yaw = 0) => ({ transforms: [{
 
 async function main() {
   const sessionsDir = tmpDir('sortbots-sessions-');
+  // A real fleetsim run for the replay, recorded into a temp dir serve.py reads
+  // instead of data/fleetsim/. Small and short: six robots, 80 sim-s, the
+  // partition_heal split starting at 60 s so a cut is on the timeline.
+  const fleetDir = tmpDir('sortbots-fleetsim-');
+  const fs1 = spawnSync('/usr/bin/python3', ['-m', 'fleetsim', 'run', 'partition_heal', '--robots', '6', '--duration', '80',
+    '--set', 'record.belief_maps=[robot_0]', '--set', 'record.belief_map_s=5', '--out', path.join(fleetDir, 'fixture_run'), '--quiet'],
+    { cwd: REPO_ROOT, encoding: 'utf8', timeout: 180000 });
+  check('replay: the fleetsim fixture run was recorded', fs.existsSync(path.join(fleetDir, 'fixture_run', 'summary.json')), (fs1.stderr || '').slice(-300));
+  // And a real `fleetsim bench` into data/fleetsim/bench/'s layout, for the Tests tab's
+  // bench groups and the comms monitor on a radio: six robots, 60 sim-s, spatial
+  // contention, map sharing on; `busy` adds 94 % background load with capacity
+  // unlimited, so its channel runs past the 95 % cap.
+  const suiteDir = tmpDir('sortbots-suite-');
+  fs.writeFileSync(path.join(suiteDir, 'monitor.yaml'), [
+    'name: monitor', 'description: the operator test\'s bench',
+    'scenarios:', '  - {scenario: delivery_smoke, robots: [6], duration_s: 60, set: {network.model: radio, network.radio.contention: spatial, map_share.prior: none}}',
+    'seeds: [1]', 'variants:', '  radio: {}', '  busy: {network.capacity: unlimited, network.radio.background_load: 0.94}',
+    'headline: fleet_tasks.per_hour', ''].join('\n'));
+  const BENCH = '20261126T000000Z_monitor';
+  const fs2 = spawnSync('/usr/bin/python3', ['-m', 'fleetsim', 'bench', path.join(suiteDir, 'monitor.yaml'), '--out', path.join(fleetDir, 'bench', BENCH), '--jobs', '2'],
+    { cwd: REPO_ROOT, encoding: 'utf8', timeout: 180000 });
+  check('monitor: the fleetsim bench fixture was recorded', ['radio', 'busy'].every((v) => fs.existsSync(path.join(fleetDir, 'bench', BENCH, `delivery_smoke_r6_s1_${v}`, 'events.jsonl.gz'))), (fs2.stdout || '').slice(-300) + (fs2.stderr || '').slice(-300));
+  // The scenario editor saves for real, so serve.py gets a copy of fleetsim/scenarios/.
+  const scnDir = tmpDir('sortbots-scenarios-');
+  for (const f of fs.readdirSync(path.join(REPO_ROOT, 'fleetsim', 'scenarios')).filter((f) => f.endsWith('.yaml')))
+    fs.copyFileSync(path.join(REPO_ROOT, 'fleetsim', 'scenarios', f), path.join(scnDir, f));
   spawnTracked('python3', [path.join(WEBUI_DIR, 'serve.py'), '--control', '--platform', 'sim',
                            '--port', String(PORT), '--host', '127.0.0.1'],
-               { cwd: REPO_ROOT, env: { ...process.env, SORTBOTS_SESSIONS_DIR: sessionsDir,
+               { cwd: REPO_ROOT, env: { ...process.env, SORTBOTS_SESSIONS_DIR: sessionsDir, FLEETSIM_RESULTS_DIR: fleetDir, FLEETSIM_SCENARIOS_DIR: scnDir,
                  // The gateway pin is saved by the real serve.py: never into data/.
                  SORTBOTS_COMMS_GATEWAY: path.join(sessionsDir, 'comms_gateway.json') } });
   // Read the body, not just .ok: an unread response left undici's parser paused, and once the page
@@ -1463,6 +1509,410 @@ async function main() {
   check('3d: the chosen view survives a reload', await visible('#cloud'));
   await click('#view [data-v="2d"]'); await sleep(200);
   check('3d: back to 2D restores the map and tools', await visible('#map') && await visible('#tools') && !(await visible('#cloud')));
+
+  // -- running a fleet sim (operator_fleetsim.js) ------------------------------------------------
+  console.log('\n--- fleet sim launch ---');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+  await page.eval(`localStorage.clear()`); await load();
+  await page.eval(`window.sortbotsTests.openTests()`);
+  await waitFor(async () => (await page.eval(`!document.getElementById('fr-run').disabled`)), { what: 'the fleet sim form', tries: 40 });
+  const scnFiles = fs.readdirSync(path.join(REPO_ROOT, 'fleetsim', 'scenarios')).filter((f) => f.endsWith('.yaml')).length;
+  check('fleet launch: the form lists every scenario', (await page.eval(`document.querySelectorAll('#fr-scenario option').length`)) === scnFiles);
+  await page.eval(`(() => { const s = document.getElementById('fr-scenario'); s.value = 'fleet_scale'; s.dispatchEvent(new Event('change')); })()`);
+  check("fleet launch: picking a scenario fills in its own numbers",
+    (await page.eval(`[document.getElementById('fr-robots').value, document.getElementById('fr-duration').value, document.getElementById('fr-seed').value].join()`)) === '50,900,1');
+  check('fleet launch: an override says what the scenario would do', /scenario default \(robot_0\)/.test(await $text('#fr-sets [data-set="record.belief_maps"]')), await $text('#fr-sets [data-set="record.belief_maps"]'));
+  check('fleet launch: nothing shows a run before there is one', !(await visible('#fr-status')));
+  await page.eval(`(() => {
+    document.getElementById('fr-robots').value = '20'; document.getElementById('fr-duration').value = '600';
+    document.querySelector('[data-set="map_share.prior"]').value = 'none';
+    document.querySelector('[data-set="record.belief_maps"]').value = 'all';
+    document.getElementById('fr-form').requestSubmit();
+  })()`);
+  await waitFor(async () => (await page.eval(`/running/.test(document.getElementById('fr-state').textContent)`)), { what: 'the run line', tries: 20 });
+  const fleetPost = JSON.parse(await page.eval(`JSON.stringify(window.__fleetPosts)`));
+  check('fleet launch: Run posts the same settings as the terminal command',
+    JSON.stringify(fleetPost) === JSON.stringify([{ name: 'fleet_scale', robots: 20, duration: 600, seed: 1, sets: { 'map_share.prior': 'none', 'record.belief_maps': 'all' } }]), JSON.stringify(fleetPost));
+  check('fleet launch: it stays on the panel, with a clock and Stop', (await visible('#tests-pane')) && /running · 1:05/.test(await $text('#fr-state')) && (await visible('#fr-stop')) && !(await visible('#fr-replay')));
+  check('fleet launch: Run is off while one runs', await page.eval(`document.getElementById('fr-run').disabled`));
+  await sleep(1300);
+  check('fleet launch: the log follows the run', /fleetsim started/.test(await $text('#fr-log')), await $text('#fr-log'));
+  await shot('fleet-launch-running');
+  await page.eval(`window.__fleetRun = { ...window.__fleetRun, running: false, exit: 1, verdict: 'FAIL', log: 'verdict: FAIL\\n' }`);
+  await waitFor(async () => (await visible('#fr-verdict')), { what: 'the verdict', tries: 20 });
+  check('fleet launch: a finished run shows its verdict and score', (await $text('#fr-verdict')) === 'FAIL' && /verdict: FAIL/.test(await $text('#fr-log')) && !(await visible('#fr-stop')));
+  await shot('fleet-launch-finished');
+  await page.eval(`window.__fleetRun = { ...window.__fleetRun, running: false, exit: 1, verdict: 'CRASHED', log: '' }`);
+  await waitFor(async () => (await $text('#fr-verdict')) === 'CRASHED', { what: 'the crash verdict', tries: 20 });
+  check('fleet launch: a crash is not reported as a failed test', /crashed before it could be scored/.test(await $text('#fr-state')), await $text('#fr-state'));
+  check('fleet launch: Run comes back', !(await page.eval(`document.getElementById('fr-run').disabled`)));
+  await click('#fr-replay');
+  await waitFor(async () => (await page.eval(`window.sortbotsReplay.state().loaded`)), { what: 'the replay', tries: 40 });
+  check('fleet launch: Replay opens that run and closes the panel', (await visible('#replay')) && (await page.eval(`document.getElementById('session').hidden`)));
+
+  // -- fleet replay (operator_replay.js) --------------------------------------------------------
+  // The fixture run recorded at the top, through the real serve.py and fleetsim/replay.py.
+  console.log('\n--- fleet replay ---');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+  await page.eval(`localStorage.clear()`); await load();
+  const rp = async () => JSON.parse(await page.eval(`JSON.stringify((({ toPx, ...s }) => s)(window.sortbotsReplay.state()))`));
+  check('replay: closed until a run is opened', !(await visible('#replay')));
+  await page.eval(`window.sortbotsTests.openTests()`);
+  await waitFor(async () => (await page.eval(`!!document.querySelector('#tp-fleet-list [data-dir="fixture_run"] [data-replay]:not([disabled])')`)), { what: 'the fleet run list', tries: 40 });
+  check('replay: the Tests tab lists recorded fleet runs, replayable', /Partition heal/.test(await $text('#tp-fleet-list')) && /6 robots/.test(await $text('#tp-fleet-list')), await $text('#tp-fleet-list'));
+  await click('#tp-fleet-list [data-dir="fixture_run"] [data-replay]');
+  await waitFor(async () => (await rp()).loaded, { what: 'the replay to load', tries: 40 });
+  check('replay: Replay closes the panel and covers the stage', (await visible('#replay')) && (await page.eval(`document.getElementById('session').hidden`)));
+  check('replay: the bar names the run', (await $text('#rp-name')) === 'Partition heal' && /6 robots · ideal · seed 1/.test(await $text('#rp-meta')), await $text('#rp-meta'));
+  check('replay: the floor is drawn', await page.eval(`(() => { const c = document.getElementById('rp-map'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; const seen = new Set(); for (let i = 0; i < d.length; i += 4 * 97) seen.add(d[i] + ',' + d[i + 1] + ',' + d[i + 2]); return seen.size >= 3; })()`));
+  check('replay: a shareable link', /^#replay=fixture_run$/.test(await page.eval(`location.hash`)), await page.eval(`location.hash`));
+  await page.eval(`window.sortbotsReplay.seek(30)`); await sleep(150);
+  check('replay: before the split nobody is cut off', (await rp()).cut.length === 0, JSON.stringify((await rp()).cut));
+  await page.eval(`window.sortbotsReplay.seek(70)`); await sleep(150);
+  check('replay: during the partition robots 0-3 are cut off from the gateway', JSON.stringify((await rp()).cut) === '[0,1,2,3]', JSON.stringify((await rp()).cut));
+  check('replay: the info panel shows the board at that moment', /Task board/.test(await $text('#rp-info')) && /alive/.test(await $text('#rp-info')), await $text('#rp-info'));
+  // Pick robot 0 off the floor with a real click.
+  const [qx, qy] = await page.eval(`(() => { const r = document.getElementById('rp-map').getBoundingClientRect(), s = window.sortbotsReplay.state(); window.sortbotsReplay.select(0); const p = s.toPx(...window.sortbotsReplay.state().pose); window.sortbotsReplay.select(-1); return [r.left + p[0], r.top + p[1]]; })()`);
+  await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: qx, y: qy, button: 'left', clickCount: 1 });
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: qx, y: qy, button: 'left', clickCount: 1 });
+  await sleep(200);
+  check('replay: clicking a robot selects it', (await rp()).sel === 0 && (await page.eval(`document.getElementById('rp-sel').value`)) === '0');
+  await waitFor(async () => (await rp()).own, { what: 'robot 0\'s own map to decode', tries: 20 });
+  check('replay: a robot with a recorded map shows its own map', (await rp()).own && /own map/.test(await $text('#rp-info')), await $text('#rp-info'));
+  await click('#rp-own'); await sleep(150);
+  check('replay: Own map off goes back to the true floor', !(await rp()).own);
+  await page.eval(`window.sortbotsReplay.select(1)`); await sleep(150);
+  check('replay: a robot without one says how to record it', /record\.belief_maps/.test(await $text('#rp-info')), await $text('#rp-info'));
+  await page.eval(`window.sortbotsReplay.select(-1); window.sortbotsReplay.seek(10)`);
+  const t0 = (await rp()).T;
+  await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ']', text: ']' }); await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ']' }); await sleep(100);
+  check('replay: ] jumps to the next event', (await rp()).T > t0 + 1, `${t0} -> ${(await rp()).T}`);
+  await page.eval(`window.sortbotsReplay.seek(10)`);
+  await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: ' ', code: 'Space', text: ' ' }); await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: ' ', code: 'Space' });
+  await sleep(600);
+  const playing = await rp();
+  check('replay: Space plays, at the chosen speed', playing.playing && playing.T > 11 && playing.T < 18, JSON.stringify({ T: playing.T, speed: playing.speed }));
+  check('replay: the clock follows', /^0:1\d \/ 1:20$/.test(await $text('#rp-clock')), await $text('#rp-clock'));
+  await page.eval(`window.sortbotsReplay.play(false)`);
+  await shot('replay');
+  await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape' }); await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape' }); await sleep(150);
+  check('replay: Esc closes it and drops the link', !(await visible('#replay')) && (await page.eval(`location.hash`)) === '');
+  await page.send('Page.navigate', { url: `http://127.0.0.1:${PORT}/operator.html#replay=fixture_run` });
+  await waitFor(async () => (await page.eval(`!!window.sortbotsReplay && window.sortbotsReplay.state().loaded`)), { what: 'a replay from its link', tries: 40 });
+  check('replay: the link opens straight into the run', await visible('#replay'));
+  await page.eval(`window.sortbotsReplay.open('no_such_run')`); await sleep(400);
+  check('replay: a missing run says so', (await visible('#rp-msg')) && /no fleetsim run 'no_such_run'/.test(await $text('#rp-msg')), await $text('#rp-msg'));
+  await click('#rp-x');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+  await page.eval(`window.sortbotsReplay.open('fixture_run')`);
+  await waitFor(async () => (await rp()).loaded, { what: 'the replay on a phone', tries: 40 });
+  await sleep(200);
+  check('replay: on a phone nothing scrolls sideways and the info panel starts closed', await page.eval(`document.documentElement.scrollWidth <= innerWidth`) && !(await visible('#rp-info')));
+  await shot('replay-phone');
+  await click('#rp-x');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+
+  // -- comms traffic monitor (operator_replay.js) ------------------------------------------------
+  // The ideal fixture run first (no load: traffic only), then the bench's radio runs.
+  console.log('\n--- comms traffic monitor ---');
+  const monState = async () => (await rp()).mon;
+  await page.eval(`window.sortbotsReplay.open('fixture_run')`);
+  await waitFor(async () => (await rp()).loaded, { what: 'the replay for the monitor', tries: 40 });
+  check('monitor: closed until asked for', !(await visible('#rp-mon')) && (await monState()) === null);
+  await click('#rp-mon-toggle'); await sleep(250);
+  let ms = await monState();
+  check('monitor: Traffic shows it, under the floor and over the timeline', (await visible('#rp-mon')) && ms !== null
+        && (await page.eval(`document.getElementById('rp-mon-toggle').getAttribute('aria-pressed')`)) === 'true'
+        && (await page.eval(`document.getElementById('rp-mon').getBoundingClientRect().bottom <= document.getElementById('rp-time').getBoundingClientRect().top`)));
+  check('monitor: an ideal network has traffic but no load chart', !(await visible('#rm-load-row')) && /ideal network: no airtime/.test(await $text('#rm-model'))
+        && ms.kindMax > 0 && /status/.test(await $text('#rm-kind-leg')) && /tasks/.test(await $text('#rm-kind-leg')), await $text('#rm-model'));
+  check('monitor: Airtime is not offered without airtime', !(await visible('#rm-measure [data-m="air"]')));
+  // The x axis is the scrubber's: the cursor sits over the same time on both.
+  const axis = await page.eval(`(() => { const k = document.getElementById('rm-kind').getBoundingClientRect(), t = document.getElementById('rp-ticks').getBoundingClientRect(); return [k.left, t.left, t.right]; })()`);
+  await page.eval(`window.sortbotsReplay.seek(30)`); await sleep(200);
+  const at30 = await monState();
+  await page.eval(`window.sortbotsReplay.seek(70)`); await sleep(200);
+  const at70 = await monState();
+  const expectX = (t) => axis[1] - axis[0] + (t / 80) * (axis[2] - axis[1]);
+  check('monitor: the charts follow the clock, on the scrubber\'s own axis', at30.T === 30 && at70.T === 70 && Math.abs(at30.cursorX - expectX(30)) < 2 && Math.abs(at70.cursorX - expectX(70)) < 2
+        && /0:30/.test(at30.legend['kind-h']) && /1:10/.test(at70.legend['kind-h']), JSON.stringify([at30.cursorX, at70.cursorX, expectX(30), expectX(70), at70.legend['kind-h']]));
+  check('monitor: the legend is the traffic at that moment', /^[\d.]+k?$/.test(at70.legend['k:status']) && at70.legend['k:status'] !== '–', JSON.stringify(at70.legend));
+  // Hover reads a sample; a press seeks to it.
+  const kr = await page.eval(`(() => { const r = document.getElementById('rm-kind').getBoundingClientRect(); return [r.left, r.top, r.height]; })()`);
+  const xAt = (t) => kr[0] + expectX(t);
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: xAt(20), y: kr[1] + kr[2] / 2 }); await sleep(200);
+  ms = await monState();
+  check('monitor: hovering a chart shows every series at that second', (await visible('#rm-tip')) && ms.hover && Math.abs(ms.hover.t - 20) <= 1 && /0:19–0:20/.test(ms.tip) && /status/.test(ms.tip) && /delivered/.test(ms.tip), ms.tip);
+  await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: xAt(45), y: kr[1] + kr[2] / 2, button: 'left', clickCount: 1 });
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: xAt(45), y: kr[1] + kr[2] / 2, button: 'left', clickCount: 1 }); await sleep(200);
+  check('monitor: pressing a chart seeks there', Math.abs((await rp()).T - 45) < 1, String((await rp()).T));
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 }); await sleep(150);
+  check('monitor: the tooltip leaves with the pointer', !(await visible('#rm-tip')));
+  await click('#rm-measure [data-m="lost"]'); await sleep(150);
+  check('monitor: Lost plots copies lost per kind', (await monState()).measure === 'lost' && /Copies lost per s/.test(await $text('#rm-kind-leg')));
+  await click('#rm-measure [data-m="kbs"]'); await sleep(150);
+  check('monitor: kB/s plots bytes offered', (await monState()).measure === 'kbs' && /Offered kB\/s/.test(await $text('#rm-kind-leg')));
+  await click('#rm-kind-leg [data-kind="status"]'); await sleep(150);
+  check('monitor: a kind can be hidden from its legend', (await page.eval(`document.querySelector('#rm-kind-leg [data-kind="status"]').getAttribute('aria-pressed')`)) === 'false');
+  await click('#rm-kind-leg [data-kind="status"]'); await click('#rm-measure [data-m="sent"]'); await sleep(150);
+  await page.eval(`window.sortbotsReplay.select(1)`); await sleep(200);
+  check('monitor: the info panel has the selected robot\'s own traffic', /Its traffic/.test(await $text('#rp-info')) && /out kB\/s/.test(await $text('#rp-info')) && /status/.test(await $text('#rp-info')), await $text('#rp-info'));
+  await page.eval(`window.sortbotsReplay.select(-1)`);
+  await click('#rm-x'); await sleep(150);
+  check('monitor: x hides it', !(await visible('#rp-mon')) && (await monState()) === null);
+  await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 't', text: 't' }); await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 't' }); await sleep(150);
+  check('monitor: T brings it back', await visible('#rp-mon'));
+  await click('#rp-x');
+
+  // Benchmarks in the Tests tab: grouped, closed, their runs fetched when opened.
+  await page.eval(`window.sortbotsTests.openTests(); window.sortbotsReplay.refreshRuns()`);
+  await waitFor(async () => (await page.eval(`!!document.querySelector('#tp-fleet-list details.fs-bench[data-bench="${BENCH}"]')`)), { what: 'the bench group', tries: 40 });
+  check('bench runs: listed as a closed group under the runs', /Benchmarks/.test(await $text('#tp-fleet-list')) && /Monitor/.test(await $text(`#tp-fleet-list details.fs-bench`))
+        && /2 runs/.test(await $text('#tp-fleet-list details.fs-bench summary')) && !(await page.eval(`document.querySelector('#tp-fleet-list details.fs-bench').open`))
+        && !(await page.eval(`!!document.querySelector('#tp-fleet-list [data-dir^="bench/"]')`)), await $text('#tp-fleet-list details.fs-bench'));
+  await page.eval(`document.querySelector('#tp-fleet-list details.fs-bench summary').click()`);
+  await waitFor(async () => (await page.eval(`document.querySelectorAll('#tp-fleet-list [data-dir^="bench/"] [data-replay]:not([disabled])').length`)) === 2, { what: 'the bench\'s runs', tries: 40 });
+  check('bench runs: opening the group lists its runs with their variants', /radio · seed 1 · 6 robots/.test(await $text('#tp-fleet-list details.fs-bench')) && /busy · seed 1/.test(await $text('#tp-fleet-list details.fs-bench')), await $text('#tp-fleet-list details.fs-bench'));
+  await page.eval(`window.sortbotsReplay.refreshRuns()`); await sleep(400);
+  check('bench runs: the group stays open across a refresh', await page.eval(`document.querySelector('#tp-fleet-list details.fs-bench').open && document.querySelectorAll('#tp-fleet-list [data-dir^="bench/"]').length === 2`));
+  await click(`#tp-fleet-list [data-dir="bench/${BENCH}/delivery_smoke_r6_s1_radio"] [data-replay]`);
+  await waitFor(async () => (await rp()).loaded, { what: 'a bench run to load', tries: 40 });
+  check('bench runs: one replays like any run, and its link names it', /6 robots · radio · seed 1 · bench monitor/.test(await $text('#rp-meta'))
+        && (await page.eval(`decodeURIComponent(location.hash)`)) === `#replay=bench/${BENCH}/delivery_smoke_r6_s1_radio`, await $text('#rp-meta'));
+  // On the radio: load over time, each robot's, and on the floor.
+  // T left it up, and it stays up from run to run (remembered, like the measure).
+  await page.eval(`window.sortbotsReplay.seek(40)`); await sleep(250);
+  ms = await monState();
+  check('monitor: it stays up for the next run opened', ms !== null && (await visible('#rp-mon')));
+  check('monitor: a radio run charts channel load with the 95 % cap', (await visible('#rm-load-row')) && ms.loadMax >= 1 && /spatial contention/.test(await $text('#rm-model'))
+        && /\d+ %/.test(ms.legend.max) && /\d+ %/.test(ms.legend.mean) && (await visible('#rm-measure [data-m="air"]')), JSON.stringify(ms.legend));
+  await page.eval(`window.sortbotsReplay.select(2)`); await sleep(200);
+  ms = await monState();
+  check('monitor: the selected robot\'s own load joins the chart', /\d+ %/.test(ms.legend.robot) && /Robot 2/.test(await $text('#rm-load-leg')) && /its own airtime/.test(await $text('#rp-info')), JSON.stringify(ms.legend));
+  await click('#rm-measure [data-m="air"]'); await sleep(150);
+  check('monitor: Airtime plots each kind\'s share of the channel, batman\'s OGMs too', (await monState()).measure === 'air' && /batman OGM/.test(await $text('#rm-kind-leg')) && (await monState()).kindMax > 0);
+  await click('#rm-measure [data-m="sent"]');
+  check('monitor: Load is offered on a radio run, off until ticked', !(await page.eval(`document.getElementById('rp-load').disabled`)) && !(await page.eval(`document.getElementById('rp-load').checked`)) && (await rp()).loadLinks.length === 0);
+  await click('#rp-load'); await sleep(250);
+  const stopRgb = await page.eval(`(() => { const d = document.createElement('div'); d.style.color = getComputedStyle(document.documentElement).getPropertyValue('--stop'); document.body.append(d); const c = getComputedStyle(d).color; d.remove(); return c; })()`);
+  let st = await rp();
+  const loadNow = await page.eval(`(() => { const r = window.sortbotsReplay.state(); return r.loadNode; })()`);
+  check('monitor: Load colours each link by the busier of its ends', st.loadLinks.length > 0 && st.loadLinks.every(([, , f, c]) => f < 0.95 && /^rgb\(/.test(c)) && (await visible('#rp-load-leg')) && loadNow != null,
+        JSON.stringify(st.loadLinks.slice(0, 3)));
+  // The busy variant: every channel past the cap, the excess shaded, links red.
+  await page.eval(`window.sortbotsReplay.open('bench/${BENCH}/delivery_smoke_r6_s1_busy')`);
+  await waitFor(async () => (await rp()).loaded, { what: 'the busy bench run', tries: 40 });
+  await page.eval(`window.sortbotsReplay.seek(40); window.sortbotsReplay.load(true)`); await sleep(300);
+  st = await rp(); ms = st.mon;
+  const red = (c) => { const d = /^rgb\((\d+), (\d+), (\d+)/.exec(stopRgb), m = /^#(..)(..)(..)$/.exec(c); return !!d && !!m && [1, 2, 3].every((k) => parseInt(m[k], 16) === Number(d[k])); };
+  check('monitor: past the cap is shaded and counted, and the links go red', ms.overSamples > 10 && /capacity unlimited/.test(await $text('#rm-model')) && /^\d+ s$/.test(ms.legend.over) && ms.legend.over !== '0 s'
+        && st.loadLinks.length > 0 && st.loadLinks.every(([, , f, c]) => f >= 0.95 && red(c)), JSON.stringify({ over: ms.legend.over, n: ms.overSamples, links: st.loadLinks.slice(0, 2), stopRgb }));
+  check('monitor: the info panel flags load past the cap', /peak load/.test(await $text('#rp-info')) && await page.eval(`!!document.querySelector('#rp-info .bad')`));
+  await shot('replay-monitor');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }); await sleep(400);
+  check('monitor: on a phone it stacks its legends, takes the info panel\'s place, and nothing scrolls sideways',
+        (await visible('#rp-mon')) && (await page.eval(`document.getElementById('rp-mon').classList.contains('stack')`)) && !(await visible('#rp-info'))
+        && (await page.eval(`document.documentElement.scrollWidth <= innerWidth`)));
+  await shot('replay-monitor-phone');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+  await page.eval(`window.sortbotsReplay.monitor(false); window.sortbotsReplay.load(false)`);
+  await click('#rp-x');
+  await page.eval(`localStorage.clear()`);
+
+  // -- fleet sim scenario editor (operator_fleetedit.js) ----------------------------------------
+  // The real serve.py and fleetsim/preview.py build every floor; saves land in scnDir.
+  console.log('\n--- scenario editor ---');
+  await page.send('Emulation.setDeviceMetricsOverride', { width: 1366, height: 768, deviceScaleFactor: 1, mobile: false });
+  await page.eval(`localStorage.clear()`); await load();
+  const fe = async () => JSON.parse(await page.eval(`JSON.stringify((({ toPx, wp, ...s }) => s)(window.sortbotsFleetEdit.state()))`));
+  const feSettled = (what, pred = () => true) => waitFor(async () => { const s = await fe(); return s.open && !s.checking && s.ok !== null && pred(s); }, { what, tries: 60, delay: 150 });
+  const fePx = (x, y) => page.eval(`(() => { const r = document.getElementById('fe-map').getBoundingClientRect(), p = window.sortbotsFleetEdit.state().toPx(${x}, ${y}); return [r.left + p[0], r.top + p[1]]; })()`);
+  const feWp = async (name) => JSON.parse(await page.eval(`JSON.stringify(window.sortbotsFleetEdit.state().wp(${JSON.stringify(name)}))`));
+  const feClick = async (x, y) => {
+    const [a, b] = await fePx(x, y);
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: a, y: b });
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: a, y: b, button: 'left', buttons: 1, clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: a, y: b, button: 'left', clickCount: 1 });
+    await sleep(80);
+  };
+  const feClickWp = async (name) => { const p = await feWp(name); await feClick(p[0], p[1]); };
+  const feDrag = async (x0, y0, x1, y1) => {
+    const [a, b] = await fePx(x0, y0), [c, d] = await fePx(x1, y1);
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: a, y: b, button: 'left', buttons: 1, clickCount: 1 });
+    for (let k = 1; k <= 5; k++) await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: a + (c - a) * k / 5, y: b + (d - b) * k / 5, button: 'left', buttons: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: c, y: d, button: 'left', clickCount: 1 });
+    await sleep(80);
+  };
+  const feType = (bind, value) => page.eval(`(() => { const el = document.querySelector('#fe-form [data-bind="${bind}"]'); el.focus(); el.value = ${JSON.stringify(value)}; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  const feHas = (sel) => page.eval(`!!document.querySelector(${JSON.stringify(sel)})`);
+  // A real click on a field: focus events wait for the window to have focus, and a click gives it focus.
+  const feClickEl = async (sel) => {
+    const [a, b] = await page.eval(`(() => { const el = document.querySelector(${JSON.stringify(sel)}); el.scrollIntoView({ block: 'center' }); const r = el.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+    await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: a, y: b, button: 'left', buttons: 1, clickCount: 1 });
+    await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: a, y: b, button: 'left', clickCount: 1 });
+    await sleep(80);
+  };
+
+  await page.eval(`window.sortbotsTests.openTests()`);
+  await waitFor(async () => (await page.eval(`document.querySelectorAll('#fe-list .fs-run').length`)) === scnFiles, { what: 'the scenario list', tries: 40 });
+  check('editor: the Tests tab lists every scenario with its title and description',
+    /Eight robots, a dozen deliveries/.test(await $text('#fe-list')) && /Twelve fixed/.test(await page.eval(`document.querySelector('#fe-list [data-name="delivery_smoke"]').title`)), (await $text('#fe-list')).slice(0, 120));
+  await page.eval(`document.getElementById('fe-list').scrollIntoView()`); await shot('editor-list');
+  check('editor: each scenario can be edited, or a new one started from it', (await page.eval(`document.querySelectorAll('#fe-list [data-fe-edit]').length`)) === scnFiles && (await page.eval(`document.querySelectorAll('#fe-list [data-fe-new]').length`)) === scnFiles);
+
+  // Without --control: the editor reads and checks, but can't save.
+  await page.eval(`window.__editNoControl = true`);
+  await page.eval(`window.sortbotsFleetEdit.refreshList()`); await sleep(300);
+  await click('#fe-list [data-name="delivery_smoke"] [data-fe-edit]');
+  await feSettled('delivery_smoke in the editor', (s) => s.name === 'delivery_smoke');
+  check('editor: Edit closes the panel and covers the floor below the header', (await visible('#fleetedit')) && (await page.eval(`document.getElementById('session').hidden`))
+    && (await page.eval(`document.getElementById('fleetedit').getBoundingClientRect().top >= document.querySelector('header').getBoundingClientRect().bottom - 1`)));
+  check('editor: without the sim console, Save, Save as and Run are off and it says why',
+    (await page.eval(`['fe-save', 'fe-saveas', 'fe-run'].every((id) => document.getElementById(id).disabled)`)) && /saving needs the sim console/.test(await $text('#fe-err')), await $text('#fe-err'));
+  await page.eval(`window.__editNoControl = false; window.__editSave503 = true`);
+  await page.eval(`window.sortbotsFleetEdit.refreshList()`); await sleep(300);
+  await page.eval(`window.sortbotsFleetEdit.open('delivery_smoke')`); await feSettled('delivery_smoke again', (s) => s.name === 'delivery_smoke');
+  await feType('title', 'Changed while the console is read-only');
+  await click('#fe-save'); await sleep(400);
+  check('editor: a save the server refuses (no --control) says so and writes nothing',
+    /Not saved: fleet sim runs need the sim dashboard console/.test(await $text('#fe-err')) && fs.readFileSync(path.join(scnDir, 'delivery_smoke.yaml'), 'utf8') === fs.readFileSync(path.join(REPO_ROOT, 'fleetsim/scenarios/delivery_smoke.yaml'), 'utf8'), await $text('#fe-err'));
+  await page.eval(`window.__editSave503 = false; window.__editPosts = []`);
+
+  // map_sharing: open it, then edit it on its floor.
+  await page.eval(`window.sortbotsFleetEdit.refreshList()`); await sleep(300);
+  await page.eval(`window.sortbotsFleetEdit.open('map_sharing')`);
+  await feSettled('map_sharing in the editor', (s) => s.floor && s.name === 'map_sharing');
+  let st0 = await fe();
+  check('editor: it opens with the file\'s fields and a valid check', st0.ok === true && st0.name === 'map_sharing' && !st0.unsaved && st0.doc.tasks.length === 6 && st0.doc.disturbances.length === 1
+    && (await page.eval(`document.querySelector('#fe-form [data-bind="name"]').value`)) === 'map_sharing' && /^Edit map_sharing$/.test(await $text('#fe-heading')), JSON.stringify(st0).slice(0, 200));
+  const feColours = () => page.eval(`(() => { const c = document.getElementById('fe-map'), d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; const seen = new Set(); for (let i = 0; i < d.length; i += 4 * 97) seen.add(d[i] + ',' + d[i + 1] + ',' + d[i + 2]); return seen.size; })()`);
+  await waitFor(async () => (await feColours()) >= 4, { what: 'the floor drawn', tries: 20, delay: 100 }).catch(() => {});
+  check('editor: the floor is drawn from the scenario, with its waypoints', st0.waypoints > 50 && (await feColours()) >= 4, String(await feColours()));
+  check('editor: the header comment is shown, and which comments a change would drop', /^Does sharing map patches/.test(await page.eval(`document.querySelector('#fe-form [data-bind="header"]').value`))
+    && /kept only in sections you leave unchanged/.test(await $text('#fe-cmt-note')) && !(await feHas('#fe-cmts li.lost')));
+  await shot('editor-open');
+
+  // A task's pickup and dropoff picked on the floor.
+  await feClickEl('#fe-form [data-bind="tasks.0.pickup"]');
+  check('editor: a pickup field armed for the floor says so', (await fe()).armed === 'tasks.0.pickup' && /Click a waypoint to fill in task 1's pickup/.test(await $text('#fe-hint')), `${(await fe()).armed} | ${await $text('#fe-hint')}`);
+  await feClickWp('shelf_2_1');
+  check('editor: clicking a waypoint fills the pickup and moves on to the dropoff', (await fe()).doc.tasks[0].pickup === 'shelf_2_1' && (await fe()).armed === 'tasks.0.dropoff', JSON.stringify((await fe()).doc.tasks[0]));
+  await feClickWp('dock_9');
+  st0 = await fe();
+  check('editor: ... and then the dropoff', st0.doc.tasks[0].dropoff === 'dock_9' && st0.unsaved && !st0.armed, JSON.stringify(st0.doc.tasks[0]));
+  check('editor: the changed section\'s comment is now marked as dropped on save', /tasks: a minute apart.*dropped on save/.test(await $text('#fe-cmts')), await $text('#fe-cmts'));
+
+  // A blockage drawn on the floor, at the timeline's time.
+  await page.eval(`window.sortbotsFleetEdit.seek(30)`);
+  await click('#fe-tools [data-tool="block"]');
+  await feDrag(10, 20, 12, 22);
+  st0 = await fe();
+  const blk = st0.doc.disturbances[1];
+  check('editor: dragging with the Blockage tool adds a blockage at the timeline\'s time', blk && blk.at_s === 30 && blk.blockage.rect.every((v, k) => Math.abs(v - [10, 20, 12, 22][k]) < 0.2), JSON.stringify(blk));
+  check('editor: ... listed under Disturbances and selected', (await page.eval(`document.querySelectorAll('#fe-form [data-sec="dist"] .fe-item').length`)) === 2 && JSON.stringify(st0.sel) === '{"kind":"dist","i":1}');
+
+  // Its bar on the timeline: dragged 60 s later, the form follows.
+  const [bx, by, bw] = await page.eval(`(() => { const r = document.getElementById('fe-ticks').getBoundingClientRect(); return [r.left + r.width * 30 / 1200 + 12, r.top + 12 + 9 + 3.5, r.width]; })()`);
+  await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: bx, y: by, button: 'left', buttons: 1, clickCount: 1 });
+  for (let k = 1; k <= 4; k++) await page.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: bx + bw * 60 / 1200 * k / 4, y: by, button: 'left', buttons: 1 });
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: bx + bw * 60 / 1200, y: by, button: 'left', clickCount: 1 });
+  await sleep(100);
+  const dragged = (await fe()).doc.disturbances[1].at_s;
+  check('editor: dragging a disturbance\'s bar on the timeline moves it, and its field', Math.abs(dragged - 90) <= 2 && (await page.eval(`document.querySelector('#fe-form [data-bind="dist.1.at_s"]').value`)) === String(dragged), String(dragged));
+  await feType('dist.1.at_s', '30');
+
+  // A partition added from the form, then turned into another kind.
+  await page.eval(`(() => { const k = document.querySelector('#fe-form [data-bind="_newkind"]'); k.value = 'partition'; })()`);
+  await click('#fe-form [data-add="dist"]');
+  await feType('dist.2.v.0', '0-2');
+  st0 = await fe();
+  check('editor: a partition group can be written as a range', JSON.stringify(st0.doc.disturbances[2]) === '{"at_s":30,"partition":[["robot_0","robot_1","robot_2"],"rest"]}', JSON.stringify(st0.doc.disturbances[2]));
+  await page.eval(`(() => { const k = document.querySelector('#fe-form [data-bind="dist.2.kind"]'); k.value = 'kill'; k.dispatchEvent(new Event('input', { bubbles: true })); k.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+  check('editor: changing a disturbance\'s kind gives it that kind\'s fields', JSON.stringify((await fe()).doc.disturbances[2]) === '{"at_s":30,"kill":"robot_0"}' && (await feHas('#fe-form [data-bind="dist.2.fresh"]')), JSON.stringify((await fe()).doc.disturbances[2]));
+  await click('#fe-form [data-del="dist.2"]');
+
+  // Tasks tool: pickup, dropoff, a new task.
+  await click('#fe-tools [data-tool="task"]');
+  await feClickWp('shelf_3_3');
+  check('editor: the Tasks tool remembers the pickup', (await fe()).pending === 'shelf_3_3' && /now click the dropoff/.test(await $text('#fe-hint')));
+  await feClickWp('dock_4');
+  st0 = await fe();
+  check('editor: ... and the dropoff makes a task', st0.doc.tasks.length === 7 && st0.doc.tasks[6].pickup === 'shelf_3_3' && st0.doc.tasks[6].dropoff === 'dock_4' && st0.pending === null, JSON.stringify(st0.doc.tasks[6]));
+  await page.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`); await sleep(100);
+  check('editor: Esc puts the tool down, not the editor', (await fe()).tool === 'pan' && (await fe()).open);
+  await feSettled('the edited scenario', (s) => s.ok === true);
+  await shot('editor-edited');
+
+  // Errors come back from the server, on the field they are about.
+  await feType('tasks.1.pickup', 'shelf_99_9');
+  await feSettled('the bad pickup', (s) => s.ok === false);
+  check('editor: an unknown waypoint is an error on that field', (await page.eval(`document.querySelector('#fe-form [data-bind="tasks.1.pickup"]').classList.contains('bad')`))
+    && /tasks\[1\]\.pickup.*no waypoint 'shelf_99_9'/.test(await $text('#fe-err')) && /1 ERROR/.test(await $text('#fe-state')), await $text('#fe-err'));
+  await feType('tasks.1.pickup', 'shelf_1_3');
+  await click('#fe-form [data-add="cfg"]');
+  const ci = await page.eval(`document.querySelectorAll('#fe-form [data-sec="config"] .fe-row.kv').length - 1`);
+  await feType(`cfg.${ci}.key`, 'status.hzz'); await feType(`cfg.${ci}.text`, '3');
+  await feSettled('the bad setting', (s) => s.ok === false && s.where === 'config.status.hzz');
+  check('editor: a setting base.yaml doesn\'t have is refused by the server, on its row', /no such setting/.test((await fe()).error)
+    && (await page.eval(`document.querySelector('#fe-form [data-bind="cfg.${ci}.key"]').classList.contains('bad')`)), (await fe()).error);
+  await feType(`cfg.${ci}.key`, 'status.hz');
+  await feSettled('a good setting', (s) => s.ok === true);
+  check('editor: a YAML value typed into a row reaches the server as YAML', JSON.stringify((await fe()).doc.config.status) === '{"hz":{"$yaml":"3"}}', JSON.stringify((await fe()).doc.config));
+  await click(`#fe-form [data-del="cfg.${ci}"]`);
+  await feSettled('the setting removed', (s) => s.ok === true && !s.doc.config.status);
+
+  // Save: the body, and the file it wrote.
+  const shaRx = /^[0-9a-f]{64}$/;
+  await click('#fe-save');
+  await waitFor(async () => /Saved fleetsim\/scenarios\/map_sharing\.yaml/.test(await $text('#fe-err')), { what: 'the save', tries: 40, delay: 150 });
+  const posted = JSON.parse(await page.eval(`JSON.stringify(window.__editPosts)`));
+  const pb = posted[posted.length - 1];
+  check('editor: Save posts the scenario, its header and the sha it was opened at',
+    posted.length === 1 && pb.scenario.name === 'map_sharing' && pb.overwrite === true && shaRx.test(pb.base_sha) && /^Does sharing map patches/.test(pb.header)
+    && pb.scenario.tasks[0].pickup === 'shelf_2_1' && pb.scenario.tasks[0].dropoff === 'dock_9' && pb.scenario.tasks.length === 7 && pb.scenario.disturbances[1].at_s === 30
+    && JSON.stringify(pb.scenario.config) === '{"map_share":{"prior":"truth","recipients":"all"}}', JSON.stringify(pb).slice(0, 300));
+  const feSaved = fs.readFileSync(path.join(scnDir, 'map_sharing.yaml'), 'utf8');
+  check('editor: the file keeps its header and untouched sections, comments and all', feSaved.startsWith('# Does sharing map patches') && feSaved.includes("    # Every robot ends up with the fleet's newest view")
+    && feSaved.includes('  - {at_s: 5, pickup: shelf_2_1, dropoff: dock_9}') && !feSaved.includes('tasks:  # a minute apart'), feSaved.slice(0, 200));
+  check('editor: saved, it is no longer marked unsaved', !(await fe()).unsaved && /^Edit map_sharing$/.test(await $text('#fe-heading')) && /comment in changed sections dropped/.test(await $text('#fe-err')));
+
+  // Save as: a new file; the original stays.
+  await click('#fe-saveas');
+  await page.eval(`(() => { const el = document.getElementById('fe-asname'); el.value = 'map_sharing_edge'; el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); })()`);
+  await waitFor(async () => fs.existsSync(path.join(scnDir, 'map_sharing_edge.yaml')), { what: 'save as', tries: 40, delay: 150 });
+  check('editor: Save as writes a new file under the new name', /^name: map_sharing_edge$/m.test(fs.readFileSync(path.join(scnDir, 'map_sharing_edge.yaml'), 'utf8'))
+    && fs.readFileSync(path.join(scnDir, 'map_sharing.yaml'), 'utf8') === feSaved && /^Edit map_sharing_edge$/.test(await $text('#fe-heading')));
+  const asPost = JSON.parse(await page.eval(`JSON.stringify(window.__editPosts.at(-1))`));
+  check('editor: ... posted as a new file, from the one it was opened as', asPost.overwrite === false && asPost.base_sha === null && asPost.source === 'map_sharing', JSON.stringify({ ...asPost, scenario: undefined }));
+
+  // Run: hands the saved scenario to Run a fleet sim.
+  await click('#fe-run');
+  await waitFor(async () => (await page.eval(`document.getElementById('fr-scenario').value`)) === 'map_sharing_edge', { what: 'the run form', tries: 40 });
+  check('editor: Run closes the editor and picks it in Run a fleet sim', !(await visible('#fleetedit')) && (await visible('#tests-pane')) && (await page.eval(`document.activeElement.id`)) === 'fr-run');
+  check('editor: the new scenario is in the list too', /map_sharing_edge/.test(await $text('#fe-list')));
+
+  // New from: a copy under a free name, with a mover drawn on its floor.
+  await click('#fe-list [data-name="walkers"] [data-fe-new]');
+  await feSettled('new from walkers', (s) => s.floor && s.name === 'walkers_2');
+  st0 = await fe();
+  check('editor: New from starts unsaved, under a free name, with the original\'s movers', st0.name === 'walkers_2' && st0.unsaved && st0.doc.actors.length === 4 && /^New walkers_2/.test(await $text('#fe-heading')), st0.name);
+  check('editor: ... and keeps the original\'s comments where nothing changed', /metrics: First cut/.test(await $text('#fe-cmts')) && !(await feHas('#fe-cmts li.lost')), await $text('#fe-cmts'));
+  await click('#fe-tools [data-tool="mover"]');
+  for (const [x, y] of [[40, 16], [46, 16], [46, 22]]) await feClick(x, y);
+  check('editor: the Mover tool counts the points clicked', /3 so far/.test(await $text('#fe-hint')), await $text('#fe-hint'));
+  await page.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`); await sleep(100);
+  st0 = await fe();
+  const feMv = st0.doc.actors[4];
+  check('editor: Enter ends the path: a new mover walking it, under a free id', feMv && feMv.id === 'walker_6' && feMv.path.waypoints.length === 3 && Math.abs(feMv.path.waypoints[1][0] - 46) < 0.2 && st0.tool === 'pan', JSON.stringify(feMv));
+  await feSettled('the new mover', (s) => s.ok === true);
+  check('editor: nothing in the form scrolls sideways', await page.eval(`(() => { const f = document.getElementById('fe-form'); return f.scrollWidth <= f.clientWidth + 1 && document.documentElement.scrollWidth <= innerWidth; })()`));
+  await page.eval(`document.documentElement.dataset.theme = 'dark'`); await sleep(150);
+  check('editor: it follows the dark theme', (await page.eval(`getComputedStyle(document.getElementById('fe-panel')).backgroundColor`)) === 'rgb(23, 27, 32)');
+  await shot('editor-new-dark');
+  await page.eval(`delete document.documentElement.dataset.theme`);
+  await page.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`); await sleep(150);
+  check('editor: Esc closes it (after asking, since it is unsaved)', !(await visible('#fleetedit')));
+  check('editor: closing unsaved wrote nothing', !fs.existsSync(path.join(scnDir, 'walkers_2.yaml')));
 
   // -- Drive view: the real base + D435 over serve.py --drive (operator_drive.js) -------------
   console.log('\n--- drive view ---');

@@ -483,3 +483,153 @@ def test_finished_tasks_are_forgotten_after_retention():
     assert all(set(r.alloc.tasks) == {1, 2} for r in net.robots.values())
     net.run(10.0)
     assert all(not r.alloc.tasks for r in net.robots.values())
+
+
+# ---- confirmed picks and completes (protocol.py docstring, 2026-11-17)
+
+CONFIRMED = dict(quorum_nodes=5, confirmed_picks=True, confirmed_completes=True)
+
+
+def _owned_by_1(**pkw):
+    net = fleet({1: (1, 0), 2: (5, 0), 3: (2, 0), 4: (9, 0)}, **{**CONFIRMED, **pkw})
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert net.self_owners(1) == [1]
+    return net
+
+
+def _ask(net, rid, tid):
+    """The harness at the shelf: ask, and publish whatever asking sent."""
+    ok = net.robots[rid].alloc.request_pick(tid, net.robots[rid].now(net.t))
+    net._flush(rid)
+    return ok
+
+
+def test_confirmed_pick_goes_ahead_once_a_majority_acks():
+    net = _owned_by_1()
+    assert _ask(net, 1, 1) is False  # announced, nobody has answered yet
+    net.run(0.2)
+    assert _ask(net, 1, 1) is True
+    assert net.events("pick_granted")
+    # every peer now holds it committed: none will ever reclaim it
+    assert all(r.alloc.committed(1) for rid, r in net.robots.items() if rid != 1)
+    assert not net.robots[1].alloc.committed(1)  # but the item isn't on board yet
+
+
+def test_no_pick_without_the_majority_knowing():
+    # Cut off 0.1 s before the shelf: still "has a quorum" for status_timeout_s,
+    # but the pick Claim never reaches anyone, so no ack, so no pick. The owner
+    # abandons at its lease and the majority re-auctions: one owner throughout.
+    net = _owned_by_1()
+    net.isolate(1)
+    net.run(0.1)
+    assert net.robots[1].alloc.has_quorum(net.robots[1].now(net.t))
+    end = net.t + 20.0
+    while net.t < end:
+        assert _ask(net, 1, 1) is False
+        net.step()
+        assert len(net.self_owners(1)) <= 1, (net.t, net.self_owners(1))
+    assert [e for e in net.events("stop_task") if e["robot_id"] == 1]
+    assert net.self_owners(1) in ([2], [3], [4])
+    assert not net.events("pick_granted")
+
+
+def test_a_pick_announced_then_abandoned_is_handed_back_through_the_query():
+    # The pick Claim gets through, the acks don't: peers hold the task as
+    # committed (they never reclaim it), the owner abandons it unpicked. Once
+    # the split heals, their TaskQuery reaches the owner, which answers with a
+    # Release, and the fleet re-auctions it instead of waiting for an operator.
+    net = _owned_by_1(query_s=3.0)
+    _ask(net, 1, 1)
+    net.run(0.03)  # the Claim has landed; the acks are in flight
+    net.isolate(1)
+    net.run(20.0)
+    assert [e for e in net.events("stop_task") if e["robot_id"] == 1]
+    assert [e for e in net.events("owner_missing")]
+    assert net.self_owners(1) == []
+    net.heal()
+    net.run(10.0)
+    assert len(net.self_owners(1)) == 1
+    assert len({r.alloc.tasks[1].owner for r in net.robots.values()}) == 1
+
+
+def test_a_completion_made_during_a_split_reaches_everyone_after_the_heal():
+    net = _owned_by_1()
+    _ask(net, 1, 1)
+    net.run(0.2)
+    assert _ask(net, 1, 1)
+    net.robots[1].alloc.commit(1, net.robots[1].now(net.t))
+    net.run(1.0)
+    net.isolate(1)
+    net.run(5.0)
+    net.robots[1].alloc.complete(1, net.robots[1].now(net.t))  # lost: nobody hears it
+    net.run(20.0)
+    assert all(r.alloc.tasks[1].state != DONE for rid, r in net.robots.items() if rid != 1)
+    assert not net.events("complete_confirmed")
+    net.heal()
+    net.run(3.0)
+    assert {r.alloc.tasks[1].state for r in net.robots.values()} == {DONE}
+    assert [e["robot_id"] for e in net.events("complete_confirmed")] == [1]
+    assert not net.events("lease_expired")  # nobody was ever sent to the empty shelf
+
+
+def test_an_unconfirmed_completion_outlives_retention():
+    net = _owned_by_1(finished_retention_s=5.0)
+    _ask(net, 1, 1)
+    net.run(0.2)
+    _ask(net, 1, 1)
+    net.robots[1].alloc.commit(1, net.robots[1].now(net.t))
+    net.run(1.0)
+    net.isolate(1)
+    net.robots[1].alloc.complete(1, net.robots[1].now(net.t))
+    net.run(30.0)
+    assert 1 in net.robots[1].alloc.tasks  # still repeating it
+    net.heal()
+    net.run(3.0)
+    assert {r.alloc.tasks[1].state for r in net.robots.values() if 1 in r.alloc.tasks} == {DONE}
+    net.run(10.0)
+    assert 1 not in net.robots[1].alloc.tasks  # confirmed, then forgotten as usual
+
+
+def test_a_node_that_knows_a_task_is_done_answers_a_claim_for_it():
+    a = Allocator(3, Params(**CONFIRMED))
+    a.on_announce(0, 9, (0, 0), (1, 1), now=0.0)
+    a.on_claim(1, 9, cost=-1.0, now=0.5)
+    a.on_task_event(1, 9, 0, now=10.0)  # COMPLETE
+    a.drain()
+    a.on_claim(2, 9, cost=4.0, now=20.0)  # robot 2 reclaimed it, never heard the end
+    out, _ = a.drain()
+    assert {"type": "TaskEvent", "task_id": 9, "kind": 0, "to": [2]} in out  # the asker only
+    a.on_lease_renewal(2, [(9, 4.0)], now=20.2)  # within answer_backoff_s: once is enough
+    out, _ = a.drain()
+    assert not [m for m in out if m["type"] == "TaskEvent"]
+
+
+def test_a_robot_sent_to_a_delivered_task_stops_when_told():
+    # No quorum here: a lone allocator with one would (rightly) never bid.
+    a = Allocator(2, Params(confirmed_completes=True),
+                  cost_fn=lambda pk, dp=None, st=None: (1.0, 1.0, 2.0))
+    a.on_announce(0, 9, (0, 0), (1, 1), now=0.0)
+    a.tick(1.1)  # its own window closes: it claims
+    assert a.tasks[9].owner == 2
+    a.drain()
+    a.on_task_event(3, 9, 0, now=5.0)
+    out, ev = a.drain()
+    assert [e["reason"] for e in ev if e["event"] == "stop_task"] == ["done_elsewhere"]
+    assert {"type": "Ack", "task_id": 9, "of": "complete", "to": 3} in out
+
+
+def test_switches_off_reproduce_the_spec():
+    # The DES and spec_original.yaml send none of the new messages.
+    net = fleet({1: (1, 0), 2: (5, 0)}, quorum_nodes=3)
+    net.run(1.0)
+    net.announce(GW, 1, (0, 0), (1, 1))
+    net.run(3.0)
+    assert _ask(net, 1, 1) is True
+    net.robots[1].alloc.complete(1, net.t)
+    sent = []
+    net.deliver_filter = lambda s, d, m: sent.append(m["type"]) or True
+    net._flush(1)
+    net.run(3.0)
+    assert not {"Ack", "TaskQuery"} & set(sent)

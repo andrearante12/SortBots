@@ -1,0 +1,45 @@
+# DRAFT for review (C12, 2026-11-26). Benchmark: the gateway goes down for
+# 3 minutes. The gateway is where operator requests enter the fleet, a
+# quorum member, the board, and on the radio a mesh node on the apron.
+# While it is down, new requests wait for it (the warehouse system keeps
+# them) and are announced when it is back, carrying `requested_s`; tasks
+# announced before the outage are the fleet's to finish without it.
+# What it tests: the single point of failure of a central planner (A1),
+# which lives on the gateway and so can dispatch nothing while it is down,
+# against the auction, which only loses the door new work comes in by.
+#
+# Regime: underloaded, 0.003 tasks per robot per second (~half capacity),
+# so the outage shows as delivery time. Arrivals stop at 1200 s, the run
+# ends at 1500 s. Delivery time measured from the request is the honest
+# number here: fleet_tasks (v2) measures from the announce, so it does not
+# count the wait for the gateway; requested_s on the announce has it.
+# Network: radio, because the gateway is also a relay: robots that reached
+# each other through it may not without it. Today's fleet-wide 5 Hz Status,
+# with SPATIAL contention (per-node load, as fleet_scale): with the global
+# single-domain model a 20-robot fleet went over a load cliff within 2
+# minutes of the gateway coming back and never left it (tasks 0 %, 29 of
+# 65 done; with network.capacity=unlimited 64 of 65, 2026-11-26).
+name: bench_dead_gateway
+title: "DRAFT bench: the gateway down for 3 minutes, radio"
+description: >
+  The default synthetic warehouse on the radio model, true map, a Poisson
+  stream of 0.003 tasks per robot per second until 1200 s. The gateway is
+  off from 300 to 480 s (state kept, not a reinstall); requests made then
+  are held and announced at 480 s. Fixed 1500 s.
+seed: 1
+duration_s: 1500
+robots: 10
+config:
+  map_share: {prior: truth}
+  network: {model: radio, radio: {contention: spatial}}
+task_arrival: {rate_per_robot_hz: 0.003, pickups: "shelf_*", dropoffs: "dock_*", until_s: 1200}
+disturbances:
+  - {at_s: 300, duration_s: 180, kill: gateway}
+metrics:
+  - metric: fleet_tasks
+  - metric: contacts
+  - metric: nav
+    pass: {empty_shelf: {eq: 0}}
+  - metric: comms
+  - metric: utilisation
+  - metric: bounds

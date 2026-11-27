@@ -1,0 +1,42 @@
+# DRAFT for review (C12, 2026-11-26). Benchmark: single-lane aisles.
+# Aisles 2, 4 and 6 are 1.0 m wide beside the racks (world.synthetic.
+# narrow_aisles): one robot at a time, two can't pass, and a robot picking
+# at a shelf in one blocks it for everyone. The other aisles stay 2.4 m, so
+# a narrow aisle is often the short way and a wide one the safe way round.
+# This is the floor B10 (keep right) can't help and B11 (single-lane
+# passage reservation) is for: today two robots meeting head-on inside a
+# narrow aisle stop, replan around each other, and if there is no way
+# round, wait until block_fail_s (45 s) and give the leg up.
+#
+# Regime: moderately loaded, 0.004 tasks per robot per second (~0.65 of
+# the open floor's capacity), so robots meet in the narrow aisles without
+# the fleet being saturated. Every pickup is a shelf IN a narrow aisle
+# (shelf_[246]_*): with any shelf, robots routed round the narrow aisles
+# and mean delivery at 20 robots was the plain floor's to 0.1 s (156.8 vs
+# 156.7, 2026-11-26). Arrivals stop at 1200 s, the run ends at 1500 s.
+# Compare with the plain floor, same pickups:
+#   /usr/bin/python3 -m fleetsim run bench_narrow --set world.synthetic.narrow_aisles=[]
+# bench_dead_end is this floor with the end segments sealed into bays.
+# Network: ideal. The question is traffic, not comms.
+name: bench_narrow
+title: "DRAFT bench: three single-lane aisles among wide ones"
+description: >
+  The default synthetic warehouse with aisles 2, 4 and 6 narrowed to 1.0 m
+  along every rack segment (the cross-aisle crossings keep full width).
+  True map, a Poisson stream of 0.004 tasks per robot per second until
+  1200 s, from a shelf in a narrow aisle to any dock, fixed 1500 s.
+seed: 1
+duration_s: 1500
+robots: 10
+config:
+  world:
+    synthetic: {narrow_aisles: [2, 4, 6], narrow_m: 1.0}
+  map_share: {prior: truth}
+task_arrival: {rate_per_robot_hz: 0.004, pickups: "shelf_[246]_*", dropoffs: "dock_*", until_s: 1200}
+metrics:
+  - metric: fleet_tasks
+  - metric: contacts
+  - metric: nav
+    pass: {empty_shelf: {eq: 0}}
+  - metric: utilisation
+  - metric: bounds

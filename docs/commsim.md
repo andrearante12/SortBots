@@ -20,6 +20,18 @@ There are two cross-checked tools. Median latency agrees within 3–10%.
   an Ubuntu 24.04 VM (`commsim/vm/provision_vm.sh`, created with Multipass).
 - **`des/`** is a discrete-event model, used for scale and failure sweeps on the host.
 
+**Confirmed picks and completes** (2026-11-17, team decision): no pick without the
+majority knowing, and no completion lost. An owner at the shelf announces the pick and
+waits (task_manager `AWAIT_PICK`) until a majority has acked. A Complete is repeated
+until every peer it hears has acked. Two backstops cover the rest: a node that knows
+how a task ended answers anyone still talking about it, and a node whose committed
+owner is missing asks (`TaskQuery`, backing off). The new wire types are `Ack` and
+`TaskQuery`; acks and repeats are addressed. `Params.confirmed_picks` /
+`confirmed_completes` are off by default so the DES and `spec_original.yaml`
+reproduce, and on in `configs/fleet_tasks.yaml` and fleetsim. Measured in fleetsim
+([fleetsim.md](fleetsim.md)); the DES and the emulation stubs don't carry the new
+types yet.
+
 All radio numbers are **placeholders** until real hardware is measured. Run
 everything with `/usr/bin/python3` from the repo root.
 

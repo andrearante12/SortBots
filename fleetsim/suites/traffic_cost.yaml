@@ -1,0 +1,32 @@
+# What keep right costs where robots rarely meet, and what easing it costs
+# where they do (docs/fleetsim.md "What lanes cost", 2026-11-27). The full
+# benchmark showed bench_burst at 20 robots losing throughput with the traffic
+# layer (stuck tasks behind parked robots, in either variant), and mean
+# delivery +4-7 % at 2 and 5 robots on the open floor (lanes are slower to
+# drive). traffic_slants is the option that eases lane changes
+# (traffic.keep_right.lane_change_m); bench_rush and bench_dead_end at 20 are
+# where it costs.
+#   /usr/bin/python3 -m fleetsim bench traffic_cost --jobs 4
+name: traffic_cost
+description: >
+  bench_burst and bench_steady at 2, 5, 10 and 20 robots, the small fleets of
+  bench_moved, bench_mixed, bench_partition and bench_dead_robot, and the dense
+  bench_rush and bench_dead_end at 20: off, with keep right and passages, and
+  with lane changes eased into slants; three seeds.
+scenarios:
+  - {scenario: bench_burst, robots: [2, 5, 10, 20]}
+  - {scenario: bench_steady, robots: [2, 5, 10, 20]}
+  - {scenario: bench_moved, robots: [2, 5]}
+  - {scenario: bench_mixed, robots: [2, 5]}
+  - {scenario: bench_partition, robots: [2, 5]}
+  - {scenario: bench_dead_robot, robots: [2, 5]}
+  - {scenario: bench_rush, robots: [20]}
+  - {scenario: bench_dead_end, robots: [20]}
+seeds: [1, 2, 3]
+variants:
+  "off": {}                      # quoted: bare off is YAML for false
+  traffic: {traffic.keep_right.enabled: true, traffic.passages.enabled: true}
+  traffic_slants: {traffic.keep_right.enabled: true, traffic.passages.enabled: true,
+                   traffic.keep_right.lane_change_m: 3.0}
+headline: fleet_tasks.per_hour
+also: [fleet_tasks.mean_s, fleet_tasks.done, nav.blocked_robot, nav.blocked_robot_s, nav.gave_up]

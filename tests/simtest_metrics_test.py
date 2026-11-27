@@ -508,6 +508,209 @@ def test_tasks():
     assert v["mean_time_s"] == 8.0 and v["success_rate"] == 0.5
 
 
+# -- fleetsim benchmark metrics (docs/fleetsim.md "Benchmark metrics") ---------------
+
+def _score(name, stream, robots=("robot_0",)):
+    ms = metrics.MetricSet(metrics.validate_list([{"metric": name}]),
+                           ctx(robots=list(robots)))
+    for ev in stream:
+        ms.feed(ev)
+    return ms.score()["metrics"][0]["values"]
+
+
+def _st(t, rid, tid, state):
+    return {"s": "task", "t": t, "rid": rid, "task_id": tid, "state": state}
+
+
+def _fleet_stream(t3_done=False):
+    """T1 straight through; T2 first sent to robot_1, which loses it, then
+    done by robot_0; T3 never dispatched (or, with t3_done, done late)."""
+    ev = [{"s": "announce", "t": 10.0, "task_id": "T1"},
+          {"s": "dispatch", "t": 12.0, "rid": "robot_0", "task_id": "T1"},
+          _st(12.0, "robot_0", "T1", "NAV_TO_PICKUP"),
+          {"s": "announce", "t": 20.0, "task_id": "T2"},
+          {"s": "dispatch", "t": 25.0, "rid": "robot_1", "task_id": "T2"},
+          _st(25.0, "robot_1", "T2", "NAV_TO_PICKUP"),
+          {"s": "announce", "t": 30.0, "task_id": "T3"},
+          _st(40.0, "robot_0", "T1", "PICKING"),
+          _st(42.0, "robot_0", "T1", "NAV_TO_DROPOFF"),
+          _st(50.0, "robot_1", "T2", "CANCELLED"),
+          {"s": "dispatch", "t": 60.0, "rid": "robot_0", "task_id": "T2"},
+          _st(80.0, "robot_0", "T1", "PLACING"),
+          _st(82.0, "robot_0", "T1", "DONE"),
+          _st(82.0, "robot_0", "T2", "NAV_TO_PICKUP"),
+          _st(100.0, "robot_0", "T2", "NAV_TO_DROPOFF"),
+          _st(130.0, "robot_0", "T2", "DONE")]
+    if t3_done:
+        ev += [{"s": "dispatch", "t": 130.0, "rid": "robot_0", "task_id": "T3"},
+               _st(150.0, "robot_0", "T3", "NAV_TO_DROPOFF"), _st(190.0, "robot_0", "T3", "DONE")]
+    return ev + [{"s": "end", "t": 400.0, "reason": "duration", "sim_s": 400.0, "wall_s": 1.0}]
+
+
+def test_fleet_tasks_waits_and_backlog():
+    v = _score("fleet_tasks", _fleet_stream())
+    assert (v["done"], v["backlog_end"], v["redispatched"]) == (2, 1, 1)
+    assert v["wait_assign_s"] == 3.5     # (12 - 10 + 25 - 20) / 2: the FIRST dispatch counts
+    assert v["wait_pickup_s"] == 52.5    # (42 - 12 + 100 - 25) / 2
+    assert v["mean_s"] == 91.0           # = 3.5 + 52.5 + the carry legs' mean (40 + 30) / 2
+    # T3 is still open at the end, so the window runs to the end of the run.
+    assert v["per_hour"] == round(2 * 3600 / (400.0 - 10.0), 1)
+
+
+def test_fleet_tasks_per_hour_stops_at_the_last_delivery():
+    # Everything delivered by 190 s: the 210 s idle tail after it must not
+    # count, or the same fleet scores lower the longer the run is left going.
+    v = _score("fleet_tasks", _fleet_stream(t3_done=True))
+    assert v["backlog_end"] == 0
+    assert v["per_hour"] == round(3 * 3600 / (190.0 - 10.0), 1)
+
+
+def _race_and_dup_stream():
+    """T1: a 3 ms auction race (robot_1 yields at once), then robot_0 alone.
+    T2: robot_0 and robot_1 both on it for 30 s, a real duplicate. T3:
+    robot_1 dies mid-task and robot_2 takes it over while robot_1 is dead."""
+    return [{"s": "announce", "t": 0.0, "task_id": "T1"},
+            {"s": "announce", "t": 0.0, "task_id": "T2"},
+            {"s": "announce", "t": 0.0, "task_id": "T3", "requested_s": -40.0},
+            _st(5.0, "robot_0", "T1", "NAV_TO_PICKUP"),
+            _st(5.0, "robot_1", "T1", "NAV_TO_PICKUP"),
+            _st(5.003, "robot_1", "T1", "CANCELLED"),
+            _st(10.0, "robot_0", "T2", "NAV_TO_PICKUP"),
+            _st(20.0, "robot_1", "T2", "NAV_TO_PICKUP"),
+            _st(50.0, "robot_1", "T2", "FAILED"),
+            _st(60.0, "robot_1", "T3", "NAV_TO_PICKUP"),
+            {"s": "disturb", "t": 70.0, "on": True, "kill": "robot_1"},
+            _st(71.0, "robot_2", "T3", "NAV_TO_PICKUP"),
+            _st(90.0, "robot_0", "T1", "DONE"), _st(95.0, "robot_0", "T2", "DONE"),
+            _st(100.0, "robot_2", "T3", "DONE"),
+            {"s": "end", "t": 200.0, "reason": "duration", "sim_s": 200.0, "wall_s": 1.0}]
+
+
+def test_fleet_tasks_duplicates_ignore_races_and_dead_robots():
+    v = _score("fleet_tasks", _race_and_dup_stream(), robots=("robot_0", "robot_1", "robot_2"))
+    assert v["overlaps"] == 2      # T1's race and T2 (T3 never had two LIVE robots)
+    assert v["duplicates"] == 1    # only T2 lasted dup_min_s
+    # T3 waited out a gateway outage: its delivery time runs from the request
+    assert v["mean_s"] == round((90.0 + 95.0 + 140.0) / 3, 1)
+
+
+def _util_stream(paths=True):
+    """robot_0's day, with every cause of lost time once; robot_1 never
+    reports and is idle throughout."""
+    nav = lambda t, e, **kw: {"s": "nav", "t": t, "rid": "robot_0", "event": e, **kw}  # noqa: E731
+    path = lambda t, purpose, pts: {"s": "path", "t": t, "rid": "robot_0",  # noqa: E731
+                                    "purpose": purpose, "pts": pts}
+    leg = [[0, 0], [5, 0]]
+    ev = [_st(10.0, "robot_0", "A", "NAV_TO_PICKUP"), path(10.0, "task", leg),
+          nav(20.0, "blocked", by="robot"), nav(25.0, "unblocked", after_s=5.0),
+          nav(30.0, "blocked", by="notice"), nav(32.0, "yield", to="robot_1"),
+          nav(36.0, "yield_end", after_s=4.0), nav(38.0, "unblocked", after_s=8.0),
+          path(40.0, "task", []), nav(40.0, "plan_failed", cause="sensed"),
+          path(46.0, "task", leg),
+          # A replan around the bump that finds no way: the bump's time, not no-path's.
+          nav(50.0, "blocked", by="bump"), nav(51.0, "replan", cause="blocked"),
+          path(51.0, "task", []), nav(51.0, "plan_failed", cause="blocked"),
+          path(55.0, "task", leg), nav(57.0, "unblocked", after_s=7.0),
+          _st(60.0, "robot_0", "A", "AWAIT_PICK"), _st(63.0, "robot_0", "A", "PICKING"),
+          _st(65.0, "robot_0", "A", "NAV_TO_DROPOFF"), path(65.0, "task", leg),
+          nav(65.5, "blocked", by="actor"),
+          # A queued dispatch repeats the status: the open stop goes on.
+          _st(66.0, "robot_0", "A", "NAV_TO_DROPOFF"),
+          nav(70.0, "unblocked", after_s=4.5),
+          _st(80.0, "robot_0", "A", "PLACING"), _st(82.0, "robot_0", "A", "DONE"),
+          path(92.0, "home", leg),
+          nav(95.0, "blocked", by="robot"),   # on the way home: no delivery lost
+          path(100.0, "home", []),            # re-tasked: the stop ends without unblocked
+          _st(100.0, "robot_0", "B", "NAV_TO_PICKUP"), path(100.0, "task", leg),
+          {"s": "disturb", "t": 110.0, "on": True, "kill": "robot_0", "duration_s": 20.0,
+           "fresh": True},
+          {"s": "disturb", "t": 130.0, "on": False, "kill": "robot_0", "duration_s": 20.0,
+           "fresh": True},
+          {"s": "end", "t": 200.0, "reason": "duration", "sim_s": 200.0, "wall_s": 1.0}]
+    return ev if paths else [e for e in ev if e["s"] != "path"]
+
+
+def test_utilisation_phases_and_time_lost_by_cause():
+    v = _score("utilisation", _util_stream(), robots=("robot_0", "robot_1"))
+    assert v["robot_s"] == 400.0
+    share = {k: v[f"{k}_frac"] for k in ("idle", "to_pickup", "at_pickup", "carrying",
+                                         "placing", "home", "off")}
+    # robot_0: idle 10 + 10 + 70 (after its reboot), to pickup 50 + 10, at the
+    # shelf 5, carrying 15, placing 2, home 8, off 20; robot_1 idle 200.
+    assert share == pytest.approx({"idle": 290 / 400, "to_pickup": 60 / 400,
+                                   "at_pickup": 5 / 400, "carrying": 15 / 400,
+                                   "placing": 2 / 400, "home": 8 / 400, "off": 20 / 400})
+    assert sum(share.values()) == pytest.approx(1.0, abs=1e-3)
+    assert v["busy_frac"] == pytest.approx(82 / 400)
+    lost = {k: v[f"lost_{k}_s"] for k in ("robot", "actor", "notice", "bump", "yield",
+                                          "await_pick", "no_path")}
+    assert lost == {"robot": 5.0, "actor": 4.5, "notice": 4.0, "bump": 7.0, "yield": 4.0,
+                    "await_pick": 3.0, "no_path": 6.0}
+    assert v["lost_s"] == 33.5 and v["lost_frac"] == pytest.approx(33.5 / 400, abs=1e-4)
+    assert v["lost_bump_frac"] == pytest.approx(7 / 400, abs=1e-4)
+
+
+def test_utilisation_without_path_events_says_what_it_cannot_tell():
+    # record.paths: false. Going home and recovered plans are invisible, so
+    # they come out None, and the other causes are unaffected.
+    v = _score("utilisation", _util_stream(paths=False), robots=("robot_0", "robot_1"))
+    assert v["home_frac"] is None and v["lost_no_path_s"] is None
+    assert v["idle_frac"] == pytest.approx(298 / 400)
+    assert (v["lost_robot_s"], v["lost_bump_s"], v["lost_yield_s"]) == (5.0, 7.0, 4.0)
+    assert v["lost_s"] == 27.5  # the known causes only
+
+
+def _bound_stream(bounds=True):
+    ev = [{"s": "announce", "t": 0.0, "task_id": "T1"},
+          {"s": "task_bound", "t": 0.0, "task_id": "T1", "lb_s": 50.0, "drive_m": 23.0},
+          {"s": "announce", "t": 100.0, "task_id": "T2"},
+          {"s": "task_bound", "t": 100.0, "task_id": "T2", "lb_s": 100.0, "drive_m": 48.0},
+          {"s": "announce", "t": 200.0, "task_id": "T3"},
+          {"s": "task_bound", "t": 200.0, "task_id": "T3", "lb_s": None, "drive_m": None},
+          _st(100.0, "robot_0", "T1", "DONE"), _st(400.0, "robot_1", "T2", "DONE")]
+    return ev if bounds else [e for e in ev if e["s"] != "task_bound"]
+
+
+def test_bounds_stretch_capacity_and_offered_load():
+    v = _score("bounds", _bound_stream(), robots=("robot_0", "robot_1"))
+    assert v["lb_mean_s"] == 75.0          # T3 has no path: no bound, left out
+    assert v["stretch"] == 2.5             # (100 / 50 + 300 / 100) / 2
+    assert v["ub_per_hour"] == 96.0        # 2 robots x 3600 / 75
+    assert v["arrival_per_hour"] == 36.0   # 2 gaps in 200 s
+    assert v["offered_load"] == 0.375
+
+
+def test_bounds_on_a_run_recorded_before_task_bound():
+    v = _score("bounds", _bound_stream(bounds=False), robots=("robot_0", "robot_1"))
+    assert v == {"lb_mean_s": None, "stretch": None, "ub_per_hour": None,
+                 "arrival_per_hour": 36.0, "offered_load": None, "unservable": 0}
+
+
+def test_bounds_cap_capacity_by_the_robots_that_have_a_capability():
+    # Four robots, one of them heavy. T2 and T3 need it, T4 needs a
+    # capability nobody has (able 0: no bound, no capacity, unservable).
+    ev = [{"s": "announce", "t": 0.0, "task_id": "T1"},
+          {"s": "task_bound", "t": 0.0, "task_id": "T1", "lb_s": 40.0, "drive_m": 10.0},
+          {"s": "announce", "t": 10.0, "task_id": "T2"},
+          {"s": "task_bound", "t": 10.0, "task_id": "T2", "lb_s": 60.0, "drive_m": 10.0,
+           "requires": ["heavy"], "able": 1},
+          {"s": "announce", "t": 20.0, "task_id": "T3"},
+          {"s": "task_bound", "t": 20.0, "task_id": "T3", "lb_s": 80.0, "drive_m": 20.0,
+           "requires": ["heavy"], "able": 1},
+          {"s": "announce", "t": 30.0, "task_id": "T4"},
+          {"s": "task_bound", "t": 30.0, "task_id": "T4", "lb_s": None, "drive_m": 12.0,
+           "requires": ["cold"], "able": 0}]
+    v = _score("bounds", ev, robots=tuple(f"robot_{k}" for k in range(4)))
+    assert v["lb_mean_s"] == 60.0 and v["unservable"] == 1
+    # The whole fleet: 4 x 3600 / 60 = 240/h. The one heavy robot does T2 and
+    # T3, 140 s of every 3 tasks' 180 s: 1 x 3600 x 3 / 140 = 77.1/h, lower.
+    assert v["ub_per_hour"] == 77.1
+    # Without the requirement the same bounds give the v1 capacity.
+    plain = [{k: x for k, x in e.items() if k not in ("requires", "able")} for e in ev[:6]]
+    assert _score("bounds", plain, robots=tuple(f"robot_{k}" for k in range(4)))[
+        "ub_per_hour"] == 240.0
+
+
 # -- record -> replay ----------------------------------------------------------------
 
 def test_recorded_events_rescore_identically(tmp_path):

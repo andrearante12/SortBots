@@ -1,0 +1,37 @@
+# Robot types and capabilities (A6, docs/fleetsim.md "Robot types and
+# capabilities"): a mixed fleet under the three assignment methods, with the
+# same task streams on a plain fleet beside it.
+#   /usr/bin/python3 -m fleetsim bench mixed --jobs 6
+# 72 runs; ~15 min at --jobs 6 on the 30-CPU laptop (20-robot runs take
+# 1-2 min of wall time each).
+name: mixed
+description: >
+  bench_mixed (standard, fast and heavy robots; a fifth of the tasks need a
+  heavy one), and the same task stream on a fleet where every robot is a
+  standard one that can lift heavy packages; bench_steady with bench_mixed's
+  fleet and no requirements (speed and handling differ, nothing is
+  exclusive), and bench_steady as it is. At 5 and 20 robots, seeds 1-3, by
+  auction, central greedy and rolling Hungarian.
+scenarios:
+  - {scenario: bench_mixed, robots: [5, 20]}
+  - scenario: bench_mixed
+    id: bench_mixed_uniform
+    robots: [5, 20]
+    set: {robots.types: [{name: standard, capabilities: [heavy]}]}
+  - scenario: bench_steady
+    id: bench_steady_mixed
+    robots: [5, 20]
+    set:
+      robots.types:
+        - {name: standard}
+        - {name: fast, share: 0.3, max_speed_mps: 0.75, accel_mps2: 0.75}
+        - {name: heavy, share: 0.2, capabilities: [heavy], max_speed_mps: 0.4, accel_mps2: 0.3,
+           pick_s: 8, place_s: 5}
+  - {scenario: bench_steady, robots: [5, 20]}
+seeds: [1, 2, 3]
+variants:
+  auction: {}
+  central_greedy: {dispatch.method: central_greedy}
+  central_hungarian: {dispatch.method: central_hungarian}
+headline: fleet_tasks.mean_s
+also: [fleet_tasks.p95_s, fleet_tasks.per_hour, fleet_tasks.done_frac, bounds.offered_load]

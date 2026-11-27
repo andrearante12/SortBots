@@ -1,0 +1,35 @@
+# The central dispatchers under the two faults that broke them (2026-11-26):
+# the gateway down for 3 minutes and two network splits. Pass = nobody is
+# ever sent to a shelf whose item has left (nav.empty_shelf == 0), every
+# size, every seed. `*_nopick` turns the dispatcher's pick grants off
+# (fleet_tasks.protocol.confirmed_picks: false) to show what they cost and
+# what they buy (docs/fleetsim.md, "Dispatchers and perfect information").
+#   /usr/bin/python3 -m fleetsim bench central_faults --jobs 4
+name: central_faults
+description: >
+  bench_dead_gateway and bench_partition at 2, 5, 10 and 20 robots, seeds 1-3,
+  with the central greedy and rolling-Hungarian dispatchers, the Hungarian with
+  perfect information, and the Hungarian without pick grants.
+scenarios:
+  - {scenario: bench_dead_gateway, robots: [2, 5, 10, 20]}
+  - {scenario: bench_partition, robots: [2, 5, 10, 20]}
+seeds: [1, 2, 3]
+variants:
+  central_greedy: {dispatch.method: central_greedy}
+  central_hungarian: {dispatch.method: central_hungarian}
+  central_hungarian_nopick:
+    dispatch.method: central_hungarian
+    fleet_tasks.protocol.confirmed_picks: false
+  central_hungarian_perfect:
+    dispatch.method: central_hungarian
+    info.map: truth
+    info.peers: truth
+    info.dispatch: truth
+    network.model: ideal
+    network.ideal.delay_s: 0
+headline: fleet_tasks.per_hour
+also:
+  - fleet_tasks.mean_s
+  - fleet_tasks.p95_s
+  - nav.empty_shelf
+  - fleet_tasks.duplicates

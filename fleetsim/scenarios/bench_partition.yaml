@@ -1,0 +1,50 @@
+# DRAFT for review (C12, 2026-11-26). Benchmark: the network splits, twice,
+# and heals. First 40 % of the robots lose the gateway and the majority for
+# 2 minutes; later the gateway itself is cut off with 30 % of the robots,
+# so the majority side has no gateway (and a central planner, which lives
+# on the gateway, can reach only the minority). Groups are fractions of the
+# fleet ({first: 0.4}), so the same file splits 2 robots (1 | 1 + gateway)
+# and 20 (8 | 12 + gateway).
+# What it tests: the quorum keeps the cut-off side from working what the
+# other side owns, nobody is sent to a shelf whose item has left
+# (empty_shelf must stay 0), work in flight across the split is finished,
+# not redone, and how much delivery time the split costs. fleet_tasks'
+# `duplicates` also counts a claim race at the instant of a split, which
+# confirmed picks then cancel before any pick (20 robots, seed 2: one 8 s
+# episode, no empty shelf, 2026-11-26).
+#
+# Regime: underloaded, 0.003 tasks per robot per second (~half capacity),
+# so the cost of the split shows as delivery time, not as lost throughput.
+# Arrivals stop at 1200 s, the run ends at 1500 s.
+# Network: ideal, so the split is the only comms failure and the protocol's
+# answer to it is what is measured. On the radio (--set network.model=radio)
+# the split is confounded at both ends of the size range (2026-11-26): at 2
+# robots one robot in the far aisles is out of range of the gateway and the
+# other robot, loses its quorum and its claim, and the task ping-pongs
+# between the two for the rest of the run; at 20, global contention tips
+# over a load cliff (see bench_moved).
+name: bench_partition
+title: "DRAFT bench: two network splits and heals"
+description: >
+  The default synthetic warehouse, ideal network, true map, a Poisson
+  stream of 0.003 tasks per robot per second until 1200 s. From 300 to 420 s
+  the first 40 % of the robots are cut off from everyone else (gateway
+  included); from 800 to 920 s the gateway and the last 30 % of the robots
+  are cut off from the rest. Fixed 1500 s.
+seed: 1
+duration_s: 1500
+robots: 10
+config:
+  map_share: {prior: truth}
+task_arrival: {rate_per_robot_hz: 0.003, pickups: "shelf_*", dropoffs: "dock_*", until_s: 1200}
+disturbances:
+  - {at_s: 300, duration_s: 120, partition: [{first: 0.4}, rest]}
+  - {at_s: 800, duration_s: 120, partition: [[gateway, {last: 0.3}], rest]}
+metrics:
+  - metric: fleet_tasks
+  - metric: contacts
+  - metric: nav
+    pass: {empty_shelf: {eq: 0}}
+  - metric: comms
+  - metric: utilisation
+  - metric: bounds

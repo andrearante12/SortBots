@@ -50,6 +50,47 @@ STREAMS = {
     "detect": "/<rid>/packages (nodes/package_detector.py), throttled to 2 Hz, map frame: "
               "{rid, plates: [{x, y, z, nx, ny, nz, conf}]} — each plate's centre and "
               "OUTWARD normal, what the pick controller aims at (no image data)",
+    # fleetsim only (docs/fleetsim.md): the headless fleet sim records these
+    # alongside start/end/gt/dispatch/task, which keep the schema above.
+    "announce": "fleetsim: a task the gateway announced: {task_id, pickup, dropoff}",
+    "task_bound": "fleetsim, right after each announce (since 2026-11-26): {task_id, lb_s, "
+                  "drive_m} — the task's lower bound on its delivery time (the shortest "
+                  "drive pickup -> dropoff on the true layout at max speed, plus both "
+                  "dwells); both null when the true layout has no path",
+    "contact": "fleetsim: a body contact: {rid, kind: robot|static|actor, other, x, y}",
+    "nav": "fleetsim: local-layer / planner event: {rid, event: replan|blocked|unblocked|"
+           "gave_up|plan_failed|recovery|empty_shelf|yield|yield_end|yield_timeout, cause?, "
+           "by?: robot|actor|notice|bump, after_s?, to?}; with traffic.passages also "
+           "pass_claim|pass_release|pass_enter|pass_exit|pass_hold|pass_hold_end|"
+           "pass_hold_timeout, box: [x0, y0, x1, y1] (the passage), inside?",
+    "net": "fleetsim, 1 Hz: {model, kinds: {kind: {sent, delivered, lost, bytes, p50_ms, "
+           "p95_ms, msgs, air_ms (radio)}}, load_max, load_mean, over_cap, reach_frac, hops_max; "
+           "record.net_nodes (since 2026-11-26): node_kinds: {kind: {sent, bytes, lost, rx, "
+           "rx_bytes: [per node]}}, and on the radio node_load, node_air: [per node], ogm_air}. "
+           "sent counts copies (one per recipient), msgs the sends; node 0 is the gateway",
+    "belief": "fleetsim: each robot's map vs the truth: {free_cells, cell_m, robots: {rid: "
+              "{known_free, wrong_free, wrong_occ, known}}}",
+    "board": "fleetsim: the gateway's task board, counted: {tasks: {state: n}, alarms, "
+             "robots_alive}",
+    "disturb": "fleetsim: an injected failure starting (on: true) or ending",
+    "map_learn": "fleetsim (since 2026-11-26): a blockage reached one robot's own map: {rid, "
+                 "blockage (disturbance index), on (it appeared / it cleared), after_s (null: "
+                 "never, while it stood), how: sensed|shared|truth|already, and for an appearance "
+                 "path_s (when its path first ran into it while it didn't know; null if never), "
+                 "for a clear ghost_s (null: its map had it at the clear; else when its map took "
+                 "the gone pallet in from a stale peer)}. fleetsim/maplearn.py",
+    "map_pub": "fleetsim (map_share.events): an event-driven map publish: {rid, tiles, cells}",
+    "path": "fleetsim (record.paths): a robot's planned path, on every plan; pts [] when it "
+            "has none: {rid, purpose: task|home, pts: [[x, y], ...]}. The replay draws it; "
+            "`utilisation` reads it for going home and for when a failed plan recovers",
+    # fleetsim, for the operator view's replay (fleetsim/replay.py); no metric reads them.
+    "world": "fleetsim, once after start: {grid: MapGrid JSON (0 free / 100 occupied), "
+             "waypoints: {name: [x, y]}, homes: {rid: [x, y]}, gateway: [x, y], body_r, "
+             "actors: {id: radius}}",
+    "links": "fleetsim, radio network only: usable one-hop links: {links: [[node_a, node_b, "
+             "snr_db], ...]}; node 0 is the gateway, robot_N is node N+1",
+    "belief_map": "fleetsim: one robot's own map (record.belief_maps): {rid, grid: MapGrid "
+                  "JSON, -1 unknown / 0 free / 100 occupied}",
 }
 
 # Recorded on every run whether or not a metric asks, so a NEW metric can be

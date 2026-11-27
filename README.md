@@ -51,7 +51,7 @@ Robots use a combination of vision and depth based algorithms in order to identi
 [Setup](docs/setup.md) · [Running](docs/running.md) · [Architecture](docs/architecture.md) ·
 [Testing](docs/testing.md) · [Real robot](docs/real-robot.md) · [Manipulation](docs/manipulation.md) ·
 [Arm](docs/arm.md) · [Head camera](docs/head_camera.md) · [Magnet](docs/magnet.md) ·
-[Drive](docs/drive.md) · [Comms](docs/commsim.md)
+[Drive](docs/drive.md) · [Comms](docs/commsim.md) · [Fleet sim](docs/fleetsim.md)
 
 ## License
 

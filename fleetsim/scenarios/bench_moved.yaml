@@ -1,0 +1,57 @@
+# DRAFT for review (C12, 2026-11-26). Benchmark: obstacles that come, move
+# and go. One pallet blocks a whole aisle segment and is "moved" every 6
+# minutes: it clears from one aisle and appears in another at the same
+# moment, four times. A second, half-width pallet narrows aisle 7 to one
+# lane for most of the run. Nobody's map knows any of it in advance.
+# What it tests: how fast a fleet learns that a blockage is there (one
+# robot's camera, then map sharing), and that one is GONE (until someone
+# looks again, every robot that heard of it still detours round a pallet
+# that has left: newest observation wins, docs/fleetsim.md decision 2).
+# B9 (event-driven map updates) and A2 (info.map: truth, the perfect
+# reference) are measured here.
+#
+# Regime: moderately loaded, 0.004 tasks per robot per second (~0.65 of
+# capacity), any shelf, so some pickups sit just behind the pallet. Each
+# full block lies between two shelves of its segment, so every shelf stays
+# reachable from one end. Arrivals stop at 1200 s, the run ends at 1500 s.
+# Network: radio, because map patches travel it: how fast a change spreads
+# is the question. Today's fleet-wide 5 Hz Status, with SPATIAL contention
+# (per-node load, as fleet_scale): with the global single-domain model a
+# 20-robot fleet runs at ~0.7 load and, from the pallet's first move on, sat
+# past a cliff it never came back from (tasks delivery 0 %, 18 of 84 done;
+# with network.capacity=unlimited 83 of 84, 2026-11-26). Robots start with
+# the true static map (prior: truth), so only the pallets need sharing.
+name: bench_moved
+title: "DRAFT bench: a pallet that moves between aisles, radio"
+description: >
+  The default synthetic warehouse on the radio model. A 1 m pallet blocks
+  the full width of aisle 3 (x 22-23) from 60 s, moves to aisle 5 (x 36.5-
+  37.5) at 420 s, to aisle 2 (x 8-9) at 780 s and to aisle 6 (x 50-51) at
+  1140 s. A half-width pallet sits in aisle 7 (x 22-23, south half) from
+  200 to 1000 s. Poisson stream of 0.004 tasks per robot per second until
+  1200 s, fixed 1500 s.
+seed: 1
+duration_s: 1500
+robots: 10
+config:
+  map_share: {prior: truth}
+  network: {model: radio, radio: {contention: spatial}}
+task_arrival: {rate_per_robot_hz: 0.004, pickups: "shelf_*", dropoffs: "dock_*", until_s: 1200}
+disturbances:
+  # A blockage waits for its spot to be clear of robots (sim.py), so a move
+  # can land a few seconds late; the disturb event records waited_s.
+  - {at_s: 60, duration_s: 360, blockage: {rect: [22.0, 19.2, 23.0, 21.6]}}
+  - {at_s: 420, duration_s: 360, blockage: {rect: [36.5, 26.4, 37.5, 28.8]}}
+  - {at_s: 780, duration_s: 360, blockage: {rect: [8.0, 15.6, 9.0, 18.0]}}
+  - {at_s: 1140, duration_s: 360, blockage: {rect: [50.0, 30.0, 51.0, 32.4]}}
+  - {at_s: 200, duration_s: 800, blockage: {rect: [22.0, 33.6, 23.0, 34.6]}}
+metrics:
+  - metric: fleet_tasks
+  - metric: contacts
+  - metric: nav
+    pass: {empty_shelf: {eq: 0}}
+  - metric: map_divergence
+  - metric: map_spread
+  - metric: comms
+  - metric: utilisation
+  - metric: bounds

@@ -29,6 +29,10 @@
     --float: rgba(255,255,255,.94); --scrim: rgba(242,243,244,.92); --veil: rgba(21,25,30,.35); --shadow: rgba(20,25,30,.12);
     --warnbg: #fff4e5; --warnline: #f3d3a0; --warnink: #8a5200;
     --map-bg: #f2f3f4; --map-unknown: #fbfbfc; --map-free: #e7eaed; --map-occ: #7a828f; --map-ink: #15191e; --map-robot-ink: #fff;
+    /* Chart series (the replay's comms monitor), in a fixed order that passes the
+       colour-blind and normal-vision separation checks on each theme's surface;
+       slot N always means the same thing, never "the Nth line drawn". */
+    --series-1: #257de0; --series-2: #f47230; --series-3: #00b894; --series-4: #f2a600; --series-5: #ee7fac; --series-6: #008a17; --series-7: #6a4ce2;
   }
   /* Dark follows the system unless the toggle has pinned a theme (data-theme). The same
      values appear twice because CSS cannot share a block between a media query and an
@@ -42,6 +46,7 @@
       --float: rgba(23,27,32,.94); --scrim: rgba(15,18,21,.9); --veil: rgba(0,0,0,.55); --shadow: rgba(0,0,0,.4);
       --warnbg: #2b2415; --warnline: #5a4a22; --warnink: #f0c36a;
       --map-bg: #0f1215; --map-unknown: #13171b; --map-free: #242b33; --map-occ: #7d8896; --map-ink: #e8ecf0; --map-robot-ink: #12161a;
+      --series-1: #338ced; --series-2: #e76624; --series-3: #00a888; --series-4: #d28e05; --series-5: #e24d8b; --series-6: #0aac23; --series-7: #9887ef;
     }
   }
   :root[data-theme="dark"] {
@@ -52,6 +57,7 @@
     --float: rgba(23,27,32,.94); --scrim: rgba(15,18,21,.9); --veil: rgba(0,0,0,.55); --shadow: rgba(0,0,0,.4);
     --warnbg: #2b2415; --warnline: #5a4a22; --warnink: #f0c36a;
     --map-bg: #0f1215; --map-unknown: #13171b; --map-free: #242b33; --map-occ: #7d8896; --map-ink: #e8ecf0; --map-robot-ink: #12161a;
+    --series-1: #338ced; --series-2: #e76624; --series-3: #00a888; --series-4: #d28e05; --series-5: #e24d8b; --series-6: #0aac23; --series-7: #9887ef;
   }
   [hidden] { display: none !important; }
   * { box-sizing: border-box; }
@@ -422,6 +428,181 @@
   #comms-feed:empty { display: none; }
   #comms-feed li { padding: 2px 0; } #comms-feed li:first-child { color: var(--ink); }
   #comms-feed li.error { color: var(--stop); }
+  /* Fleet replay (operator_replay.js): a recorded fleetsim run on its own floor. It
+     covers the stage, because nothing live belongs under it: different floor,
+     different robots. */
+  /* Above #empty (3): "no session running" is about the live fleet, not this. */
+  #replay { position: absolute; inset: 0; z-index: 4; background: var(--map-bg); }
+  #rp-map { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  #rp-bar { top: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 6px 10px; font-size: .84rem; }
+  #rp-bar .rp-title { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1 1 auto; }
+  #rp-name { font-weight: 600; white-space: nowrap; }
+  #rp-meta { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #rp-bar select { padding: 2px 6px; }
+  #rp-info-toggle[aria-pressed="true"] { background: var(--segbg); }
+  #rp-bar .x { margin-left: auto; background: none; border: none; color: var(--muted); font-size: 1.3rem; line-height: 1; padding: 0 2px; cursor: pointer; }
+  .rp-v { font-size: .7rem; font-weight: 700; letter-spacing: .05em; padding: 1px 6px; border-radius: 4px; color: var(--on-ink); background: var(--muted); }
+  .rp-v.pass { background: var(--go); } .rp-v.fail { background: var(--stop); }
+  #rp-info { top: 64px; right: 12px; width: 280px; max-height: calc(100% - 150px); overflow: auto; padding: 8px 12px 10px; font-size: .8rem; }
+  #rp-info .rp-k { margin: 8px 0 3px; font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  #rp-info .rp-k:first-child { margin-top: 0; }
+  #rp-info .rp-row { display: flex; flex-wrap: wrap; gap: 2px 10px; }
+  #rp-info .rp-row b { font-weight: 600; } #rp-info .bad { color: var(--stop); }
+  .rp-mode { text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--ink); }
+  .rp-mode::before { content: ""; display: inline-block; width: 8px; height: 8px; margin: 0 4px 0 6px; border-radius: 50%; background: var(--c); }
+  .rp-feed { margin: 0; padding: 0; list-style: none; }
+  .rp-feed li { padding: 1px 0 1px 8px; border-left: 2px solid var(--c, var(--line)); margin: 2px 0; }
+  .rp-feed .tm { color: var(--muted); margin-right: 6px; }
+  #rp-time { left: 12px; right: 12px; bottom: 12px; display: grid; grid-template-columns: auto auto auto 1fr auto; align-items: center; gap: 8px; padding: 6px 10px; font-size: .84rem; }
+  #rp-clock { white-space: nowrap; min-width: 92px; text-align: right; }
+  #rp-time select { padding: 2px 4px; }
+  .rp-scrub { position: relative; display: grid; }
+  #rp-ticks { width: 100%; height: 14px; cursor: pointer; display: block; }
+  #rp-slider { width: 100%; margin: 0; }
+  #rp-legend { display: inline-flex; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: .78rem; }
+  #rp-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; background: var(--c); }
+  #rp-msg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); padding: 24px; text-align: center; pointer-events: none; }
+  #rp-msg.err { color: var(--stop); }
+  #rp-mon-toggle[aria-pressed="true"] { background: var(--segbg); }
+  #rp-load-leg { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: .78rem; }
+  #rp-load-leg .ramp { display: inline-block; width: 36px; height: 6px; border-radius: 3px; background: linear-gradient(90deg, var(--map-free), var(--info)); }
+  #rp-load-leg .over { display: inline-block; width: 8px; height: 6px; border-radius: 3px; background: var(--stop); margin-left: 2px; }
+  /* Comms monitor (operator_replay.js): load and traffic over the whole run, its
+     time axis lined up with the scrubber below, so the cursor sits over the thumb. */
+  #rp-mon { left: 12px; right: 12px; bottom: 64px; padding: 6px 10px 8px; font-size: .78rem; }
+  #rp-mon .rm-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-bottom: 2px; }
+  #rp-mon .rm-head b { font-size: .84rem; }
+  #rm-model { color: var(--muted); min-width: 0; flex: 1 1 auto; }
+  #rp-mon .seg button { padding: 2px 9px; font-size: .76rem; }
+  #rp-mon .x { background: none; border: none; color: var(--muted); font-size: 1.2rem; line-height: 1; padding: 0 2px; cursor: pointer; }
+  #rp-mon .rm-chart { display: grid; grid-template-columns: var(--rm-legend, 190px) minmax(0, 1fr); gap: 8px; margin-top: 4px; }
+  #rp-mon canvas { width: 100%; height: 86px; display: block; cursor: crosshair; touch-action: none; }
+  #rp-mon #rm-kind { height: 104px; }
+  .rm-leg { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+  .rm-leg .rm-k { font-size: .68rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rm-li { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto auto; align-items: center; gap: 6px; padding: 0 2px; background: none; border: none;
+           border-radius: 4px; text-align: left; color: var(--ink); font-size: .76rem; line-height: 1.35; }
+  button.rm-li:hover { background: var(--hover2); }
+  .rm-li[aria-pressed="false"] { opacity: .45; }
+  .rm-li > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .rm-li b { font-weight: 600; text-align: right; } .rm-li .muted { font-size: .72rem; text-align: right; min-width: 3.6em; }
+  .rm-li .bad { color: var(--stop); }
+  .rm-li i, #rm-tip i, .rp-tr i { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--c); vertical-align: middle; }
+  .rm-li i.dash, #rm-tip i.dash { border-top-style: dashed; }
+  #rm-tip { position: absolute; z-index: 1; pointer-events: none; padding: 5px 8px; border-radius: 6px; background: var(--surface); border: 1px solid var(--border);
+            box-shadow: 0 2px 8px var(--shadow); font-size: .74rem; white-space: nowrap; }
+  #rm-tip .tm { color: var(--muted); margin-bottom: 2px; }
+  #rm-tip div > b { display: inline-block; min-width: 4.2em; text-align: right; margin: 0 6px 0 4px; }
+  #rp-mon.stack .rm-chart { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  #rp-mon.stack .rm-leg { flex-direction: row; flex-wrap: wrap; gap: 0 8px; }
+  #rp-mon.stack .rm-leg .rm-k { flex-basis: 100%; }
+  #rp-mon.stack .rm-li { grid-template-columns: 14px auto auto; } #rp-mon.stack .rm-li .muted { display: none; }
+  #rp-mon.stack canvas { height: 64px; } #rp-mon.stack #rm-kind { height: 76px; }
+  #rp-info .rp-tr { border-collapse: collapse; width: 100%; font-size: .76rem; }
+  #rp-info .rp-tr th { font-weight: 500; color: var(--muted); text-align: right; padding: 0 0 1px 6px; }
+  #rp-info .rp-tr td { text-align: right; padding: 0 0 0 6px; } #rp-info .rp-tr td:first-child, #rp-info .rp-tr th:first-child { text-align: left; padding-left: 0; }
+  #rp-info .rp-tr i { width: 10px; margin-right: 4px; }
+  /* The Tests tab's list of recorded fleet runs. */
+  .fs-run { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 8px 4px; border-top: 1px solid var(--line); }
+  .fs-run:last-child { border-bottom: 1px solid var(--line); }
+  .fs-t { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; font-size: .86rem; }
+  .fs-t .muted { flex-basis: 100%; font-size: .8rem; }
+  .fs-run .fe-btns { display: flex; gap: 6px; }
+  .fs-run.invalid .fs-t b { color: var(--muted); }
+  .fs-run .err { color: var(--warnink); }
+  /* fleetsim bench output (data/fleetsim/bench/<bench>/<run>/): a group per bench,
+     closed until opened, its runs fetched then: a suite can be hundreds. */
+  .fs-bh { margin: 14px 0 2px; font-size: .7rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .fs-bench { border-top: 1px solid var(--line); }
+  .fs-bench:last-child { border-bottom: 1px solid var(--line); }
+  .fs-bench > summary { cursor: pointer; padding: 8px 4px; list-style: none; display: grid; grid-template-columns: 1.1em 1fr; align-items: baseline; }
+  .fs-bench > summary::-webkit-details-marker { display: none; }
+  .fs-bench > summary::before { content: "+"; color: var(--muted); }
+  .fs-bench[open] > summary::before { content: "\2212"; }
+  .fs-bench .fs-run { padding-left: 1.4em; }
+  .fs-bench .fs-run:last-child { border-bottom: none; }
+  .fs-bench .tp-empty { padding-left: 1.4em; }
+  /* Fleet sim scenario editor (operator_fleetedit.js): one scenario's floor and its
+     form. It covers everything below the header, not just the stage like the replay:
+     the floor needs the width, and the robot and task lists are about the live fleet. */
+  #fleetedit { position: fixed; top: var(--fe-top, 50px); left: 0; right: 0; bottom: 0; z-index: 5; background: var(--map-bg); --fe-w: 430px; }
+  #fe-stage { position: absolute; top: 0; left: 0; bottom: 0; right: var(--fe-w); overflow: hidden; }
+  #fe-map { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  #fleetedit:not([data-tool="pan"]) #fe-map, #fleetedit.arming #fe-map { cursor: crosshair; }
+  #fe-bar { top: 12px; left: 12px; right: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 6px 10px; font-size: .84rem; }
+  #fe-bar .seg { padding: 2px; } #fe-bar .seg button { padding: 3px 10px; font-size: .8rem; }
+  .fe-title { display: inline-flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1 1 auto; }
+  #fe-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #fe-sum { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fe-state { font-size: .7rem; font-weight: 700; letter-spacing: .05em; padding: 1px 6px; border-radius: 4px; color: var(--on-ink); background: var(--muted); white-space: nowrap; }
+  .fe-state.ok { background: var(--go); } .fe-state.bad { background: var(--stop); } .fe-state.busy { background: var(--info); }
+  #fe-hint { flex-basis: 100%; color: var(--muted); font-size: .78rem; }
+  #fe-hint:empty { display: none; }
+  #fe-time { left: 12px; right: 12px; bottom: 12px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; padding: 6px 10px; font-size: .84rem; }
+  #fe-clock { white-space: nowrap; min-width: 92px; text-align: right; }
+  .fe-scrub { display: grid; min-width: 0; }
+  #fe-ticks { width: 100%; height: 30px; display: block; cursor: pointer; touch-action: none; }
+  #fe-slider { width: 100%; margin: 0; }
+  #fe-msg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); padding: 24px; text-align: center; pointer-events: none; }
+  #fe-msg.err { color: var(--stop); }
+  #fe-tip { position: absolute; pointer-events: none; padding: 2px 7px; font-size: .76rem; white-space: nowrap; z-index: 1; }
+  #fe-panel { position: absolute; top: 0; right: 0; bottom: 0; width: var(--fe-w); background: var(--surface); border-left: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  .fe-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .fe-head h3 { margin: 0; font-size: 1rem; font-weight: 600; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fe-head .x { background: none; border: none; color: var(--muted); font-size: 1.4rem; line-height: 1; padding: 0 2px; }
+  #fe-form { flex: 1; overflow: auto; padding: 2px 14px 14px; min-height: 0; }
+  .fe-sec { border-bottom: 1px solid var(--line); padding: 0 0 10px; }
+  .fe-sec > summary { cursor: pointer; padding: 9px 0 7px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .fe-sec > summary .n { text-transform: none; letter-spacing: 0; font-weight: 500; color: var(--faint); margin-left: 4px; }
+  .fe-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 10px; }
+  .fe-grid .w2 { grid-column: span 2; } .fe-grid .w3 { grid-column: 1 / -1; }
+  #fleetedit label.f { display: grid; gap: 3px; color: var(--muted); font-size: .76rem; min-width: 0; align-content: start; }
+  #fleetedit input:not([type="checkbox"]):not([type="range"]), #fleetedit select, #fleetedit textarea { min-width: 0; width: 100%; color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; font-size: .84rem; }
+  #fleetedit #fe-bar select { width: auto; }
+  #fleetedit textarea { resize: vertical; font: inherit; font-size: .84rem; line-height: 1.4; }
+  #fleetedit .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; }
+  #fleetedit .bad { border-color: var(--stop) !important; box-shadow: 0 0 0 1px var(--stop); }
+  #fleetedit .warned { border-color: var(--warnline) !important; box-shadow: 0 0 0 1px var(--warnline); }
+  #fleetedit .armed { outline: 2px solid var(--tape); outline-offset: 1px; }
+  .fe-rows { display: grid; gap: 4px; }
+  .fe-row { display: grid; grid-template-columns: 4.6em minmax(0, 1fr) minmax(0, 1fr) 24px; gap: 4px; align-items: center; border-radius: 6px; }
+  .fe-row.kv { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) 24px; }
+  .fe-row.crit { grid-template-columns: minmax(0, 1.3fr) 4.4em minmax(0, 1fr) 24px; }
+  .fe-row.hd { color: var(--faint); font-size: .72rem; }
+  .fe-row.sel, .fe-item.sel { background: var(--sel); box-shadow: 0 0 0 4px var(--sel); }
+  .fe-item { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px 8px; display: grid; gap: 6px; }
+  .fe-items { display: grid; gap: 6px; }
+  .fe-item-h { display: flex; gap: 6px; align-items: center; }
+  .fe-item-h > select { flex: 0 1 9.5em; } .fe-item-h > .grow { flex: 1; color: var(--muted); font-size: .78rem; }
+  .fe-line { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; color: var(--muted); font-size: .78rem; }
+  .fe-line input[type="number"] { width: 5.4em !important; }
+  #fleetedit .fe-line select { width: auto; max-width: 100%; }
+  .fe-line .grow { flex: 1 1 8em; }
+  .fe-del { background: none; border: none; color: var(--muted); font-size: 1.15rem; line-height: 1; padding: 0 4px; }
+  .fe-del:hover { color: var(--stop); }
+  .fe-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+  .fe-acts select { width: auto !important; }
+  .fe-note { margin: 6px 0 0; font-size: .78rem; color: var(--muted); line-height: 1.45; }
+  .fe-note:empty { display: none; }
+  .fe-note b { color: var(--ink); font-weight: 600; }
+  .fe-cmts { margin: 4px 0 0; padding-left: 16px; font-size: .76rem; color: var(--muted); }
+  .fe-cmts li.lost { color: var(--warnink); }
+  .fe-foot { border-top: 1px solid var(--line); padding: 8px 14px 10px; display: grid; gap: 6px; }
+  #fe-err { font-size: .8rem; max-height: 128px; overflow: auto; line-height: 1.4; }
+  #fe-err:empty { display: none; }
+  #fe-err button.p { display: block; width: 100%; text-align: left; background: none; border: none; padding: 1px 0; color: var(--stop); font-size: inherit; }
+  #fe-err button.p.warning { color: var(--warnink); }
+  #fe-err .ok { color: var(--go); } #fe-err .info { color: var(--muted); }
+  .fe-foot .fe-acts { justify-content: flex-end; margin: 0; }
+  #fe-as { display: flex; gap: 6px; align-items: center; }
+  #fe-as[hidden] { display: none; }
+  #fe-as input { flex: 1; }
+  @media (max-width: 1100px) { #fleetedit { --fe-w: 370px; } }
+  @media (max-width: 760px), (max-height: 520px) and (orientation: landscape) {
+    #fe-stage { right: 0; bottom: 55%; }
+    #fe-panel { top: 45%; left: 0; width: auto; border-left: none; border-top: 1px solid var(--line); }
+    #fe-time { display: none; }
+  }
   #coverage { font-size: .86rem; color: var(--muted); white-space: nowrap; }
   #coverage b { font-weight: 600; color: var(--ink); }
   #coverage[hidden] { display: none; }
@@ -576,20 +757,21 @@
   #session .card.tab-tests #launch-form, #session .card.tab-tests #session-pane,
   #session .card.tab-tests #console-warning, #session .card:not(.tab-tests) #tests-pane { display: none !important; }
   #tests-pane { display: grid; gap: 18px; }
-  #tp-warn { padding: 8px 12px; border-radius: 6px; background: var(--warnbg); border: 1px solid var(--warnline); color: var(--warnink); font-size: .86rem; }
-  #tp-warn[hidden], #tp-run[hidden], #tp-log[hidden], #sp-test-note { display: none; }
+  #tp-warn, #fr-warn { padding: 8px 12px; border-radius: 6px; background: var(--warnbg); border: 1px solid var(--warnline); color: var(--warnink); font-size: .86rem; }
+  #tp-warn[hidden], #fr-warn[hidden], #tp-run[hidden], #fr-status[hidden], #tp-log[hidden], #sp-test-note { display: none; }
   button.link { background: none; border: none; padding: 0; color: var(--muted); font-size: .84rem; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
   button.link:hover { color: var(--ink); }
   /* One line for the test that is running or ran last. */
-  #tp-run { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border-radius: 8px; background: var(--ground); }
+  #tp-run, #fr-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border-radius: 8px; background: var(--ground); }
   .tp-run-text { flex: 1 1 200px; min-width: 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-  #tp-run-state { color: var(--muted); font-size: .86rem; }
-  #tp-run.fail #tp-run-state { color: var(--stop); } #tp-run.pass #tp-run-state { color: var(--go); }
+  #tp-run-state, #fr-state { color: var(--muted); font-size: .86rem; }
+  #tp-run.fail #tp-run-state, #fr-status.fail #fr-state { color: var(--stop); } #tp-run.pass #tp-run-state, #fr-status.pass #fr-state { color: var(--go); }
   .tp-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--info); animation: tp-pulse 1.2s ease-in-out infinite; }
-  #tp-run.done .tp-dot { animation: none; background: var(--muted); }
-  #tp-run.done.pass .tp-dot { background: var(--go); } #tp-run.done.fail .tp-dot { background: var(--stop); }
+  #tp-run.done .tp-dot, #fr-status.done .tp-dot { animation: none; background: var(--muted); }
+  #tp-run.done.pass .tp-dot, #fr-status.done.pass .tp-dot { background: var(--go); } #tp-run.done.fail .tp-dot, #fr-status.done.fail .tp-dot { background: var(--stop); }
   @keyframes tp-pulse { 50% { opacity: .3; } }
-  #tp-log { flex-basis: 100%; margin: 4px 0 0; max-height: 220px; overflow: auto; font: .72rem/1.45 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; }
+  #tp-log, #fr-log { flex-basis: 100%; margin: 4px 0 0; max-height: 220px; overflow: auto; font: .72rem/1.45 ui-monospace, monospace; color: var(--muted); white-space: pre-wrap; }
+  .tp-h { margin: 0 0 4px; font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
   /* Test cases: a list, not cards. A row is its name, Run and a chevron; open it for what
      the test is, what it takes to pass, and a clip of a pass. */
   .tp-sec { margin-top: 18px; }
@@ -624,6 +806,19 @@
   .tp-clip { margin: 0; }
   .tp-clip img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; background: var(--segbg); }
   .tp-clip figcaption { margin-top: 5px; font-size: .76rem; color: var(--faint); }
+  /* Run a fleet sim form (operator_fleetsim.js) */
+  #fr-form { display: grid; gap: 10px; }
+  .fr-fields { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: flex-end; }
+  .fr-fields label { display: grid; gap: 3px; color: var(--muted); font-size: .8rem; min-width: 0; }
+  .fr-fields input { width: 6.5em; color: var(--ink); }
+  .fr-fields select { max-width: 100%; color: var(--ink); }
+  #fr-scenario { min-width: 12em; }
+  #fr-about, #fr-note { margin: 0; color: var(--muted); font-size: .84rem; line-height: 1.45; }
+  #fr-note[hidden] { display: none; }
+  #fr-more summary { cursor: pointer; color: var(--muted); font-size: .84rem; }
+  #fr-more[open] summary { margin-bottom: 8px; }
+  #fr-actions { display: flex; justify-content: flex-end; }
+  #fr-status { margin-top: 10px; }
   .tp-empty { color: var(--muted); font-size: .84rem; padding: 6px 4px; }
   /* A test owns the session it runs: its Stop would abort the run unscored. */
   #session .card.testing #session-finish, #session .card.testing #session-stop { display: none; }
@@ -690,6 +885,13 @@
     #mnav .badge { font-size: .7rem; color: var(--muted); font-weight: 500; }
     #alarm-pop { top: auto; bottom: 70px; left: 8px; right: 8px; width: auto; }
     #comms-bar { top: 8px; left: 8px; right: 8px; font-size: .8rem; gap: 6px 8px; }
+    #rp-bar { top: 8px; left: 8px; right: 8px; }
+    #rp-time { left: 8px; right: 8px; bottom: 8px; grid-template-columns: auto auto 1fr; }
+    #rp-time .rp-jump { display: none; }
+    #rp-time .rp-scrub { grid-column: 1 / -1; }
+    #rp-info { top: auto; bottom: 96px; left: 8px; right: 8px; width: auto; max-height: 40%; }
+    #rp-legend, #rp-load-leg { display: none; }
+    #rp-mon { left: 8px; right: 8px; bottom: 96px; padding: 4px 8px 6px; }
     #comms-bar .cm-range input { width: 70px; }
     #comms-feed { left: 8px; right: 8px; bottom: 56px; max-width: none; }
     #hint { display: none; }
@@ -904,6 +1106,47 @@
     <ul id="rc-checks"></ul>
     <p id="rc-err" hidden></p>
   </div>
+  <!-- Fleet replay (operator_replay.js): a recorded fleetsim run, opened from the
+       Tests tab. Covers the stage until closed; nothing in it is the live fleet. -->
+  <section id="replay" hidden aria-label="Fleet sim replay">
+    <canvas id="rp-map"></canvas>
+    <div id="rp-msg" hidden></div>
+    <div class="float" id="rp-bar" role="toolbar" aria-label="Replay">
+      <span class="rp-title"><b id="rp-name"></b><span class="rp-v" id="rp-verdict" hidden></span><span id="rp-meta"></span></span>
+      <select id="rp-sel" title="Follow one robot: its path, its task, its events and (if recorded) its own map"></select>
+      <label class="lf-check" title="Every robot's planned path; the selected one's dashed"><input type="checkbox" id="rp-paths" checked> Paths</label>
+      <label class="lf-check"><input type="checkbox" id="rp-links" checked> Links</label>
+      <label class="lf-check" title="Colour the radio links and ring the robots by how loaded their channel is (the Traffic monitor's load). Radio runs recorded with record.net_nodes"><input type="checkbox" id="rp-load"> Load</label>
+      <label class="lf-check" title="Draw the selected robot's OWN map instead of the true floor (record.belief_maps). Red cells: where it is wrong"><input type="checkbox" id="rp-own" checked> Own map</label>
+      <span id="rp-legend"><span style="--c: var(--info)"><i></i>to pickup</span><span style="--c: var(--go)"><i></i>carrying</span><span style="--c: var(--muted)"><i></i>idle</span><span style="--c: var(--stop)"><i></i>off</span></span>
+      <span id="rp-load-leg" hidden title="Link: the busier of its two ends. Ring: the robot's own channel">load 0 <span class="ramp"></span> 95 % <span class="over"></span> over</span>
+      <button type="button" class="btn small" id="rp-mon-toggle" aria-pressed="false" title="Comms traffic: channel load and traffic by kind over the run (T)">Traffic</button>
+      <button type="button" class="btn small" id="rp-info-toggle" aria-pressed="true" title="Task board, network, the selected robot and its events at this moment">Info</button>
+      <button type="button" class="btn small" id="rp-fit" title="Fit the floor (or double-click it)">Fit</button>
+      <button type="button" class="x" id="rp-x" title="Close the replay (Esc)" aria-label="Close the replay">&times;</button>
+    </div>
+    <div class="float" id="rp-info" aria-live="off"></div>
+    <div class="float" id="rp-mon" hidden role="group" aria-label="Comms traffic monitor">
+      <div class="rm-head"><b>Comms traffic</b><span id="rm-model"></span>
+        <span class="seg" id="rm-measure" role="group" aria-label="Traffic measure">
+          <button type="button" data-m="sent" title="Copies sent per second: one per recipient (every copy is unicast)">Sent</button><button type="button" data-m="lost" title="Copies lost per second">Lost</button><button type="button" data-m="kbs" title="Bytes offered per second, every copy counted">kB/s</button><button type="button" data-m="air" title="Airtime offered, as a share of one channel: every hop and retransmission counted (radio only)">Airtime</button></span>
+        <button type="button" class="x" id="rm-x" title="Close the monitor (T)" aria-label="Close the comms monitor">&times;</button></div>
+      <div class="rm-chart" id="rm-load-row"><div class="rm-leg" id="rm-load-leg"></div><canvas id="rm-load" aria-label="Channel load over the run"></canvas></div>
+      <div class="rm-chart"><div class="rm-leg" id="rm-kind-leg"></div><canvas id="rm-kind" aria-label="Traffic by kind over the run"></canvas></div>
+      <div id="rm-tip" hidden></div>
+    </div>
+    <div class="float" id="rp-time" role="group" aria-label="Timeline">
+      <button type="button" class="btn small" id="rp-play" aria-pressed="false" title="Play / pause (Space)">Play</button>
+      <select id="rp-speed" title="Playback speed, sim seconds per second"></select>
+      <span id="rp-clock">0:00</span>
+      <div class="rp-scrub">
+        <canvas id="rp-ticks" title=""></canvas>
+        <input type="range" id="rp-slider" min="0" max="1" step="0.1" value="0" aria-label="Sim time" title="Scrub (arrow keys: 1 s, Shift: 10 s)">
+      </div>
+      <span class="rp-jump"><button type="button" class="btn small" id="rp-prev" title="Previous event ([): contacts, blocks, failures; the selected robot's only, if one is">&lsaquo;</button>
+        <button type="button" class="btn small" id="rp-next" title="Next event (])">&rsaquo;</button></span>
+    </div>
+  </section>
   <div id="link-down" hidden>Reconnecting to the robots&hellip;</div>
   <div id="empty" hidden><div class="radar" id="empty-radar" hidden aria-hidden="true"><i></i><i></i><i></i><b></b></div><b id="empty-title">Simulation not running</b><span class="muted" id="empty-sub">Start the simulation to see your robots and give them tasks.</span><div class="boot" id="empty-boot" hidden><div class="bar"><i></i></div></div><div class="empty-acts"><button class="btn primary" id="empty-go">Start simulation</button><button class="btn" id="empty-test">Run a test</button><button class="btn" id="empty-robot" hidden title="The robot plugged into this machine: camera, driving, pick and place">Open the Robot view</button></div></div>
   <div id="toast" role="status"></div>
@@ -936,6 +1179,50 @@
     </div>
   </details>
 </aside>
+
+<!-- Fleet sim scenario editor (operator_fleetedit.js), opened from the Tests tab's
+     scenario list. Below the header, over the stage and both side columns. -->
+<section id="fleetedit" hidden data-tool="pan" aria-label="Fleet sim scenario editor">
+  <div id="fe-stage">
+    <canvas id="fe-map"></canvas>
+    <div id="fe-msg" hidden></div>
+    <div class="float" id="fe-tip" hidden></div>
+    <div class="float" id="fe-bar" role="toolbar" aria-label="Scenario floor">
+      <span class="fe-title"><b id="fe-name"></b><span class="fe-state" id="fe-state"></span><span id="fe-sum"></span></span>
+      <div class="seg" id="fe-tools" role="radiogroup" aria-label="Map tool">
+        <button type="button" data-tool="pan" class="active" role="radio" title="Drag to pan, scroll to zoom. With a pickup or dropoff field selected, click a waypoint to fill it in (V)">Pan</button>
+        <button type="button" data-tool="task" role="radio" title="Add tasks: click the pickup waypoint, then the dropoff (T)">Tasks</button>
+        <button type="button" data-tool="block" role="radio" title="Drag a rectangle: a blockage that appears at the timeline's time (B)">Blockage</button>
+        <button type="button" data-tool="mover" role="radio" title="Click a mover's path point by point; Enter or a double-click ends it (M)">Mover</button>
+        <button type="button" data-tool="gateway" role="radio" title="Click where the gateway goes. A saved map only: the synthetic warehouse puts it on the apron (G)">Gateway</button>
+      </div>
+      <button type="button" class="btn small" id="fe-fit" title="Fit the floor (or double-click it)">Fit</button>
+      <span id="fe-hint" aria-live="polite"></span>
+    </div>
+    <div class="float" id="fe-time" role="group" aria-label="Timeline">
+      <span id="fe-clock">0:00</span>
+      <div class="fe-scrub">
+        <canvas id="fe-ticks" title="Tasks along the top, a bar per disturbance. Drag a bar to move it, its right end to change how long it lasts"></canvas>
+        <input type="range" id="fe-slider" min="0" max="600" step="1" value="0" aria-label="Show the floor at this time" title="The floor at this time: blockages up, movers where they are, who is cut off (arrow keys: 1 s, Shift: 10 s)">
+      </div>
+    </div>
+  </div>
+  <aside id="fe-panel">
+    <div class="fe-head"><h3 id="fe-heading">Scenario</h3>
+      <button type="button" class="x" id="fe-x" title="Close the editor (Esc)" aria-label="Close the editor">&times;</button></div>
+    <form id="fe-form" autocomplete="off" novalidate></form>
+    <div class="fe-foot">
+      <div id="fe-err" aria-live="polite"></div>
+      <div id="fe-as" hidden><input id="fe-asname" spellcheck="false" aria-label="Save as name" title="lowercase letters, digits, - and _"><button type="button" class="btn small primary" id="fe-as-go">Save</button><button type="button" class="btn small" id="fe-as-no">Cancel</button></div>
+      <div class="fe-acts">
+        <button type="button" class="btn small" id="fe-validate" title="Check the scenario as a run would load it">Validate</button>
+        <button type="button" class="btn small" id="fe-saveas" title="Save under a new name; the original stays as it is">Save as&hellip;</button>
+        <button type="button" class="btn small primary" id="fe-save" title="Write fleetsim/scenarios/NAME.yaml (Ctrl+S)">Save</button>
+        <button type="button" class="btn small" id="fe-run" title="Save, then pick it in Run a fleet sim">Run&hellip;</button>
+      </div>
+    </div>
+  </aside>
+</section>
 
 <!-- Stop all: the robots are already halted by the time this shows; this is the
      sim itself, and whether this run's map is kept. operator.js fills it. -->
@@ -1052,6 +1339,41 @@
       <section>
         <div id="tp-list"></div>
       </section>
+      <!-- Fleet sim scenarios (fleetsim/scenarios/), edited on their own floor: operator_fleetedit.js. -->
+      <section>
+        <h4 class="tp-h">Fleet sim scenarios <span class="muted" id="fe-count"></span></h4>
+        <div id="fe-list"></div>
+      </section>
+      <!-- Run a fleet sim form, see operator_fleetsim.js -->
+      <section>
+        <h4 class="tp-h">Run a fleet sim</h4>
+        <form id="fr-form">
+          <p id="fr-note" hidden>Read-only: this server isn't the sim console, so runs can't be started here. Use <code>python3 -m fleetsim run NAME</code> in a terminal.</p>
+          <div id="fr-warn" hidden></div>
+          <div class="fr-fields">
+            <label>Scenario<select id="fr-scenario"></select></label>
+            <label>Robots<input type="number" id="fr-robots" min="1" step="1" required></label>
+            <label>Duration (sim s)<input type="number" id="fr-duration" min="1" step="any" required></label>
+            <label>Seed<input type="number" id="fr-seed" min="0" step="1" required></label>
+          </div>
+          <p id="fr-about"></p>
+          <details id="fr-more"><summary>Overrides</summary><div class="fr-fields" id="fr-sets"></div></details>
+          <div id="fr-actions"><button type="submit" class="btn small" id="fr-run" disabled>Run</button></div>
+        </form>
+        <div id="fr-status" hidden>
+          <span class="tp-dot"></span>
+          <div class="tp-run-text"><b id="fr-name"></b><span id="fr-state"></span></div>
+          <span id="fr-verdict" class="rp-v" hidden></span>
+          <button type="button" class="btn small" id="fr-replay" hidden title="Replay this run on its floor">Replay</button>
+          <button type="button" class="btn small stop" id="fr-stop" hidden title="Stop the run. What it recorded so far can still be replayed, but it won't be scored">Stop</button>
+          <pre id="fr-log"></pre>
+        </div>
+      </section>
+      <!-- Headless fleetsim runs (data/fleetsim/), replayed on the stage: operator_replay.js. -->
+      <section>
+        <h4 class="tp-h">Fleet sim runs <span class="muted" id="tp-fleet-count"></span></h4>
+        <div id="tp-fleet-list"></div>
+      </section>
     </div>
     <div id="session-pane">
         <div class="boot" id="sp-boot" hidden><div class="bar"><i></i></div><span class="boot-label"></span></div>
@@ -1092,6 +1414,9 @@
 <script src="operator.js"></script>
 <script src="scenarios.js"></script>
 <script src="operator_tests.js"></script>
+<script src="operator_replay.js"></script>
+<script src="operator_fleetsim.js"></script>
+<script src="operator_fleetedit.js"></script>
 <script src="operator_drive.js"></script>
 </body>
 </html>

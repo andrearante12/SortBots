@@ -1,0 +1,77 @@
+# The benchmark (docs/fleetsim-plan.md, "The goal"): every bench_* scenario
+# at the fleet sizes the plan fixed (2, 5, 10, 20; 40-50 stays a stress test),
+# three seeds, against the reference methods.
+#
+#   auction                  the robots' own decentralised auction, on the
+#                            scenario's network (what the robots run)
+#   central_greedy           a dispatcher at the gateway: oldest task to the
+#                            robot that reaches it first
+#   central_hungarian        a dispatcher at the gateway re-solving the whole
+#                            assignment on every event (rolling Hungarian)
+#   *_perfect                the same with perfect information: true maps,
+#                            true peer poses, a dispatcher that reads true state,
+#                            an instant lossless network. auction vs
+#                            auction_perfect is the information gap;
+#                            auction_perfect vs central_hungarian_perfect is the
+#                            coordination gap.
+#   auction_traffic          the auction with keep right and single-lane passage
+#                            reservation on (docs/fleetsim.md, "Traffic")
+#   auction_orca             the auction with ORCA local avoidance instead of
+#                            stop-and-replan (docs/fleetsim.md, "Local avoidance")
+#
+# Throughput (deliveries per hour) is the headline. It only separates methods
+# in the overloaded scenarios (bench_rush, bench_burst); in the underloaded
+# ones every method keeps up and mean delivery time is what differs. Read
+# `bounds.offered_load` and `fleet_tasks.backlog_end` to see which regime a
+# row is in.
+#
+# 11 scenarios x 4 sizes x 3 seeds x 7 variants = 924 runs. At most 12 at once
+# (fleetsim/bench.py MAX_DEFAULT_JOBS), about 45 min on the 30-CPU laptop.
+#   /usr/bin/python3 -m fleetsim bench bench --dry-run
+#   /usr/bin/python3 -m fleetsim bench bench --only 'bench_steady_*'
+name: bench
+description: >
+  Every bench_* scenario at 2, 5, 10 and 20 robots, seeds 1-3, with the robots'
+  auction, central greedy and rolling-Hungarian dispatchers, and the auction
+  and Hungarian with perfect information, and the auction with the traffic layer or with ORCA.
+scenarios:
+  - {scenario: bench_steady, robots: [2, 5, 10, 20]}
+  - {scenario: bench_rush, robots: [2, 5, 10, 20]}
+  - {scenario: bench_burst, robots: [2, 5, 10, 20]}
+  - {scenario: bench_narrow, robots: [2, 5, 10, 20]}
+  - {scenario: bench_dead_end, robots: [2, 5, 10, 20]}
+  - {scenario: bench_moved, robots: [2, 5, 10, 20]}
+  - {scenario: bench_partition, robots: [2, 5, 10, 20]}
+  - {scenario: bench_dead_robot, robots: [2, 5, 10, 20]}
+  - {scenario: bench_dead_gateway, robots: [2, 5, 10, 20]}
+  - {scenario: bench_walkers, robots: [2, 5, 10, 20]}
+  - {scenario: bench_mixed, robots: [2, 5, 10, 20]}
+seeds: [1, 2, 3]
+variants:
+  auction: {}
+  central_greedy: {dispatch.method: central_greedy}
+  central_hungarian: {dispatch.method: central_hungarian}
+  auction_traffic: {traffic.keep_right.enabled: true, traffic.passages.enabled: true}
+  auction_orca: {nav.local: orca}
+  auction_perfect:
+    info.map: truth
+    info.peers: truth
+    info.dispatch: truth
+    network.model: ideal
+    network.ideal.delay_s: 0
+  central_hungarian_perfect:
+    dispatch.method: central_hungarian
+    info.map: truth
+    info.peers: truth
+    info.dispatch: truth
+    network.model: ideal
+    network.ideal.delay_s: 0
+headline: fleet_tasks.per_hour
+also:
+  - fleet_tasks.mean_s
+  - fleet_tasks.backlog_end
+  - bounds.offered_load
+  - bounds.stretch
+  - utilisation.lost_frac
+  - fleet_tasks.duplicates
+  - nav.empty_shelf

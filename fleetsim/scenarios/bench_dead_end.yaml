@@ -1,0 +1,45 @@
+# DRAFT for review (C12, 2026-11-26). Benchmark: single-lane dead-end bays.
+# bench_narrow's floor (aisles 2, 4 and 6 one robot wide) with both end
+# segments of each narrow aisle walled off at the outer end
+# (world.synthetic.dead_ends): six 11.5 m bays, each entered from one
+# cross-aisle only, two shelves deep. A robot that drives in must come back
+# out the way it went in, so a second robot following it in, or waiting at
+# the mouth in its way, meets it head-on with nowhere to pass. This is the
+# case B11 (single-lane passage reservation) is for: hold at the mouth
+# until the bay is free. Today the local layer stops both, replans round,
+# finds no way round, and gives the leg up after block_fail_s (45 s).
+#
+# Regime: moderately loaded, 0.004 tasks per robot per second (~0.65 of the
+# open floor's capacity), every pickup in a narrow aisle (shelf_[246]_*),
+# a third of them in a bay. Arrivals stop at 1200 s, the run ends at 1500 s.
+# Expect it to be hard at 20 robots: measured 70 of 84 done, 91 legs given
+# up (seed 1, 2026-11-26); at 5 robots it barely shows.
+# Compare without the bays (= bench_narrow):
+#   /usr/bin/python3 -m fleetsim run bench_dead_end --set world.synthetic.dead_ends=[]
+# Network: ideal. The question is traffic, not comms.
+name: bench_dead_end
+title: "DRAFT bench: six single-lane dead-end bays"
+description: >
+  The default synthetic warehouse with aisles 2, 4 and 6 narrowed to 1.0 m
+  and their westmost and eastmost segments walled at the outer end, so each
+  is a one-robot bay entered from the next cross-aisle. True map, a Poisson
+  stream of 0.004 tasks per robot per second until 1200 s, from a shelf in
+  a narrow aisle to any dock, fixed 1500 s.
+seed: 1
+duration_s: 1500
+robots: 10
+config:
+  world:
+    synthetic:
+      narrow_aisles: [2, 4, 6]
+      narrow_m: 1.0
+      dead_ends: [[2, 0, west], [2, 3, east], [4, 0, west], [4, 3, east], [6, 0, west], [6, 3, east]]
+  map_share: {prior: truth}
+task_arrival: {rate_per_robot_hz: 0.004, pickups: "shelf_[246]_*", dropoffs: "dock_*", until_s: 1200}
+metrics:
+  - metric: fleet_tasks
+  - metric: contacts
+  - metric: nav
+    pass: {empty_shelf: {eq: 0}}
+  - metric: utilisation
+  - metric: bounds

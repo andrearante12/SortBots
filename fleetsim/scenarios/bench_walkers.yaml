@@ -1,0 +1,43 @@
+# DRAFT for review (C12, 2026-11-26). Benchmark: people in the aisles.
+# The four walkers of `walkers` (issue #18): pacing 7 m along aisles 1, 3,
+# 5 and 7 at 1.2 m/s, across the mouths of the middle cross-aisles, never
+# yielding. They are not mapped and racks hide them from a robot in a
+# cross-aisle until they step out, so they cost robots stops and detours.
+# What it tests: delivery time and safety (driven contacts, clearance) with
+# movers no method can plan around in advance, and obstacle notices.
+#
+# Regime: underloaded, 0.003 tasks per robot per second (~half capacity),
+# so the walkers' cost shows as delivery time. Arrivals stop at 1200 s, the
+# run ends at 1500 s. The walkers' positions are fixed, so at 20 robots the
+# robot-to-walker ratio is 5 times that at 4 robots.
+# Network: ideal. The question is local avoidance, not comms (obstacle
+# notices still travel the network model).
+name: bench_walkers
+title: "DRAFT bench: four walkers pacing across the cross-aisles"
+description: >
+  The default synthetic warehouse, ideal network, true map, a Poisson stream
+  of 0.003 tasks per robot per second until 1200 s, and the four walkers of
+  the `walkers` scenario. Fixed 1500 s.
+seed: 1
+duration_s: 1500
+robots: 10
+config:
+  map_share: {prior: truth}
+task_arrival: {rate_per_robot_hz: 0.003, pickups: "shelf_*", dropoffs: "dock_*", until_s: 1200}
+actors:
+  - {id: walker_1, shape: cylinder, radius: 0.25, height: 1.75,
+     path: {waypoints: [[12.0, 13.2], [19.0, 13.2]], speed_mps: 1.2, mode: pingpong, dwell_s: 2}}
+  - {id: walker_3, shape: cylinder, radius: 0.25, height: 1.75,
+     path: {waypoints: [[26.0, 20.4], [33.0, 20.4]], speed_mps: 1.2, mode: pingpong, dwell_s: 2, start_at_s: 5}}
+  - {id: walker_5, shape: cylinder, radius: 0.25, height: 1.75,
+     path: {waypoints: [[12.0, 27.6], [19.0, 27.6]], speed_mps: 1.2, mode: pingpong, dwell_s: 2, start_at_s: 10}}
+  - {id: walker_7, shape: cylinder, radius: 0.25, height: 1.75,
+     path: {waypoints: [[26.0, 34.8], [33.0, 34.8]], speed_mps: 1.2, mode: pingpong, dwell_s: 2, start_at_s: 15}}
+metrics:
+  - metric: clearance
+  - metric: contacts
+  - metric: fleet_tasks
+  - metric: nav
+    pass: {empty_shelf: {eq: 0}}
+  - metric: utilisation
+  - metric: bounds

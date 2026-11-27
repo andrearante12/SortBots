@@ -1,0 +1,31 @@
+# DRAFT for review (C12, 2026-11-26). Benchmark: the open floor, OVERLOADED.
+# Arrivals at about twice what the fleet can deliver, so tasks pile up and
+# the fleet is never idle: throughput (deliveries per hour) is what differs
+# between methods, and a method that keeps more robots usefully busy wins.
+# Same floor and stream shape as bench_steady, at four times its rate.
+#
+# Regime: rate_per_robot_hz 0.012 against a measured capacity of ~0.0062
+# per robot per second (2026-11-26, seed 1; see bench_steady), offered load
+# ~1.9. The backlog grows through the whole run (it is the point), so
+# done_frac is low by design: read per_hour, not done_frac. No drain
+# period: throughput is scored over the fixed 1200 s.
+# Network: ideal. The question is task allocation under load, not comms.
+name: bench_rush
+title: "DRAFT bench: open floor, overloaded (throughput)"
+description: >
+  The default synthetic warehouse, true map, a Poisson task stream at 0.012
+  tasks per robot per second (about twice the fleet's capacity) for the
+  whole 1200 s run, any shelf to any dock. Undone tasks pile up on purpose.
+seed: 1
+duration_s: 1200
+robots: 10
+config:
+  map_share: {prior: truth}
+task_arrival: {rate_per_robot_hz: 0.012, pickups: "shelf_*", dropoffs: "dock_*"}
+metrics:
+  - metric: fleet_tasks
+  - metric: contacts
+  - metric: nav
+    pass: {empty_shelf: {eq: 0}}
+  - metric: utilisation
+  - metric: bounds
