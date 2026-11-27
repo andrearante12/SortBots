@@ -53,7 +53,7 @@ or heard from peers, and every byte of that travels the network model.
 |---|---|---|
 | Task auction, leases, commit, quorum, confirmed picks and completes, retry, restart adoption | **real**: `FleetTasks` + `commsim/core/protocol.py`, imported | `nodes/fleet_tasks.py` |
 | Bid cost | the bidder's own A* path on its own belief (`robot.PathOracle`), so bid and drive agree | `nodes/grid_dist.py` Dijkstra on fused `/map` |
-| Task FSM | stand-in with task_manager's states, dwell and status JSON | `nodes/task_manager.py` |
+| Task FSM | stand-in with task_manager's states, dwell (per robot type: pick and place times) and status JSON | `nodes/task_manager.py` |
 | Global planner | A* on the robot's belief, Nav2-style lethal band + exponential inflation (`planner.py`) | Nav2 NavFn |
 | Local layer | stop for what's ahead within `stop_distance_m`, replan around after `block_replan_s` (lower priority first), give up after `block_fail_s` (`robot.py`) | Nav2 controller + costmaps |
 | Perception | ray-cast cone, movers occlude and come back as detections with velocity, never mapped (`sensing.py`) | D435 + RTAB-Map + obstacle_detector + dynamic_obstacle_filter |
@@ -443,6 +443,11 @@ or the task's next state. The rules:
 - Recovery pauses (`nav.hiccup_rate_hz`, 0 until calibrated) aren't booked,
   because their length isn't in the event.
 
+**`bounds` v2** (2026-11-26) adds robot types: a task's bound is the best
+type that can do it, `ub_per_hour` is also capped per capability, and
+`unservable` counts tasks no robot can do. Runs without types score as in v1
+([Robot types and capabilities](#robot-types-and-capabilities)).
+
 Runs recorded before 2026-11-26 rescore. They have no `task_bound`, so every
 `bounds` value except `arrival_per_hour` comes out None. The new
 `fleet_tasks` and `utilisation` values are computed from streams those runs
@@ -507,7 +512,7 @@ The operator view's run form offers the method as **Task assignment**.
 | Method | Who decides | How |
 |---|---|---|
 | `auction` (default) | every robot | the real FleetTasks auction (`nodes/fleet_tasks.py`); the gateway only announces |
-| `central_greedy` | one dispatcher at the gateway | on every event and every `resolve_period_s`, the oldest open task goes to the **idle** robot that reaches its pickup soonest, repeated while both remain; never reassigns |
+| `central_greedy` | one dispatcher at the gateway | on every event and every `resolve_period_s`, the oldest open task goes to the **idle** robot that reaches its pickup soonest (with [robot types](#robot-types-and-capabilities): an eligible one, that delivers it soonest), repeated while both remain; never reassigns |
 | `central_hungarian` | one dispatcher at the gateway | on the same triggers, Kuhn-Munkres over robots × tasks not yet picked, minimising total drive time to pickup; a robot carrying an item counts as free at its dropoff after its remaining drive and dwell, so it can take one queued task |
 
 The code is `fleetsim/dispatch/`. A robot talks to its task side through
@@ -749,6 +754,9 @@ what differs). The underloaded drafts stop arrivals at 1200 s and run to
 | `bench_dead_gateway` | the gateway down for 3 min; requests wait for it | 0.003 (~0.5) | radio, spatial | 1500 s | 8/10, 154; 15/18, 248 (from the request: 154; 254) | 64/65, 168; 73/73, 194 (from the request: 180; 207) |
 | `bench_walkers` | the four walkers of `walkers` | 0.003 (~0.5) | ideal | 1500 s | 10/10, 168; 18/18, 188 | 65/65, 176; 73/73, 156 |
 
+An eleventh draft, `bench_mixed` (a fleet of standard, fast and heavy robots;
+A6), is measured in [Robot types and capabilities](#robot-types-and-capabilities).
+
 Read `bench_rush`'s cells as deliveries per hour, not done/announced: the
 undone tasks are the point. Up to 16 runs went in parallel. Even so, a
 20-robot run took 40–105 s of wall time, and `bench_dead_end` took 170 s,
@@ -838,6 +846,217 @@ and 150 s of `fleet_scale` are identical before and after.
 - Whether `bench_dead_end` at 20 robots (91 legs given up) is the right
   strength, and whether findings 3 and 4 should become scenarios once they
   are fixed.
+
+## Robot types and capabilities
+
+Robots may differ (A6 in `docs/fleetsim-plan.md`, 2026-11-26). A robot type
+sets a robot's speed, acceleration, pick and place times, battery drain and
+capabilities. A task may require a capability. The default is one type with
+today's values, and a default run is bit-identical to one from before types
+existed.
+
+```yaml
+config:
+  robots:
+    types:
+      - {name: standard}                       # no share or count: it takes the rest
+      - {name: fast, share: 0.3, max_speed_mps: 0.75, accel_mps2: 0.75}
+      - {name: heavy, share: 0.2, capabilities: [heavy], max_speed_mps: 0.4,
+         accel_mps2: 0.3, pick_s: 8, place_s: 5}
+tasks:
+  - {at_s: 5, pickup: shelf_1_0, dropoff: dock_0, requires: heavy}   # or a list
+task_arrival: {rate_per_robot_hz: 0.004, pickups: "shelf_*", dropoffs: "dock_*",
+               requires: {heavy: 0.2}}
+```
+
+**Types.** `robots.types` is `null` (one type: the `robots.*` values, and
+`tasks.dwell_s` to pick and to place) or a list. Each type has a `name` and
+may set `max_speed_mps`, `accel_mps2`, `yaw_rate_rps`, `pick_s`, `place_s`,
+`battery_drain_pct_per_s` and `capabilities`. What a type does not set comes
+from `robots.*` and `tasks.dwell_s`. The battery drain only matters with a
+battery model (`fleet_tasks.battery.sim_start_pct`). The footprint stays
+fleet-wide, because every costmap and the floor check use it.
+
+**How many of each.** A type gives `share: F`, `count: N`, or neither:
+
+- `share: F` takes round(F × robots) robots, and at least one. A capability
+  that a 20-robot fleet has is then also there at 2 robots.
+- `count: N` is fixed: it does not scale with `--robots`.
+- The one type with neither takes the rest. It can get none. Without such a
+  type, the counts must add up to the fleet size, or validation fails.
+
+bench_mixed's fleet at the benchmark sizes:
+
+| robots | standard | fast (0.3) | heavy (0.2) |
+|---:|---:|---:|---:|
+| 2 | 0 | 1 | 1 |
+| 5 | 2 | 2 | 1 |
+| 10 | 5 | 3 | 2 |
+| 20 | 10 | 6 | 4 |
+
+Types are spread through the fleet, not given in blocks: each type's robots
+take evenly spaced indices (`config.robot_profiles`). `robot_k` parks at the
+k-th home and wins exact auction ties by its index, so a block would park
+every heavy robot at one end of the apron and give one type all the
+tie-breaks. The `world` event records each robot's type (`types: {robot_0:
+standard, ...}`), only when types are set.
+
+**Tasks that need a capability.** A fixed task takes `requires` (one name or
+a list). `task_arrival.requires` gives the share of arrivals that need each
+capability. Each arrival needs at most one, so the shares add up to at most 1.
+The requirement draws use an RNG of their own, so a seed gives the same times,
+pickups and dropoffs with or without `requires`. The `announce` event carries
+`requires`. A capability that no type lists fails validation, because it is
+most likely a typo. A type with no robots at this fleet size passes
+validation: its tasks are the case below.
+
+**A task no robot can do.** When no type that has the capability has a robot
+(a `count: 0`, or the rest type got none), the task is still announced, as the
+real gateway would announce it. Then:
+
+- nobody is ever assigned it, and the gateway's `task_stalled` alarm shows it;
+- the run's `notes` say so, and its `task_bound` has `able: 0` and no `lb_s`;
+- `bounds.unservable` counts it, and `fleet_tasks` counts it as undone
+  (`backlog_end`);
+- `stop: {until: tasks_done}` does not wait for it, so the run still ends.
+
+**The task FSM** waits `pick_s` at the shelf and `place_s` at the dock.
+`AWAIT_PICK` is unchanged: `pick_s` starts when the pick permit arrives.
+
+**The auction.** Each robot's FleetTasks gets its type's `speed_mps`,
+`capabilities`, `service_s: {pick, place}` and battery drain.
+
+- *Who bids.* The gateway's TaskAnnounce carries `requires` (a list) when the
+  task has one, and only then. A robot whose `capabilities` lack one returns
+  no cost for the task, so it does not bid, in the first round or in any rebid
+  round. FleetTasks' cost function makes this decision (protocol.py: `None` =
+  "this robot cannot take the task at all"). `commsim/core/protocol.py` is
+  unchanged. Its `cost_fn` gets only coordinates, and two tasks from the same
+  shelf to the same dock can need different robots. So `fleet_tasks._Allocator`
+  overrides `_open_bidding`, where every bid and its backlog are priced, to
+  say which task it prices.
+- *The wire.* An announce without `requires` is byte-identical to before and
+  open to every robot. A node that predates the field ignores it
+  (`test_a_node_that_predates_requires_still_takes_the_announce`). A
+  malformed `requires` gets no bid from anyone, and the gateway refuses a
+  request that has one. The gateway's `/fleet/task_request` takes an optional
+  `"requires"`, and the board shows it per task.
+- *What a bid is.* With `service_s` set, a bid is the time until this robot
+  would have delivered the task: the drive to the pickup, the pick, the carry
+  and the place, all at its own speed and times, plus the same for what it
+  already owns (the backlog). Without it, a bid is the drive to the pickup, as
+  before. That ranks identical robots correctly, because the rest of the task
+  costs them all the same. It cannot rank a fast robot against a slow one, or
+  a slow picker against a quick one. fleetsim sets `service_s` on every robot
+  when `robots.types` is set. The battery gate then counts the pick and place
+  as driving, which slightly overestimates the drain. On the real robots, set
+  `service_s` on every robot or on none, because bids are compared across the
+  fleet.
+
+**The central dispatchers.** A task that requires a capability goes only to
+robots whose type has it, for both methods. Each robot's drive time uses its
+own max speed, and the Hungarian "free at" offset uses its own pick and place
+times. When the robots differ, a pair also costs the rest of the task: the
+pick, the carry at that robot's speed, and the place. Greedy then picks the
+robot that would deliver soonest, as the auction does. The Hungarian solve
+takes that term relative to the task's best eligible robot. Added as it is, it
+would be a constant per task, and that changes which tasks get robots when
+there are more tasks than robots. With identical robots the term is zero.
+
+**The lower bound** (`bounds` v2). A task's `lb_s` is the best robot this
+fleet could send: the minimum, over the types that can do it and have a robot,
+of drive / their max speed + their pick + place. A task with a requirement
+also records `requires` and `able`, the number of robots that can do it.
+`ub_per_hour` is the lowest of:
+
+- robots × 3600 / `lb_mean_s`, as in v1;
+- for each requirement R: `able` × 3600 × tasks / (the summed bounds of the
+  tasks that need R or more). The robots that have R must do all of that work
+  themselves.
+
+It is still optimistic: it ignores the empty drive between tasks, and it
+assumes every robot is as quick as the best type. A run without types, and
+every run recorded before them, scores as in v1, with `unservable` 0.
+
+**Per-task service times: not added.** A package's own handling time is the
+same whichever robot takes it. So it shifts every candidate's cost by the same
+amount and cannot change who should take the task. What does depend on the
+pair (a heavy package needs a different gripper, which is slower) is a
+capability on the task plus that type's own `pick_s` and `place_s`. A
+per-task time would also need one more field on the wire and in the central
+costs.
+
+### Measured (2026-11-26, seeds 1-3, `fleetsim bench mixed --jobs 6`)
+
+`fleetsim/suites/mixed.yaml`, 72 runs, no crashes, 8-66 s of wall time
+each. Four rows per fleet size:
+
+- `bench_mixed`: the mixed fleet above, a fifth of the tasks need `heavy`;
+- `bench_mixed_uniform`: the same task stream, every robot a standard one
+  that can lift heavy packages;
+- `bench_steady_mixed`: `bench_steady` with bench_mixed's fleet and no
+  requirements, so speed and handling differ but nothing is exclusive;
+- `bench_steady` as it is.
+
+Mean delivery time in s (p95 in brackets), mean ± sd over the seeds:
+
+| scenario | robots | auction | central_greedy | central_hungarian |
+|---|---:|---:|---:|---:|
+| `bench_mixed` | 5 | 219 ± 71 (500) | 192 ± 83 (429) | 169 ± 50 (351) |
+| | 20 | 169 ± 22 (383) | 152 ± 13 (294) | 154 ± 12 (300) |
+| `bench_mixed_uniform` | 5 | 178 ± 10 (280) | 154 ± 7 (227) | 150 ± 8 (221) |
+| | 20 | 160 ± 4 (274) | 151 ± 2 (239) | 147 ± 3 (232) |
+| `bench_steady_mixed` | 5 | 131 ± 5 (179) | 124 ± 10 (184) | 119 ± 11 (175) |
+| | 20 | 132 ± 9 (220) | 122 ± 4 (202) | 122 ± 9 (198) |
+| `bench_steady` | 5 | 171 ± 12 (254) | 155 ± 6 (219) | 154 ± 6 (216) |
+| | 20 | 161 ± 14 (284) | 149 ± 6 (230) | 148 ± 8 (231) |
+
+Every run delivered at least 96 % of its tasks. The lowest was
+`bench_mixed`, 20 robots, seed 1, auction: 81 of 84, with 3 still in flight
+at 1500 s. Every run had 0 empty-shelf visits. There
+was one contact in 72 runs, in `bench_mixed_uniform`. `bench_mixed`'s
+`offered_load` was 0.38 ± 0.15 at 5 robots and 0.40 ± 0.16 at 20, against
+0.26-0.28 for the same tasks on the uniform fleet. The difference is the cap
+from the heavy robots.
+
+Heavy tasks against the rest in `bench_mixed`, read from the runs' events
+(not a metric yet). Means are over the seeds' means; shares and counts are
+over all three seeds:
+
+| robots | method | heavy tasks, mean s | other tasks, mean s | delivered by standard / fast / heavy | other tasks delivered by a heavy robot |
+|---:|---|---:|---:|---|---:|
+| 5 | auction | 366 | 150 | 12 / 61 / 27 % | 4 |
+| | central_greedy | 362 | 118 | 22 / 56 / 22 % | 1 |
+| | central_hungarian | 299 | 115 | 14 / 66 / 20 % | 0 |
+| 20 | auction | 290 | 136 | 28 / 51 / 21 % | 5 |
+| | central_greedy | 248 | 125 | 26 / 53 / 20 % | 1 |
+| | central_hungarian | 243 | 127 | 23 / 57 / 20 % | 0 |
+
+What this shows:
+
+- **Faster robots, priced by delivery time, get most of the work.** With no
+  exclusive capability (`bench_steady_mixed`), fast robots delivered 67-89 %
+  of the tasks and heavy robots at most 1 %. Mean delivery fell by 18-23 %
+  against the plain fleet for every method (auction 171 → 131 s at 5 robots,
+  161 → 132 s at 20). The standard robots stand idle more.
+- **The scarce capability is the bottleneck.** Heavy tasks took 1.9-3.1 × as
+  long as the others, because the heavy robots are both few and slow. Against
+  the uniform fleet on the same tasks, the mean rose 13-25 % at 5 robots
+  (auction 178 → 219 s) and 1-6 % at 20. The p95 rose much more (auction at
+  5 robots: 280 → 500 s).
+- **The coordination gap widens with a mixed fleet at 5 robots**: the
+  Hungarian dispatcher beat the auction by 23 % there (219 vs 169 s), against
+  16 % on the uniform fleet. Most of it is on the heavy tasks (366 vs 299 s).
+  At 20 robots the gap is 8-9 % either way.
+- **The heavy robots were not wasted on other work**: 0-5 tasks over three
+  seeds. Delivery-time pricing keeps a slow robot off a task that a quicker one
+  can do, so no method had to reserve the heavy robots. A heavy type as fast as
+  a standard one would take ordinary work and make heavy tasks wait. That case
+  is not tested.
+- **The task mix varies a lot between seeds.** The share of heavy tasks is a
+  draw per arrival: at 20 robots seeds 1, 2 and 3 drew 29 %, 11 % and 22 %.
+  That is most of the ± on `bench_mixed`, and at 5 robots one seed had only 2
+  heavy tasks.
 
 ## Known issues
 
