@@ -39,3 +39,5 @@ metrics:
   - metric: fleet_tasks
   - metric: nav
     pass: {empty_shelf: {eq: 0}}
+  - metric: utilisation
+  - metric: bounds
