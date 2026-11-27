@@ -1,0 +1,30 @@
+# B10 (keep right) and B11 (single-lane passage reservation), off and on
+# (docs/fleetsim.md "Traffic: keep right and single-lane passages").
+#   /usr/bin/python3 -m fleetsim bench traffic --jobs 6
+# Keep right is for the open floor's two-way aisles (bench_steady, bench_rush,
+# delivery_smoke, walkers, and the 50-robot radio fleet, which starts blind so
+# the lanes are re-cut as the map fills in). Passages are for the single-lane
+# floors (bench_narrow, bench_dead_end); on a floor without one, `passages`
+# must score exactly as `off`. ~30 min at 6 jobs on the i9-14900HX laptop.
+name: traffic
+description: >
+  The open-floor benchmarks at 8 to 40 robots and fleet_scale at 50, and the
+  narrow-aisle and dead-end-bay benchmarks at 5, 10 and 20, each off, with
+  keep right, with passage reservation, and with both; three seeds.
+scenarios:
+  - {scenario: bench_steady, robots: [10, 20, 40]}
+  - {scenario: bench_rush, robots: [10, 20]}
+  - {scenario: delivery_smoke, robots: [8]}
+  - {scenario: walkers, robots: [12]}
+  - {scenario: fleet_scale, robots: [50]}
+  - {scenario: bench_narrow, robots: [5, 10, 20]}
+  - {scenario: bench_dead_end, robots: [5, 10, 20]}
+seeds: [1, 2, 3]
+variants:
+  "off": {}                      # quoted: bare off is YAML for false
+  keep_right: {traffic.keep_right.enabled: true}
+  passages: {traffic.passages.enabled: true}
+  both: {traffic.keep_right.enabled: true, traffic.passages.enabled: true}
+headline: fleet_tasks.per_hour
+also: [fleet_tasks.mean_s, fleet_tasks.done, nav.blocked_robot, nav.blocked_robot_s, nav.gave_up,
+       nav.pass_hold_s, contacts.contacts]

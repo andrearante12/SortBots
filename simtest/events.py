@@ -60,7 +60,9 @@ STREAMS = {
     "contact": "fleetsim: a body contact: {rid, kind: robot|static|actor, other, x, y}",
     "nav": "fleetsim: local-layer / planner event: {rid, event: replan|blocked|unblocked|"
            "gave_up|plan_failed|recovery|empty_shelf|yield|yield_end|yield_timeout, cause?, "
-           "by?: robot|actor|notice|bump, after_s?, to?}",
+           "by?: robot|actor|notice|bump, after_s?, to?}; with traffic.passages also "
+           "pass_claim|pass_release|pass_enter|pass_exit|pass_hold|pass_hold_end|"
+           "pass_hold_timeout, box: [x0, y0, x1, y1] (the passage), inside?",
     "net": "fleetsim, 1 Hz: {model, kinds: {kind: {sent, delivered, lost, bytes, p50_ms, "
            "p95_ms}}, load_max, load_mean, over_cap, reach_frac, hops_max}",
     "belief": "fleetsim: each robot's map vs the truth: {free_cells, cell_m, robots: {rid: "

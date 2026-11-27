@@ -488,6 +488,7 @@ class Robot:
         cap = 1.0 + 0.5 * cm.weight
         step = 0.5 * g.res
         ln = cm.lanes
+        cells = None if ln is None else [g.index(*p) for p in pts]
 
         def clear(i0, i1):
             a, b = pts[i0], pts[i1]
@@ -498,8 +499,8 @@ class Robot:
                 j = g.index(a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
                 if j is None or cm.mult[j] > cap:
                     return False
-                if lane is not None and not ln.follows(
-                        j, g.index(*pts[i0 + int(t * (i1 - i0) + 0.5)]), lane):
+                if lane is not None and not ln.follows(j, cells[i0 + int(t * (i1 - i0) + 0.5)],
+                                                       lane):
                     return False
             return True
 

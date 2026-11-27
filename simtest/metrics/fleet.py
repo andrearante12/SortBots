@@ -285,7 +285,8 @@ class MapDivergence(Metric):
 class Nav(Metric):
     name = "nav"
     # 2: robot-caused stops apart, and path-intent yields (2026-11-17).
-    version = 2
+    # 3: holds short of a single-lane passage (fleetsim/traffic.py, 2026-11-26).
+    version = 3
     streams = {"nav"}
     summary = "Replans by cause, blocking and give-ups of the local layer."
     params = {}
@@ -306,12 +307,18 @@ class Nav(Metric):
         "yields": "holds at a safe spot for a peer's path intent (fleetsim/intent.py)",
         "yield_s": "total sim seconds held for a peer's intent",
         "yield_timeouts": "holds given up after intent.yield_max_s",
+        "pass_holds": "holds short of a single-lane passage another robot claimed first "
+                      "(traffic.passages), a new claim's settle_s wait included",
+        "pass_hold_s": "total sim seconds held short of a passage",
+        "pass_hold_timeouts": "passage holds given up after traffic.passages.hold_max_s",
     }
+    ROUNDED = ("blocked_s", "blocked_robot_s", "yield_s", "pass_hold_s")
 
     def __init__(self, ctx, **params):
         super().__init__(ctx, **params)
         self.c = {k: 0 for k in self.values}
-        self.c["blocked_s"] = self.c["blocked_robot_s"] = self.c["yield_s"] = 0.0
+        for k in self.ROUNDED:
+            self.c[k] = 0.0
         self._by: dict = {}  # rid -> what its open stop is for
 
     def on_event(self, ev):
@@ -338,6 +345,12 @@ class Nav(Metric):
             self.c["yield_s"] += ev.get("after_s", 0.0)
         elif e == "yield_timeout":
             self.c["yield_timeouts"] += 1
+        elif e == "pass_hold":
+            self.c["pass_holds"] += 1
+        elif e == "pass_hold_end":
+            self.c["pass_hold_s"] += ev.get("after_s", 0.0)
+        elif e == "pass_hold_timeout":
+            self.c["pass_hold_timeouts"] += 1
         elif e == "gave_up":
             self.c["gave_up"] += 1
         elif e == "recovery":
@@ -346,8 +359,7 @@ class Nav(Metric):
             self.c["empty_shelf"] += 1
 
     def result(self):
-        return {**self.c, **{k: round(self.c[k], 1)
-                             for k in ("blocked_s", "blocked_robot_s", "yield_s")}}
+        return {**self.c, **{k: round(self.c[k], 1) for k in self.ROUNDED}}
 
 
 # The task FSM's states (fleetsim/robot.py, task_manager's) as shares of a
@@ -358,14 +370,14 @@ PHASE = {"NAV_TO_PICKUP": "to_pickup", "AWAIT_PICK": "at_pickup", "PICKING": "at
          "NAV_TO_DROPOFF": "carrying", "PLACING": "placing"}
 BUSY = ("to_pickup", "at_pickup", "carrying", "placing")
 DRIVING = {"to_pickup", "carrying"}
-CAUSES = ("robot", "actor", "notice", "bump", "yield", "await_pick", "no_path")
+CAUSES = ("robot", "actor", "notice", "bump", "yield", "passage", "await_pick", "no_path")
 
 
 class _Bot:
     """One robot's state as the event stream tells it."""
 
     __slots__ = ("last", "phase", "task", "state", "home", "off", "block", "yielding",
-                 "no_path")
+                 "passage", "no_path")
 
     def __init__(self):
         self.last = 0.0
@@ -375,6 +387,7 @@ class _Bot:
         self.off = False       # killed by a disturbance
         self.block = None      # what the open local-layer stop is for
         self.yielding = False  # holding for a peer's path intent
+        self.passage = False   # holding short of a single-lane passage
         self.no_path = False   # plan_failed, no plan since
 
     def copy(self) -> "_Bot":
@@ -387,7 +400,8 @@ class _Bot:
 @register
 class Utilisation(Metric):
     name = "utilisation"
-    version = 1
+    # 2: holds short of a single-lane passage, lost_passage_* (2026-11-26).
+    version = 2
     streams = {"task", "nav", "path", "disturb", "end"}
     summary = "Where the fleet's robot-time goes: task phases, and time lost by cause."
     params = {}
@@ -419,6 +433,9 @@ class Utilisation(Metric):
         "lost_bump_frac": "lost_bump_s as a share of robot-time",
         "lost_yield_s": "robot-seconds holding for a peer's path intent (fleetsim/intent.py)",
         "lost_yield_frac": "lost_yield_s as a share of robot-time",
+        "lost_passage_s": "robot-seconds held short of a single-lane passage another robot "
+                          "claimed first (traffic.passages)",
+        "lost_passage_frac": "lost_passage_s as a share of robot-time",
         "lost_await_pick_s": "robot-seconds at the shelf waiting for the majority's pick "
                              "acks (AWAIT_PICK)",
         "lost_await_pick_frac": "lost_await_pick_s as a share of robot-time",
@@ -441,7 +458,8 @@ class Utilisation(Metric):
     def _advance(b: _Bot, t: float, phase_s: dict, lost_s: dict) -> None:
         """Book the time since b.last to what the robot was doing. One cause
         at a time: yielding over a stop (a held robot isn't checked for
-        blockers, so a stop open across a hold is the hold's), and a stop over
+        blockers, so a stop open across a hold is the hold's; a passage hold
+        likewise), and a stop over
         no path (a replan around a blocker that finds no way out is the
         blocker's doing). Lost time is counted only while working a task: a
         robot stopped on its way home costs no delivery."""
@@ -459,6 +477,8 @@ class Utilisation(Metric):
             return
         elif b.yielding:
             cause = "yield"
+        elif b.passage:
+            cause = "passage"
         elif b.block is not None:
             cause = b.block
         elif b.no_path:
@@ -516,6 +536,10 @@ class Utilisation(Metric):
                 b.yielding = True
             elif e == "yield_end":
                 b.yielding = False
+            elif e == "pass_hold":
+                b.passage = True
+            elif e == "pass_hold_end":
+                b.passage = False
         elif s == "path":
             # The one place a recovered plan shows: robot._replan records the
             # new path, and a failed one records none (or an empty one).

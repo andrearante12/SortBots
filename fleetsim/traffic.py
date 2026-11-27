@@ -58,23 +58,42 @@ WIDTH_TAPER_M = 0.4
 CLAIM_B = 16  # a claim on Status: passage box (4 x int16 dm), claim time, priority, flags
 
 
+def row_runs(mask: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The runs of True along axis 1, in row-major order: (row, first
+    column, length)."""
+    h, w = mask.shape
+    pad = np.zeros((h, w + 2), np.int8)
+    pad[:, 1:-1] = mask
+    d = np.diff(pad, axis=1).ravel()
+    s, e = np.flatnonzero(d == 1), np.flatnonzero(d == -1)  # w + 1 diffs per row
+    return s // (w + 1), s % (w + 1), e - s
+
+
+def run_lengths(free: np.ndarray) -> np.ndarray:
+    """Along axis 1: each free cell's run length (cells), 0 off the mask."""
+    n = np.zeros(free.size, np.int32)
+    _r, _c, ln = row_runs(free)
+    if len(ln):
+        n[free.ravel()] = np.repeat(ln, ln)
+    return n.reshape(free.shape)
+
+
 def free_runs(free: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Along axis 1: each free cell's run length (cells) and its offset from
     the run's centre (cells: 0 on an odd run's middle cell, +-0.5 beside an
     even run's middle). Zero off the mask."""
     h, w = free.shape
-    if not free.any():
-        return np.zeros((h, w), np.int32), np.zeros((h, w), np.float32)
-    start = free.copy()
-    start[:, 1:] &= ~free[:, :-1]
-    rid = np.cumsum(start.ravel()).reshape(h, w) * free  # run id, 1-based; a row starts afresh
-    length = np.bincount(rid.ravel())
-    cols = np.broadcast_to(np.arange(w), (h, w))
-    first = np.zeros(len(length), np.int64)
-    first[rid[start]] = cols[start]
-    n = length[rid]
-    off = cols - first[rid] - (n - 1) / 2.0
-    return np.where(free, n, 0).astype(np.int32), np.where(free, off, 0.0).astype(np.float32)
+    n = np.zeros(h * w, np.int32)
+    off = np.zeros(h * w, np.float32)
+    _r, _c, ln = row_runs(free)
+    if len(ln):
+        # Free cells in row-major order are the runs' cells in run order.
+        per = np.repeat(ln, ln)
+        pos = np.arange(per.size) - np.repeat(np.cumsum(ln) - ln, ln)
+        flat = free.ravel()
+        n[flat] = per
+        off[flat] = pos - (per - 1) / 2.0
+    return n.reshape(h, w), off.reshape(h, w)
 
 
 def corridor_geometry(rx, ry, px, py, res: float):
@@ -116,8 +135,12 @@ class Lanes:
         self.axf = array("b", bytes(g.size))
         self.c, self.ox, self.oy = (_frombuffer(a, self.shape) for a in (self.cf, self.oxf, self.oyf))
         self.ax = _frombuffer(self.axf, self.shape)
-        self.units = [(dx / math.hypot(dx, dy), dy / math.hypot(dx, dy))
-                      for dx, dy, _s in NEIGHBOURS_INT]
+        # The lane term x1000 of a step east, west, north and south; a
+        # diagonal's is 0.707 x the sum of its two (one of them is 0: a cell
+        # lies in a corridor along x or along y).
+        self._base = [np.zeros(self.shape, np.float32) for _ in range(4)]
+        assert [(dx, dy) for dx, dy, _s in NEIGHBOURS_INT] == [
+            (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)]
         self.wdir = [array("i", bytes(4 * g.size)) for _ in NEIGHBOURS_INT]
         self._wdir = [_frombuffer(a, self.shape) for a in self.wdir]
         self._wint = _frombuffer(cm.wint, self.shape)
@@ -184,25 +207,32 @@ class Lanes:
             ce = np.clip((length / np.maximum(width, 1e-6) - 1.0) / 2.0, 0.0, 1.0)
         c = np.where(~self.occ[sl], cw * ce, 0.0)
         self.c[sl] = c
-        self.ox[sl] = np.where(along_x, 0.0, off)
-        self.oy[sl] = np.where(along_x, off, 0.0)
+        self.ox[sl] = ox = np.where(along_x, 0.0, off)
+        self.oy[sl] = oy = np.where(along_x, off, 0.0)
         self.ax[sl] = along_x
-
-    def _pen(self, sl, mx: float, my: float) -> np.ndarray:
-        c, ax = self.c[sl], self.ax[sl]
-        along = np.where(ax, abs(mx), abs(my))
-        side = self.ox[sl] * -my + self.oy[sl] * mx  # offset . the move's left normal
-        with np.errstate(divide="ignore", invalid="ignore"):
-            sigma = np.where(along > 1e-6, side / along, 0.0)
-        frac = np.clip((sigma + self.offset) / (2.0 * self.offset), 0.0, 1.0)
-        return self.weight * c * along * frac
+        # weight x corridor x clamp((sigma + lane_offset) / (2 lane_offset)),
+        # sigma the offset LEFT of the move: +oy going west... see the module
+        # docstring. A move across the corridor (east in a north-south one)
+        # has along = 0 and costs nothing extra.
+        k = 1000.0 * self.weight * c
+        f = lambda v: np.clip((v + self.offset) / (2.0 * self.offset), 0.0, 1.0)  # noqa: E731
+        for base, (sel, v) in zip(self._base, ((along_x, oy), (along_x, -oy),
+                                               (~along_x, -ox), (~along_x, ox))):
+            base[sl] = np.where(sel, k * f(v), 0.0)
 
     def _write(self, y0, y1, x0, x1) -> None:
         sl = (slice(y0, y1), slice(x0, x1))
         wi = self._wint[sl]
+        if not self.c[sl].any():  # no corridor here: every direction is wint
+            for a in self._wdir:
+                a[sl] = wi
+            return
         live = wi > 0
-        for k, (mx, my) in enumerate(self.units):
-            self._wdir[k][sl] = np.where(live, wi + np.rint(1000.0 * self._pen(sl, mx, my)), 0)
+        e, w_, n, s_ = (b[sl] for b in self._base)
+        d = math.sqrt(0.5)
+        for a, pen in zip(self._wdir, (e, w_, n, s_, d * (e + n), d * (e + s_), d * (w_ + n),
+                                       d * (w_ + s_))):
+            a[sl] = np.where(live, wi + np.rint(pen), 0)
 
     # ---- the smoother's check -------------------------------------------------
 
@@ -275,32 +305,22 @@ class PassageMap:
             return False
         self.occ = occ
         free = ~occ
-        rx, px = free_runs(free)
-        ryT, pyT = free_runs(free.T.copy())
-        width, _l, _o, _a = corridor_geometry(rx, ryT.T, px, pyT.T, self.g.res)
+        width = np.minimum(run_lengths(free), run_lengths(free.T.copy()).T) * self.g.res
         single = free & (width <= self.single + 1e-6)
-        drivable = ~inflate_bool(occ, self.g, self.r_lethal)
+        drivable = ~inflate_bool(occ, self.g, self.r_lethal) if single.any() else None
         self._label(single, drivable)
         self.version += 1
         return True
 
-    def _label(self, mask: np.ndarray, drivable: np.ndarray) -> None:
+    def _label(self, mask: np.ndarray, drivable) -> None:
         """Components of mask by runs: label each row's runs, join runs of
         adjacent rows that touch (8-way), union-find over runs."""
-        h, w = mask.shape
-        runs = []  # (row, x0, x1) inclusive
-        row_runs: list[list[int]] = []
-        pad = np.zeros((h, w + 2), bool)
-        pad[:, 1:-1] = mask
-        d = np.diff(pad.astype(np.int8), axis=1)
-        for y in range(h):
-            s = np.flatnonzero(d[y] == 1)
-            e = np.flatnonzero(d[y] == -1) - 1
-            ids = []
-            for a, b in zip(s.tolist(), e.tolist()):
-                ids.append(len(runs))
-                runs.append((y, a, b))
-            row_runs.append(ids)
+        h, _w = mask.shape
+        rr, rc, rl = row_runs(mask)
+        runs = list(zip(rr.tolist(), rc.tolist(), (rc + rl - 1).tolist()))  # (row, x0, x1)
+        by_row: list[list[int]] = [[] for _ in range(h)]
+        for i, (y, _a, _b) in enumerate(runs):
+            by_row[y].append(i)
         parent = list(range(len(runs)))
 
         def find(i):
@@ -310,7 +330,9 @@ class PassageMap:
             return i
 
         for y in range(1, h):
-            prev, cur = row_runs[y - 1], row_runs[y]
+            prev, cur = by_row[y - 1], by_row[y]
+            if not prev or not cur:
+                continue
             i = j = 0
             while i < len(prev) and j < len(cur):
                 _, a0, b0 = runs[prev[i]]
