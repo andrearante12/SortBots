@@ -325,12 +325,13 @@ class Orca:
     # ---- the decision ------------------------------------------------------------
 
     def velocity(self, now: float):
-        """-> (chosen velocity, preferred velocity, neighbours, agent lines)."""
+        """-> (chosen velocity, preferred velocity, neighbours, agent lines,
+        bumps)."""
         r = self.r
         pref = r.preferred_velocity()
         nbrs, bumps = self.neighbours(now)
         if not nbrs and not bumps:
-            return pref, pref, nbrs, []
+            return pref, pref, nbrs, [], bumps
         vx, vy = r.velocity()
         static = self.wall_lines(pref)
         for bx, by in bumps:
@@ -351,7 +352,7 @@ class Orca:
                                     resp, vx, vy))
         agents = [ln for ln in lines if ln is not None]
         v = solve(static + agents, len(static), r.vmax, pref)
-        return v, pref, nbrs, lines
+        return v, pref, nbrs, lines, bumps
 
     def contact_step(self, dt: float, v: tuple, nbrs: list):
         """The neighbour the tracker's next step toward `v` would close on to
@@ -372,8 +373,8 @@ class Orca:
 
     def decide(self, dt: float, now: float) -> Decision:
         r = self.r
-        v, pref, nbrs, lines = self.velocity(now)
-        if not nbrs and r.on_path():
+        v, pref, nbrs, lines, bumps = self.velocity(now)
+        if not nbrs and not bumps and r.on_path():
             return FOLLOW
         sp = math.hypot(v[0], v[1])
         need = self.resume if r.blocked_since is not None else self.stall

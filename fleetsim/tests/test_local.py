@@ -287,3 +287,17 @@ def test_orca_runs_are_reproducible():
     strip = lambda evs: [{k: v for k, v in e.items() if k not in ("wall", "wall_s", "summary")}  # noqa: E731
                          for e in evs]
     assert strip(a.events) == strip(b.events)
+
+
+def test_orca_does_not_push_into_what_it_bumped():
+    # Nothing perceived, but it ran into something (a bump, 5 cm ahead): it
+    # must not just follow its path into it again.
+    s = _sim([(6.0, 6.0)])
+    r = s.robots[0]
+    s.at(1.0, r.set_goal, (20.0, 6.0), "home")
+    s.duration = 4.0
+    s.run()
+    assert r.v > 0.3 and abs(r.yaw) < 0.1  # driving east along its path
+    r.bumps.append((r.x + 0.05, r.y, s.now))
+    d = r.local.decide(0.1, s.now)
+    assert d.act == "drive" and d.vel is not None and d.vel[0] <= 1e-6

@@ -26,7 +26,10 @@ and does what the answer says:
   Decision(DRIVE, vel=(vx, vy))     track this world-frame velocity instead
                                     (`Robot._track`: a diff drive turns toward
                                     it and drives the part along its heading;
-                                    path progress follows where it went)
+                                    path progress follows where it went; it
+                                    never drives from a free cell of its
+                                    costmap into a lethal one, and when that
+                                    stops it, it replans, cause "guard")
   Decision(STOP, by)                stand still this step. `by` is what for:
                                     robot | actor | notice | bump, the cause
                                     the nav and utilisation metrics book the
@@ -55,13 +58,16 @@ A method is a class built per robot:
 It reads what the robot knows, never ground truth unless `info.peers:
 truth`: `perceive(robot, now)` (camera detections with a velocity, peers
 heard on Status with the twist Status carries, peers' obstacle notices,
-bumps), the robot's pose, velocity, path and costmap, and
-`robot.preferred_velocity()` (the path follower's velocity). It may call
-`robot.sim.record` for its own events. It must not move the robot or
-touch the costmap itself: the decision does that.
+bumps), the robot's pose, `velocity()`, path, `ahead(dist_m)` and
+costmap, `preferred_velocity()` (the path follower's velocity),
+`on_path()`, and `track_step(dt, vel)` (the step a velocity would really
+take, nothing applied). It may call `robot.sim.record` for its own events.
+It must not move the robot or touch the costmap itself: the decision does
+that.
 
 To add a method: a module here with a class as above, an entry in
-METHODS, and its knobs under `nav:` in fleetsim/configs/base.yaml.
+METHODS and in _methods(), and its knobs under `nav:` in
+fleetsim/configs/base.yaml (validated in config._validate).
 """
 from __future__ import annotations
 

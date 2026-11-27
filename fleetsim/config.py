@@ -55,6 +55,8 @@ import yaml
 from simtest import metrics as metrics_lib
 from simtest import world as world_lib
 
+from .local import METHODS as LOCAL_METHODS
+
 FLEETSIM_DIR = Path(__file__).resolve().parent
 BASE = FLEETSIM_DIR / "configs" / "base.yaml"
 SCENARIOS_DIR = Path(os.environ.get("FLEETSIM_SCENARIOS_DIR") or FLEETSIM_DIR / "scenarios")
@@ -68,7 +70,6 @@ TOP_KEYS = {"name", "title", "description", "seed", "duration_s", "robots", "con
 FREE_FORM = {("world", "synthetic"), ("fleet_tasks",), ("network", "radio", "radio_model")}
 DISTURBANCE_KINDS = {"kill", "revive", "partition", "block_link", "blockage"}
 DISPATCH_METHODS = ("auction", "central_greedy", "central_hungarian")  # fleetsim/dispatch
-LOCAL_METHODS = ("stop_replan", "orca")  # fleetsim/local (its METHODS)
 INFO_CHOICES = {"map": ("shared", "truth"), "peers": ("heard", "truth"),
                 "dispatch": ("network", "truth")}
 # kill: {select: ...} picks its robot when it fires, lowest index first.
