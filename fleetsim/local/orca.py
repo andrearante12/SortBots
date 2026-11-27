@@ -230,6 +230,7 @@ class Orca:
         self.resume = float(c["resume_mps"])
         self.track_s = float(c["track_s"])
         self.tracks: dict = {}  # (kind, ident) -> (x, y, vx, vy, rad, t) of the last sighting
+        self._heard: set = set()  # peers heard on Status at the last neighbours()
         self.replan_at = None
         self._wall_key = None
         self._wall_pts = np.zeros((0, 2))
@@ -244,7 +245,7 @@ class Orca:
         most max_neighbors; [(x, y)] bumps)."""
         r = self.r
         seen = perceive(r, now, 0.0, self.near_m)
-        heard = {o[4] for o in seen if o[7] == "status"}
+        heard = self._heard = {o[4] for o in seen if o[7] == "status"}
         out, bumps = [], []
         seen_t = r.sim.seen_t[r.k]
         cam = set()
@@ -354,20 +355,30 @@ class Orca:
         v = solve(static + agents, len(static), r.vmax, pref)
         return v, pref, nbrs, lines, bumps
 
-    def contact_step(self, dt: float, v: tuple, nbrs: list):
+    def contact_step(self, dt: float, now: float, v: tuple, nbrs: list):
         """The neighbour the tracker's next step toward `v` would close on to
         within contact distance (body + its radius + 2 cm), or None. ORCA
         assumes the robot takes `v` at once; a diff drive moves along its
         heading, and when no velocity is safe (a walker coming head-on faster
         than the robot can turn away) the fallback's least-bad one can still
-        step into it. Standing still is then the safe move, as stop_replan's."""
+        step into it. Standing still is then the safe move, as stop_replan's.
+        A camera track is checked where it was last seen too, not only where
+        its velocity carried it: close up, the nearest-point stand-in's
+        velocity is noise (a walker read as -2.05, +1.69 m/s while pacing
+        along x; bench_walkers seed 3, 2026-11-26), and the carried track
+        was 0.3 m from the walker the robot then stepped into."""
         r = self.r
         x, y, _yaw, sp = r.track_step(dt, v)
         if sp * dt <= 1e-9:
             return None
-        for o in nbrs:
-            d = math.hypot(o[1] - x, o[2] - y)
-            if d < o[0] and d < r.body_r + o[5] + 0.02:
+        pts = [(o[1], o[2], o) for o in nbrs]
+        for (kind, ident), (tx, ty, _vx, _vy, rad, t) in self.tracks.items():
+            if now - t <= self.track_s and not (kind == "robot" and ident in self._heard):
+                pts.append((tx, ty, (math.hypot(tx - r.x, ty - r.y), tx, ty, 0.0, 0.0, rad,
+                                     kind, ident)))
+        for px, py, o in pts:
+            d = math.hypot(px - x, py - y)
+            if d < math.hypot(px - r.x, py - r.y) and d < r.body_r + o[5] + 0.02:
                 return o
         return None
 
@@ -380,7 +391,7 @@ class Orca:
         need = self.resume if r.blocked_since is not None else self.stall
         blk = None
         if nbrs:
-            blk = self.contact_step(dt, v, nbrs)
+            blk = self.contact_step(dt, now, v, nbrs)
         if blk is None and (sp >= need or math.hypot(pref[0], pref[1]) < need or not nbrs):
             return Decision(DRIVE, vel=v)
         if blk is None:
