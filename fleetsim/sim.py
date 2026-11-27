@@ -898,8 +898,11 @@ class Sim:
         self.record({"s": "links", "links": [[e["a"], e["b"], round(e["snr_db"])] for e in tab]})
 
     def _net_sample(self) -> None:
+        # record.net_nodes: who sent and heard what, and each node's load, for
+        # the replay's comms monitor. +3.3 kB a sample at 50 robots (2026-11-26).
+        nodes = self.net.take_nodes() if self.cfg["record"]["net_nodes"] else {}
         self.record({"s": "net", "model": self.cfg["network"]["model"],
-                     "kinds": self.net.take_stats(), **self.net.summary()})
+                     "kinds": self.net.take_stats(), **self.net.summary(), **nodes})
 
     def _board_sample(self) -> None:
         b = self.gw.board()

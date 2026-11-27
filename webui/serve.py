@@ -14,9 +14,11 @@ Then open http://localhost:8081/. Requires rosbridge_websocket (port 9090)
 and web_video_server (port 8080) running separately — see
 launch/sortbots_webui.launch.py, which brings up all three together.
 
-FLEET REPLAY (fleetsim/replay.py): /api/fleetsim/runs lists data/fleetsim/ and
-/api/fleetsim/run?dir=NAME returns one run packed for the operator view's
-replay. Read-only, so no --control. Launching one (/api/fleetsim/launch) does
+FLEET REPLAY (fleetsim/replay.py): /api/fleetsim/runs lists data/fleetsim/
+and the benches under data/fleetsim/bench/, /api/fleetsim/bench?dir=NAME one
+bench's runs, and /api/fleetsim/run?dir=REF returns one run packed for the
+operator view's replay (REF: a run dir name, or bench/<bench>/<run>).
+Read-only, so no --control. Launching one (/api/fleetsim/launch) does
 need --control, and goes through webui/fleetsim_runner.py's own allowlist.
 
 SCENARIO EDITOR (webui/fleetsim_editor.py): /api/fleetsim/editor lists what it
@@ -300,7 +302,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         elif route == "/api/tests/run":
             self._with_tests(lambda: self._serve_run_state(TESTS))
         elif route == "/api/fleetsim/runs":
-            self._serve_json({"runs": fleetsim_replay.list_runs()})
+            self._serve_json({"runs": fleetsim_replay.list_runs(),
+                              "benches": fleetsim_replay.list_benches()})
+        elif route == "/api/fleetsim/bench":
+            self._serve_fleetsim_bench()
         elif route == "/api/fleetsim/run":
             self._serve_fleetsim_run()
         elif route == "/api/fleetsim/scenarios":
@@ -915,12 +920,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def _serve_fleetsim_run(self):
         """One recorded fleetsim run, packed whole for the page to scrub.
         Readable without --control, like /api/tests/results: it only reads
-        data/fleetsim/, by directory NAME (fleetsim_replay.DIR_RX)."""
+        data/fleetsim/, by a run's directory NAME or bench/<bench>/<run>
+        (fleetsim_replay.valid_ref: DIR_RX at every level, nothing that
+        resolves outside data/fleetsim/)."""
         name = parse_qs(urlsplit(self.path).query).get("dir", [""])[0]
         try:
             packed = fleetsim_replay.pack(name)
         except fleetsim_replay.ReplayError as exc:
-            self._serve_error(400 if not fleetsim_replay.DIR_RX.match(name) else 409, str(exc))
+            self._serve_error(400 if not fleetsim_replay.valid_ref(name) else 409, str(exc))
             return
         except FileNotFoundError as exc:
             self._serve_error(404, str(exc))
@@ -928,6 +935,18 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         # Megabytes of JSON for a big fleet, over Tailscale Funnel to a phone:
         # gzip takes a 50-robot run from ~4 MB to under 1 MB.
         self._serve_json(packed, gzip_ok=True)
+
+    def _serve_fleetsim_bench(self):
+        """One bench's runs (data/fleetsim/bench/NAME/), listed when the Tests
+        tab opens that bench: a suite can be hundreds of runs, too many to
+        read on every refresh of the list."""
+        name = parse_qs(urlsplit(self.path).query).get("dir", [""])[0]
+        try:
+            self._serve_json({"dir": name, "runs": fleetsim_replay.list_bench(name)})
+        except fleetsim_replay.ReplayError as exc:
+            self._serve_error(400, str(exc))
+        except FileNotFoundError as exc:
+            self._serve_error(404, str(exc))
 
     def _start_fleetsim(self):
         body = self._read_json_body()

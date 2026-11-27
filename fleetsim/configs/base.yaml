@@ -204,6 +204,8 @@ record:
   gt_hz: 5.0                  # ground truth (Isaac publishes 10 Hz)
   belief_s: 5.0               # map divergence sample (0 = off)
   net_s: 1.0
+  net_nodes: true             # per node in each net sample: load, own airtime, traffic by kind
+                              # in and out (the replay's comms monitor). +3.3 kB a sample at 50 robots
   board_s: 5.0
   fleet_log: false            # every FleetTasks log line as an event (verbose)
   # For the operator view's fleet replay (Tests tab -> Fleet sim runs); only

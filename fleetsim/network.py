@@ -77,6 +77,8 @@ class Network:
     `_compute()`: reach (routing has a path), p (a frame survives the path),
     hops, air_f / air_b (path airtime per frame / per byte)."""
 
+    has_air = False  # does the model price airtime (the radio) or not (ideal)
+
     def __init__(self, n_nodes: int, cfg: dict, rng: np.random.Generator):
         self.n = n_nodes
         self.cfg = cfg
@@ -100,7 +102,15 @@ class Network:
         self.lease_s = float(cfg.get("transport_lease_s", 4.0))
         self.unlimited = str(cfg.get("capacity", "enforced")) == "unlimited"
         self.stats = defaultdict(lambda: {"sent": 0, "delivered": 0, "lost": 0,
-                                          "bytes": 0, "lat": []})
+                                          "bytes": 0, "lat": [], "msgs": 0, "air": 0.0})
+        # Per node, per kind, for the replay's comms monitor (take_nodes):
+        # tx rows are copies sent / bytes offered / copies lost, by SENDER;
+        # rx rows copies delivered / bytes, by RECEIVER. Counting only:
+        # nothing here feeds back into delivery or draws a random number.
+        self.node_tx = defaultdict(lambda: np.zeros((3, n_nodes)))
+        self.node_rx = defaultdict(lambda: np.zeros((2, n_nodes)))
+        self.air_epoch = np.zeros(n_nodes)   # airtime each node offered last epoch, s per s
+        self.ogm_epoch = 0.0                 # of which batman OGMs, fleet total, s per s
         n = n_nodes
         self.reach = np.ones((n, n), dtype=bool)
         self.p = np.ones((n, n))
@@ -211,11 +221,16 @@ class Network:
         first_try = deadline is None
         if deadline is None:
             deadline = now + self.lease_s
+        tx = self.node_tx[kind]
         if first_try:
             st["sent"] += len(dsts)
             st["bytes"] += size * len(dsts)
+            st["msgs"] += 1
+            tx[0, src] += len(dsts)
+            tx[1, src] += size * len(dsts)
         if not self.alive_phys[src]:
             st["lost"] += len(dsts)
+            tx[2, src] += len(dsts)
             return empty
         reach = self.reach[src, dsts] & self.alive_phys[dsts]
         p = np.where(reach, self.p[src, dsts], 0.0)
@@ -240,7 +255,9 @@ class Network:
             wait = self.rto_s * (np.power(2.0, fails) - 1.0)
             lat = lat + wait + np.maximum(self.backlog[src], self.backlog[dsts])
             ok &= now + lat <= deadline
-            self.air[src] += float((air * (fails + 1.0))[reach].sum())
+            spent = float((air * (fails + 1.0))[reach].sum())
+            self.air[src] += spent
+            st["air"] += spent
             # Cut by a failure routing will notice before the lease runs out:
             # TCP keeps retransmitting and gets through on the new route.
             due = self.pending_notice(now)
@@ -251,27 +268,67 @@ class Network:
         else:
             over = np.where(rho > LOAD_CAP, 1.0 - LOAD_CAP / np.maximum(rho, 1e-9), 0.0)
             ok = self.rng.random(len(dsts)) < p * (1.0 - over)
-            self.air[src] += float(air[reach].sum())
+            spent = float(air[reach].sum())
+            self.air[src] += spent
+            st["air"] += spent
             lost_n = int((~ok).sum())
         st["lost"] += max(0, lost_n)
+        tx[2, src] += max(0, lost_n)
         d, arr = dsts[ok], now + lat[ok]
         if reliable and len(d):
             arr = np.maximum(arr, self.last_rel[src, d] + 1e-6)  # in order per pair
             self.last_rel[src, d] = arr
         st["delivered"] += len(d)
         st["lat"].append(arr - now)
+        if len(d):
+            rx = self.node_rx[kind]
+            np.add.at(rx[0], d, 1)
+            np.add.at(rx[1], d, size)
         return d, arr, retry_dsts, retry_t
 
     def take_stats(self) -> dict:
-        """Per-kind counters and latency percentiles since the last call."""
+        """Per-kind counters and latency percentiles since the last call.
+        `sent` counts copies (one per recipient), `msgs` the sends that made
+        them; `air_ms` (radio only) the airtime they offered, every hop and
+        retransmission included."""
         out = {}
         for kind, st in self.stats.items():
             lat = np.concatenate(st["lat"]) if st["lat"] else np.zeros(0)
             out[kind] = {"sent": st["sent"], "delivered": st["delivered"], "lost": st["lost"],
                          "bytes": st["bytes"],
                          "p50_ms": round(float(np.percentile(lat, 50)) * 1e3, 2) if len(lat) else None,
-                         "p95_ms": round(float(np.percentile(lat, 95)) * 1e3, 2) if len(lat) else None}
+                         "p95_ms": round(float(np.percentile(lat, 95)) * 1e3, 2) if len(lat) else None,
+                         "msgs": st["msgs"]}
+            if self.has_air:
+                out[kind]["air_ms"] = round(st["air"] * 1e3, 2)
         self.stats.clear()
+        return out
+
+    def take_nodes(self) -> dict:
+        """Per-node traffic since the last call, for the replay's comms
+        monitor (record.net_nodes): `node_kinds` {kind: {sent, bytes, lost,
+        rx, rx_bytes: [one value per node]}} (an all-zero list is left out),
+        and on the radio `node_load` (the load each node's channel carried
+        last epoch, the factor delay and loss are priced at), `node_air` (the
+        airtime the node itself offered, s per s, OGMs included) and
+        `ogm_air` (the fleet's OGM airtime, s per s). Node 0 is the gateway."""
+        kinds = {}
+        for kind in sorted(set(self.node_tx) | set(self.node_rx)):
+            named = []
+            if kind in self.node_tx:
+                named += zip(("sent", "bytes", "lost"), self.node_tx[kind])
+            if kind in self.node_rx:
+                named += zip(("rx", "rx_bytes"), self.node_rx[kind])
+            rows = {name: arr.astype(np.int64).tolist() for name, arr in named if arr.any()}
+            if rows:
+                kinds[kind] = rows
+        self.node_tx.clear()
+        self.node_rx.clear()
+        out = {"node_kinds": kinds}
+        if self.has_air:
+            out["node_load"] = [round(float(v), 3) for v in self.load]
+            out["node_air"] = [round(float(v), 4) for v in self.air_epoch]
+            out["ogm_air"] = round(self.ogm_epoch, 4)
         return out
 
     def summary(self) -> dict:
@@ -330,12 +387,17 @@ class RadioNetwork(Network):
         self._rects = _rect_arrays(self.layout)
         self.snr = np.full((n_nodes, n_nodes), -100.0)
 
+    has_air = True
+
     def _load_from_air(self, epoch: float) -> None:
         if epoch <= 0:
             self.load[:] = self.background
             self.air[:] = 0.0
             return
-        air = self.air + self._ogm_air(epoch)
+        ogm = self._ogm_air(epoch)
+        air = self.air + ogm
+        self.air_epoch = air / epoch          # recorded only (take_nodes)
+        self.ogm_epoch = float(ogm.sum()) / epoch
         if self.contention == "spatial":
             cs = self.snr >= (self.rp.cs_dbm - self.rp.noise_dbm)
             np.fill_diagonal(cs, True)

@@ -62,7 +62,10 @@ STREAMS = {
            "gave_up|plan_failed|recovery|empty_shelf|yield|yield_end|yield_timeout, cause?, "
            "by?: robot|actor|notice|bump, after_s?, to?}",
     "net": "fleetsim, 1 Hz: {model, kinds: {kind: {sent, delivered, lost, bytes, p50_ms, "
-           "p95_ms}}, load_max, load_mean, over_cap, reach_frac, hops_max}",
+           "p95_ms, msgs, air_ms (radio)}}, load_max, load_mean, over_cap, reach_frac, hops_max; "
+           "record.net_nodes (since 2026-11-26): node_kinds: {kind: {sent, bytes, lost, rx, "
+           "rx_bytes: [per node]}}, and on the radio node_load, node_air: [per node], ogm_air}. "
+           "sent counts copies (one per recipient), msgs the sends; node 0 is the gateway",
     "belief": "fleetsim: each robot's map vs the truth: {free_cells, cell_m, robots: {rid: "
               "{known_free, wrong_free, wrong_occ, known}}}",
     "board": "fleetsim: the gateway's task board, counted: {tasks: {state: n}, alarms, "

@@ -108,9 +108,12 @@ The circumscribed 0.32 m disc made robots unable to pass each other in a
 ## Watching a run
 
 The operator view replays any recorded run. Open the Session panel, go to the
-**Tests** tab, and find the run under **Fleet sim runs**. You can also go
-straight to one with `http://<console>/#replay=<run dir>`. The replay
-covers the stage until you close it. None of it is the live fleet.
+**Tests** tab, and find the run under **Fleet sim runs**. Runs of a
+`fleetsim bench` are under **Benchmarks** below them, a closed group per
+bench; open one to list its runs. You can also go straight to one with
+`http://<console>/#replay=<run dir>` (a bench run is
+`#replay=bench/<bench dir>/<run dir>`). The replay covers the stage until you
+close it. None of it is the live fleet.
 
 - **Floor:** the true floor. Waypoints are drawn as tape, the gateway as a
   triangle, and a blockage as a red box while it is in place.
@@ -121,6 +124,8 @@ covers the stage until you close it. None of it is the live fleet.
   dashed.
 - **Links:** one-hop radio links, darker for a stronger signal. Radio runs
   only.
+- **Load:** colours each link and rings each robot by its channel's load
+  instead. See [Comms traffic monitor](#comms-traffic-monitor).
 - **Own map:** with a robot selected, its *own* map replaces the true floor.
   Cells where it disagrees with the truth at that moment are red, so a
   blockage it hasn't learned about shows up red. Only robots listed in
@@ -130,11 +135,14 @@ covers the stage until you close it. None of it is the live fleet.
   Click a tick to jump to it.
 - **Info panel:** the task board, network loss and load, and the selected
   robot's task, how much of the floor it knows, how far it is behind the
-  fleet's map, and its recent events.
+  fleet's map, its own traffic, and its recent events.
+- **Traffic:** the comms monitor, charts of load and traffic over the run
+  ([Comms traffic monitor](#comms-traffic-monitor)).
 
 Keys: Space plays or pauses. ←/→ steps 1 s (with Shift, 10 s). `[`/`]` jumps
 to the previous or next event (only the selected robot's, if one is
-selected). Esc closes. Drag to pan, scroll to zoom, double-click to fit.
+selected). T shows or hides the comms monitor. Esc closes. Drag to pan,
+scroll to zoom, double-click to fit.
 
 **What is recorded for it.** These go in `record:` in `fleetsim/configs/base.yaml`.
 Only the paths feed a metric (`utilisation`, see [Benchmark metrics](#benchmark-metrics)).
@@ -142,12 +150,14 @@ The run's floor, waypoints, homes and gateway are
 recorded once (`world`). Paths are recorded on every plan and replan. Radio
 links are recorded every `links_s`. `belief_map` snapshots are taken every
 `belief_map_s` for the robots in `belief_maps` (default `[robot_0]`; `all`
-records every robot).
+records every robot). Each node's load and traffic go into every `net`
+sample while `net_nodes` is on (the default).
 
 `fleetsim/replay.py` packs a run into one JSON document. Poses are stored as
 flat arrays, and every stream is a list of time-ordered rows, so the page
 finds the state at any moment by bisection. A 5-minute run of `fleet_scale`
-(50 robots, radio) packs in 0.2 s to 2.5 MB, or 420 kB once gzipped.
+(50 robots, radio) packs in 0.2 s to 3.4 MB, or 620 kB once gzipped; 0.9 MB
+of that is the per-node traffic (2.5 MB and 430 kB without it).
 
 Runs recorded before 2026-11-03 have no `world` event, so they are listed but
 can't be replayed. Re-running the same scenario and seed reproduces them
@@ -318,8 +328,10 @@ scenario's `metrics:`. A scenario without an `also` metric shows `-`.
 | `summary.json` | the suite, the host (CPU, microcode, kernel, python, numpy, offline CPUs), every run with each attempt, the tables, crash counts. Rewritten as runs finish, so a bench cut short keeps what it finished |
 | `<id>_r<N>_s<seed>_<variant>/` | one run: what `fleetsim run` writes, plus `log.txt`; a crashed attempt is moved into `attempt_<k>/` before the re-run |
 
-Bench runs are not in the operator view's replay list. To replay one, copy
-its dir into `data/fleetsim/`.
+The operator view lists bench runs under **Benchmarks** in its replay list
+(Tests tab), a closed group per bench dir, newest first. Open a group to
+list its runs in the order the bench planned them, with each run's variant
+and seed. They replay like any run ([Watching a run](#watching-a-run)).
 
 **What counts as done.** A run is complete when it exits 0 (every criterion
 held) or 1 (one failed) and wrote `score.json`. Exit 2 is an invalid
@@ -842,6 +854,77 @@ and 150 s of `fleet_scale` are identical before and after.
 - Whether `bench_dead_end` at 20 robots (91 legs given up) is the right
   strength, and whether findings 3 and 4 should become scenarios once they
   are fixed.
+
+## Comms traffic monitor
+
+The replay's **Traffic** button (or T) opens a panel under the floor with two
+charts over the whole run. Use it to tune the communication scheme: which
+kind of message fills the channel, when the channel is past what the radio
+can carry, and which robots lose traffic. The charts span the run on the
+scrubber's own time axis, so the cursor (the replay's time) sits above the
+slider's thumb. Hover a chart to read every series at that second. Press or
+drag on a chart to move the replay there.
+
+- **Channel load** (radio runs only): the busiest node's load and the fleet
+  mean per 1 s sample, and the selected robot's own. The dashed red line is
+  the 95 % cap (`LOAD_CAP`, `fleetsim/network.py`). Seconds in which some
+  node was past it are shaded red above the cap, and the legend counts them
+  (the `comms` metric's `over_cap_s`). Past the cap an enforced radio loses
+  best-effort traffic and queues reliable traffic. With
+  `network.capacity: unlimited` nothing is lost, and the shading is what a
+  real radio could not have carried. Load is what a node's channel carries
+  in its last topology epoch (`radio.topo_s`), so it is a 1 s average:
+  bursts inside a second don't show.
+- **Traffic by kind**, one line per kind (status, tasks, map, intent,
+  obstacle, resync, and any other). **Sent** is copies sent per second.
+  Every copy is unicast, so a fleet-wide message counts once per recipient.
+  **Lost** is copies lost per second, **kB/s** is bytes offered, and
+  **Airtime** is the airtime each kind offered as a share of one channel,
+  every hop and retransmission included (radio only). Under Airtime the
+  batman OGMs that carry routing are drawn too. With spatial contention the
+  shares add over all nodes, so they can pass 100 %. The legend gives each
+  kind's value at the cursor and the share of its copies lost. Click a kind
+  in the legend to hide it, and the axis rescales: hide status to see what
+  the map traffic does.
+- **On the floor**, the **Load** checkbox colours each radio link by the
+  busier of its two ends and rings each robot by its own channel's load:
+  faint is idle, blue is near the cap, red is past it. The fleet has no
+  per-link traffic figure (routes are only kept as totals per pair), so a
+  link shows the channel it shares. With `contention: global` every node
+  shares one channel, so every link and robot gets the same colour. Use
+  `contention: spatial` to see where on the floor the channel fills.
+- **The info panel**, with a robot selected, gives its load, the airtime its
+  own sends took, and per kind the kB/s it sent and received and the share
+  of its copies that were lost.
+
+An ideal network has no airtime and no load, so the load chart and Airtime
+are not shown. Its messages, deliveries and losses (`network.ideal.loss`)
+are.
+
+**What is recorded.** Each `net` sample (`record.net_s`, 1 s) has always had
+the fleet's counters per kind. Since 2026-11-26 each kind also has `msgs`
+(sends, as against copies) and, on the radio, `air_ms` (airtime offered).
+With `record.net_nodes` on (the default), the sample also holds per node
+(node 0 is the gateway, `robot_k` is node k + 1):
+
+- `node_kinds`: `{kind: {sent, bytes, lost, rx, rx_bytes}}`, one value per
+  node. The first three are counted at the sender, the last two at the
+  receiver. A list that is all zeros is left out. Summed over nodes they
+  equal the fleet's `sent`, `bytes`, `lost` and `delivered`.
+- `node_load` (radio): each node's load factor, the one delay and loss are
+  priced at.
+- `node_air` (radio): the airtime the node's own sends took, in seconds per
+  second, OGMs included.
+- `ogm_air` (radio): the fleet's OGM airtime, in seconds per second.
+
+Recording changes nothing else: a run's events are identical with
+`net_nodes` on and off once the new fields are dropped
+(`fleetsim/tests/test_replay.py`). `delivery_smoke`, `bench_moved` and
+5 minutes of `fleet_scale` were also compared, event for event, against
+recordings made before the change. At 50 robots a sample grows from 0.4 kB
+to 3.7 kB, and a 5-minute `fleet_scale` `events.jsonl.gz` grows from 0.86 to
+1.08 MB. A run recorded before the change still replays: the monitor draws
+the fleet's charts and says that per-robot traffic was not recorded.
 
 ## Known issues
 
