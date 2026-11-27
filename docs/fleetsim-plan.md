@@ -43,8 +43,8 @@ its map — checked against Isaac with a 2-robot task list after this groundwork
 | C12 | Scenario set (for review) + scenario editor in the operator view | done (scenarios drafted for review: `fleetsim/scenarios/bench_*.yaml`; editor in the operator view) |
 | B8 | Map-tile subscriptions | todo |
 | B9 | Event-driven map/intent updates | todo |
-| B10 | Keep right in aisles | todo |
-| B11 | Single-lane passage reservation | todo |
+| B10 | Keep right in aisles | done (`traffic.keep_right`, off by default; `fleetsim/traffic.py`, `fleetsim/suites/traffic.yaml`) |
+| B11 | Single-lane passage reservation | done (`traffic.passages`, off by default; claims ride on Status) |
 | C13 | Comms traffic monitor in the replay | todo |
 | A6 | Per-robot service times and capabilities | todo |
 | A7 | Swappable local-avoidance layer (for ORCA) | todo |

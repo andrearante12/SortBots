@@ -839,6 +839,311 @@ and 150 s of `fleet_scale` are identical before and after.
   strength, and whether findings 3 and 4 should become scenarios once they
   are fixed.
 
+## Traffic: keep right and single-lane passages
+
+Two switches (2026-11-26, `fleetsim/traffic.py`; items B10 and B11 in
+[the plan](fleetsim-plan.md)): `traffic.keep_right` puts a lane term on each
+robot's A*, and `traffic.passages` makes robots claim single-lane passages
+before they drive in. Both are off by default, and off, a run is
+bit-identical to one from before they existed: the `events.jsonl.gz` of
+`delivery_smoke`, `bench_narrow` and 600 s of `bench_dead_end` at 5 robots
+were compared before and after, ignoring `wall`, `wall_s` and `summary`, and
+were identical. `test_defaults_reproduce_the_event_stream_from_before_traffic`
+keeps a digest of a small narrow-aisle run from before. The robots don't do
+either yet.
+
+```bash
+/usr/bin/python3 -m fleetsim run bench_rush --robots 20 --set traffic.keep_right.enabled=true
+/usr/bin/python3 -m fleetsim run bench_dead_end --robots 20 --set traffic.passages.enabled=true
+/usr/bin/python3 -m fleetsim bench traffic --jobs 6     # off / keep_right / passages / both, 3 seeds
+```
+
+**What both read.** Each robot reads the corridors from its OWN belief, as
+it plans on it. For every free cell, it takes the free run through it along
+x and along y. The shorter run is the corridor's cross-section: its length
+is the free width, its axis is the way the corridor runs, and the cell's
+place in it is its offset from the centre line. On an axis-aligned floor
+that is the distance to the walls measured across the corridor, so "left of
+the centre line" is exactly cross(move, gradient of distance-to-obstacle)
+< 0. `test_traffic.py` checks it against the Euclidean field. One run
+extraction per axis gives width, axis and offset together. A distance
+transform would take ~250 shifted passes and a width estimate on top. The
+price: a corridor more than ~40 degrees off the grid reads wider than it is,
+so it gets no lanes and no passage. Unknown cells count as free, as for the
+planner.
+
+### Keep right (`traffic.keep_right`)
+
+A step's cost multiplier gets a lane term, per direction:
+
+    weight * corridor * along * clamp((sigma + lane_offset_m) / (2 * lane_offset_m), 0, 1)
+
+- `sigma` is the cell's offset from the centre line, positive to the left of
+  the move. The term is 0 from `lane_offset_m` (0.4 m) right of the centre
+  outwards and `weight` (1.0) from 0.4 m left of it. So the right lane costs
+  what the aisle cost before, and routes don't change: only the side does.
+- `along` is how much the move runs with the corridor: 1 along it, 0.71
+  diagonal, 0 across. Crossing an aisle costs nothing extra.
+- `corridor` is 1 where the free width is above `single_lane_m` (1.3 m) and
+  at most `max_width_m` (3.2 m). It fades to 0 by 3.6 m, and with length /
+  width from 3 down to 1. So the 2.4 m aisles and the 3.0 m end gaps get
+  lanes. Junctions, the apron and single-lane aisles get none.
+
+A* reads one multiplier array per direction (`Costmap.use_step_arrays`).
+Off, all eight are the costmap's own `wint`, so the search is the one it
+was. The lane term only adds, so the octile heuristic stays a lower bound.
+
+**The smoother.** A shortcut may run no further left at any point than the
+A* path it replaces was at the same fraction along, plus half a cell, unless
+it stays inside the zero-cost lane (`Lanes.follows`). The first rule tried
+bounded a shortcut by its two ends, and that was not enough. Shelves sit on
+the aisle's centre line, so a leg from shelf to shelf pulled taut ran straight
+down the middle, and the lanes A* had chosen were gone. With half a cell also
+allowed past the lane's edge, lanes drifted 0.2 m toward the centre.
+
+**The clearance check (`_blocking`'s `need`).** The local layer stops for an
+obstacle whose centre comes within body + its radius + `clearance_margin_m`
+= 0.6 m of the path ahead. In a 2.4 m aisle the outer cells of the flat band
+are 0.5 m either side of the centre, so two robots going opposite ways run
+1.0 m apart. For a peer known from its Status (its centre) that agrees. For a
+peer the camera sees, it nearly does. A detection is the nearest point seen
+on the peer's body, used as the centre of a body-sized disc, with a velocity
+from consecutive such points. As the peer slides past, that point swings
+around its body, and `predict_s` (0.5 s) throws it sideways toward our lane.
+The meeting then costs one 0.1-0.2 s stop. With `nav.predict_s: 0` it costs
+none. The sensor stand-in has this artefact in every run, not only with
+lanes. A tracker that estimates the centre would remove it.
+
+Two robots sent past each other down a 2.4 m aisle, four start/goal pairs
+on and near the shelf line (scratch runs;
+`test_two_robots_meeting_head_on_pass_without_a_stop` keeps the first):
+
+| | stops | seconds stopped | both arrived by |
+|---|---|---|---|
+| off | 7-12 | 7.1-11.5 s | 26.4-29.5 s |
+| keep right | 1-2 | 0.2-0.3 s | 20.3-23.1 s |
+
+The field follows the belief. The costmap's window updates tell `Lanes`
+which rows and columns have walls that changed. The runs there are re-cut
+before the next plan, at most every `keep_right.refresh_s` (1 s). The lane
+term only steers, and lethal cells stay exact.
+
+### Single-lane passages (`traffic.passages`)
+
+**What a passage is.** A connected (8-way) region of cells seen free whose
+free width is at most `traffic.single_lane_m`, with at least one cell a robot
+can stand on. Seen free, not just unknown: unknown counts as free for the
+width, but a blind robot that has seen both faces of a 1.2 m rack read its
+unknown inside as a 0.8 m lane. On `fleet_scale` robots claimed and held for
+slivers like that (first bench, 2026-11-26). Why 1.3 m: the local layer
+wants 0.6 m between centres, and each centre keeps a lethal band off the
+walls, so the 1.0 m narrow aisles are single-lane and 1.4 m is not. On
+`bench_narrow` that is the 12 narrow segments, each 11.6 x 1.0 m. On
+`bench_dead_end`, six of them are bays. The plain floor has none. A passage
+is named by its box (`PassageMap`). Two robots' maps can cut one passage
+slightly differently, and claims match when the boxes overlap.
+
+**The claim.** When a robot's path enters a passage within `claim_m` (5 m),
+or the robot stands in one, it claims it: (box, claim time, task class at
+claim time, inside). The claim that comes first holds the passage. A robot
+inside comes first: it can't wait outside. After that the earliest claim
+wins, then the task class (carrying, fetching, other), then the robot index.
+Claim times are the sender's clock, not offsets re-based on arrival (as
+intents are). With re-based times, two near-simultaneous claimants can each
+see the other as earlier and both wait. Every robot must compare the same
+numbers for the order to be the same everywhere. Clock skew only changes who
+wins.
+
+**On the wire.** Claims ride on `/fleet/status`, on every Status while they
+last, best-effort, 16 B each. No frames of their own: intents sent as their
+own message took the 50-robot radio down (Path intents, above), and airtime
+is per frame far more than per byte. Not reliable: the claim has to be
+repeated anyway so that a dead holder's claim can lapse. A lost one costs
+one Status period (0.2 s at 5 Hz), and a reliable claim would still need
+the refresh. A Status without the claim releases it at once. A peer's
+claims lapse `ttl_s` (2 s, 10 Statuses) after its last Status. With
+`status.recipients: radius`, only robots within `status.radius_m` hear a
+claim. A holder at the far end of a passage and a claimant `claim_m` short
+of the near end are the passage's length plus `claim_m` apart, so with
+15 m and 5 m a passage longer than 10 m can be entered from both ends. The
+bench floors' are 11.6 m, and their scenarios send Status fleet-wide. Under
+`info.peers: truth`, claims are handed over every step instead.
+
+**The hold.** A robot may enter only if its claim comes first and is
+`settle_s` (1 s) old, so that an earlier claim has time to arrive.
+Otherwise it stops `standoff_m` (2.5 m) along its path before the entry,
+and stands still as an intent yield does (`Robot.pass_hold`). It never
+stops inside a passage, or in the gap just past one. A hold point that lands
+there is the earlier passage's, so the robot waits before both until both
+are its own. At 1.2 m, a robot waited in the 2.4 m crossing between two
+narrow segments, in the mouth that the holder had to come out of. The holder
+couldn't get past it, gave its leg up after `block_fail_s`, and the waiter
+waited 90 s.
+
+**The cases:**
+- **Two robots arrive at both ends at once.** Both claim, and both hear
+  both claims. The order is the same at each robot, so one goes and one
+  waits. Claims made in the same 0.1 s step tie on time and fall to task
+  class and index.
+- **A robot wants a passage it already stands in** (after a pick in a bay,
+  a reboot, a lost claim). It claims as inside, and that comes first.
+- **A dead-end bay** is entered and left the same way. The claim stands
+  while the robot is inside, whatever its path or task does. The leg in
+  ends inside, and the leg out exits, which releases it.
+- **A dead holder.** Its Status stops, and its claim lapses `ttl_s` later.
+  If it died inside, the passage is still physically blocked. The next
+  robot meets it and is left to the local layer, as today (Benchmark
+  scenarios, finding 4).
+- **A partition between claimants.** Neither hears the other, so both go
+  in. Head-on inside, the local layer has them as before reservations: stop,
+  replan, give up after `block_fail_s`. No deadlock comes from the
+  reservation: nobody waits on a claim it can't hear, and claims heard
+  before the split lapse after `ttl_s`. A one-way loss works the same way.
+  If the robot that hears is second, it waits; if it is first, both go.
+- **The path changes after claiming.** A new path that no longer enters the
+  passage within `claim_m` releases it. A failed plan (a goal and no path)
+  keeps its claims. Releasing there put the robot at the back of the queue
+  on every retry.
+- **A holder that never leaves** (parked inside with `nav.return_home_s:
+  null`, stuck). After `hold_max_s` (120 s) on one holder, the waiter stops
+  deferring to it for as long and goes in. This is a backstop, not a
+  schedule. A bay in and out is ~46 s at full speed plus the pick, and at
+  60 s a waiter gave up 0.8 s before the holder came out.
+- **A robot stopped by the local layer when its hold starts.** That stop is
+  closed first. A held robot isn't checked for blockers, so the open stop
+  would have booked the whole hold as a stop for a robot.
+
+**Events and metrics.** `nav` events `pass_claim`, `pass_release`,
+`pass_enter`, `pass_exit`, `pass_hold` (to the holder; to itself while the
+claim settles), `pass_hold_end` and `pass_hold_timeout`, each with the
+passage's `box`. The `nav` metric v3 adds `pass_holds`, `pass_hold_s` and
+`pass_hold_timeouts`. `utilisation` v2 books held time as `lost_passage_s`;
+like an intent yield, it wins over a stop. The replay doesn't mark passage
+holds on its timeline yet.
+
+### Cost
+
+Measured with timers around each part, bench_rush 20 robots and
+bench_dead_end 20 robots for 600 s, fleet_scale 50 robots for 300 s, both
+on. Wall times on this shared laptop move 20-30 % from run to run, so the
+per-call costs below are the measure.
+
+- **A\*:** +5 % per plan on the plain floor (2.42 → 2.54 ms), +8 % on the
+  50-robot floor. The scratch micro-benchmark (120 fixed shelf/dock legs,
+  true map) gives +6 % on the plain floor and +10 % on the narrow one. On
+  bench_dead_end it is cheaper per plan (7.5 → 5.0 ms), because fewer
+  searches flood the floor and fail. There is no measurable cost with the
+  switch off (4.50 → 4.50-4.52 ms).
+- **Smoother:** 0.8-1.0 → 1.3-1.4 ms per path, 0.2-0.7 s more per 600 s at
+  20 robots.
+- **Upkeep with a true map** (every bench scenario): nothing after the
+  first build, which takes ~22 ms per robot for the lanes and ~1.5 ms for
+  the passages.
+- **Upkeep with a blind start** (fleet_scale, prior none). The belief
+  changes on almost every scan. Every costmap window update rewrites the
+  direction arrays (0.04 ms, ~2.5 times a second per robot). The lanes are
+  re-cut at replans, about every 12 s per robot (2.7-3.3 ms each). The
+  passage map is re-cut every second (0.6 ms). Over 300 s of 50 robots,
+  keep right cost ~7 s of CPU and passages ~11 s, on a 47 s run.
+- **Memory with keep right:** 8 direction arrays, 4 lane terms, the field
+  and the runs, ~4.7 MB per robot on the default floor (60 k cells), ~7.8 MB
+  on `fleet_scale`'s (100 k).
+
+### Measured
+
+`fleetsim bench traffic --jobs 6`, seeds 1-3: 168 runs, no crashes
+(`data/fleetsim/bench/20261127T021323Z_traffic_7151f6d`). `fleet_scale`'s
+passages and both runs were re-run after the seen-free fix
+(`..._c741974_fleet_scale`). Cells are means over the seeds, off → keep
+right. "Stops" and "stopped s" are the `nav` metric's `blocked_robot` and
+`blocked_robot_s`. "Lost" is `utilisation`'s `lost_robot_s`: stopped for a
+peer while working a task, up to the next state change, so it also counts
+stops that ended in a give-up. Contacts were 0 in every run except `walkers`
+(11.7 → 9.0, walkers walking into robots) and `fleet_scale` (1.3 either
+way).
+
+**Keep right, open floor:**
+
+| Scenario | Robots | per hour | mean s | stops | stopped s | lost s | gave up |
+|---|---|---|---|---|---|---|---|
+| `bench_steady` | 10 | 87.0 → 86.7 | 172 → 176 | 166 → 150 | 184 → 154 | 144 → 101 | 0.7 → 0.3 |
+| `bench_steady` | 20 | 173 → 185 | 161 → 162 | 844 → 742 | 955 → 802 | 713 → 499 | 2.7 → 1.3 |
+| `bench_steady` | 40 | 334 → 342 | 172 → 165 | 4044 → 3220 | 4307 → 3416 | 3297 → 2420 | 7.0 → 9.0 |
+| `bench_rush` | 10 | 200 → 204 | 353 → 359 | 453 → 326 | 457 → 273 | 459 → 274 | 0 → 0 |
+| `bench_rush` | 20 | 392 → 405 | 377 → 359 | 2011 → 1303 | 2032 → 1222 | 2030 → 1237 | 0 → 0.3 |
+| `delivery_smoke` | 8 | 113.4 → 111.7 | 217 → 224 | 44 → 51 | 36 → 33 | 19 → 19 | 0 → 0 |
+| `walkers` | 12 | 170 → 174 | 180 → 190 | 204 → 185 | 191 → 178 | 183 → 165 | 0 → 0 |
+| `fleet_scale` (radio, blind) | 50 | 443 → 502 | 213 → 202 | 3798 → 3142 | 4219 → 3316 | 4434 → 2825 | 11.3 → 0.3 |
+
+Seed-to-seed sd: `bench_rush` 20 throughput ±3.4 either way, `bench_steady`
+20 ±17-19, `fleet_scale` ±56 → ±17. `delivery_smoke` has a fixed task list,
+so its three seeds are one run.
+
+**Single-lane floors, all four variants** (off / keep right / passages /
+both). At 5 robots the variants are within 0.3 per hour and 4 s of each
+other, and nothing is given up.
+
+| Scenario | Robots | per hour | mean s | stops | lost s | held s | gave up |
+|---|---|---|---|---|---|---|---|
+| `bench_narrow` | 10 | 113 / 118 / 116 / 113 | 184 / 181 / 184 / 181 | 287 / 186 / 287 / 191 | 244 / 133 / 251 / 162 | 0 / 0 / 27 / 38 | 0 / 0.3 / 0.3 / 0.7 |
+| `bench_narrow` | 20 | 233 / 236 / 229 / 236 | 186 / 175 / 188 / 176 | 1443 / 989 / 1404 / 975 | 1288 / 736 / 1283 / 750 | 0 / 0 / 259 / 213 | 1.0 / 0.7 / 0.7 / 1.0 |
+| `bench_dead_end` | 10 | 114 / 117 / 114 / 115 | 194 / 190 / 196 / 183 | 341 / 215 / 299 / 232 | 421 / 310 / 320 / 220 | 0 / 0 / 81 / 59 | 3.0 / 2.3 / 1.0 / 0 |
+| `bench_dead_end` | 20 | 195 / 204 / 228 / 231 | 239 / 208 / 211 / 184 | 1837 / 1311 / 1846 / 1174 | 5634 / 4367 / 2014 / 1027 | 0 / 0 / 344 / 288 | 66 / 55 / 1.0 / 0.3 |
+
+`bench_dead_end` at 20 robots also ran faster with passages: 188 → 95-112 s
+of wall time, because far fewer searches flood the floor and fail.
+
+**Checks over the bench.** In the 66 runs with passages on: 1856 passage
+entries, 332 holds, never two robots inside one passage at once, and no
+hold timed out. On the floors without a single-lane passage, the switch
+changes nothing: 24 runs are event-identical to `off`, and `both` is
+event-identical to `keep_right`.
+
+**What this shows:**
+- **Keep right cuts robot stops wherever robots meet in two-way aisles.**
+  Stops fall 9-37 % and time lost to peers 10-45 %. On `bench_rush` at 20
+  robots, throughput rose 3.3 % (about 4 times the seed-to-seed sd) and mean
+  delivery fell 5 %. In its seed 1, stops in junctions, cross-aisles and
+  aisles fell from 1894 to 868, and on the apron they rose from 280 to 326.
+  The 50-robot radio fleet gained the most: legs given up 11.3 → 0.3, and
+  throughput +13 %.
+- **It doesn't touch the apron**, which has no lanes, and the apron is where
+  `delivery_smoke`'s stops are. There the cross-aisle stops fell from 14 to
+  3, but a changed arrival order added 14 on the apron and 6 at junctions,
+  and mean delivery rose 7 s. Underloaded (`bench_steady`), throughput is the
+  arrival rate, and mean delivery moved within its noise.
+- **Passages fix the dead-end bays at 20 robots.** Legs given up went 66 →
+  1, throughput +17 % and mean delivery -12 %; with keep right as well,
+  +19 % and -23 %. Holding cost 290-340 robot-s per run, against ~3600-4600
+  robot-s of time lost to peers removed.
+- **On `bench_narrow` they change little.** Robots rarely meet inside the
+  narrow aisles: at 10 robots, 10 s of the 364 s of robot stops were in
+  them, and most were at junctions and on the apron. Keep right does more
+  there (-31 % stops at 20 robots).
+- **Holding robots are obstacles too.** They wait in cross-aisles and
+  junctions, and others stop for them. That is most of what is left in
+  `bench_dead_end`'s stops with passages alone.
+
+**For the owner to decide:**
+- **The camera stand-in's detections.** A detection is the nearest point
+  seen, with a velocity from consecutive such points. It costs every passing
+  meeting a short stop, with lanes or without. Whether to report a centre
+  estimate, or track it as obstacle_detector does, is a sensing-model
+  change for all runs.
+- **Lanes and passages need corridors near the grid axes.** A saved RTAB-Map
+  map is in the robot's start frame, so its aisles can be at any angle. The
+  robots would need a rotated or Euclidean corridor field.
+- **A passage is held by one robot at a time**, even when the next robot
+  goes the same way, and claims don't steer A*: a robot waits rather than
+  take the long way round. Direction-aware claims, or a temporary cost on
+  held passages, are the next levers.
+- **On the robots** the claim would be a field on `/fleet/status`
+  (`fleet_radio.encode_status`), and claim times compared across robots
+  need clocks synced to well under the 1 s `settle_s`.
+- The operator view's run form doesn't offer the two switches
+  (`webui/fleetsim_runner.py`, `SETTABLE`), and the replay doesn't mark
+  passage holds. Both are terminal-only for now.
+
 ## Known issues
 
 - **Intermittent interpreter faults on the development machine — cause not
@@ -900,6 +1205,13 @@ and 150 s of `fleet_scale` are identical before and after.
   with `recipients: all`.
 - **Notice extrapolation** is capped at 1 s. A full 3 s along a stale
   velocity planted phantom obstacles where a pacing walker never went.
+- **A camera detection is the nearest point seen, not the body's centre**
+  (2026-11-26). The local layer uses it as the centre of a body-sized disc,
+  with a velocity from consecutive such points. As a peer slides past, that
+  point swings around its body, and `nav.predict_s` throws it sideways.
+  Two robots passing 1.0 m apart in keep-right lanes still stop for
+  0.1-0.2 s; with `predict_s: 0` they don't
+  ([Traffic](#traffic-keep-right-and-single-lane-passages)).
 
 ## Not modelled yet
 
