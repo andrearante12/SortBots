@@ -237,6 +237,12 @@ traffic:
     lane_offset_m: 0.4        # no cost from this far right of the centre line outwards, the full
                               # weight from this far left; 2 x 0.4 m > the local layer's 0.6 m
     refresh_s: 1.0            # re-cut the lanes after a wall changes at most this often
+    # A smoother shortcut this short may run as far left as either of its ends
+    # (a lane change, a shelf's approach); a longer one keeps to A*'s lane point
+    # by point. 0: point by point always, as first built. 3 m turns a lane change
+    # into an 11-degree slant instead of a 45-degree step the follower stops at
+    # (2026-11-27, bench_burst).
+    lane_change_m: 3.0
   passages:                   # B11: single-lane passage reservation
     enabled: false
     claim_m: 5.0              # claim a passage when the path enters it within this far (> standoff_m

@@ -127,6 +127,7 @@ class Lanes:
         self.min_w = float(single_lane_m)
         self.offset = max(float(cfg["lane_offset_m"]), 1e-3)
         self.refresh_s = float(cfg["refresh_s"])
+        self.lane_change = float(cfg["lane_change_m"])
         h, w = self.shape = (g.height, g.width)
         self.occ = np.zeros(self.shape, bool)  # the OCC mask the runs were cut from
         self.rx, self.px = np.zeros(self.shape, np.int32), np.zeros(self.shape, np.float32)
@@ -251,22 +252,101 @@ class Lanes:
         return (self.oxf[j] * -my + self.oyf[j] * mx) / along
 
     def direction(self, a, b):
+        """The smoother's shortcut a -> b: (mx, my, limit). limit is None
+        for a long shortcut (follows() holds it to the A* path point by
+        point), else how far left it may run: as far as either end is, or
+        the right lane's edge, plus half a cell."""
         d = math.dist(a, b)
-        return None if d < 1e-9 else ((b[0] - a[0]) / d, (b[1] - a[1]) / d)
+        if d < 1e-9:
+            return None
+        mx, my = (b[0] - a[0]) / d, (b[1] - a[1]) / d
+        if d > self.lane_change:
+            return mx, my, None
+        g = self.g
+        lim = max(self.sigma(g.index(*a), mx, my), self.sigma(g.index(*b), mx, my), -self.offset)
+        return mx, my, lim + 0.5 * g.res
 
     def follows(self, j, j_ref, m) -> bool:
-        """May a smoother shortcut in direction m pass cell j, where the A*
-        path it replaces was at cell j_ref (the same fraction along)? Not
-        more than half a cell further left than A* was there, or anywhere in
-        the zero-cost right lane. Bounding it by the shortcut's ends was not
-        enough (2026-11-26): a shelf sits on the aisle's centre line, so a
-        leg from shelf to shelf pulled taut ran straight down the middle and
-        the lanes A* chose were gone. With the half cell also allowed past
-        the lane's edge, lanes drifted 0.2 m toward the centre."""
+        """May a smoother shortcut m (from direction()) pass cell j, where
+        the A* path it replaces was at cell j_ref (the same fraction along)?
+
+        A long one: not more than half a cell further left than A* was
+        there, or anywhere in the zero-cost right lane. Bounding it by its
+        ends was not enough (2026-11-26): a shelf sits on the aisle's centre
+        line, so a leg from shelf to shelf pulled taut ran straight down the
+        middle and the lanes A* chose were gone. With the half cell also
+        allowed past the lane's edge, lanes drifted 0.2 m toward the centre.
+
+        A short one (lane_change_m): bounded by its ends. Held to A* point
+        by point, every lane change was A*'s own 45-degree diagonal, and
+        the follower stops and turns in place at a heading change over 30
+        degrees: lanes cost 3.6 s on a 73 s leg on the open floor, 1.2 more
+        such turns, which a burst of short legs and small fleets with few
+        meetings paid for in full (bench_burst, 2026-11-27). A short
+        shortcut between two cells of a straight corridor can't run left of
+        both ends; at a corner its ends hold it to the right of both
+        corridors, so it can't cut across the oncoming lane before a left
+        turn."""
         s = self.sigma(j, m[0], m[1])
         if s == -math.inf:
             return True
+        if m[2] is not None:
+            return s <= m[2] + 1e-6
         return s <= max(self.sigma(j_ref, m[0], m[1]) + 0.5 * self.g.res, -self.offset) + 1e-6
+
+
+def drive_s(pts: list, idx: list, v: float, yaw_rate: float, accel: float) -> float:
+    """Roughly how long the follower takes over pts[idx]: the length at v,
+    and at each heading change past 30 degrees (it stops and turns in place,
+    robot._drive) the turn at yaw_rate and the half second-ish of getting
+    back up to speed."""
+    t = 0.0
+    for a, b in zip(idx[:-1], idx[1:]):
+        t += math.dist(pts[a], pts[b]) / v
+    for a, b, c in zip(idx[:-2], idx[1:-1], idx[2:]):
+        h1 = math.atan2(pts[b][1] - pts[a][1], pts[b][0] - pts[a][0])
+        h2 = math.atan2(pts[c][1] - pts[b][1], pts[c][0] - pts[b][0])
+        d = abs((h2 - h1 + math.pi) % (2 * math.pi) - math.pi)
+        if d > math.radians(30):
+            t += d / yaw_rate + 0.5 * v / accel
+    return t
+
+
+def prune(pts: list, clear, v: float, yaw_rate: float, accel: float) -> list:
+    """robot._smooth's line-of-sight pruning with lanes on: indices of the
+    cells of pts to keep, given clear(i, j) (the straight line pts[i] ->
+    pts[j] is allowed). Greedy from the start, as without lanes: from each
+    kept cell, the farthest one it may reach. That eases the robot from a
+    shelf into its lane (a slant of up to lane_change_m) but ends it with a
+    hop from the lane onto the next shelf, a heading change of ~55 degrees
+    the follower stops for. So the second half is also pruned greedily from
+    the goal backwards, and the version the follower drives faster is kept
+    (2026-11-27)."""
+    n = len(pts)
+    fwd, i = [0], 0
+    while i < n - 1:
+        j = n - 1
+        while j > i + 1 and not clear(i, j):
+            j -= 1
+        fwd.append(j)
+        i = j
+    if len(fwd) <= 2:
+        return fwd
+    # A cell the forward pass kept, at or before the middle: with fwd[len // 2]
+    # a four-cell path (shelf, lane, lane, shelf) left the backward pass
+    # nothing to redo.
+    m = fwd[(len(fwd) - 1) // 2]
+    tail, j = [n - 1], n - 1
+    while j > m:
+        i = m
+        while i < j - 1 and not clear(i, j):
+            i += 1
+        tail.append(i)
+        j = i
+    both = [k for k in fwd if k <= m] + tail[::-1][1:]
+    if drive_s(pts, both, v, yaw_rate, accel) < drive_s(pts, fwd, v, yaw_rate, accel) - 1e-6:
+        return both
+    return fwd
 
 
 def attach_lanes(cm, cfg: dict, single_lane_m: float) -> Lanes:

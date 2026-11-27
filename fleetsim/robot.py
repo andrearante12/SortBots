@@ -518,6 +518,8 @@ class Robot:
                     return False
             return True
 
+        if ln is not None:  # lanes: pruned from both ends (traffic.prune)
+            return [pts[k] for k in TR.prune(pts, clear, self.vmax, self.yaw_rate, self.accel)]
         out = [pts[0]]
         i = 0
         while i < len(pts) - 1:
