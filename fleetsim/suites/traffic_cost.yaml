@@ -1,0 +1,24 @@
+# What keep right costs where robots rarely meet (docs/fleetsim.md "Traffic",
+# 2026-11-27). The full benchmark showed bench_burst at 20 robots losing
+# throughput with the traffic layer, and mean delivery +4-7 % at 2 and 5 robots
+# in every open-floor scenario: lanes made legs slower to drive. This suite
+# re-measures those rows off and on.
+#   /usr/bin/python3 -m fleetsim bench traffic_cost --jobs 4
+name: traffic_cost
+description: >
+  bench_burst and bench_steady at 2, 5, 10 and 20 robots, and the small fleets
+  of bench_moved, bench_mixed, bench_partition and bench_dead_robot, with and
+  without keep right and passages; three seeds.
+scenarios:
+  - {scenario: bench_burst, robots: [2, 5, 10, 20]}
+  - {scenario: bench_steady, robots: [2, 5, 10, 20]}
+  - {scenario: bench_moved, robots: [2, 5]}
+  - {scenario: bench_mixed, robots: [2, 5]}
+  - {scenario: bench_partition, robots: [2, 5]}
+  - {scenario: bench_dead_robot, robots: [2, 5]}
+seeds: [1, 2, 3]
+variants:
+  "off": {}                      # quoted: bare off is YAML for false
+  traffic: {traffic.keep_right.enabled: true, traffic.passages.enabled: true}
+headline: fleet_tasks.per_hour
+also: [fleet_tasks.mean_s, fleet_tasks.done, nav.blocked_robot, nav.blocked_robot_s, nav.gave_up]
