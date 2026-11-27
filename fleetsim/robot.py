@@ -23,6 +23,11 @@ and when, and the lower-priority robot of a predicted conflict holds at a
 safe point until it clears (fleetsim/intent.py). The robots don't do this
 yet: /fleet/intent today carries a goal and a straight corridor.
 
+With `traffic.keep_right` its A* keeps to the right lane of two-way
+corridors, and with `traffic.passages` it claims single-lane passages
+before driving into them and holds short of one another robot holds
+(fleetsim/traffic.py). The robots don't do either yet.
+
 Peers are known three ways, as on the robots: seen in the camera cone,
 heard in their /fleet/status (pose, at the status rate, subject to the
 network), and as obstacle notices a peer shared. Never from ground truth,
@@ -38,6 +43,7 @@ from collections import deque
 import numpy as np
 
 from . import intent as I
+from . import traffic as TR
 from .belief import Belief
 from .planner import INF, Costmap, path_length
 from .sensing import Sensor
@@ -116,6 +122,9 @@ class Robot:
         g = sim.grid
         self.belief = Belief(g, float(cfg["map_share"]["tile_m"]), prior)
         self.cost = Costmap(g, self.belief.state, self.nav, self.body_r)
+        tc = cfg["traffic"]
+        if tc["keep_right"]["enabled"]:
+            TR.attach_lanes(self.cost, tc["keep_right"], float(tc["single_lane_m"]))
         self.sensor = Sensor(g, cfg["sensing"])
         self._new_core()
         # navigation
@@ -173,6 +182,13 @@ class Robot:
         self.counters = {"replans": 0, "replan_sensed": 0, "replan_shared": 0,
                          "replan_blocked": 0, "plan_fail": 0, "blocked_s": 0.0,
                          "stuck": 0, "shared_changed": 0, "yields": 0, "yield_s": 0.0}
+        # single-lane passages (fleetsim/traffic.py): None when off, and then
+        # no counters either, so a default run's summary is what it was
+        self.pass_hold = None               # {"peer", "box", "since"} while held short of one
+        self.traffic = None
+        if tc["passages"]["enabled"]:
+            self.traffic = TR.PassageAgent(self, tc["passages"], float(tc["single_lane_m"]))
+            self.counters.update(pass_holds=0, pass_hold_s=0.0)
 
     def _new_core(self) -> None:
         """A fresh task side (start, or a reboot): fleetsim/dispatch picks it."""
@@ -317,7 +333,7 @@ class Robot:
         """Rebuild the intent; send it now (transport: message) or leave it
         for the next Status to carry (transport: status)."""
         c = self.icfg
-        moving = self.goal is not None and self.path and self.hold is None
+        moving = self.goal is not None and self.path and self.hold is None and self.pass_hold is None
         pts = I.announce(self._own_pts(), self._v_nom(), float(c["horizon_s"]),
                          int(c["max_pts"])) if moving else \
             [[round(self.x, 2), round(self.y, 2), 0.0]]
@@ -413,6 +429,8 @@ class Robot:
         self._intent_dirty = True  # every new path is re-announced
         if self.sim.learn is not None:
             self.sim.learn.on_path(self)  # recording only (fleetsim/maplearn.py)
+        if self.traffic is not None:
+            self.traffic.path_changed()  # where it crosses passages, re-cut on the next tick
         if self.sim.cfg["record"]["paths"]:
             self.sim.record({"s": "path", "rid": self.rid, "purpose": self.purpose,
                              "pts": [[round(x, 2), round(y, 2)] for x, y in self.path]})
@@ -439,6 +457,8 @@ class Robot:
         now = self.sim.now
         self.next_replan_ok = now + float(self.nav["min_replan_s"])
         self.replan_due = None
+        if self.cost.lanes is not None:
+            self.cost.lanes.refresh(now)  # walls changed since: re-cut the lanes (rate-limited)
         path = self.cost.plan((self.x, self.y), self.goal,
                               goal_tol_m=float(self.nav["goal_tolerance_m"]),
                               max_expansions=int(self.nav["max_expansions"]))
@@ -472,19 +492,29 @@ class Robot:
         """Line-of-sight pruning: drop a cell-centre while the straight line
         from the last kept point to the next stays out of lethal space and
         out of the expensive half of the inflation, so the shortcut keeps
-        about the clearance A* chose instead of hugging the wall."""
+        about the clearance A* chose instead of hugging the wall. With
+        keep-right it also may not run further left in a corridor than the
+        A* path it replaces did (traffic.Lanes.follows): a taut line would
+        put two robots going opposite ways back on one line."""
         if len(pts) <= 2:
             return list(pts)
         cm, g = self.cost, self.sim.grid
         cap = 1.0 + 0.5 * cm.weight
         step = 0.5 * g.res
+        ln = cm.lanes
+        cells = None if ln is None else [g.index(*p) for p in pts]
 
-        def clear(a, b):
+        def clear(i0, i1):
+            a, b = pts[i0], pts[i1]
             n = max(1, int(math.dist(a, b) / step))
+            lane = None if ln is None else ln.direction(a, b)
             for i in range(1, n):
                 t = i / n
                 j = g.index(a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
                 if j is None or cm.mult[j] > cap:
+                    return False
+                if lane is not None and not ln.follows(j, cells[i0 + int(t * (i1 - i0) + 0.5)],
+                                                       lane):
                     return False
             return True
 
@@ -492,7 +522,7 @@ class Robot:
         i = 0
         while i < len(pts) - 1:
             j = len(pts) - 1
-            while j > i + 1 and not clear(pts[i], pts[j]):
+            while j > i + 1 and not clear(i, j):
                 j -= 1
             out.append(pts[j])
             i = j
@@ -684,6 +714,10 @@ class Robot:
             self.yield_leg_s += dt
             self.counters["yield_s"] += dt
             return
+        if self.pass_hold is not None:  # short of a passage another robot holds (traffic.py)
+            self.v = 0.0
+            self.counters["pass_hold_s"] += dt
+            return
         rate = float(nav["hiccup_rate_hz"])
         if rate > 0 and self.rng.random() < rate * dt:
             self.pause_until = now + float(nav["hiccup_s"])
@@ -816,6 +850,8 @@ class Robot:
         self._fsm(now)
         if self.icfg["enabled"]:
             self._intent_tick(now)
+        if self.traffic is not None:
+            self.traffic.tick(now)
         self._drive(dt, now)
         if self.core.battery_pct is not None:
             self.core.drive(dt, self.v > 0.02)

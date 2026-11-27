@@ -65,6 +65,16 @@ class PerfectInfo:
         # Everyone, the dead included: a dead robot is still in the way.
         sim.seen_t[:] = now
         sim.seen_xy[:] = pos[None, :, :]
+        if sim.cfg["traffic"]["passages"]["enabled"]:
+            # Passage claims (fleetsim/traffic.py), from every live robot to
+            # every other, each step. Not from the dead: a dead holder's
+            # claim must still lapse, as it does over the radio.
+            live = [r for r in sim.robots if r.alive]
+            for r in live:
+                cl = r.traffic.for_status()
+                for o in live:
+                    if o is not r:
+                        o.traffic.on_claims(r.k, now, cl, now)
         if not sim.cfg["intent"]["enabled"]:
             return
         for r in sim.robots:
