@@ -93,6 +93,27 @@ nav:
   hiccup_rate_hz: 0.0         # PLACEHOLDER: random recovery pauses per driving second; calibrate
   hiccup_s: 4.0               #   against Isaac's task timings (docs/fleetsim.md, "Calibration")
   return_home_s: 10.0         # idle this long -> drive back to the home spot (null = stay put)
+  # The local layer (fleetsim/local/; docs/fleetsim.md "Local avoidance"):
+  #   stop_replan  stop for what is ahead on the path, replan around it after
+  #                block_replan_s, give up after block_fail_s (the keys above).
+  #                The robots' Nav2 stand-in, and every run before the seam.
+  #   orca         Optimal Reciprocal Collision Avoidance (van den Berg et al.,
+  #                RVO2's formulation): each step the velocity closest to the
+  #                path follower's that keeps clear of peers and movers for
+  #                time_horizon_s. Stalled, it books a stop and replans around
+  #                and gives up as stop_replan does. The robots don't do this.
+  local: stop_replan
+  orca:
+    time_horizon_s: 4.0       # keep clear of peers and movers this far ahead (tau)
+    wall_horizon_s: 0.5       # and of walls: only a velocity off the path is held back
+    neighbor_m: 5.0           # what is closer than this counts as a neighbour
+    max_neighbors: 10         # the nearest this many
+    margin_m: 0.1             # centres keep body + its radius + this apart (clearance_margin_m)
+    wall_m: 1.0               # occupied cells (and overlays) this close are wall constraints
+    reciprocal_mps: 0.1       # a peer moving faster than this avoids too: each takes half
+    track_s: 1.0              # what the camera saw stays a neighbour this long after it left the cone
+    stall_mps: 0.05           # a chosen speed below this is a stop, booked as stop_replan's are
+    resume_mps: 0.1           # stopped, drive on once the chosen speed is above this
 
 tasks:
   dwell_s: 2.0                # task_manager DWELL_SEC; per type: robots.types[].pick_s, place_s

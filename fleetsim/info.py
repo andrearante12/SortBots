@@ -6,8 +6,9 @@ channel of knowledge, all defaulting to the robots as they are:
   map: truth       every robot's belief and costmap follow the true grid,
                    blockages included, the moment it changes; a central
                    planner's drive times do too (dispatch/costs.py).
-  peers: truth     peer poses for the local layer, and path intents, come
-                   from ground truth every step instead of /fleet/status.
+  peers: truth     peer poses (and velocities, for nav.local: orca) for the
+                   local layer, and path intents, come from ground truth
+                   every step instead of /fleet/status.
   dispatch: truth  /fleet/tasks is delivered instantly and never lost (the
                    auction's whole protocol, or a central dispatcher's
                    Dispatch/Cancel/Report), and a central dispatcher reads
@@ -65,6 +66,7 @@ class PerfectInfo:
         # Everyone, the dead included: a dead robot is still in the way.
         sim.seen_t[:] = now
         sim.seen_xy[:] = pos[None, :, :]
+        sim.seen_v[:] = np.array([r.velocity() for r in sim.robots])[None, :, :]
         if sim.cfg["traffic"]["passages"]["enabled"]:
             # Passage claims (fleetsim/traffic.py), from every live robot to
             # every other, each step. Not from the dead: a dead holder's

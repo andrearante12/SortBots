@@ -55,6 +55,8 @@ import yaml
 from simtest import metrics as metrics_lib
 from simtest import world as world_lib
 
+from .local import METHODS as LOCAL_METHODS
+
 FLEETSIM_DIR = Path(__file__).resolve().parent
 BASE = FLEETSIM_DIR / "configs" / "base.yaml"
 SCENARIOS_DIR = Path(os.environ.get("FLEETSIM_SCENARIOS_DIR") or FLEETSIM_DIR / "scenarios")
@@ -220,6 +222,15 @@ def _validate(s: dict) -> None:
         raise ScenarioError("config.tasks.bid_cost: path | straight")
     if cfg["network"]["radio"]["contention"] not in ("global", "spatial"):
         raise ScenarioError("config.network.radio.contention: global | spatial")
+    if cfg["nav"]["local"] not in LOCAL_METHODS:
+        raise ScenarioError(f"config.nav.local: {' | '.join(LOCAL_METHODS)}")
+    oc = cfg["nav"]["orca"]
+    for key in ("time_horizon_s", "wall_horizon_s", "neighbor_m", "max_neighbors"):
+        if not _num(oc[key]) or oc[key] <= 0:
+            raise ScenarioError(f"config.nav.orca.{key}: a number > 0")
+    for key in ("margin_m", "wall_m", "reciprocal_mps", "track_s", "stall_mps", "resume_mps"):
+        if not _num(oc[key]) or oc[key] < 0:
+            raise ScenarioError(f"config.nav.orca.{key}: a number >= 0")
     dsp = cfg["dispatch"]
     if dsp["method"] not in DISPATCH_METHODS:
         raise ScenarioError(f"config.dispatch.method: {' | '.join(DISPATCH_METHODS)}")

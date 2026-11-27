@@ -1,0 +1,27 @@
+# A7: the local layer, stop_replan (default) against ORCA, each with and
+# without keep right (docs/fleetsim.md "Local avoidance").
+#   /usr/bin/python3 -m fleetsim bench local --jobs 4
+# The open floor underloaded and overloaded, walkers at two densities, and the
+# single-lane floor at 20 robots, where no velocity passes a peer and ORCA
+# falls back on stop_replan's replan-around. ~45 min at 4 jobs on the
+# i9-14900HX laptop while another bench ran.
+name: local
+description: >
+  bench_steady, bench_rush, bench_walkers and walkers at 5 and 20 robots and
+  bench_narrow at 20, with the stop/replan local layer and with ORCA, each with
+  and without keep right; three seeds.
+scenarios:
+  - {scenario: bench_steady, robots: [5, 20]}
+  - {scenario: bench_rush, robots: [5, 20]}
+  - {scenario: bench_walkers, robots: [5, 20]}
+  - {scenario: walkers, robots: [5, 20]}
+  - {scenario: bench_narrow, robots: [20]}
+seeds: [1, 2, 3]
+variants:
+  stop_replan: {}
+  stop_replan_kr: {traffic.keep_right.enabled: true}
+  orca: {nav.local: orca}
+  orca_kr: {nav.local: orca, traffic.keep_right.enabled: true}
+headline: fleet_tasks.per_hour
+also: [fleet_tasks.mean_s, contacts.robot, contacts.actor, contacts.driven, nav.blocked_robot,
+       nav.blocked_robot_s, utilisation.lost_robot_s, utilisation.lost_s, nav.gave_up]

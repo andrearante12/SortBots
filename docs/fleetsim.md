@@ -55,7 +55,7 @@ or heard from peers, and every byte of that travels the network model.
 | Bid cost | the bidder's own A* path on its own belief (`robot.PathOracle`), so bid and drive agree | `nodes/grid_dist.py` Dijkstra on fused `/map` |
 | Task FSM | stand-in with task_manager's states, dwell (per robot type: pick and place times) and status JSON | `nodes/task_manager.py` |
 | Global planner | A* on the robot's belief, Nav2-style lethal band + exponential inflation (`planner.py`) | Nav2 NavFn |
-| Local layer | stop for what's ahead within `stop_distance_m`, replan around after `block_replan_s` (lower priority first), give up after `block_fail_s` (`robot.py`) | Nav2 controller + costmaps |
+| Local layer | behind a seam, `nav.local` ([Local avoidance](#local-avoidance)). Default `stop_replan`: stop for what's ahead within `stop_distance_m`, replan around after `block_replan_s` (lower priority first), give up after `block_fail_s` (`local/stop_replan.py`). Or `orca` (`local/orca.py`) | Nav2 controller + costmaps |
 | Perception | ray-cast cone, movers occlude and come back as detections with velocity, never mapped (`sensing.py`) | D435 + RTAB-Map + obstacle_detector + dynamic_obstacle_filter |
 | Peer awareness | camera, `/fleet/status` over the network, obstacle notices; never ground truth | the same |
 | Map sharing | tiles, deltas, sequence numbers, MapResync, round-robin refresh (`belief.py`, `sim.py`); optional tile subscriptions and event-driven publishes (`mapshare.py`, [below](#map-sharing-subscriptions-and-event-driven-updates)) | not implemented on the robots yet; this is the commsim brief's design |
@@ -1761,6 +1761,261 @@ event-identical to `keep_right`.
   (`webui/fleetsim_runner.py`, `SETTABLE`), and the replay doesn't mark
   passage holds. Both are terminal-only for now.
 
+## Local avoidance
+
+One switch (2026-11-26, `fleetsim/local/`; item A7 in
+[the plan](fleetsim-plan.md)): `nav.local` picks the local layer, the part
+that decides each step what a robot does about what is near it.
+`stop_replan` (the default) is the layer the robots always had in fleetsim,
+moved out of `robot.py` unchanged. `orca` is Optimal Reciprocal Collision
+Avoidance. The global planner, the path follower, the intent and passage
+holds and the contact model stay where they were. With the default, a run
+is bit-identical to one from before the seam: the `events.jsonl.gz` of
+`delivery_smoke`, `walkers` and 600 s of `bench_dead_end` at 5 robots were
+compared before and after, ignoring `wall`, `wall_s` and `summary`, and
+were identical. `test_stop_replan_reproduces_the_event_stream_from_before_the_seam`
+keeps a digest of a 6-robot run with a walker, stops and replans, from the
+tree before (b85effd). The robots don't do ORCA.
+
+```bash
+/usr/bin/python3 -m fleetsim run bench_rush --robots 20 --set nav.local=orca
+/usr/bin/python3 -m fleetsim bench local --jobs 4    # both, with and without keep right, 3 seeds
+```
+
+### The seam
+
+While a robot drives a path and no hold, pause or recovery stops it,
+`Robot._drive` asks `robot.local.decide(dt, now)` once per step and does
+what the answer says:
+
+| Decision | What the robot does |
+|---|---|
+| `DRIVE` | follows the path at the follower's own speed (`_follow`, as before) |
+| `DRIVE` with `vel=(vx, vy)` | tracks that world-frame velocity (`_track`, below) |
+| `STOP`, `by` | stands still this step. `by` (robot, actor, notice, bump) is the cause the metrics book |
+| `STOP`, `by`, `around` | the same, after it marks the `around` discs lethal for `overlay_ttl_s` and replans around them |
+| `GIVE_UP`, `by` | the leg fails, as a Nav2 abort |
+
+The robot keeps the books, so both methods are measured the same way. A
+`STOP` opens a stop if none is open (the `blocked` event), a `DRIVE` closes
+it (`unblocked`), a `GIVE_UP` records `gave_up` cause blocked. A method is a
+class per robot with `decide(dt, now)` and `reset()` (the robot calls it when
+a stop closes and when its goal is cleared). It reads what the robot knows:
+`perceive()` (camera detections with a velocity, bumps, peers heard on
+Status, peers' obstacle notices), the pose, path and costmap, the path
+follower's `preferred_velocity()`, and `track_step()`, the step a velocity
+would really take. It never moves the robot or writes the costmap itself.
+The docstring of `fleetsim/local/__init__.py` is the full contract, and how
+to add a method.
+
+`_track` drives a velocity the way a diff drive can. It turns toward it at
+`yaw_rate_rps`, drives the part along its heading (none while more than 30
+degrees off, the follower's rule) and accelerates at `accel_mps2`. The robot
+then moves along its heading, not along the path, and its progress along the
+path follows where it got to. It never drives from a cell its costmap holds
+free into a lethal one. When that guard stops it, it replans from where it
+stands (cause `guard`): off its path, the straight line to the next path
+point can clip a rack's corner.
+
+### ORCA (`nav.local: orca`)
+
+van den Berg et al.'s ORCA in the RVO2 library's formulation (its
+`computeNewVelocity`, `linearProgram1-3`), ported to pure python
+(`fleetsim/local/orca.py`). RVO2 is C++, and fleetsim stays on the system
+python3 with numpy. Each step:
+
+1. **The preferred velocity** is the path follower's: toward the next path
+   point, at the speed `_follow` would drive.
+2. **Neighbours** are what the robot knows, never ground truth unless
+   `info.peers: truth`. A peer heard on Status is its centre, carried along
+   the twist that Status carries for the Status's age. `fleet_radio.encode_status`
+   always carried `twist.vx` and the yaw, and the bytes were already priced;
+   the sim now also delivers them (`Sim.seen_v`). A peer the camera sees
+   whose Status is stale, and a mover, are the nearest point the camera saw,
+   with the camera's velocity. Notices about movers count too. The nearest
+   `max_neighbors` (10) within `neighbor_m` (5 m) are used.
+3. **One half-plane per neighbour**, from the velocity obstacle for
+   `time_horizon_s` (4 s). A peer moving faster than `reciprocal_mps` is taken
+   to be avoiding too, and gets half the correction. A peer standing still
+   (parked, picking, held, dead) and every mover get all of it: walkers never
+   yield.
+4. **Walls stay with the global planner.** The path is already clear of them,
+   so ORCA only needs a guard against a dodge into one. Each occupied cell
+   (or overlay) within `wall_m` (1 m), the nearest per 22.5 degrees, is a hard
+   half-plane: no faster toward it than (distance - lethal radius) /
+   `wall_horizon_s` (0.5 s). The bound is never tighter than the preferred
+   velocity's own approach, so it never fights the path (a dock against a
+   wall), and it always allows standing still. A bump is a half-plane too: no
+   velocity toward it.
+5. **The velocity** closest to the preferred one inside the max-speed circle
+   that every half-plane allows (RVO2's 2D program). When nothing is allowed,
+   RVO2's 3D fallback trades the neighbours' half-planes off and keeps the
+   wall ones.
+
+The knobs, under `nav.orca` (base.yaml):
+
+| Key | Default | What |
+|---|---|---|
+| `time_horizon_s` | 4.0 | keep clear of peers and movers this far ahead |
+| `wall_horizon_s` | 0.5 | and of walls (only a velocity off the path is held back) |
+| `neighbor_m` | 5.0 | what is closer counts as a neighbour |
+| `max_neighbors` | 10 | the nearest this many |
+| `margin_m` | 0.1 | centres keep body + its radius + this apart (= `clearance_margin_m`) |
+| `wall_m` | 1.0 | occupied cells and overlays this close are wall half-planes |
+| `reciprocal_mps` | 0.1 | a peer moving faster than this takes half the correction |
+| `track_s` | 1.0 | what the camera saw stays a neighbour this long after it left the cone |
+| `stall_mps` | 0.05 | a chosen speed below this is a stop |
+| `resume_mps` | 0.1 | stopped, drive on once the chosen speed is above this |
+
+When nothing is near and the robot is on its path, it drives the path
+exactly as `stop_replan` does. When the chosen speed falls under
+`stall_mps` (and until it is back over `resume_mps`), the robot stands still
+and books a stop for the neighbour that most excludes its preferred
+velocity. From there on, the backstop is `stop_replan`'s: stopped
+`block_replan_s`, it marks that neighbour and what is chained to it and
+replans around them; stopped `block_fail_s`, it gives the leg up. That is
+what clears a peer parked across a single-lane aisle, which no velocity can
+pass.
+
+**The diff-drive approximation.** ORCA assumes an agent that takes the new
+velocity at once. Here the robot turns toward it and drives along its
+heading, so it lags. `margin_m` (0.1 m) on top of both radii is the slack
+for that lag: RVO2's radius inflation, the simplest form of NH-ORCA's
+tracking-error bound. Two checks run on the step the robot will really take
+(`track_step`), whatever ORCA asked for. It never closes on a neighbour to
+within contact distance (body + its radius + 2 cm): it stands still
+instead, booked as a stop for that neighbour. And `_track`'s guard keeps it
+out of lethal cells. Inside the comfort distance (body + its radius +
+`margin_m`), RVO2 would demand the whole separation within one step, a
+sideways jump a diff drive can't make. Here the disc shrinks to just under
+the distance instead, so ORCA forbids closing in and nothing more.
+
+**Fixes found in testing (`walkers` and the first bench, 2026-11-26).**
+- **Camera tracks.** The scan replaces the robot's detections every 0.2 s.
+  A walker at the edge of the cone came and went every scan, so the robot
+  turned toward its dodge and back toward its path in turn, and never moved
+  off the walker's line: 4 driven contacts in seed 1. What the camera saw now
+  stays a neighbour for `track_s` (1 s) after its last sighting, carried
+  along its velocity, as obstacle_detector's tracks outlive a frame. Driven
+  contacts: 4 → 1.
+- **The contact veto.** A walker coming head-on at 1.2 m/s, faster than the
+  robot can turn away, leaves no safe velocity. The fallback's least-bad
+  one then took a small step into the walker. The veto above took the last
+  driven contact of that run to 0. The first bench then found one more,
+  with the walker in view: close up, the camera stand-in read a walker
+  pacing along x as moving at (-2.05, +1.69) m/s, the next scan missed it,
+  and the track it left was carried 0.3 m away from where the walker was.
+  The veto now also checks each camera track where it was last seen.
+- **Bumps with nothing in view.** A bump with no neighbour perceived fell
+  through to plain path following, so the robot pushed on into what it had
+  hit. A bump now always goes through the program (no velocity toward it).
+
+**What it can't see, it can't avoid.** A walker crossing square on at 1.2 m/s
+approaches a 0.5 m/s robot at 67 degrees off its heading, outside the
+87-degree cone. Neither layer sees it until it is beside the robot, unless
+a peer's notice reports it. `test_orca_avoids_a_walker_crossing_in_front`
+has the walker cross diagonally from ahead, where the camera has it.
+
+**Cost.** The neighbour loop and the linear programs are pure python on a
+handful of floats. The wall candidates are cached per (cell, costmap
+version) and binned with numpy. Under the profiler, `decide` took 4.3 s of
+a 48 s `bench_narrow` run at 20 robots (600 s).
+
+### Measured
+
+`fleetsim bench local --jobs 4`, seeds 1-3: 108 runs, no crashes
+(`data/fleetsim/bench/20261127T035711Z_local`, commit 8319c1e). The ORCA
+runs of `bench_walkers` and `walkers` were run again after the last veto fix
+(`..._20261127T041645Z_local`, 5053df2, 24 runs); the fix changed no run without
+movers (`bench_rush` 5 robots, seed 1: event-identical). Cells are means over
+the seeds, stop_replan / stop_replan with keep right / ORCA / ORCA with keep
+right. "Robot stops" is the `nav` metric's `blocked_robot`. "Lost to robots"
+and "lost" are `utilisation`'s `lost_robot_s` and `lost_s` (every cause).
+"Driven" is `contacts.driven`. No run had a robot-robot or a robot-wall
+contact. The stop_replan cells of `bench_steady` 20, `bench_rush` 20 and
+`bench_narrow` 20 are the numbers the traffic bench measured
+([above](#traffic-keep-right-and-single-lane-passages)), so the seam changed
+nothing there either. "Wall s" is from the first bench, where every
+variant ran side by side.
+
+| Scenario | Robots | per hour | mean s | robot stops | lost to robots s | lost s | actor contacts | driven | gave up | wall s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `bench_steady` | 5 | 42.8 / 42.4 / 42.9 / 42.5 | 171 / 180 / 169 / 177 | 35 / 43 / 0 / 0 | 18 / 26 / 0 / 0 | 18 / 26 / 0 / 0 | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 10 / 11 / 10 / 11 |
+| `bench_steady` | 20 | 172.5 / 185.3 / 190.3 / 187.3 | 161 / 162 / 141 / 146 | 844 / 742 / 8 / 7 | 713 / 499 / 32 / 20 | 714 / 500 / 32 / 21 | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 2.7 / 1.3 / 0 / 0 | 46 / 48 / 45 / 46 |
+| `bench_rush` | 5 | 106.1 / 106.1 / 110.3 / 107.2 | 342 / 343 / 332 / 340 | 97 / 56 / 4 / 1 | 108 / 59 / 3 / 2 | 108 / 59 / 4 / 2 | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 20 / 23 / 20 / 23 |
+| `bench_rush` | 20 | 391.9 / 405.0 / 447.4 / 444.4 | 377 / 359 / 325 / 330 | 2011 / 1303 / 98 / 50 | 2030 / 1237 / 104 / 59 | 2031 / 1238 / 105 / 60 | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 0 / 0.3 / 0 / 0 | 83 / 84 / 86 / 88 |
+| `bench_walkers` | 5 | 42.7 / 42.4 / 42.8 / 42.5 | 175 / 183 / 172 / 179 | 46 / 36 / 0 / 0 | 23 / 21 / 0 / 0 | 45 / 42 / 5 / 7 | 2.3 / 5.3 / 2.7 / 5.0 | 0.3 / 1.0 / 0.7 / 0.3 | 0 / 0 / 0 / 0 | 13 / 13 / 13 / 14 |
+| `bench_walkers` | 20 | 187.2 / 177.9 / 190.1 / 189.3 | 162 / 164 / 144 / 149 | 833 / 751 / 25 / 34 | 614 / 582 / 45 / 30 | 712 / 694 / 67 / 52 | 25.3 / 34.0 / 20.3 / 27.3 | 2.0 / 2.7 / 0.7 / 3.0 | 1.3 / 1.3 / 0 / 0 | 47 / 50 / 48 / 50 |
+| `walkers` | 5 | 94.3 / 88.0 / 96.3 / 92.1 | 255 / 260 / 246 / 254 | 46 / 44 / 0 / 0 | 44 / 38 / 0 / 0 | 71 / 68 / 7 / 3 | 5.3 / 5.3 / 3.0 / 3.7 | 0 / 0.3 / 0 / 0 | 0 / 0 / 0 / 0 | 15 / 12 / 12 / 13 |
+| `walkers` | 20 | 192.5 / 194.7 / 199.0 / 194.8 | 157 / 155 / 142 / 146 | 345 / 295 / 27 / 4 | 295 / 207 / 52 / 18 | 357 / 265 / 64 / 30 | 9.7 / 15.0 / 11.7 / 13.0 | 0.3 / 0.3 / 0.3 / 0 | 0.3 / 0 / 0 / 0 | 22 / 23 / 22 / 22 |
+| `bench_narrow` | 20 | 232.7 / 235.9 / 240.1 / 239.4 | 186 / 175 / 155 / 157 | 1443 / 989 / 68 / 70 | 1288 / 736 / 174 / 119 | 1289 / 737 / 175 / 120 | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 | 1.0 / 0.7 / 0 / 0 | 62 / 62 / 57 / 60 |
+
+Seed-to-seed sd of the throughput, in the same order: `bench_rush` 20
+±3.4 / 3.4 / 5.5 / 2.5, `bench_narrow` 20 ±9.4 / 5.2 / 3.0 / 2.8,
+`bench_steady` 20 ±17 / 19 / 16 / 13, `walkers` 20 ±34 / 32 / 29 / 32.
+`bench_steady`, `bench_walkers` and `walkers` at 20 vary by arrivals far
+more than by method. Wall time on the final code, side by side, seed 1:
+`bench_walkers` 20 at 91 s either way, `bench_rush` 20 50 → 54 s.
+
+**What this shows:**
+- **ORCA removes almost every stop for a peer.** Robot stops fall 92-100 %
+  at every size and floor, and time lost to peers 82-100 %. Robots pass
+  each other, and parked or picking peers, without stopping and replanning.
+  No leg was given up with ORCA in any run (stop_replan: up to 2.7 a run).
+- **Overloaded, that is throughput.** `bench_rush` at 20 robots: 392 → 447
+  deliveries per hour, +14 % (about 10 times the sd), and mean delivery 377
+  → 325 s. Keep right alone gave +3.3 %. At 5 robots the floor is barely
+  contended, and the gain (+4 %) is within the noise.
+- **Underloaded, it is delivery time.** Mean delivery falls 10-17 % at 20
+  robots on every floor: `bench_steady` 161 → 141 s, `bench_walkers` 162 →
+  144 s, `walkers` 157 → 142 s, `bench_narrow` 186 → 155 s. At 5 robots,
+  1-4 %. The throughput gains on the underloaded floors (`bench_steady` 20:
+  +10 %) are within their seed-to-seed sd.
+- **Single-lane aisles.** On `bench_narrow` a head-on meeting inside a
+  narrow aisle still stalls both robots, and the backstop's replan around
+  resolves it as before. The gain there is the two-way aisles and
+  junctions between the narrow segments.
+- **Keep right adds nothing on top of ORCA.** It cuts the few remaining
+  stops further, but throughput is the same within noise and mean delivery
+  is 2-8 s longer. ORCA already passes head-on meetings, so the lanes'
+  extra distance is not paid back.
+- **Walkers: no worse on safety.** Actor contacts are walkers walking into
+  robots (they never yield), and are within noise across the four variants.
+  Driven contacts are 0-3 a run for every variant. With ORCA, every one in
+  the bench was a walker 44-99 degrees off the robot's heading, outside the
+  camera's 43.5-degree half-cone, walking into the robot's side while it
+  moved. `contacts.driven` books those to the robot when the walker's
+  centre is in its front half-plane. Neither layer can avoid what it can't
+  see.
+- **Slow-downs are not booked as lost time.** `utilisation` counts stops.
+  ORCA trades stops for slowing down and swerving, which show only as
+  delivery time and throughput. Those are the fair comparison, and both
+  improved.
+
+**For the owner to decide:**
+- **The robots don't run ORCA.** Their Nav2 controller and costmaps are what
+  `stop_replan` stands in for. ORCA on the robots needs a controller that
+  reads peers' twist from `/fleet/status` (already carried, at 5 Hz) and
+  tracked movers with a velocity (obstacle_detector's tracks have one).
+  These gains assume aligned frames and, in these benches, an ideal network.
+  Status loss on a radio makes peers fall back to the camera's nearest
+  point, which is a worse input for ORCA than for stop_replan.
+- **Which local layer the other benchmarks use.** The default stays
+  `stop_replan`, the robots as they are. Under ORCA, traffic costs far
+  less, so the dispatchers (A1) would be compared on a different floor.
+- **The camera stand-in's velocity.** ORCA leans on velocities more than
+  stop_replan does, and the nearest-point stand-in's velocity is noise at
+  close range (Known issues). A tracker that estimates the centre would
+  help both layers.
+- **A metric for slow-downs** (time driving well under the preferred speed)
+  would book ORCA's cost the way stops are booked today.
+- **The diff-drive mapping** is the simplest one: turn toward the velocity,
+  drive along the heading, 30-degree rule, a radius margin. NH-ORCA's
+  tracking-error bound, or choosing among velocities the robot can reach
+  in one step, would be the next refinements.
+- The operator view's run form doesn't offer `nav.local`
+  (`webui/fleetsim_runner.py`, `SETTABLE`). It is terminal-only for now.
+
 ## Known issues
 
 - **Intermittent interpreter faults on the development machine — cause not
@@ -1829,7 +2084,9 @@ event-identical to `keep_right`.
   point swings around its body, and `nav.predict_s` throws it sideways.
   Two robots passing 1.0 m apart in keep-right lanes still stop for
   0.1-0.2 s; with `predict_s: 0` they don't
-  ([Traffic](#traffic-keep-right-and-single-lane-passages)).
+  ([Traffic](#traffic-keep-right-and-single-lane-passages)). ORCA leans on
+  the velocity more, and close up it is noise: a walker pacing along x read
+  as (-2.05, +1.69) m/s ([Local avoidance](#local-avoidance)).
 
 ## Not modelled yet
 

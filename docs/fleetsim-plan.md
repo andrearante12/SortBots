@@ -47,7 +47,7 @@ its map — checked against Isaac with a 2-robot task list after this groundwork
 | B11 | Single-lane passage reservation | done (`traffic.passages`, off by default; claims ride on Status) |
 | C13 | Comms traffic monitor in the replay | done (replay's Traffic panel, Load on the floor, `record.net_nodes`; bench runs listed in the replay; docs/fleetsim.md "Comms traffic monitor") |
 | A6 | Per-robot service times and capabilities | done (`robots.types`, tasks' `requires`; `fleetsim/scenarios/bench_mixed.yaml`, `fleetsim/suites/mixed.yaml`; docs/fleetsim.md "Robot types and capabilities") |
-| A7 | Swappable local-avoidance layer (for ORCA) | todo |
+| A7 | Swappable local-avoidance layer (for ORCA) | done (`nav.local`, `fleetsim/local/`: `stop_replan` default, `orca` in pure python; `fleetsim/suites/local.yaml`; docs/fleetsim.md "Local avoidance") |
 
 
 Later, separate tracks: Isaac calibration (2-robot task list), grid export for
@@ -250,6 +250,12 @@ costs price the whole delivery at each robot's own speed and service times.
 Move the local layer (stop for what's ahead, replan around after
 `block_replan_s`, give up after `block_fail_s`) behind an interface so ORCA (RVO2,
 Apache-2.0) can be tried in its place.
+Built as `robot.local.decide(dt, now)` -> drive (along the path, or at a
+velocity), stop (and replan around discs), or give up; the robot keeps the
+books. ORCA is RVO2's formulation ported to python (RVO2 is C++), with peers'
+velocities from the twist Status already carries, a wall guard instead of
+obstacle polygons, and stop_replan's replan-around and give-up as its
+backstop when it stalls.
 
 ## Ground rules for every item
 - fleetsim runs on the system python3 (`/usr/bin/python3`), numpy + PyYAML only.
