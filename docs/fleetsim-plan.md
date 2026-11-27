@@ -137,6 +137,23 @@ Traffic (B10, B11)
   but one robot still livelocked behind the row. For A7 (the local layer)
   and #51 (where idle robots park).
 
+Local avoidance (A7)
+- **The parked-row trap.** At 20 robots every home is in one row 1.6 m
+  apart in front of the docks. A loaded robot passing between two parked
+  robots is stopped, its replan marks the blockers with the body radius only,
+  so it plans through the same gap, gives up after 45 s and repeats; one such
+  task decides a whole `bench_burst` run. Widening the mark by the clearance
+  margin plus half a cell removed every give-up in a probe, but changes every
+  default run. With #51 (idle behaviour), parking layout is the other lever.
+- **Which local layer the benchmark uses.** ORCA cut robot-caused stops
+  92-100 % and lifted `bench_rush` 20-robot throughput 14 %, with no
+  robot-robot or wall contacts; the default stays `stop_replan`, which is
+  closer to what Nav2 does on the robots today.
+- **ORCA on the robots** would need a Nav2 controller that reads peers'
+  twist from `/fleet/status` (already carried, 5 Hz).
+- A metric for slow-downs (`utilisation` books stops only), and a
+  centre-estimating camera tracker (helps both local layers and keep right).
+
 Machine
 - All 10 python segfaults in the kernel log (2026-10-21 to 11-17) were on one
   physical core (CPUs 10-11), and those CPUs were offline on 2026-11-26 by
