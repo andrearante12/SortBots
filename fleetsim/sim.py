@@ -33,6 +33,7 @@ from . import dispatch as D
 from . import grid as G
 from . import info as PI
 from . import network as N
+from . import traffic as TR
 from .planner import FREE, OCC, Costmap, path_length
 from .robot import Robot
 
@@ -581,6 +582,8 @@ class Sim:
             r.task, r.state = None, "IDLE"
             r._clear_goal()
             r._new_core()
+            if r.traffic is not None:
+                r.traffic.reset()
 
     def _revive_gateway(self) -> None:
         """Back with the state it had (a power cut, not a reinstall), then
@@ -669,11 +672,20 @@ class Sim:
             dsts = np.r_[GW, self._robots_near((r.x, r.y), float(cfg["radius_m"]))]
         it = r.intent_for_status(self.now)
         extra = 0 if it is None else 4 + 12 * len(it["pts"])  # fleetsim/intent.py points
+        # Passage claims (fleetsim/traffic.py) ride on every Status while
+        # they last: the repeats are the refresh that lets a dead holder's
+        # claim lapse, and a Status without one is its release. No frames of
+        # their own: intents as a separate message took the 50-robot radio
+        # down, and airtime is per frame far more than per byte (2026-11-17).
+        cl = None if r.traffic is None else r.traffic.for_status()
+        if cl:
+            extra += TR.CLAIM_B * len(cl)
         d, arr, _, _ = self.net.send("status", r.node, dsts, len(raw) + 8 + extra, False,
                                      self.now, udp=True)
         if len(d):
             self._pending_status.append((r.k, d, arr,
-                                         (r.x, r.y, r.mode(), r.core.battery_pct, it)))
+                                         (r.x, r.y, r.mode(), r.core.battery_pct, it, cl,
+                                          self.now)))
 
     def _session_liveness(self) -> None:
         """status.session_liveness: a live zenoh session to a peer counts as
@@ -695,10 +707,11 @@ class Sim:
             return
         now, poll = self.now, float(self.cfg["status"]["liveness_poll_s"])
         keep = []
-        for src, d, arr, (x, y, mode, bat, it) in self._pending_status:
+        for src, d, arr, body in self._pending_status:
+            x, y, mode, bat, it, cl, sent = body
             due = arr <= now
             if not due.all():
-                keep.append((src, d[~due], arr[~due], (x, y, mode, bat, it)))
+                keep.append((src, d[~due], arr[~due], body))
             dd = d[due]
             if not len(dd):
                 continue
@@ -709,6 +722,11 @@ class Sim:
                 for k in rob.tolist():
                     if self.robots[k].alive:
                         self.robots[k].on_intent(it, now)
+            if cl is not None and not self.peers_truth:  # info.peers: truth hands them over itself
+                for k in rob.tolist():
+                    rr = self.robots[k]
+                    if rr.alive and rr.traffic is not None:
+                        rr.traffic.on_claims(src, sent, cl, now)
             stale = dd[now - self.live_t[dd, src] >= poll]
             if not len(stale):
                 continue

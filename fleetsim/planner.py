@@ -19,6 +19,11 @@ An `overlay` mask adds short-lived lethal cells on top of the belief: the
 local layer's "something is in the way" (peers, movers) when it replans
 around a blockage. It never enters the belief, so it is never shared — the
 same split the real stack keeps between /map and the costmap obstacle layer.
+
+With `traffic.keep_right` a step's cost also depends on its direction: a
+`lanes` object (fleetsim/traffic.py) keeps one multiplier array per
+neighbour direction, and A* reads the one for the step it takes. Without it
+all eight entries are the same `wint`, so the search is the one it was.
 """
 from __future__ import annotations
 
@@ -63,7 +68,16 @@ class Costmap:
         # only moved; see docs/fleetsim.md "Known issues".
         self.wint = array("l", bytes(array("l").itemsize * grid.size))
         self.version = 0
+        # fleetsim/traffic.py Lanes when keep-right is on: told about every
+        # window rebuilt here, it keeps its per-direction arrays in step.
+        self.lanes = None
+        self.use_step_arrays([self.wint] * len(NEIGHBOURS_INT))
         self.rebuild()
+
+    def use_step_arrays(self, arrays: list) -> None:
+        """A*'s neighbour table: (dx, dy, step length, the x1000 multiplier
+        array a step in that direction reads; 0 = lethal)."""
+        self._nbrs = tuple((dx, dy, s, a) for (dx, dy, s), a in zip(NEIGHBOURS_INT, arrays))
 
     # ---- building -------------------------------------------------------
 
@@ -110,6 +124,8 @@ class Costmap:
             base = (y0 + r) * g.width + x0
             self.mult[base: base + w] = array("f", m[r].tobytes())
             self.wint[base: base + w] = array("l", wi[r].tobytes())
+        if self.lanes is not None:
+            self.lanes.on_window(x0, y0, x1, y1)
         self.version += 1
 
     def lethal(self, idx: int) -> bool:
@@ -156,12 +172,13 @@ class Costmap:
             si = esc
         if si == gi:
             return prefix + [g.centre_of(gi)]
-        w, h, wint = g.width, g.height, self.wint
+        w, h, wint, nbrs = g.width, g.height, self.wint, self._nbrs
         gx, gy = gi % w, gi // w
         # Integer costs: a step is 1000 (orthogonal) or 1414 (diagonal) per
         # cell, times the cell's x1000 multiplier; the heuristic is octile in
         # the same units with multiplier 1000 (the floor), so it never
-        # overestimates. See the note on self.wint.
+        # overestimates. See the note on self.wint. A lane term only adds to
+        # the multiplier, so the heuristic stays a lower bound with it too.
         gscore = [-1] * g.size
         came = [-1] * g.size
         gscore[si] = 0
@@ -183,12 +200,12 @@ class Costmap:
             if expansions > max_expansions:
                 return None
             x, y = i % w, i // w
-            for dx, dy, step in NEIGHBOURS_INT:
+            for dx, dy, step, wd in nbrs:
                 nx, ny = x + dx, y + dy
                 if nx < 0 or ny < 0 or nx >= w or ny >= h:
                     continue
                 j = ny * w + nx
-                wj = wint[j]
+                wj = wd[j]
                 if wj == 0:
                     continue
                 if step > 1000 and (wint[y * w + nx] == 0 or wint[ny * w + x] == 0):
