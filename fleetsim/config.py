@@ -68,6 +68,7 @@ TOP_KEYS = {"name", "title", "description", "seed", "duration_s", "robots", "con
 FREE_FORM = {("world", "synthetic"), ("fleet_tasks",), ("network", "radio", "radio_model")}
 DISTURBANCE_KINDS = {"kill", "revive", "partition", "block_link", "blockage"}
 DISPATCH_METHODS = ("auction", "central_greedy", "central_hungarian")  # fleetsim/dispatch
+LOCAL_METHODS = ("stop_replan", "orca")  # fleetsim/local (its METHODS)
 INFO_CHOICES = {"map": ("shared", "truth"), "peers": ("heard", "truth"),
                 "dispatch": ("network", "truth")}
 # kill: {select: ...} picks its robot when it fires, lowest index first.
@@ -220,6 +221,15 @@ def _validate(s: dict) -> None:
         raise ScenarioError("config.tasks.bid_cost: path | straight")
     if cfg["network"]["radio"]["contention"] not in ("global", "spatial"):
         raise ScenarioError("config.network.radio.contention: global | spatial")
+    if cfg["nav"]["local"] not in LOCAL_METHODS:
+        raise ScenarioError(f"config.nav.local: {' | '.join(LOCAL_METHODS)}")
+    oc = cfg["nav"]["orca"]
+    for key in ("time_horizon_s", "wall_horizon_s", "neighbor_m", "max_neighbors"):
+        if not _num(oc[key]) or oc[key] <= 0:
+            raise ScenarioError(f"config.nav.orca.{key}: a number > 0")
+    for key in ("margin_m", "wall_m", "reciprocal_mps", "track_s", "stall_mps", "resume_mps"):
+        if not _num(oc[key]) or oc[key] < 0:
+            raise ScenarioError(f"config.nav.orca.{key}: a number >= 0")
     dsp = cfg["dispatch"]
     if dsp["method"] not in DISPATCH_METHODS:
         raise ScenarioError(f"config.dispatch.method: {' | '.join(DISPATCH_METHODS)}")

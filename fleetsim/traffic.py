@@ -614,13 +614,10 @@ class PassageAgent:
                           "after_s": round(now - h["since"], 2)})
             r.pass_hold = None
         if blocker is not None and r.pass_hold is None:
-            if r.blocked_since is not None:
-                # A held robot isn't checked for blockers, so a stop left open
-                # would book the whole hold as a stop for a robot (nav
-                # blocked_robot_s) when it ends. Close it here.
-                r.sim.record({"s": "nav", "rid": r.rid, "event": "unblocked",
-                              "after_s": round(now - r.blocked_since, 2)})
-                r.blocked_since = r.blocked_by = r.block_replan_at = None
+            # A held robot isn't checked for blockers, so a stop left open
+            # would book the whole hold as a stop for a robot (nav
+            # blocked_robot_s) when it ends. Close it here.
+            r.end_stop(now)
             r.pass_hold = {"peer": blocker[0], "box": blocker[1], "since": now}
             r.counters["pass_holds"] += 1
             r.sim.record({"s": "nav", "rid": r.rid, "event": "pass_hold",

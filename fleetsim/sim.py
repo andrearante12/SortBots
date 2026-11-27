@@ -135,6 +135,10 @@ class Sim:
         self.learn = ML.LearnTracker(self)
         self.seen_t = np.full((n, n), -np.inf)
         self.seen_xy = np.zeros((n, n, 2))
+        # The twist each Status carries (fleet_radio.encode_status: vx along
+        # the heading), as a world-frame velocity. Only a velocity method of
+        # the local layer reads it (nav.local: orca, fleetsim/local/).
+        self.seen_v = np.zeros((n, n, 2))
         self.live_t = np.full((n + 1, n), -np.inf)
         self._pending_status: list = []
         self.contacts_active: set = set()
@@ -765,7 +769,7 @@ class Sim:
         if len(d):
             self._pending_status.append((r.k, d, arr,
                                          (r.x, r.y, r.mode(), r.core.battery_pct, it, sub, cl,
-                                          self.now)))
+                                          self.now, r.velocity())))
 
     def _session_liveness(self) -> None:
         """status.session_liveness: a live zenoh session to a peer counts as
@@ -788,7 +792,7 @@ class Sim:
         now, poll = self.now, float(self.cfg["status"]["liveness_poll_s"])
         keep = []
         for src, d, arr, body in self._pending_status:
-            x, y, mode, bat, it, sub, cl, sent = body
+            x, y, mode, bat, it, sub, cl, sent, vel = body
             due = arr <= now
             if not due.all():
                 keep.append((src, d[~due], arr[~due], body))
@@ -798,6 +802,7 @@ class Sim:
             rob = dd[dd > 0] - 1
             self.seen_t[rob, src] = now
             self.seen_xy[rob, src] = (x, y)
+            self.seen_v[rob, src] = vel
             if it is not None:
                 for k in rob.tolist():
                     if self.robots[k].alive:

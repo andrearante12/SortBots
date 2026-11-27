@@ -13,8 +13,9 @@ What is real and what stands in:
             fields FleetTasks reads.
   STAND-IN  Nav2: global A* on the robot's own belief (planner.py), a path
             follower that drives the smoothed path exactly (rotating in
-            place at sharp turns), and a local layer that stops for what the
-            robot can see or hear about, replans around it after
+            place at sharp turns), and a local layer, behind a seam
+            (fleetsim/local/, `nav.local`): by default one that stops for
+            what the robot can see or hear about, replans around it after
             `block_replan_s`, and gives up after `block_fail_s`.
   STAND-IN  RTAB-Map + obstacle_detector: sensing.py.
 
@@ -43,6 +44,7 @@ from collections import deque
 import numpy as np
 
 from . import intent as I
+from . import local as LOCAL
 from . import traffic as TR
 from .belief import Belief
 from .planner import INF, Costmap, path_length
@@ -53,16 +55,6 @@ ACTIVE = {"NAV_TO_PICKUP", "AWAIT_PICK", "PICKING", "NAV_TO_DROPOFF", "PLACING"}
 
 def wrap(a: float) -> float:
     return (a + math.pi) % (2 * math.pi) - math.pi
-
-
-def seg_dist(p, a, b) -> float:
-    ax, ay = a
-    dx, dy = b[0] - ax, b[1] - ay
-    L2 = dx * dx + dy * dy
-    if L2 < 1e-12:
-        return math.hypot(p[0] - ax, p[1] - ay)
-    t = max(0.0, min(1.0, ((p[0] - ax) * dx + (p[1] - ay) * dy) / L2))
-    return math.hypot(p[0] - (ax + t * dx), p[1] - (ay + t * dy))
 
 
 class PathOracle:
@@ -134,15 +126,15 @@ class Robot:
         self.path_idx: list[int] = []
         self.seg = 0
         self.plan_failed_since = None
-        self.blocked_since = None
+        self.blocked_since = None         # the open stop (the local layer's STOP) began
         self.blocked_by = None
-        self.block_replan_at = None
         self.next_replan_ok = 0.0
         self.next_periodic = 0.0
         self.replan_due = None
         self._retry_n = 0
         self.pause_until = 0.0
-        self.overlay: list[tuple[float, np.ndarray]] = []
+        self.overlay = LOCAL.Overlay(self)  # what the local layer replans around
+        self.local = LOCAL.build(self)      # nav.local (fleetsim/local/)
         # task FSM (task_manager stand-in)
         self.queue: deque = deque()
         self.task = None
@@ -442,7 +434,7 @@ class Robot:
         self.goal = self.purpose = None
         self.path, self.path_idx, self.seg = [], [], 0
         self.plan_failed_since = self.blocked_since = self.blocked_by = None
-        self.block_replan_at = None
+        self.local.reset()
         self.replan_due = None
         self.v = 0.0
 
@@ -541,7 +533,7 @@ class Robot:
         if self.goal is not None and self.path and self.path_blocked_in_belief():
             self.replan_due = cause if self.replan_due is None else self.replan_due
 
-    def _ahead(self, dist_m: float) -> list:
+    def ahead(self, dist_m: float) -> list:
         """The remaining path from here, cut at dist_m."""
         pts = [(self.x, self.y)]
         left = dist_m
@@ -555,123 +547,6 @@ class Robot:
             pts.append(p)
             left -= d
         return pts
-
-    def obstacles(self, now: float) -> list[tuple]:
-        """(x, y, radius, kind, ident) the local layer avoids: own camera
-        detections, peers from Status, peers' obstacle notices."""
-        out = []
-        ttl = float(self.nav["detection_ttl_s"])
-        ahead = float(self.nav["predict_s"])
-        for kind, ident, x, y, t, vx, vy in self.dets:
-            if now - t <= ttl:
-                r = self.body_r if kind == "robot" else self.sim.actor_radius(ident)
-                # Where it is now, and where it will be predict_s from now:
-                # obstacle_detector's tracks carry a velocity, and a walker
-                # crossing at 1.2 m/s covers a body width between two scans.
-                dt = now - t
-                out.append((x + vx * dt, y + vy * dt, r, kind, ident))
-                if ahead > 0 and (vx or vy):
-                    out.append((x + vx * (dt + ahead), y + vy * (dt + ahead), r, kind, ident))
-        bump_ttl = float(self.nav["bump_ttl_s"])
-        self.bumps = [b for b in self.bumps if now - b[2] <= bump_ttl]
-        for x, y, _t in self.bumps:
-            out.append((x, y, 0.1, "bump", -1))
-        sim = self.sim
-        st_ttl = float(sim.cfg["status"]["ttl_s"])
-        fresh = np.flatnonzero((now - sim.seen_t[self.k] <= st_ttl))
-        if len(fresh):
-            xy = sim.seen_xy[self.k, fresh]
-            near = np.hypot(xy[:, 0] - self.x, xy[:, 1] - self.y) < 4.0
-            for j, (px, py) in zip(fresh[near].tolist(), xy[near].tolist()):
-                if j != self.k:
-                    out.append((px, py, self.body_r, "robot", j))
-        keep = []
-        for o in self.remote_obs:
-            if now <= o["expires"]:
-                keep.append(o)
-                # Extrapolate at most 1 s: a walker turns around, and a notice
-                # carried 3 s along a stale velocity put phantom obstacles
-                # where no one was (walkers scenario, 2026-11-02).
-                dt = min(now - o["t"], 1.0)
-                out.append((o["x"] + o["vx"] * dt, o["y"] + o["vy"] * dt, o["r"], "notice", o["id"]))
-        self.remote_obs = keep
-        return out
-
-    def _blocking(self, now: float):
-        stop = float(self.nav["stop_distance_m"])
-        ahead = self._ahead(stop)
-        if len(ahead) < 2:
-            return None
-        hx, hy = math.cos(self.yaw), math.sin(self.yaw)
-        margin = float(self.nav["clearance_margin_m"])
-        # Skip the first few cm of the path: something right beside the robot
-        # that is not in the way forward must not pin it in place.
-        start = ahead[0]
-        if len(ahead) >= 2 and math.dist(ahead[0], ahead[1]) > 0.1:
-            f = 0.1 / math.dist(ahead[0], ahead[1])
-            start = (ahead[0][0] + f * (ahead[1][0] - ahead[0][0]),
-                     ahead[0][1] + f * (ahead[1][1] - ahead[0][1]))
-        segs = [start] + ahead[1:]
-        for ox, oy, r, kind, ident in self.obstacles(now):
-            if math.hypot(ox - self.x, oy - self.y) > stop + r + self.body_r + 0.5:
-                continue
-            if (ox - self.x) * hx + (oy - self.y) * hy < -0.05:
-                continue  # behind: driving on only gains distance
-            need = self.body_r + r + margin
-            here = math.hypot(ox - self.x, oy - self.y)
-            closest = min(seg_dist((ox, oy), a, b) for a, b in zip(segs[:-1], segs[1:]))
-            # In the way only if the path ahead comes within `need` AND closer
-            # than the robot already is: a peer that stopped right beside or
-            # in front of us must not pin us when the new path leads away.
-            if closest < need and closest < here - 0.02:
-                return (ox, oy, r, kind, ident)
-        return None
-
-    def _cluster(self, blk, now: float, link_m: float = 1.8, limit: int = 8) -> list:
-        """The blocking obstacle plus every obstacle within link_m of one
-        already taken (transitively), nearest first, at most `limit`."""
-        obs = [(o[0], o[1], o[2]) for o in self.obstacles(now)
-               if math.hypot(o[0] - self.x, o[1] - self.y) < 6.0]
-        taken = [(blk[0], blk[1], blk[2])]
-        grew = True
-        while grew and len(taken) < limit:
-            grew = False
-            for o in obs:
-                if o in taken:
-                    continue
-                if any(math.hypot(o[0] - t[0], o[1] - t[1]) <= link_m for t in taken):
-                    taken.append(o)
-                    grew = True
-                    if len(taken) >= limit:
-                        break
-        return taken
-
-    def _add_overlay(self, ox: float, oy: float, r: float, now: float) -> None:
-        g = self.sim.grid
-        c = g.cell(ox, oy)
-        if c is None:
-            return
-        idx = []
-        for dx, dy, _d in g.disc_offsets(r):
-            nx, ny = c[0] + dx, c[1] + dy
-            if 0 <= nx < g.width and 0 <= ny < g.height:
-                idx.append(ny * g.width + nx)
-        idx = np.array(idx, dtype=np.int64)
-        self.cost.overlay.reshape(-1)[idx] = True
-        self.cost.update_cells(idx)
-        self.overlay.append((now + float(self.nav["overlay_ttl_s"]), idx))
-
-    def _expire_overlay(self, now: float) -> None:
-        if not self.overlay or self.overlay[0][0] > now:
-            return
-        keep = [(t, i) for t, i in self.overlay if t > now]
-        gone = np.concatenate([i for t, i in self.overlay if t <= now])
-        flat = self.cost.overlay.reshape(-1)
-        flat[gone] = False
-        for _t, i in keep:
-            flat[i] = True
-        self.overlay = keep
-        self.cost.update_cells(gone)
 
     def _drive(self, dt: float, now: float) -> None:
         if self.goal is None:
@@ -724,39 +599,43 @@ class Robot:
             self.sim.record({"s": "nav", "rid": self.rid, "event": "recovery"})
             self.v = 0.0
             return
-        blk = self._blocking(now)
-        if blk is not None:
-            self.v = 0.0
-            if self.blocked_since is None:
-                self.blocked_since, self.blocked_by = now, blk[3]
-                self.sim.record({"s": "nav", "rid": self.rid, "event": "blocked", "by": blk[3]})
-            self.counters["blocked_s"] += dt
-            waited = now - self.blocked_since
-            if waited >= float(nav["block_fail_s"]):
-                self.counters["stuck"] += 1
-                self.sim.record({"s": "nav", "rid": self.rid, "event": "gave_up", "cause": "blocked"})
-                self._nav_done(False)
-                return
-            # Replan around it. Facing a peer, the lower-priority robot (higher
-            # id, fleet_radio's order) goes first; the other waits a second
-            # interval, so two robots don't swerve into each other in step.
-            first = blk[3] != "robot" or blk[4] < self.k
-            due = float(nav["block_replan_s"]) * (1 if first else 2)
-            if self.block_replan_at is None:
-                self.block_replan_at = now + due
-            if now >= self.block_replan_at and now >= self.next_replan_ok:
-                self.block_replan_at = now + due  # still blocked after this: wait again
-                # Mark the blocker and whatever is chained to it: a row of
-                # parked peers has to be planned around as a row, or the new
-                # path just runs into the next one.
-                for ox, oy, r in self._cluster(blk, now):
-                    self._add_overlay(ox, oy, r, now)
-                self._replan("blocked")
+        # The local layer (fleetsim/local/, nav.local) decides; the robot
+        # does it and keeps the books, the same for every method.
+        d = self.local.decide(dt, now)
+        if d.act == LOCAL.DRIVE:
+            self.end_stop(now)
+            if d.vel is None:
+                self._follow(dt)
+            else:
+                self._track(dt, d.vel)
             return
-        if self.blocked_since is not None:
-            self.sim.record({"s": "nav", "rid": self.rid, "event": "unblocked",
-                             "after_s": round(now - self.blocked_since, 2)})
-            self.blocked_since = self.blocked_by = self.block_replan_at = None
+        self.v = 0.0
+        if self.blocked_since is None:
+            self.blocked_since, self.blocked_by = now, d.by
+            self.sim.record({"s": "nav", "rid": self.rid, "event": "blocked", "by": d.by})
+        self.counters["blocked_s"] += dt
+        if d.act == LOCAL.GIVE_UP:
+            self.counters["stuck"] += 1
+            self.sim.record({"s": "nav", "rid": self.rid, "event": "gave_up", "cause": "blocked"})
+            self._nav_done(False)
+            return
+        if d.around:
+            for ox, oy, rad in d.around:
+                self.overlay.add(ox, oy, rad, now)
+            self._replan("blocked")
+
+    def end_stop(self, now: float) -> None:
+        """Close the open stop, if any (the local layer says drive on, or a
+        hold starts: a held robot isn't checked for blockers)."""
+        if self.blocked_since is None:
+            return
+        self.sim.record({"s": "nav", "rid": self.rid, "event": "unblocked",
+                         "after_s": round(now - self.blocked_since, 2)})
+        self.blocked_since = self.blocked_by = None
+        self.local.reset()
+
+    def _follow(self, dt: float) -> None:
+        """The path follower: drive the smoothed path exactly."""
         # Heading: turn toward the current segment; drive only when roughly
         # facing it (rotate in place at a sharp corner, as a diff drive does).
         a, b = (self.x, self.y), self.path[self.seg + 1]
@@ -786,6 +665,88 @@ class Robot:
                 # following steps rather than snapping.
             else:
                 self.v = 0.0
+
+    # ---- velocity commands (a local layer that answers with a velocity) -------
+
+    def velocity(self) -> tuple[float, float]:
+        """What the robot is doing: its speed along its heading."""
+        return (self.v * math.cos(self.yaw), self.v * math.sin(self.yaw))
+
+    def on_path(self, tol_m: float = 0.05) -> bool:
+        """On the segment it is driving (not pushed off it by a dodge)."""
+        return LOCAL.seg_dist((self.x, self.y), self.path[self.seg], self.path[self.seg + 1]) <= tol_m
+
+    def preferred_velocity(self) -> tuple[float, float]:
+        """The path follower's velocity: toward the next path point, at the
+        speed `_follow` would drive (max speed, slow enough to stop at the
+        end), whatever the heading."""
+        a, b = (self.x, self.y), self.path[self.seg + 1]
+        d = math.dist(a, b)
+        if d < 1e-9:
+            return (0.0, 0.0)
+        v = min(self.vmax, math.sqrt(2 * self.accel * path_length([a] + self.path[self.seg + 1:])))
+        return (v * (b[0] - a[0]) / d, v * (b[1] - a[1]) / d)
+
+    def track_step(self, dt: float, vel: tuple[float, float]) -> tuple[float, float, float, float]:
+        """The step `_track` would take toward `vel` from here, as (x, y,
+        yaw, v), nothing applied: a diff drive turns toward the velocity at
+        yaw_rate and drives the part of it along its heading (none while
+        more than 30 degrees off: it turns in place first, as `_follow`
+        does), accelerating at accel, braking at once. On the last segment
+        it lands on the end when within the step (arrival wants 5 cm)."""
+        vx, vy = vel
+        sp = math.hypot(vx, vy)
+        yaw, target = self.yaw, 0.0
+        if sp > 1e-9:
+            want = math.atan2(vy, vx)
+            err = wrap(want - yaw)
+            yaw = wrap(yaw + max(-self.yaw_rate * dt, min(self.yaw_rate * dt, err)))
+            err = wrap(want - yaw)
+            target = 0.0 if abs(err) > math.radians(30) else sp * math.cos(err)
+        v = min(target, self.v + self.accel * dt) if target > self.v else target
+        step = v * dt
+        x, y = self.x + step * math.cos(yaw), self.y + step * math.sin(yaw)
+        end = self.path[-1]
+        if self.seg >= len(self.path) - 2 and math.dist((self.x, self.y), end) <= step:
+            x, y = end
+        return x, y, yaw, v
+
+    def _track(self, dt: float, vel: tuple[float, float]) -> None:
+        """Drive a world-frame velocity (`track_step`). The robot moves along
+        its heading, not along the path, so path progress follows where it
+        got to (`_progress`). It never drives from a cell its costmap holds
+        free into a lethal one: the guard that keeps a velocity method off
+        walls whatever it asked for."""
+        x, y, self.yaw, self.v = self.track_step(dt, vel)
+        if self.v * dt <= 1e-9:
+            return
+        g, mult = self.sim.grid, self.cost.mult
+        i_to, i_at = g.index(x, y), g.index(self.x, self.y)
+        if i_to is None or (mult[i_to] == INF and i_at is not None and mult[i_at] != INF):
+            # Blocked by the guard: off its path (a dodge) the straight line to
+            # the next path point can clip a corner, so plan again from here.
+            self.v = 0.0
+            if self.replan_due is None:
+                self.replan_due = "guard"
+            return
+        if self.sim.try_move(self, x, y):
+            self._progress()
+        else:
+            self.v = 0.0
+
+    def _progress(self) -> None:
+        """Advance `seg` past path points the robot has reached or passed
+        (its projection on the segment is beyond the point), the end only
+        by reaching it."""
+        p, n = (self.x, self.y), len(self.path)
+        while self.seg < n - 2:
+            a, b = self.path[self.seg], self.path[self.seg + 1]
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            L2 = dx * dx + dy * dy
+            if math.dist(p, b) > 0.1 and L2 > 1e-12 and \
+                    (p[0] - a[0]) * dx + (p[1] - a[1]) * dy < L2:
+                break
+            self.seg += 1
 
     # ---- sensing --------------------------------------------------------------
 
@@ -835,7 +796,7 @@ class Robot:
     def step(self, dt: float, now: float) -> None:
         if not self.alive:
             return
-        self._expire_overlay(now)
+        self.overlay.expire(now)
         if now >= self.next_sense:
             # A robot standing still sees the same static world: scan it at
             # idle_hz (still enough to notice a peer or mover coming).
