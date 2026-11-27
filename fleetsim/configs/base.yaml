@@ -117,6 +117,10 @@ dispatch:
                               # that saves this much drive time (hysteresis; without it the
                               # assignment flips back and forth as robots move)
   resolve_period_s: 5.0       # central: also re-solve this often (robots move between events)
+  # central_hungarian: a waiting task's cost falls by this many seconds per second
+  # since its announce. 0 = minimum total drive time alone, which with more tasks
+  # than robots can leave a far task waiting while nearer ones keep coming.
+  age_weight: 0.0
 
 # configs/fleet_tasks.yaml is loaded first; this block overrides it (FREE-FORM).
 # protocol.quorum_nodes defaults to robots + 1 (every node, gateway included).

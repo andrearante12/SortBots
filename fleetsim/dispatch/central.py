@@ -5,7 +5,8 @@ The dispatcher runs at network node 0 (sim.GW) and talks to robots over the
 same network model as everything else:
 
     gateway -> robot   Dispatch {task_id, pickup, dropoff[, carrying]},
-                       Cancel {task_id}, Query {tasks}       reliable, kind `tasks`
+                       Cancel {task_id}, Pick {task_id}, Query {tasks},
+                       Ack {finals}                          reliable, kind `tasks`
     robot -> gateway   Report {seq, cur, state, queue, finals[, outcomes]}
                                                              reliable, kind `tasks`
     robot -> gateway   /fleet/status (pose, mode)            as for every method
@@ -16,12 +17,31 @@ part of what gets measured. With `info.dispatch: truth` the /fleet/tasks
 messages arrive instantly and always (sim.Sim.handle_actions) and the
 dispatcher reads each robot's true pose and liveness instead of Status.
 
-Robots keep running the same task FSM. There is no AWAIT_PICK: a central
-planner is its own single source of truth, so it needs no confirmed-pick
-handshake. What stands in for it is the physical rule "whoever holds the
-item keeps the task": a robot refuses a Cancel for a task whose item is on
-board and reports instead, and the dispatcher then takes the task back
-from whoever else it gave it to.
+Robots keep running the same task FSM, and the dispatcher decides every
+pick (confirmed picks, `fleet_tasks.protocol.confirmed_picks`, on by
+default): a robot at the shelf waits in AWAIT_PICK until a Pick comes back,
+and the dispatcher grants it only to the task's current robot, once, after
+which the task is never moved. Without it (the first cut, until
+2026-11-26) a partition sent two robots to one shelf: the dispatcher
+re-planned the task of a robot it had lost, the lost robot picked it
+anyway, and the new one found the shelf empty (bench_partition). A robot it
+can't reach waits at the shelf instead, which is what a single point of
+decision costs. With `info.dispatch: truth` the dispatcher sees every pick
+as it happens, so robots pick on arrival. And whoever holds the item keeps
+the task: a robot refuses a Cancel for a task whose item is on board and
+reports instead, and the dispatcher takes it back from whoever else it
+gave it to.
+
+How a task ended is never left to one message (the central version of the
+auction's confirmed completes). A robot remembers every task it finished
+(DONE / FAILED / CANCELLED, where it was, when) and repeats each in its
+Reports until the dispatcher Acks it, and it answers a Query with the
+outcome of every task named. The dispatcher asks about every task it ever
+gave that robot and hasn't heard the end of, not only the ones it still
+counts as the robot's: the first cut asked only those, so a task it had
+re-planned while the gateway was down, and which the robot had delivered
+meanwhile, was sent out again to an empty shelf (bench_dead_gateway,
+2026-11-26).
 
 Bookkeeping that keeps the two sides consistent without acks on every
 message: every gateway -> robot message carries a per-robot sequence number
@@ -33,12 +53,16 @@ answer is authoritative for the tasks it names: held, finished (and how),
 or unknown (the Dispatch never arrived, or the robot rebooted).
 
 A robot is lost when the dispatcher hasn't heard it for fleet_tasks
-status_timeout_s (6 s). Its tasks that were not yet picked are re-planned
-(and cancelled on it, in case only its Status was lost); a task whose item
-is on it stays with it, since nobody else can deliver it. A lost robot
-keeps working what it has; when it is heard again it is queried and the
-two views are merged (it keeps a task nobody else took, it is cancelled off
-one somebody else now has, unless it already holds the item).
+status_timeout_s (6 s). Its tasks that were not yet granted a pick are
+re-planned (and cancelled on it, in case only its Status was lost); a task
+whose pick was granted stays with it, since nobody else can deliver it. A
+lost robot keeps working what it has; when it is heard again it is queried,
+and planning waits for the answer, before the two views are merged (it
+keeps a task nobody else took or that it is already at the shelf for, it is
+cancelled off one somebody else now has, unless it already holds the item).
+A dispatcher that was itself down (a gateway power cut: its clock jumped)
+counts the silence as its own, not the robots', and asks every robot what
+it holds before it plans anything.
 
 Greedy (FCFS to the nearest idle robot): on every event (task announced,
 robot finished/failed a task, robot lost/back/first heard) and every
@@ -53,9 +77,14 @@ queued task; every robot gets at most one task per solve. A task stays with
 its current robot unless another assignment saves at least reassign_gain_s
 (a bonus on current pairs, so a change must pay for itself; without it the
 assignment flips back and forth as robots move). A reassignment is a
-Cancel to the old robot and a Dispatch to the new one. A task whose robot
-is at the shelf (PICKING) is never moved: the Cancel could arrive after
-the pick.
+Cancel to the old robot and a Dispatch to the new one. A task whose pick
+was granted is never moved. With `dispatch.age_weight` > 0 a task's cost
+falls by that many seconds per second it has waited since its announce:
+with more tasks than robots, the minimum total drive time otherwise leaves
+a far task waiting as long as nearer ones keep arriving. Only the choice of
+WHICH tasks get robots changes (a constant per task doesn't change who
+does a task), and with the default 0 nothing does. Greedy already serves
+the oldest task first.
 
 Drive times come from the true static map at robots.max_speed_mps
 (costs.py); a blockage is known only through the failed legs it causes,
@@ -95,6 +124,7 @@ GW = 0
 ON_BOARD = ("NAV_TO_DROPOFF", "PLACING")
 FINAL = ("DONE", "FAILED", "CANCELLED")
 BIG = 1e6  # a forbidden pair for the solver (drive times are < 1e4 s)
+REPEAT_MAX_S = 8.0  # the slowest a robot repeats an unacked outcome or a wait at the shelf
 COMMITTED_COST = -1.0  # what Status carries for a task with the item on board (protocol.py)
 
 
@@ -124,13 +154,25 @@ class CentralClient:
         self.battery_pct = None if bat is None else float(bat)
         drain = robot.profile["battery_drain_pct_per_s"]  # robot type; None = fleet-wide
         self.drain_pct_s = float(sim.params.battery_drain_pct_per_s if drain is None else drain)
+        # A dispatcher that reads true state sees the pick as it happens;
+        # over the network it must grant it (module docstring).
+        self.confirm = bool(sim.params.confirmed_picks) and sim.cfg["info"]["dispatch"] != "truth"
+        self.repeat_s = float(sim.params.ack_repeat_s)
+        # An unanswered wait at the shelf ends at the auction's lease: the
+        # dispatcher has re-planned the task by then if it is alive and cut
+        # off from us, and a robot parked on the spot blocks whoever it sent.
+        self.give_up_s = float(sim.params.task_lease_s)
+        self._heard_gw = -math.inf
+        self._wait_since = -math.inf
         self.seen_seq = 0
         self.cur: int | None = None
         self.state = "IDLE"
         self.queue: list[int] = []
         self.at: dict[int, str] = {}         # task -> its last active state (where a FAILED was)
-        self.outcomes: dict[int, list] = {}  # task -> [final, at], for Query answers
-        self._finals: list[list] = []        # since the last Report
+        self.outcomes: dict[int, list] = {}  # task -> [final, at, when], for Query answers
+        self.unacked: dict[int, list] = {}   # outcomes the dispatcher hasn't acked: repeated
+        self._gap = self.repeat_s
+        self._next_repeat = math.inf
         self._asked: list[int] | None = None
         self._dirty = False
         self._actions: list[tuple] = []
@@ -141,7 +183,24 @@ class CentralClient:
         pass
 
     def tick(self, now) -> None:
-        pass
+        # Repeat what must not be lost: an outcome until it is acked, and a
+        # wait at the shelf until the Pick comes. Backing off to 8 s, so a
+        # gateway down for minutes costs a frame every 8 s per robot.
+        if (self.unacked or self.state == "AWAIT_PICK") and now >= self._next_repeat:
+            self._next_repeat = now + self._gap
+            self._gap = min(2.0 * self._gap, REPEAT_MAX_S)
+            self._mark()
+        if self.state == "AWAIT_PICK" and self.cur is not None \
+                and now - max(self._wait_since, self._heard_gw) >= self.give_up_s:
+            # Nobody answers (the gateway is down, or we are out of its
+            # reach): give the task back rather than wait on the spot for
+            # ever. Without this, 2-robot radio runs ended with both robots
+            # parked at shelves out of the gateway's range (2026-11-26).
+            self._actions.append(("cancel", _name(self.cur)))
+
+    def _arm(self) -> None:
+        self._gap = self.repeat_s
+        self._next_repeat = self.sim.now + self._gap
 
     def on_peer_status(self, rid, now, *, battery_pct=None, mode=None) -> None:
         pass
@@ -180,24 +239,40 @@ class CentralClient:
         elif tid is not None:
             self.at[tid] = state
         if (tid, state, queue) != (self.cur, self.state, self.queue):
+            if state == "AWAIT_PICK" and self.state != "AWAIT_PICK":
+                self._wait_since = self.sim.now
+                self._arm()
             self.cur, self.state, self.queue = tid, state, queue
             self._mark()
 
     def _final(self, tid: int, state: str, at: str) -> None:
-        self.outcomes[tid] = [state, at]
-        self._finals.append([tid, state, at])
+        rec = [state, at, round(self.sim.now, 3)]
+        self.outcomes[tid] = self.unacked[tid] = rec
+        self._arm()
         self._mark()
 
     def on_message(self, sender: int, m: dict, now: float) -> None:
         if sender != GW:
             return
-        self.seen_seq = max(self.seen_seq, int(m.get("seq", 0)))
+        self._heard_gw = now
         kind = m["type"]
+        if kind == "Ack":  # unsequenced, and never answered (or the two would echo forever)
+            for tid in m.get("finals") or []:
+                self.unacked.pop(tid, None)
+            return
+        self.seen_seq = max(self.seen_seq, int(m.get("seq", 0)))
         tid = m.get("task_id")
         if kind == "Dispatch" and tid not in self.held():
+            carrying = bool(m.get("carrying"))
+            # A carrying re-dispatch skips the shelf, so it has no pick to gate.
+            gate = self.confirm and not carrying
             self._actions.append(("dispatch", {"task_id": _name(tid), "pickup": m["pickup"],
                                                "dropoff": m["dropoff"],
-                                               **({"carrying": True} if m.get("carrying") else {})}))
+                                               **({"await_pick": True} if gate else {}),
+                                               **({"carrying": True} if carrying else {})}))
+        elif kind == "Pick":
+            if tid == self.cur and self.state == "AWAIT_PICK":
+                self._actions.append(("pick", _name(tid)))
         elif kind == "Cancel" and tid in self.held():
             # The item is on board: nobody else can deliver it. Refuse and
             # report, so the dispatcher takes it back from whoever else it
@@ -223,8 +298,8 @@ class CentralClient:
         if not self.robot.alive or self.robot.core is not self:
             return
         m = {"type": "Report", "to": GW, "seq": self.seen_seq, "cur": self.cur,
-             "state": self.state, "queue": list(self.queue), "finals": self._finals}
-        self._finals = []
+             "state": self.state, "queue": list(self.queue),
+             "finals": [[tid, *rec] for tid, rec in self.unacked.items()]}
         if self._asked is not None:
             held = self.held()
             m["outcomes"] = {str(t): self.outcomes[t] for t in self._asked
@@ -252,6 +327,7 @@ class CTask:
     sent_at: float = -math.inf
     retry_at: float | None = None  # a failed dropoff with the item on board: re-dispatch then
     requires: tuple = ()           # capabilities a robot needs to be given it (robot types)
+    granted: bool = False          # its robot was told to pick: never moved again
 
 
 @dataclass
@@ -266,6 +342,7 @@ class RView:
     seq: int = 0                                  # last message sequence number sent
     out: dict = field(default_factory=dict)       # task -> (kind, seq, sent_at), latest about it
     query: tuple | None = None                    # (seq, sent_at, back) of the open Query
+    given: set = field(default_factory=set)       # tasks sent to it whose end it hasn't told us
     mismatch_since: float | None = None
     next_query: float = -math.inf
 
@@ -279,6 +356,7 @@ class CentralDispatcher:
         c = sim.cfg["dispatch"]
         self.gain = float(c["reassign_gain_s"])
         self.period = float(c["resolve_period_s"])
+        self.age_w = float(c["age_weight"])
         self.truth = sim.cfg["info"]["dispatch"] == "truth"
         self.timeout = float(sim.params.status_timeout_s)
         self.backoff = float(sim.ft_cfg["failed_backoff_s"])
@@ -300,10 +378,12 @@ class CentralDispatcher:
         self._next_id = 0
         self._dirty = False
         self._next_solve = 0.0
+        self._last_tick: float | None = None
+        self._outages: list[tuple] = []  # (from, to): when we ourselves were down
         self._actions: list[tuple] = []
         self.now = 0.0
         self.stats = {"solves": 0, "solve_wall_s": 0.0, "dispatches": 0, "cancels": 0,
-                      "reassigned": 0, "queries": 0, "lost": 0}
+                      "reassigned": 0, "queries": 0, "lost": 0, "picks": 0, "restarts": 0}
 
     # ---- the gateway API --------------------------------------------------
 
@@ -356,6 +436,11 @@ class CentralDispatcher:
 
     def tick(self, now: float) -> None:
         self.now = now
+        # A gap this long would by itself make robots look lost; a shorter
+        # one loses nothing (outcomes are repeated until acked).
+        if self._last_tick is not None and now - self._last_tick > self.timeout / 2:
+            self._restart(now)
+        self._last_tick = now
         if self.truth:
             for rv, r in zip(self.robots, self.sim.robots):
                 rv.xy = (r.x, r.y)
@@ -363,6 +448,7 @@ class CentralDispatcher:
                     self._heard(rv, now)
                 elif rv.heard and not rv.lost:
                     self._lose(rv, now)
+            self._truth_sync(now)
         else:
             for rv in self.robots:
                 if rv.heard and not rv.lost and now - rv.last_heard > self.timeout:
@@ -415,8 +501,56 @@ class CentralDispatcher:
 
     @staticmethod
     def _locked(t: CTask) -> bool:
-        """Not to be moved: the item is on the robot, or about to be."""
-        return t.state == "picked" or (t.state == "assigned" and t.sub == "PICKING")
+        """Not to be moved: the item is on the robot, or about to be (its
+        pick was granted, or it picks on arrival and is at the shelf)."""
+        return t.state == "picked" or (t.state == "assigned" and (t.granted or t.sub == "PICKING"))
+
+    def _restart(self, now: float) -> None:
+        """We were down (the gateway lost power: our clock jumped). Every
+        robot's silence was ours: give each the full timeout again instead
+        of losing the whole fleet at once, and ask each what it holds and
+        what it finished meanwhile before planning anything (tick waits for
+        the answers)."""
+        self.stats["restarts"] += 1
+        self._outages.append((self._last_tick, now))
+        self._log(f"dispatcher back after {now - self._last_tick:.0f} s; asking every robot")
+        for rv in self.robots:
+            if rv.heard and not rv.lost:
+                rv.last_heard = now
+                if not self.truth:
+                    self._query(rv, now, force=True, back=True)
+        self._dirty = True
+
+    def _truth_sync(self, now: float) -> None:
+        """info.dispatch: truth — where every item is and what every robot
+        is doing, from the sim itself, so no lost message can mislead us."""
+        sim = self.sim
+        for t in list(self.active.values()):
+            name = _name(t.tid)
+            loc = sim.item_at(name)
+            if loc == "delivered":
+                if t.state == "assigned" and t.robot is not None:
+                    self._send_cancel(self.robots[t.robot], t.tid, now)
+                t.state, t.retry_at = "done", None
+                self.active.pop(t.tid, None)
+                self._dirty = True
+            elif loc != "shelf":  # on robot `loc`
+                k = int(loc.rsplit("_", 1)[1])
+                if t.state != "picked" or t.robot != k:
+                    if t.state == "assigned" and t.robot not in (None, k):
+                        self._send_cancel(self.robots[t.robot], t.tid, now)
+                    t.robot, t.state, t.granted = k, "picked", False
+                    self._dirty = True
+            elif t.state == "assigned" and t.sent_at < now:
+                r = sim.robots[t.robot]
+                if r.task is not None and r.task["task_id"] == name:
+                    t.sub = r.state
+                elif any(q["task_id"] == name for q in r.queue):
+                    t.sub = "queued"
+                else:
+                    self._reopen(t)  # it never got it (dead), or dropped it
+            elif t.state == "elsewhere":
+                self._reopen(t)  # the item is on its shelf after all
 
     def _heard(self, rv: RView, now: float) -> None:
         rv.last_heard = now
@@ -449,16 +583,26 @@ class CentralDispatcher:
 
     def _reopen(self, t: CTask) -> None:
         t.state, t.robot, t.sub, t.seq, t.retry_at = "open", None, None, 0, None
+        t.granted = False
         self._dirty = True
 
     def _adopt(self, t: CTask, rv: RView, sub: str, now: float) -> None:
         """robot rv holds t and keeps it."""
         if t.robot is not None and t.robot != rv.k and t.state == "assigned":
             self._send_cancel(self.robots[t.robot], t.tid, now)
-        t.robot, t.sub, t.seq, t.retry_at = rv.k, sub, 0, None
+        t.robot, t.sub, t.seq, t.retry_at, t.granted = rv.k, sub, 0, None, False
         t.state = "picked" if sub in ON_BOARD else "assigned"
         rv.out.pop(t.tid, None)
+        rv.given.add(t.tid)
         self._dirty = True
+
+    def _grant(self, rv: RView, t: CTask, now: float) -> None:
+        """rv waits at t's shelf and t is rv's: it may pick. Repeated for a
+        robot still waiting (the Pick was lost), never for two robots."""
+        if not t.granted:
+            self.stats["picks"] += 1  # grants, not Pick messages (a lost one is sent again)
+        t.granted = True
+        self._send(rv, {"type": "Pick", "task_id": t.tid})
 
     def _reconcile(self, rv: RView, m: dict, now: float) -> None:
         k, seq = rv.k, int(m.get("seq", 0))
@@ -466,12 +610,16 @@ class CentralDispatcher:
         if answer:
             rv.query = None
             self._dirty = True
-        finals = [tuple(f) for f in m.get("finals") or []]
-        finals += [(int(t), *o) for t, o in (m.get("outcomes") or {}).items()]
+        finals = [(int(f[0]), f[1], f[2], f[3] if len(f) > 3 else None)
+                  for f in m.get("finals") or []]
+        finals += [(int(t), o[0], o[1], o[2] if len(o) > 2 else None)
+                   for t, o in (m.get("outcomes") or {}).items()]
         done_here = set()
-        for tid, final, at in finals:
+        for tid, final, at, when in finals:
             done_here.add(tid)
-            self._final(rv, tid, final, at, now)
+            self._final(rv, tid, final, at, now, when)
+        if m.get("finals"):
+            self._send_ack(rv, [int(f[0]) for f in m["finals"]])
         held = []
         if m.get("cur") is not None:
             held.append((int(m["cur"]), m.get("state")))
@@ -489,12 +637,19 @@ class CentralDispatcher:
                     t.state = "picked"
                 if msg is not None and msg[0] == "dispatch" and seq >= msg[1]:
                     del rv.out[tid]
+                if sub == "AWAIT_PICK" and t.state == "assigned":
+                    self._grant(rv, t, now)
                 continue
             if sub in ON_BOARD:  # whoever holds the item keeps the task
                 self._adopt(t, rv, sub, now)
             elif msg is not None and msg[0] == "cancel" and msg[1] > seq \
                     and now - msg[2] <= self.lease + 1.0:
                 continue  # our Cancel is on its way
+            elif sub == "AWAIT_PICK" and t.state in ("open", "assigned") and not self._locked(t):
+                # Back from a split already at the shelf, and nobody was told
+                # to pick it yet: it is the nearest robot there can be.
+                self._adopt(t, rv, sub, now)
+                self._grant(rv, t, now)
             elif t.state == "open" and not any(not self._locked(x) for x in self._mine(k)):
                 self._adopt(t, rv, sub, now)  # nobody else took it meanwhile: keep it there
             else:
@@ -502,6 +657,13 @@ class CentralDispatcher:
         for tid, msg in list(rv.out.items()):
             if msg[0] == "cancel" and tid not in held_ids and seq >= msg[1]:
                 del rv.out[tid]  # the cancel took effect
+                if tid not in done_here:
+                    rv.given.discard(tid)
+        if answer:
+            for tid in m.get("unknown") or []:
+                t = self.tasks.get(tid)
+                if t is None or t.robot != k:
+                    rv.given.discard(tid)  # it never got it; nothing of ours there
         need_query = False
         for t in self._mine(k):
             if t.tid in held_ids or t.tid in done_here or t.retry_at is not None:
@@ -511,7 +673,8 @@ class CentralDispatcher:
                     need_query = True  # ...and never will: reliable traffic gives up at the lease
                 continue
             if answer and t.tid in (m.get("unknown") or []):
-                if t.state == "picked":
+                rv.given.discard(t.tid)
+                if self._locked(t):
                     t.state, t.robot = "elsewhere", None  # it forgot (a reboot); the item is lost
                 else:
                     self._reopen(t)  # the Dispatch was lost
@@ -520,12 +683,14 @@ class CentralDispatcher:
         if need_query:
             self._query(rv, now)
 
-    def _final(self, rv: RView, tid: int, final: str, at: str, now: float) -> None:
+    def _final(self, rv: RView, tid: int, final: str, at: str, now: float,
+               when: float | None = None) -> None:
         t = self.tasks.get(tid)
         if t is None:
             return
         msg = rv.out.pop(tid, None)
         ours = msg is not None and msg[0] == "cancel"
+        rv.given.discard(tid)
         if final == "DONE":
             if t.state != "done":
                 if t.robot is not None and t.robot != rv.k and t.state == "assigned":
@@ -533,16 +698,29 @@ class CentralDispatcher:
                 t.state, t.robot, t.retry_at = "done", rv.k, None
                 self.active.pop(tid, None)
                 self._dirty = True
+        elif final == "FAILED" and at in ON_BOARD and t.state != "done":
+            # The dropoff leg failed with the item on board: nobody else can
+            # deliver it, whoever we thought had it. Try again after the
+            # backoff (fleet_tasks' rule).
+            if t.robot is not None and t.robot != rv.k and t.state == "assigned":
+                self._send_cancel(self.robots[t.robot], tid, now)
+            if t.robot != rv.k or t.state != "picked" or t.retry_at is None:
+                t.robot, t.state, t.sub, t.granted = rv.k, "picked", None, False
+                t.retry_at = now + self.backoff
+                rv.given.add(tid)
+                self._dirty = True
         elif t.robot != rv.k or t.state not in ("assigned", "picked"):
             return  # not ours on that robot any more: nothing to undo
         elif final == "CANCELLED":
             if not ours:
+                if at == "AWAIT_PICK" and not any(a <= (when or now) <= b
+                                                  for a, b in self._outages):
+                    # It gave up waiting for our word at the shelf while we were
+                    # up: if it is out of our reach there, someone else may have
+                    # better luck. Not when we were down: then it was us, and
+                    # it is probably still the nearest robot.
+                    self.failed[(rv.k, tid)] = now + self.backoff
                 self._reopen(t)
-        elif at in ON_BOARD:
-            # The dropoff leg failed with the item on board: nobody else can
-            # deliver it. Try again after the backoff (fleet_tasks' rule).
-            t.state, t.sub, t.retry_at = "picked", None, now + self.backoff
-            self._dirty = True
         elif at == "PICKING":
             # The shelf was empty: a robot we lost track of took the item.
             # It reports the task when it is heard again.
@@ -561,12 +739,18 @@ class CentralDispatcher:
         self._actions.append(("publish", ft.encode(GW, {**m, "to": rv.k + 1, "seq": rv.seq})))
         return rv.seq
 
+    def _send_ack(self, rv: RView, tids: list) -> None:
+        # Unsequenced: an Ack carries no decision the Report seq must echo.
+        self._actions.append(("publish", ft.encode(GW, {"type": "Ack", "to": rv.k + 1,
+                                                        "finals": sorted(set(tids))})))
+
     def _send_dispatch(self, rv: RView, t: CTask, now: float, carrying: bool = False) -> None:
         seq = self._send(rv, {"type": "Dispatch", "task_id": t.tid, "pickup": t.pickup,
                               "dropoff": t.dropoff, **({"carrying": True} if carrying else {})})
-        t.robot, t.seq, t.sent_at, t.sub = rv.k, seq, now, "queued"
+        t.robot, t.seq, t.sent_at, t.sub, t.granted = rv.k, seq, now, "queued", False
         t.state = "picked" if carrying else "assigned"
         rv.out[t.tid] = ("dispatch", seq, now)
+        rv.given.add(t.tid)
         self.stats["dispatches"] += 1
 
     def _send_cancel(self, rv: RView, tid: int, now: float) -> None:
@@ -579,7 +763,10 @@ class CentralDispatcher:
             return  # one open at a time, asked again once it must have been lost
         if not force and now < rv.next_query:
             return
-        tasks = sorted(t.tid for t in self._mine(rv.k))
+        # Everything it was ever given and hasn't told us the end of, not
+        # just what we still count as its: a task re-planned while we
+        # couldn't hear it may be one it delivered meanwhile.
+        tasks = sorted({t.tid for t in self._mine(rv.k)} | rv.given)
         seq = self._send(rv, {"type": "Query", "tasks": tasks})
         rv.query = (seq, now, back)
         rv.next_query = now + 5.0
@@ -683,7 +870,7 @@ class RollingHungarian(CentralDispatcher):
             if not self._locked(t):
                 continue
             drop = self.costs.snap(self.sim.waypoint_xy(t.dropoff))
-            if t.sub == "PICKING":
+            if t.sub in ("PICKING", "AWAIT_PICK"):
                 off = p["pick_s"] + self.costs.between(t.pickup, t.dropoff, v) + p["place_s"]
             elif t.sub == "PLACING":
                 off = p["place_s"]
@@ -723,6 +910,10 @@ class RollingHungarian(CentralDispatcher):
                 ok[:, j] &= np.isfinite(rest)
                 if ok[:, j].any():
                     cost[:, j] += np.where(ok[:, j], rest - rest[ok[:, j]].min(), 0.0)
+        if self.age_w:
+            # A waiting task gets cheaper (module docstring): only which
+            # tasks win the robots changes, not who does a task.
+            cost -= self.age_w * np.array([now - t.at for t in cols])[None, :]
         c = np.where(ok, cost, BIG)
         row_of = {rv.k: i for i, rv in enumerate(rows)}
         for j, t in enumerate(cols):
